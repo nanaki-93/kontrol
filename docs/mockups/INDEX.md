@@ -5,6 +5,7 @@ Each row links a function to an actual PNG mockup. SVG sources sit beside the PN
 | Feature | Function / page | Mockup |
 | --- | --- | --- |
 | [F00](../features/F00-foundation.md) | Launch and navigation | [M00 · Today](M00-app-shell.png) |
+| [F00](../features/F00-foundation.md) | Browse imported offline starter topics and lesson summaries (no active choices or progress) | [M43 · Learning starter summary](M43-learning-starter-summary.png) |
 | [F00](../features/F00-foundation.md) | Store open, migration and failure recovery | [M01 · Kontrol](M01-store-recovery.png) |
 | [F01](../features/F01-design-system.md) | Typography, colors and icons | [M42 · Appearance](M42-design-accessibility.png) |
 | [F01](../features/F01-design-system.md) | Navigation, keyboard and focus | [M00 · Today](M00-app-shell.png) |
@@ -54,7 +55,7 @@ Each row links a function to an actual PNG mockup. SVG sources sit beside the PN
 | [F13](../features/F13-settings-release.md) | Disconnect project folder | [M41 · Project folders](M41-remove-project.png) |
 | [F13](../features/F13-settings-release.md) | Accessibility and release verification | [M42 · Appearance](M42-design-accessibility.png) |
 
-## All 43 visual states
+## All 44 visual states
 
 | ID | State | Owner |
 | --- | --- | --- |
@@ -101,3 +102,4 @@ Each row links a function to an actual PNG mockup. SVG sources sit beside the PN
 | M40 | [data-export](M40-data-export.png) | F13 |
 | M41 | [remove-project](M41-remove-project.png) | F13 |
 | M42 | [design-accessibility](M42-design-accessibility.png) | F01 |
+| M43 | [learning-starter-summary](M43-learning-starter-summary.png) | F00 |

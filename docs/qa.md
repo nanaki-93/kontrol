@@ -45,4 +45,4 @@ For each F00–F13: implement its checklist, run its own acceptance checks, comp
 
 ## This package's validation
 
-The package build checks that every function row points to an existing mockup, every relative Markdown link resolves, all 43 SVG sources render to PNG, and the archive contains the referenced paths. It does not verify native Swift behavior; that work belongs to the implementation gates above.
+The package build checks that every function row points to an existing mockup, every relative Markdown link resolves, all 44 SVG sources render to PNG, and the archive contains the referenced paths. It does not verify native Swift behavior; that work belongs to the implementation gates above.

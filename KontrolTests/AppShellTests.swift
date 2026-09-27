@@ -20,6 +20,8 @@ final class AppShellTests: XCTestCase {
             XCTAssertEqual(AppShell.navigationTraits(for: destination, selected: .today).contains(.isSelected), destination == .today)
             if destination == .today {
                 XCTAssertEqual(AppShell.contentKind(for: destination), .today)
+            } else if destination == .learning {
+                XCTAssertEqual(AppShell.contentKind(for: destination), .learning)
             } else if destination == .tasks {
                 XCTAssertEqual(AppShell.contentKind(for: destination), .tasks)
             } else if destination == .settings {

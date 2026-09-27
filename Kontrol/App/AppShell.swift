@@ -28,7 +28,7 @@ extension AppDestination {
     var foundationMessage: String {
         switch self {
         case .today: "Nothing planned yet."
-        case .learning: "Starter lessons will appear here."
+        case .learning: "Included starter content is available offline."
         case .projects: "No projects added yet."
         case .focus: "Focus sessions are not available yet."
         case .tasks: "No tasks captured yet."
@@ -44,11 +44,12 @@ struct AppShell: View {
     @FocusState private var focusedDestination: AppDestination?
 
     /// Routing is deliberately limited to the foundation surfaces until their features ship.
-    enum ContentKind: Equatable { case today, tasks, settings, foundation(AppDestination) }
+    enum ContentKind: Equatable { case today, learning, tasks, settings, foundation(AppDestination) }
 
     static func contentKind(for destination: AppDestination) -> ContentKind {
         switch destination {
         case .today: .today
+        case .learning: .learning
         case .tasks: .tasks
         case .settings: .settings
         default: .foundation(destination)
@@ -67,6 +68,8 @@ struct AppShell: View {
                     switch Self.contentKind(for: navigation.selectedDestination) {
                     case .today:
                         TodayView(taskRepository: SwiftDataTaskRepository(container: dependencies.container))
+                    case .learning:
+                        LearningView(container: dependencies.container)
                     case .tasks:
                         TasksView(taskRepository: SwiftDataTaskRepository(container: dependencies.container))
                     case .settings:
