@@ -5,12 +5,13 @@ import SwiftUI
 struct KontrolApp: App {
     static let bootstrapTitle = "Kontrol"
     @StateObject private var launch = LaunchCoordinator()
+    @StateObject private var navigation = NavigationStore()
 
     var body: some Scene {
         WindowGroup {
             Group {
                 if let dependencies = launch.dependencies, launch.state == .ready {
-                    Text(Self.bootstrapTitle)
+                    AppShell(navigation: navigation)
                         .modelContainer(dependencies.container)
                 } else if launch.state == .opening {
                     ProgressView("Opening Kontrol")
@@ -19,7 +20,7 @@ struct KontrolApp: App {
                     Text(Self.bootstrapTitle)
                 }
             }
-            .frame(minWidth: 600, minHeight: 400)
+            .frame(minWidth: 1000, minHeight: 700)
             .task { await launch.start() }
         }
     }
