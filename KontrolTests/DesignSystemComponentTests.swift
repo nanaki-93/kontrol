@@ -149,6 +149,100 @@ final class DesignSystemComponentTests: XCTestCase {
         }
     }
 
+    func testStatusKindsConveyMeaningWithoutColorOrDuplicateSymbolNarration() throws {
+        XCTAssertEqual(Set([StatusPill.Kind.success.symbol, StatusPill.Kind.warning.symbol, StatusPill.Kind.error.symbol]).count, 3)
+        let view = VStack(alignment: .leading) {
+            StatusPill("Complete", kind: .success)
+            StatusPill("Due", kind: .warning)
+            StatusPill("Failed", kind: .error)
+            StatusPill("   ", kind: .warning)
+        }.padding()
+        try inspect(view, width: 300) { _, nodes in
+            for name in ["Success: Complete", "Warning: Due", "Error: Failed"] {
+                XCTAssertEqual(nodes.filter {
+                    attribute($0, kAXDescriptionAttribute) as? String == name ||
+                    attribute($0, kAXValueAttribute) as? String == name
+                }.count, 1, "status name is announced once: \(name)")
+            }
+            XCTAssertFalse(nodes.contains { (attribute($0, kAXDescriptionAttribute) as? String)?.contains("triangle") == true ||
+                (attribute($0, kAXDescriptionAttribute) as? String)?.contains("octagon") == true })
+            XCTAssertFalse(nodes.contains { attribute($0, kAXDescriptionAttribute) as? String == "Warning: " })
+            XCTAssertFalse(nodes.contains { attribute($0, kAXRoleAttribute) as? String == kAXButtonRole })
+        }
+    }
+
+    func testRowsAndCardsOmitAbsentMetadataStatusAndAction() throws {
+        try inspect(VStack {
+            AppListRow("Fixture task", metadata: "  \n ", status: StatusPill(" ", kind: .warning))
+            NextActionCard("Fixture lesson")
+        }.frame(width: 280).padding(), width: 320) { _, nodes in
+            for text in ["Fixture task", "Fixture lesson"] {
+                XCTAssertTrue(nodes.contains { attribute($0, kAXValueAttribute) as? String == text ||
+                    attribute($0, kAXDescriptionAttribute) as? String == text })
+            }
+            XCTAssertFalse(nodes.contains { attribute($0, kAXRoleAttribute) as? String == kAXButtonRole })
+            XCTAssertFalse(nodes.contains { (attribute($0, kAXDescriptionAttribute) as? String)?.contains("Warning") == true })
+            XCTAssertFalse(nodes.contains { attribute($0, kAXValueAttribute) as? String == "" })
+        }
+    }
+
+    func testLongRowsAndCardsWrapAt130PercentWithCallerOwnedActions() throws {
+        let title = "Investigate cancellation propagation through nested requests before the next review"
+        let metadata = "Context cancellation · 15 min · additional details of the review that must wrap before clipping"
+        var rowCalls = 0
+        var cardCalls = 0
+        func fixture() -> some View {
+            VStack(alignment: .leading, spacing: AppMetrics.space4) {
+                AppListRow(title, metadata: metadata, status: StatusPill("Due", kind: .warning)) {
+                    ActionButton("Open task") { rowCalls += 1 }.accessibilityIdentifier("row-action")
+                }
+                NextActionCard(title, metadata: metadata, status: StatusPill("Next", kind: .success)) {
+                    ActionButton("Open lesson") { cardCalls += 1 }.accessibilityIdentifier("card-action")
+                }
+            }.frame(width: 240).padding(AppMetrics.space4)
+        }
+        var standardMetadataHeight: CGFloat = 0
+        try inspect(fixture(), width: 280) { _, nodes in
+            let metadataNodes = nodes.filter { attribute($0, kAXValueAttribute) as? String == metadata ||
+                attribute($0, kAXDescriptionAttribute) as? String == metadata }
+            XCTAssertEqual(metadataNodes.count, 2)
+            standardMetadataHeight = try frame(XCTUnwrap(metadataNodes.first)).height
+        }
+        try inspect(fixture().environment(\.appTextScaleOverride, 1.3), width: 280) { _, nodes in
+            let metadataNodes = nodes.filter { attribute($0, kAXValueAttribute) as? String == metadata ||
+                attribute($0, kAXDescriptionAttribute) as? String == metadata }
+            XCTAssertEqual(metadataNodes.count, 2)
+            for node in metadataNodes {
+                let bounds = try frame(node)
+                XCTAssertGreaterThan(bounds.height, standardMetadataHeight, "enlarged metadata must reflow")
+                XCTAssertLessThanOrEqual(bounds.width, 240)
+            }
+            let titles = nodes.filter { attribute($0, kAXValueAttribute) as? String == title ||
+                attribute($0, kAXDescriptionAttribute) as? String == title }
+            XCTAssertEqual(titles.count, 2)
+            for titleNode in titles {
+                let bounds = try frame(titleNode)
+                XCTAssertGreaterThan(bounds.height, 20, "long titles grow with content")
+                XCTAssertLessThanOrEqual(bounds.width, 240)
+            }
+            for (index, name) in ["Warning: Due", "Success: Next"].enumerated() {
+                let status = try XCTUnwrap(nodes.first { attribute($0, kAXDescriptionAttribute) as? String == name ||
+                    attribute($0, kAXValueAttribute) as? String == name })
+                XCTAssertGreaterThanOrEqual(try frame(status).minY, try frame(metadataNodes[index]).maxY,
+                                            "status must follow the fully wrapped metadata")
+            }
+            let buttons = nodes.filter { attribute($0, kAXRoleAttribute) as? String == kAXButtonRole }
+            XCTAssertEqual(buttons.count, 2, "rows and cards are not buttons around their trailing actions")
+            for identifier in ["row-action", "card-action"] {
+                let button = try XCTUnwrap(buttons.first { attribute($0, kAXIdentifierAttribute) as? String == identifier })
+                XCTAssertGreaterThanOrEqual(try frame(button).height, AppMetrics.minimumTarget)
+                XCTAssertEqual(AXUIElementPerformAction(button, kAXPressAction as CFString), .success)
+            }
+            XCTAssertEqual(rowCalls, 1)
+            XCTAssertEqual(cardCalls, 1)
+        }
+    }
+
     func testIconLabelHasOneNameWithoutSymbolAnnouncement() throws {
         try inspect(IconLabel(title: "Learning", symbol: "book"), width: 300) { _, nodes in
             let named = nodes.filter { attribute($0, kAXDescriptionAttribute) as? String == "Learning" ||
