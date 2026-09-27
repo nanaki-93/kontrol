@@ -1,0 +1,222 @@
+{
+  "catalogID": "kontrol.starter",
+  "version": 1,
+  "topics": [
+    {
+      "id": "go",
+      "name": "Go"
+    },
+    {
+      "id": "java",
+      "name": "Java"
+    },
+    {
+      "id": "design",
+      "name": "System Design"
+    },
+    {
+      "id": "perf",
+      "name": "Performance"
+    },
+    {
+      "id": "security",
+      "name": "Security"
+    }
+  ],
+  "subtopics": [
+    {
+      "id": "go.concurrency",
+      "topicID": "go",
+      "name": "Concurrency"
+    },
+    {
+      "id": "java.io",
+      "topicID": "java",
+      "name": "Resource ownership"
+    },
+    {
+      "id": "design.api",
+      "topicID": "design",
+      "name": "API reliability"
+    },
+    {
+      "id": "perf.database",
+      "topicID": "perf",
+      "name": "Database performance"
+    },
+    {
+      "id": "security.api",
+      "topicID": "security",
+      "name": "API authorization"
+    }
+  ],
+  "concepts": [
+    {
+      "id": "go.concurrency.cancel-work",
+      "subtopicID": "go.concurrency",
+      "name": "Cooperative cancellation",
+      "prerequisiteConceptIDs": []
+    },
+    {
+      "id": "java.io.resource-ownership",
+      "subtopicID": "java.io",
+      "name": "Closeable resource ownership",
+      "prerequisiteConceptIDs": []
+    },
+    {
+      "id": "design.api.deduplicate-writes",
+      "subtopicID": "design.api",
+      "name": "Idempotent writes",
+      "prerequisiteConceptIDs": []
+    },
+    {
+      "id": "perf.database.query-count",
+      "subtopicID": "perf.database",
+      "name": "Query count diagnosis",
+      "prerequisiteConceptIDs": []
+    },
+    {
+      "id": "security.api.object-access",
+      "subtopicID": "security.api",
+      "name": "Per-object authorization",
+      "prerequisiteConceptIDs": []
+    }
+  ],
+  "lessons": [
+    {
+      "id": "go.concurrency.cancel-work.v1",
+      "objectiveKey": "go.concurrency.cancel-work",
+      "title": "Stop a worker when its caller leaves",
+      "topicID": "go",
+      "subtopicID": "go.concurrency",
+      "conceptIDs": [
+        "go.concurrency.cancel-work"
+      ],
+      "difficulty": "intermediate",
+      "format": "learn",
+      "estimatedMinutes": 12,
+      "prerequisiteConceptIDs": [],
+      "explanation": "A Go context signals that work is no longer needed; it does not terminate a goroutine. The caller owns the cancel function and should invoke it when it no longer needs the result. A worker must observe ctx.Done() at blocking or repeated work boundaries and return promptly. Pass the context into downstream calls that support it; do not replace it with context.Background() inside the worker. A deadline bounds waiting, but cleanup still belongs to the worker. Assume the standard library context API.",
+      "workedExample": "A search handler starts a worker to read batches from an index. The handler creates ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second), defers cancel(), and passes ctx to the worker. In its loop the worker selects between ctx.Done() (return ctx.Err()) and the next batch signal. If the client disconnects, r.Context() is canceled; the derived context signals the worker even before the two-second timeout. The worker closes only resources it owns, not ctx.Done().",
+      "exercise": "A handler launches a goroutine that waits on a results channel before replying. The client can disconnect while the goroutine is waiting; no one then reads its result. Describe a cancellation-aware send and who calls cancel. What should the worker do after observing cancellation?",
+      "referenceAnswer": "Derive ctx, cancel := context.WithCancel(r.Context()) in the handler and defer cancel(). The worker should select { case results <- value: case <-ctx.Done(): return } rather than send unconditionally. Pass ctx to any cancellable fetch and check its error. When the handler returns or the request is canceled, the worker releases its own resources and exits; cancel only signals, it does not join the goroutine.",
+      "selfCheckCriteria": [
+        "Names the handler as owner of cancel and calls it on exit.",
+        "Makes the channel send selectable against ctx.Done() so it cannot wait forever.",
+        "Explains that cancellation is cooperative and the worker must return and clean up."
+      ],
+      "contentVersion": 1,
+      "normalizedContentHash": "sha256:e752c4c155eb0a0f7b546726ff2e2f706c1e13ef77ceb0c81ded95df913b5ef7",
+      "source": "seed",
+      "provenance": "Original Kontrol starter lesson; docs/learning-curriculum.md: Go / Context cancellation; Go standard library context package semantics"
+    },
+    {
+      "id": "java.io.resource-ownership.v1",
+      "objectiveKey": "java.io.resource-ownership",
+      "title": "Own the stream you open",
+      "topicID": "java",
+      "subtopicID": "java.io",
+      "conceptIDs": [
+        "java.io.resource-ownership"
+      ],
+      "difficulty": "intermediate",
+      "format": "code",
+      "estimatedMinutes": 14,
+      "prerequisiteConceptIDs": [],
+      "explanation": "Java try-with-resources closes each AutoCloseable declared in its header when the block exits, including when an exception is thrown. Close happens in reverse declaration order. The exception from the body stays primary; close failures become suppressed exceptions. A method should close resources it creates, but must not silently close a stream supplied by its caller unless ownership was agreed. The example assumes Java 11+ and java.nio.file.Files.",
+      "workedExample": "A report method opens a reader with Files.newBufferedReader(path) and a writer with Files.newBufferedWriter(output). It declares both in try (var reader = ...; var writer = ...) { ... }. If copying a line throws, the writer and then reader still close. If writer.close() also fails, inspect the primary exception's getSuppressed() rather than replacing the original read error with a manual finally block.",
+      "exercise": "Implement countNonempty(Path path) returning the number of nonblank lines. The method opens its own reader, propagates IOException, and must close the reader on both normal return and failure. Show the resource boundary, not just the counting loop.",
+      "referenceAnswer": "long countNonempty(Path path) throws IOException { try (var reader = Files.newBufferedReader(path)) { long count = 0; String line; while ((line = reader.readLine()) != null) { if (!line.isBlank()) count++; } return count; } } Import java.nio.file.Files, Path and java.io.IOException. The try header owns the newly opened reader and closes it even when readLine throws; the caller owns the Path, not an open stream.",
+      "selfCheckCriteria": [
+        "Opens the reader inside try-with-resources rather than relying on garbage collection.",
+        "Counts nonblank lines and propagates read/close failures without swallowing them.",
+        "Does not close a caller-owned stream or Path."
+      ],
+      "contentVersion": 1,
+      "normalizedContentHash": "sha256:3a896f4abee568c12881fbce54f408e70df65621df21ecf25e92d0778a044b87",
+      "source": "seed",
+      "provenance": "Original Kontrol starter lesson; docs/learning-curriculum.md: Java / Resource cleanup; Java AutoCloseable and try-with-resources semantics"
+    },
+    {
+      "id": "design.api.deduplicate-writes.v1",
+      "objectiveKey": "design.api.deduplicate-writes",
+      "title": "Make a retried payment safe",
+      "topicID": "design",
+      "subtopicID": "design.api",
+      "conceptIDs": [
+        "design.api.deduplicate-writes"
+      ],
+      "difficulty": "intermediate",
+      "format": "design",
+      "estimatedMinutes": 16,
+      "prerequisiteConceptIDs": [],
+      "explanation": "A network timeout does not tell a client whether a write committed. An idempotency key lets the client retry the same logical operation without creating a second one. Scope the key to the authenticated account, record a canonical request fingerprint and outcome durably, and reject reuse with different input. The key claim and the business write need one atomic boundary; a process-local cache or read-then-insert leaves a race. Define retention and what happens after expiry rather than promising exactly-once delivery across all systems.",
+      "workedExample": "Account A sends POST /payments with key K and amount 25. The server atomically reserves (A,K) with a unique constraint and associates the payment and recorded result. The response is lost. A retry of the same payload and key returns the recorded result, including the payment ID, without charging again. Account B can independently use K. If A retries K with amount 30, the server returns a conflict instead of silently replaying the 25-unit result.",
+      "exercise": "Sketch a create-payment endpoint where two identical requests with the same account and key arrive concurrently, then one client times out. Specify the uniqueness boundary, how the loser obtains a result, what a different payload does, and what you would do if the external payment provider cannot participate in your database transaction.",
+      "referenceAnswer": "Require a client-generated key and store (accountID, key) under a unique index with a canonical payload digest. In a database transaction, claim that pair and create one local payment intent/result; the competing request waits for the winner or reads the committed result. On a different digest return conflict. Pass a stable derived key to a provider that supports idempotency and reconcile uncertain provider outcomes; do not claim the local transaction makes an external charge atomic. Document key lifetime and retry behavior after expiration.",
+      "selfCheckCriteria": [
+        "Uses a unique account-scoped key and compares the request fingerprint.",
+        "Handles simultaneous claims atomically and replays the same committed result after a lost response.",
+        "Acknowledges external side-effect uncertainty and defines a provider/reconciliation strategy and retention limit."
+      ],
+      "contentVersion": 1,
+      "normalizedContentHash": "sha256:3c0784dc9be939e19d8c07567c7feb6991def39b54683ddfcb0265abfb5e9b09",
+      "source": "seed",
+      "provenance": "Original Kontrol starter lesson; docs/learning-curriculum.md: System Design / API idempotency; design exercise, not a provider-specific guarantee"
+    },
+    {
+      "id": "perf.database.query-count.v1",
+      "objectiveKey": "perf.database.query-count",
+      "title": "Spot the query hidden in a loop",
+      "topicID": "perf",
+      "subtopicID": "perf.database",
+      "conceptIDs": [
+        "perf.database.query-count"
+      ],
+      "difficulty": "intermediate",
+      "format": "code",
+      "estimatedMinutes": 13,
+      "prerequisiteConceptIDs": [],
+      "explanation": "An N+1 read fetches N parent rows with one query, then issues a separate child query for every parent. The number of round trips grows with the result size even when each query is fast. Count database statements for a representative request before optimizing. Fetch children in a bounded batch using parent IDs, then group them in memory; a join or ORM eager-load may also work, but check row multiplication and memory cost. Query count is a diagnostic, not a complete latency measure.",
+      "workedExample": "A page shows 20 orders and each customer's display name. One SELECT obtains the orders; a loop calls SELECT name FROM customers WHERE id = ? for each order: up to 21 statements. Collect distinct customer IDs and load their names with one parameterized SELECT ... WHERE id IN (...) (respecting parameter limits); map names by ID and render orders. The result uses two statements for the page, even when a customer appears twice.",
+      "exercise": "An endpoint fetches 30 articles in one query, then for each article fetches tags with another query. State the expected query count and outline a two-query rewrite. What should a regression test count, and what must be checked before asserting the rewrite is faster?",
+      "referenceAnswer": "The naive path executes 1 + 30 = 31 statements if every article triggers a tag fetch. First fetch the articles, then fetch tags for their IDs in one bounded parameterized batch, grouping returned rows by article ID and using an empty list when no tags exist. An integration test can capture SQL statements for a fixed 30-article fixture and assert the count stays bounded rather than growing per article. Compare representative latency and memory, including large tag fan-out and database parameter limits, before claiming a speedup.",
+      "selfCheckCriteria": [
+        "Counts 31 statements for the stated naive workload.",
+        "Batches tag reads and preserves articles with zero tags.",
+        "Tests query-count growth and checks fan-out, limits, and measured latency rather than assuming every join is faster."
+      ],
+      "contentVersion": 1,
+      "normalizedContentHash": "sha256:48ca55e36d2add08c36abd665bc7359cc6c5a45bb7e422cc9bf6bec80171d921",
+      "source": "seed",
+      "provenance": "Original Kontrol starter lesson; docs/learning-curriculum.md: Performance / N+1 query diagnosis; database-agnostic example"
+    },
+    {
+      "id": "security.api.object-access.v1",
+      "objectiveKey": "security.api.object-access",
+      "title": "Check the object, not just the login",
+      "topicID": "security",
+      "subtopicID": "security.api",
+      "conceptIDs": [
+        "security.api.object-access"
+      ],
+      "difficulty": "intermediate",
+      "format": "code",
+      "estimatedMinutes": 14,
+      "prerequisiteConceptIDs": [],
+      "explanation": "Authentication establishes who is making a request; authorization decides whether that principal can access this particular object. A valid session alone does not authorize an arbitrary ID in a URL. Constrain reads and writes using the server-derived principal and the object's ownership or membership rules. Do not trust an owner ID supplied by the client. Recheck authorization at the mutation boundary, and avoid leaking another user's object details in denied responses.",
+      "workedExample": "GET /notes/82 receives an authenticated principal with account ID 7. Note 82 belongs to account 9. A query by note ID alone would disclose it; SELECT ... WHERE id = 82 AND account_id = 7 returns no row. For UPDATE, include both id and account_id in the update predicate and check affected rows, rather than authorizing an earlier read and later updating by id alone.",
+      "exercise": "A DELETE /notes/{id} handler checks that the caller is signed in and executes DELETE FROM notes WHERE id = :id. Rewrite the key decision in pseudocode or SQL so account 7 cannot delete account 9's note even by guessing its ID. Explain what the handler returns when no authorized row is found.",
+      "referenceAnswer": "Read accountID from the verified server-side session, not request JSON. Execute DELETE FROM notes WHERE id = :id AND account_id = :accountID with bound parameters, inside the write transaction; inspect affected row count. Return a generic not-found response if zero rows changed (assuming the API uses concealment), without confirming whether another account owns the ID. If shared notes exist, replace the ownership predicate with an explicit authorized-membership rule checked in the same write boundary.",
+      "selfCheckCriteria": [
+        "Gets account identity from a verified server-side principal instead of a client field.",
+        "Constrains the delete by both object ID and authorized account/membership at mutation time.",
+        "Does not expose the existence or content of another account's note on denial."
+      ],
+      "contentVersion": 1,
+      "normalizedContentHash": "sha256:e9fc9e61a77c3fa51be8d9b4f26eeea61f4dc61ab1c54659e48215a7ecb34fb4",
+      "source": "seed",
+      "provenance": "Original Kontrol starter lesson; docs/learning-curriculum.md: Security / Authorization checks; generic SQL pseudocode"
+    }
+  ]
+}
