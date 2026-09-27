@@ -1,13 +1,6 @@
 import Foundation
 import SwiftData
 
-// Failure presentation and diagnostics are added in the recovery step. Never
-// publish a partially initialized graph, including on catalog import failure.
-enum LaunchFailure: Equatable {
-    case store
-    case catalog
-}
-
 enum LaunchState: Equatable {
     case idle
     case opening
@@ -54,29 +47,51 @@ final class LaunchCoordinator: ObservableObject {
     }
 
     private func attempt() async {
-        state = .opening
+        let previousState = state
+        state = .opening // synchronous main-actor gate, before the first suspension
+        if Task.isCancelled {
+            state = previousState
+            return
+        }
         let container: ModelContainer
         if let openedContainer {
             container = openedContainer
         } else {
             do {
                 container = try open()
+                // A successful open is retained even if catalog work is cancelled.
                 openedContainer = container
             } catch {
-                state = .failed(.store)
+                if Task.isCancelled {
+                    state = previousState
+                } else {
+                    SafeLaunchLogger.failure(stage: .storeOpen, error: error)
+                    state = .failed(.store)
+                }
                 return
             }
+        }
+        if Task.isCancelled {
+            state = previousState
+            return
         }
         do {
             // This boundary returns only value data; the default loader performs
             // resource IO, decoding, fingerprint checks and validation off-main.
             let catalog = try await loadCatalog()
+            try Task.checkCancellation() // loaders need not cooperate with cancellation
             let repository = makeRepository(container)
             _ = try repository.importIfNeeded(catalog)
+            try Task.checkCancellation() // do not publish a stale result
             dependencies = AppDependencies(container: container, catalogRepository: repository)
             state = .ready
         } catch {
-            state = .failed(.catalog)
+            if Task.isCancelled {
+                state = previousState
+            } else {
+                SafeLaunchLogger.failure(stage: .catalogInitialization, error: error)
+                state = .failed(.catalog)
+            }
         }
     }
 }
