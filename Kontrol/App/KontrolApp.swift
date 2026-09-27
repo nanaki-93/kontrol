@@ -23,18 +23,29 @@ struct KontrolApp: App {
 struct MainWindowContent: View {
     @ObservedObject var launch: LaunchCoordinator
     @ObservedObject var navigation: NavigationStore
+    @State private var recoveryFailure: LaunchFailure?
 
     var body: some View {
         Group {
             if let dependencies = launch.dependencies, launch.state == .ready {
                 AppShell(navigation: navigation, dependencies: dependencies)
                     .modelContainer(dependencies.container)
+            } else if case .failed(let failure) = launch.state {
+                RecoveryView(failure: failure, launch: launch, onRetry: {
+                    recoveryFailure = failure
+                    Task { await launch.retry() }
+                })
+            } else if launch.state == .opening, let recoveryFailure {
+                RecoveryView(failure: recoveryFailure, launch: launch)
             } else if launch.state == .opening {
                 ProgressView("Opening Kontrol")
             } else {
-                // The blocking recovery surface and actions are added in 3.4.
                 Text(KontrolApp.bootstrapTitle)
             }
+        }
+        .onChange(of: launch.state) { newState in
+            if case .failed(let failure) = newState { recoveryFailure = failure }
+            if newState == .ready { recoveryFailure = nil }
         }
         .task { await launch.start() }
     }
@@ -42,18 +53,28 @@ struct MainWindowContent: View {
 
 struct SettingsSceneContent: View {
     @ObservedObject var launch: LaunchCoordinator
+    @State private var recoveryFailure: LaunchFailure?
 
     var body: some View {
         Group {
             if let dependencies = launch.dependencies, launch.state == .ready {
                 FoundationSettingsView(dependencies: dependencies)
-            } else if launch.state == .opening || launch.state == .idle {
-                ProgressView("Opening Kontrol")
+            } else if case .failed(let failure) = launch.state {
+                RecoveryView(failure: failure, launch: launch, onRetry: {
+                    recoveryFailure = failure
+                    Task { await launch.retry() }
+                })
+            } else if launch.state == .opening, let recoveryFailure {
+                RecoveryView(failure: recoveryFailure, launch: launch)
             } else {
-                Text("Settings are unavailable until Kontrol opens.")
+                ProgressView("Opening Kontrol")
             }
         }
         .frame(width: 520, height: 340)
+        .onChange(of: launch.state) { newState in
+            if case .failed(let failure) = newState { recoveryFailure = failure }
+            if newState == .ready { recoveryFailure = nil }
+        }
         .task { await launch.start() }
     }
 }
