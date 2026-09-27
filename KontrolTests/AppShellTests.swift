@@ -37,8 +37,11 @@ final class AppShellTests: XCTestCase {
         let suite = "AppShellAXTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set("unchanged", forKey: "unrelated-preference")
+        defaults.set(AppDestination.today.rawValue, forKey: UserDefaultsDestinationPreferences.key)
         let navigation = NavigationStore(preferences: UserDefaultsDestinationPreferences(defaults: defaults))
-        let host = NSHostingView(rootView: AppShell(navigation: navigation, dependencies: try makeDependencies()))
+        let host = NSHostingView(rootView: AppShell(navigation: navigation, dependencies: try makeDependencies())
+            .environment(\.appTextScaleOverride, CGFloat(1)))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.title = "AppShell accessibility inspection"
@@ -75,15 +78,58 @@ final class AppShellTests: XCTestCase {
             return try XCTUnwrap(attribute(unsafeBitCast(value, to: AXUIElement.self), kAXIdentifierAttribute) as? String)
         }
         func settle() { RunLoop.main.run(until: Date().addingTimeInterval(0.03)) }
+        func frame(of button: AXUIElement) throws -> CGRect {
+            let positionValue = try XCTUnwrap(attribute(button, kAXPositionAttribute))
+            let sizeValue = try XCTUnwrap(attribute(button, kAXSizeAttribute))
+            XCTAssertEqual(CFGetTypeID(positionValue), AXValueGetTypeID())
+            XCTAssertEqual(CFGetTypeID(sizeValue), AXValueGetTypeID())
+            var position = CGPoint.zero
+            var size = CGSize.zero
+            XCTAssertTrue(AXValueGetValue(unsafeBitCast(positionValue, to: AXValue.self), .cgPoint, &position))
+            XCTAssertTrue(AXValueGetValue(unsafeBitCast(sizeValue, to: AXValue.self), .cgSize, &size))
+            return CGRect(origin: position, size: size)
+        }
 
         for size in [CGSize(width: 1000, height: 700), CGSize(width: 1440, height: 940)] {
+          for scale: CGFloat in [1, 1.3, 1.6, 2.4] {
+            if scale != 1 || size.width == 1440 {
+                host.rootView = AppShell(navigation: navigation, dependencies: try makeDependencies())
+                    .environment(\.appTextScaleOverride, scale)
+            }
             window.setContentSize(size)
             window.makeKeyAndOrderFront(nil)
             navigation.select(.today)
             host.layoutSubtreeIfNeeded()
             settle()
             let expected = AppDestination.allCases
-            XCTAssertEqual(try navButtons().count, expected.count)
+            let initialButtons = try navButtons()
+            XCTAssertEqual(initialButtons.count, expected.count)
+            let frames = try initialButtons.map(frame)
+            for frame in frames {
+                XCTAssertGreaterThanOrEqual(frame.width, AppMetrics.minimumTarget)
+                XCTAssertGreaterThanOrEqual(frame.height, AppMetrics.minimumTarget)
+                XCTAssertGreaterThanOrEqual(frame.minX, window.frame.minX - 1)
+                XCTAssertLessThanOrEqual(frame.maxX, window.frame.maxX + 1)
+                XCTAssertGreaterThanOrEqual(frame.minY, window.frame.minY - 1)
+                XCTAssertLessThanOrEqual(frame.maxY, window.frame.maxY + 1)
+            }
+            for (destination, frame) in zip(expected, frames) {
+                let font = NSFont.monospacedSystemFont(ofSize: AppTypography.pointSize(.navigation, for: .large, override: scale), weight: .regular)
+                let textWidth = (destination.title as NSString).size(withAttributes: [.font: font]).width
+                // The symbol, gap and full-size glyphs must fit without scale-to-fit.
+                XCTAssertGreaterThan(frame.width, textWidth + AppMetrics.space2 + font.pointSize)
+            }
+            // AX children must be in the same row-major order as their screen positions.
+            let rowStarts: Set<Int> = scale >= 2 ? [2, 4, 6] : scale >= 1.6 ? [3, 5] : scale >= 1.3 ? [4] : []
+            for index in 1..<frames.count {
+                if rowStarts.contains(index) {
+                    XCTAssertGreaterThan(frames[index].minY, frames[index - 1].minY + 32)
+                    XCTAssertLessThan(frames[index].minX, frames[index - 1].minX)
+                } else {
+                    XCTAssertEqual(frames[index].minY, frames[index - 1].minY, accuracy: 4)
+                    XCTAssertGreaterThan(frames[index].minX, frames[index - 1].minX)
+                }
+            }
             for selected in expected {
                 navigation.select(selected)
                 settle()
@@ -100,11 +146,26 @@ final class AppShellTests: XCTestCase {
             }
             // Native Tab traversal uses the window's next-key-view chain. Verify the
             // actually focused AX elements, not the enum order or SwiftUI focus helpers.
-            XCTAssertEqual(try focusedIdentifier(), "navigation-today")
+            window.makeFirstResponder(nil)
+            settle()
+            func renderedPixels() throws -> Data {
+                host.displayIfNeeded()
+                let bitmap = try XCTUnwrap(NSBitmapImageRep(
+                    bitmapDataPlanes: nil, pixelsWide: Int(host.bounds.width), pixelsHigh: Int(host.bounds.height),
+                    bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                    colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+                host.cacheDisplay(in: host.bounds, to: bitmap)
+                return try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+            }
+            let unfocused = try renderedPixels()
+            window.selectNextKeyView(nil)
+            settle()
+            XCTAssertEqual(try focusedIdentifier(), "navigation-today", "size \(size), scale \(scale)")
+            XCTAssertNotEqual(try renderedPixels(), unfocused, "Keyboard focus must have a visible treatment")
             for destination in expected.dropFirst() {
                 window.selectNextKeyView(nil)
                 settle()
-                XCTAssertEqual(try focusedIdentifier(), "navigation-\(destination.rawValue)")
+                XCTAssertEqual(try focusedIdentifier(), "navigation-\(destination.rawValue)", "size \(size), scale \(scale)")
             }
             window.selectNextKeyView(nil)
             settle()
@@ -118,10 +179,17 @@ final class AppShellTests: XCTestCase {
                 XCTAssertEqual(AXUIElementPerformAction(button, kAXPressAction as CFString), .success)
                 settle()
                 XCTAssertEqual(navigation.selectedDestination, destination)
+                XCTAssertEqual(defaults.string(forKey: UserDefaultsDestinationPreferences.key), destination.rawValue)
+                XCTAssertEqual(defaults.string(forKey: "unrelated-preference"), "unchanged")
+                XCTAssertEqual(defaults.persistentDomain(forName: suite).map { Set($0.keys) } ?? [],
+                               Set(["unrelated-preference", UserDefaultsDestinationPreferences.key]))
+                XCTAssertEqual(NavigationStore(preferences: UserDefaultsDestinationPreferences(defaults: defaults))
+                    .selectedDestination, destination)
                 XCTAssertEqual((attribute(try XCTUnwrap(navButtons().first {
                     attribute($0, kAXIdentifierAttribute) as? String == "navigation-\(destination.rawValue)"
                 }), kAXSelectedAttribute) as? NSNumber)?.boolValue, true)
             }
+          }
         }
     }
 

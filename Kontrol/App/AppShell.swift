@@ -42,6 +42,8 @@ struct AppShell: View {
     @ObservedObject var navigation: NavigationStore
     let dependencies: AppDependencies
     @FocusState private var focusedDestination: AppDestination?
+    @Environment(\.dynamicTypeSize) private var systemTextSize
+    @Environment(\.appTextScaleOverride) private var previewTextScale
 
     /// Routing is deliberately limited to the foundation surfaces until their features ship.
     enum ContentKind: Equatable { case today, learning, tasks, settings, foundation(AppDestination) }
@@ -81,33 +83,58 @@ struct AppShell: View {
                 .frame(maxWidth: .infinity, minHeight: 500, alignment: .topLeading)
             }
         }
-        .background(FoundationStyle.background)
-        .foregroundStyle(FoundationStyle.primary)
+        .background(AppColors.background)
+        .foregroundStyle(AppColors.textPrimary)
         .preferredColorScheme(.dark)
     }
 
     private var navigationBar: some View {
+        // Explicit contiguous rows retain visual, AX, and native Tab order. Standard
+        // text stays on one line; enlarged text never shrinks or drops a label.
+        VStack(spacing: 0) {
+            if AppTypography.scale(for: systemTextSize, override: previewTextScale) >= 2 {
+                navigationRow(Array(AppDestination.allCases[0..<2]))
+                navigationRow(Array(AppDestination.allCases[2..<4]))
+                navigationRow(Array(AppDestination.allCases[4..<6]))
+                navigationRow(Array(AppDestination.allCases[6..<7]))
+            } else if AppTypography.scale(for: systemTextSize, override: previewTextScale) >= 1.6 {
+                navigationRow(Array(AppDestination.allCases[0..<3]))
+                navigationRow(Array(AppDestination.allCases[3..<5]))
+                navigationRow(Array(AppDestination.allCases[5..<7]))
+            } else if AppTypography.scale(for: systemTextSize, override: previewTextScale) >= 1.3 {
+                navigationRow(Array(AppDestination.allCases.prefix(4)))
+                navigationRow(Array(AppDestination.allCases.dropFirst(4)))
+            } else {
+                navigationRow(AppDestination.allCases)
+            }
+        }
+        .padding(.horizontal, AppMetrics.contentInset)
+        .background(AppColors.background)
+        .overlay(alignment: .bottom) { AppColors.border.frame(height: 1) }
+    }
+
+    private func navigationRow(_ destinations: [AppDestination]) -> some View {
         HStack(spacing: 0) {
-            ForEach(AppDestination.allCases, id: \.self) { destination in
+            ForEach(destinations, id: \.self) { destination in
                 let selected = destination == navigation.selectedDestination
                 Button {
                     navigation.select(destination)
                 } label: {
                     VStack(spacing: 0) {
-                        HStack(spacing: 9) {
+                        HStack(spacing: AppMetrics.space2) {
                             Image(systemName: destination.symbol)
                                 .accessibilityHidden(true)
                             Text(destination.title)
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.85)
+                                .fixedSize(horizontal: true, vertical: false)
                         }
-                        .font(.system(size: 14, design: .monospaced))
-                        .frame(maxWidth: .infinity, minHeight: 44)
-                        .foregroundStyle(selected ? FoundationStyle.accent : FoundationStyle.secondary)
+                        .appTypography(.navigation)
+                        .frame(maxWidth: .infinity, minHeight: AppMetrics.preferredTarget)
+                        .foregroundStyle(selected ? AppColors.accent : AppColors.textSecondary)
                         Rectangle()
-                            .fill(selected ? FoundationStyle.accent : .clear)
+                            .fill(selected ? AppColors.accent : .clear)
                             .frame(height: 2)
                     }
+                    .frame(minWidth: AppMetrics.minimumTarget)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -115,9 +142,9 @@ struct AppShell: View {
                 .focused($focusedDestination, equals: destination)
                 .overlay {
                     if focusedDestination == destination {
-                        RoundedRectangle(cornerRadius: 4)
-                            .strokeBorder(FoundationStyle.primary, lineWidth: 2)
-                            .padding(2)
+                        RoundedRectangle(cornerRadius: AppMetrics.smallRadius)
+                            .strokeBorder(AppColors.focusRing, lineWidth: 2)
+                            .padding(-3)
                             .allowsHitTesting(false)
                     }
                 }
@@ -126,8 +153,6 @@ struct AppShell: View {
                 .accessibilityIdentifier("navigation-\(destination.rawValue)")
             }
         }
-        .padding(.horizontal, 20)
-        .background(FoundationStyle.background)
-        .overlay(alignment: .bottom) { FoundationStyle.border.frame(height: 1) }
+        .focusSection()
     }
 }
