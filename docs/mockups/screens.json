@@ -1,0 +1,1919 @@
+[
+  {
+    "id": "M00",
+    "slug": "app-shell",
+    "feature": "F00",
+    "section": "Today",
+    "title": "Today",
+    "meta": "Sunday, 27 September",
+    "groups": [
+      {
+        "title": "Next",
+        "rows": [
+          {
+            "title": "Context cancellation",
+            "meta": "Go \u00b7 15 min",
+            "action": "Open lesson"
+          }
+        ]
+      },
+      {
+        "title": "Schedule",
+        "rows": [
+          {
+            "title": "09:30   Plan the day",
+            "meta": "",
+            "action": ""
+          },
+          {
+            "title": "11:00   Go practice",
+            "meta": "",
+            "action": ""
+          },
+          {
+            "title": "14:00   Build Kontrol",
+            "meta": "",
+            "action": ""
+          }
+        ]
+      }
+    ],
+    "actions": [
+      "+ Task",
+      "+ Block"
+    ],
+    "modal": null,
+    "note": "",
+    "kind": "list"
+  },
+  {
+    "id": "M01",
+    "slug": "store-recovery",
+    "feature": "F00",
+    "section": "Today",
+    "title": "Kontrol",
+    "meta": "Local data unavailable",
+    "groups": [],
+    "actions": [],
+    "modal": {
+      "title": "Cannot open local data",
+      "fields": [],
+      "actions": [
+        "Quit",
+        "Try again"
+      ],
+      "body": "Your data has not been reset. Retry opening it, or quit and try again later."
+    },
+    "note": "",
+    "kind": "list"
+  },
+  {
+    "id": "M02",
+    "slug": "tasks",
+    "feature": "F02",
+    "section": "Tasks",
+    "title": "Tasks",
+    "meta": "Today \u00b7 Upcoming \u00b7 Completed",
+    "groups": [
+      {
+        "title": "Today",
+        "rows": [
+          {
+            "title": "Outline lesson rotation",
+            "meta": "Today \u00b7 14:00",
+            "action": "Complete"
+          },
+          {
+            "title": "Review project files",
+            "meta": "Overdue \u00b7 Yesterday",
+            "action": "Complete"
+          }
+        ]
+      },
+      {
+        "title": "Upcoming",
+        "rows": [
+          {
+            "title": "Review API design",
+            "meta": "Tuesday \u00b7 10:00",
+            "action": "Edit"
+          }
+        ]
+      }
+    ],
+    "actions": [
+      "+ Task"
+    ],
+    "modal": null,
+    "note": "",
+    "kind": "list"
+  },
+  {
+    "id": "M03",
+    "slug": "task-editor",
+    "feature": "F02",
+    "section": "Tasks",
+    "title": "Tasks",
+    "meta": "Today \u00b7 Upcoming \u00b7 Completed",
+    "groups": [
+      {
+        "title": "Today",
+        "rows": [
+          {
+            "title": "Outline lesson rotation",
+            "meta": "Today \u00b7 14:00",
+            "action": "Edit"
+          }
+        ]
+      }
+    ],
+    "actions": [],
+    "modal": {
+      "title": "Edit task",
+      "fields": [
+        [
+          "Title",
+          "Outline lesson rotation"
+        ],
+        [
+          "Due",
+          "27 Sep 2026 \u00b7 14:00"
+        ],
+        [
+          "Plan for",
+          "Today"
+        ],
+        [
+          "Notes",
+          "Choose stable lesson slots."
+        ]
+      ],
+      "actions": [
+        "Cancel",
+        "Save"
+      ],
+      "body": ""
+    },
+    "note": "",
+    "kind": "list"
+  },
+  {
+    "id": "M04",
+    "slug": "task-complete-reopen",
+    "feature": "F02",
+    "section": "Tasks",
+    "title": "Completed",
+    "meta": "3 tasks",
+    "groups": [
+      {
+        "title": "Today",
+        "rows": [
+          {
+            "title": "Outline lesson rotation",
+            "meta": "Completed \u00b7 14:20",
+            "action": "Reopen"
+          },
+          {
+            "title": "Review project files",
+            "meta": "Completed \u00b7 10:40",
+            "action": "Reopen"
+          },
+          {
+            "title": "Plan the day",
+            "meta": "Completed \u00b7 09:35",
+            "action": "Reopen"
+          }
+        ]
+      }
+    ],
+    "actions": [],
+    "modal": null,
+    "note": "",
+    "kind": "list"
+  },
+  {
+    "id": "M05",
+    "slug": "task-delete",
+    "feature": "F02",
+    "section": "Tasks",
+    "title": "Tasks",
+    "meta": "Upcoming",
+    "groups": [
+      {
+        "title": "Upcoming",
+        "rows": [
+          {
+            "title": "Review API design",
+            "meta": "Tuesday \u00b7 10:00",
+            "action": "Edit"
+          }
+        ]
+      }
+    ],
+    "actions": [],
+    "modal": {
+      "title": "Delete task?",
+      "fields": [],
+      "actions": [
+        "Cancel",
+        "Delete"
+      ],
+      "body": "Review API design will be removed. Linked focus history will keep its original title."
+    },
+    "note": "",
+    "kind": "list"
+  },
+  {
+    "id": "M06",
+    "slug": "today",
+    "feature": "F03",
+    "section": "Today",
+    "title": "Today",
+    "meta": "Sunday, 27 September",
+    "groups": [
+      {
+        "title": "Next \u00b7 11:00",
+        "rows": [
+          {
+            "title": "Context cancellation",
+            "meta": "Go \u00b7 15 min",
+            "action": "Open lesson"
+          }
+        ]
+      },
+      {
+        "title": "Schedule",
+        "rows": [
+          {
+            "title": "09:30   Plan the day",
+            "meta": "30 min",
+            "action": "Edit"
+          },
+          {
+            "title": "11:00   Go practice",
+            "meta": "25 min",
+            "action": "Edit"
+          },
+          {
+            "title": "14:00   Build Kontrol",
+            "meta": "60 min",
+            "action": "Edit"
+          }
+        ]
+      },
+      {
+        "title": "Tasks",
+        "rows": [
+          {
+            "title": "Outline lesson rotation",
+            "meta": "Today",
+            "action": "Complete"
+          },
+          {
+            "title": "Review project files",
+            "meta": "Overdue",
+            "action": "Complete"
+          }
+        ]
+      }
+    ],
+    "actions": [
+      "Previous day",
+      "Next day",
+      "+ Task",
+      "+ Block"
+    ],
+    "modal": null,
+    "note": "",
+    "kind": "list"
+  },
+  {
+    "id": "M07",
+    "slug": "schedule-editor",
+    "feature": "F03",
+    "section": "Today",
+    "title": "Today",
+    "meta": "Sunday, 27 September",
+    "groups": [
+      {
+        "title": "Schedule",
+        "rows": [
+          {
+            "title": "11:00   Go practice",
+            "meta": "25 min",
+            "action": "Edit"
+          }
+        ]
+      }
+    ],
+    "actions": [],
+    "modal": {
+      "title": "Schedule block",
+      "fields": [
+        [
+          "Title",
+          "Go practice"
+        ],
+        [
+          "Date",
+          "27 Sep 2026"
+        ],
+        [
+          "Start / End",
+          "11:00 / 11:25"
+        ],
+        [
+          "Lesson",
+          "Context cancellation"
+        ]
+      ],
+      "actions": [
+        "Delete",
+        "Cancel",
+        "Save"
+      ],
+      "body": ""
+    },
+    "note": "",
+    "kind": "list"
+  },
+  {
+    "id": "M08",
+    "slug": "schedule-overlap",
+    "feature": "F03",
+    "section": "Today",
+    "title": "Today",
+    "meta": "Sunday, 27 September",
+    "groups": [
+      {
+        "title": "Schedule",
+        "rows": [
+          {
+            "title": "11:00   Go practice",
+            "meta": "25 min",
+            "action": ""
+          },
+          {
+            "title": "11:15   Build Kontrol",
+            "meta": "60 min",
+            "action": ""
+          }
+        ]
+      }
+    ],
+    "actions": [],
+    "modal": {
+      "title": "Overlapping blocks",
+      "fields": [],
+      "actions": [
+        "Edit time",
+        "Keep both"
+      ],
+      "body": "Build Kontrol overlaps Go practice by 10 minutes."
+    },
+    "note": "",
+    "kind": "list"
+  },
+  {
+    "id": "M09",
+    "slug": "quick-capture",
+    "feature": "F02",
+    "section": "Today",
+    "title": "Today",
+    "meta": "No tasks planned",
+    "groups": [
+      {
+        "title": "Schedule",
+        "rows": [
+          {
+            "title": "No blocks yet",
+            "meta": "",
+            "action": "Add block"
+          }
+        ]
+      }
+    ],
+    "actions": [],
+    "modal": {
+      "title": "New task",
+      "fields": [
+        [
+          "Title",
+          "Read Go lesson"
+        ],
+        [
+          "Plan for",
+          "Today"
+        ],
+        [
+          "Due",
+          "None"
+        ]
+      ],
+      "actions": [
+        "Cancel",
+        "Add"
+      ],
+      "body": ""
+    },
+    "note": "",
+    "kind": "list"
+  },
+  {
+    "id": "M10",
+    "slug": "focus-ready",
+    "feature": "F04",
+    "section": "Focus",
+    "title": "Focus",
+    "meta": "Ready",
+    "groups": [
+      {
+        "title": "25:00",
+        "rows": [
+          {
+            "title": "Outline lesson rotation",
+            "meta": "Linked task",
+            "action": "Change task"
+          }
+        ]
+      },
+      {
+        "title": "Duration",
+        "rows": [
+          {
+            "title": "25 minutes",
+            "meta": "15 \u00b7 25 \u00b7 50 \u00b7 Custom",
+            "action": "Set duration"
+          }
+        ]
+      }
+    ],
+    "actions": [
+      "Start"
+    ],
+    "modal": null,
+    "note": "",
+    "kind": "timer"
+  },
+  {
+    "id": "M11",
+    "slug": "focus-running",
+    "feature": "F04",
+    "section": "Focus",
+    "title": "Focus",
+    "meta": "Running",
+    "groups": [
+      {
+        "title": "18:42",
+        "rows": [
+          {
+            "title": "Outline lesson rotation",
+            "meta": "Started 11:00",
+            "action": ""
+          }
+        ]
+      },
+      {
+        "title": "Today",
+        "rows": [
+          {
+            "title": "2 sessions",
+            "meta": "45 min",
+            "action": ""
+          }
+        ]
+      }
+    ],
+    "actions": [
+      "Pause",
+      "End"
+    ],
+    "modal": null,
+    "note": "",
+    "kind": "timer"
+  },
+  {
+    "id": "M12",
+    "slug": "focus-paused",
+    "feature": "F04",
+    "section": "Focus",
+    "title": "Focus",
+    "meta": "Paused",
+    "groups": [
+      {
+        "title": "18:42",
+        "rows": [
+          {
+            "title": "Outline lesson rotation",
+            "meta": "6 min 18 sec focused",
+            "action": ""
+          }
+        ]
+      },
+      {
+        "title": "Session",
+        "rows": [
+          {
+            "title": "Paused at 11:06",
+            "meta": "Paused time is excluded",
+            "action": ""
+          }
+        ]
+      }
+    ],
+    "actions": [
+      "Resume",
+      "End"
+    ],
+    "modal": null,
+    "note": "",
+    "kind": "timer"
+  },
+  {
+    "id": "M13",
+    "slug": "focus-recovery",
+    "feature": "F04",
+    "section": "Focus",
+    "title": "Focus",
+    "meta": "Interrupted session",
+    "groups": [
+      {
+        "title": "12:15",
+        "rows": [
+          {
+            "title": "Outline lesson rotation",
+            "meta": "Last saved 11:12",
+            "action": ""
+          }
+        ]
+      }
+    ],
+    "actions": [],
+    "modal": {
+      "title": "Resume session?",
+      "fields": [],
+      "actions": [
+        "End session",
+        "Resume"
+      ],
+      "body": "12 min 45 sec recorded. Your task is still open."
+    },
+    "note": "",
+    "kind": "list"
+  },
+  {
+    "id": "M14",
+    "slug": "focus-history",
+    "feature": "F04",
+    "section": "Focus",
+    "title": "Sessions",
+    "meta": "Today \u00b7 This week",
+    "groups": [
+      {
+        "title": "Today",
+        "rows": [
+          {
+            "title": "Go practice",
+            "meta": "25 min \u00b7 Completed",
+            "action": ""
+          },
+          {
+            "title": "Outline lesson rotation",
+            "meta": "20 min \u00b7 Ended early",
+            "action": ""
+          }
+        ]
+      },
+      {
+        "title": "Yesterday",
+        "rows": [
+          {
+            "title": "Read project notes",
+            "meta": "25 min \u00b7 Completed",
+            "action": ""
+          }
+        ]
+      }
+    ],
+    "actions": [
+      "Back to timer"
+    ],
+    "modal": null,
+    "note": "",
+    "kind": "list"
+  },
+  {
+    "id": "M15",
+    "slug": "learning-choices",
+    "feature": "F05",
+    "section": "Learning",
+    "title": "Learning",
+    "meta": "Go \u00b7 Java \u00b7 System Design \u00b7 Performance \u00b7 Security",
+    "groups": [
+      {
+        "title": "Go \u00b7 4 available",
+        "rows": [
+          {
+            "title": "Context cancellation",
+            "meta": "Learn \u00b7 Intermediate \u00b7 15 min",
+            "action": "Open"
+          },
+          {
+            "title": "Table-driven tests",
+            "meta": "Code \u00b7 Intermediate \u00b7 20 min",
+            "action": "Open"
+          },
+          {
+            "title": "Small interfaces",
+            "meta": "Design \u00b7 Intermediate \u00b7 20 min",
+            "action": "Open"
+          },
+          {
+            "title": "Benchmarking Go",
+            "meta": "Question \u00b7 Intermediate \u00b7 15 min",
+            "action": "Open"
+          }
+        ]
+      }
+    ],
+    "actions": [
+      "History",
+      "Coverage",
+      "Generate"
+    ],
+    "modal": null,
+    "note": "",
+    "kind": "list"
+  },
+  {
+    "id": "M16",
+    "slug": "lesson-learn",
+    "feature": "F06",
+    "section": "Learning",
+    "title": "Context cancellation",
+    "meta": "Go \u00b7 Learn \u00b7 15 min",
+    "groups": [
+      {
+        "title": "Explanation",
+        "rows": [
+          {
+            "title": "Cancellation is a signal",
+            "meta": "Workers must observe it and release owned resources.",
+            "action": ""
+          }
+        ]
+      },
+      {
+        "title": "Example",
+        "rows": [
+          {
+            "title": "Request cancelled \u2192 worker returns",
+            "meta": "select on work and ctx.Done()",
+            "action": ""
+          }
+        ]
+      },
+      {
+        "title": "Exercise",
+        "rows": [
+          {
+            "title": "Where should a worker check for cancellation?",
+            "meta": "Your answer: While waiting and before new work.",
+            "action": ""
+          }
+        ]
+      }
+    ],
+    "actions": [
+      "Back",
+      "Add to Today",
+      "Show solution"
+    ],
+    "modal": null,
+    "note": "",
+    "kind": "list"
+  },
+  {
+    "id": "M17",
+    "slug": "lesson-code",
+    "feature": "F06",
+    "section": "Learning",
+    "title": "Table-driven tests",
+    "meta": "Go \u00b7 Code \u00b7 20 min",
+    "groups": [
+      {
+        "title": "Example",
+        "rows": [
+          {
+            "title": "One test body, many named cases",
+            "meta": "name | input | expected",
+            "action": ""
+          }
+        ]
+      },
+      {
+        "title": "Exercise",
+        "rows": [
+          {
+            "title": "Add an empty-input case",
+            "meta": "cases := []testCase{\n  {name: \"empty\", input: \"\", want: \"\"},\n}",
+            "action": ""
+          }
+        ]
+      },
+      {
+        "title": "Draft",
+        "rows": [
+          {
+            "title": "Write and compare locally; no code execution.",
+            "meta": "",
+            "action": ""
+          }
+        ]
+      }
+    ],
+    "actions": [
+      "Back",
+      "Add to Today",
+      "Show solution"
+    ],
+    "modal": null,
+    "note": "",
+    "kind": "list"
+  },
+  {
+    "id": "M18",
+    "slug": "lesson-question",
+    "feature": "F06",
+    "section": "Learning",
+    "title": "Benchmarking Go",
+    "meta": "Go \u00b7 Question \u00b7 15 min",
+    "groups": [
+      {
+        "title": "Question",
+        "rows": [
+          {
+            "title": "What must stay constant between benchmark runs?",
+            "meta": "Explain how input size and allocations affect a comparison.",
+            "action": ""
+          }
+        ]
+      },
+      {
+        "title": "Your answer",
+        "rows": [
+          {
+            "title": "Use the same workload and environment.",
+            "meta": "Repeat measurements and compare allocations.",
+            "action": ""
+          }
+        ]
+      }
+    ],
+    "actions": [
+      "Back",
+      "Add to Today",
+      "Show solution"
+    ],
+    "modal": null,
+    "note": "",
+    "kind": "list"
+  },
+  {
+    "id": "M19",
+    "slug": "lesson-design",
+    "feature": "F06",
+    "section": "Learning",
+    "title": "Design a rate limiter",
+    "meta": "System Design \u00b7 Design \u00b7 30 min",
+    "groups": [
+      {
+        "title": "Scenario",
+        "rows": [
+          {
+            "title": "Per-user API limits",
+            "meta": "100 requests per minute \u00b7 two application instances",
+            "action": ""
+          }
+        ]
+      },
+      {
+        "title": "Your design",
+        "rows": [
+          {
+            "title": "Shared counters with an expiry",
+            "meta": "Define key, interval and failure behavior.",
+            "action": ""
+          }
+        ]
+      },
+      {
+        "title": "Checklist",
+        "rows": [
+          {
+            "title": "State assumptions",
+            "meta": "",
+            "action": ""
+          },
+          {
+            "title": "Choose a consistency tradeoff",
+            "meta": "",
+            "action": ""
+          },
+          {
+            "title": "Describe failure behavior",
+            "meta": "",
+            "action": ""
+          }
+        ]
+      }
+    ],
+    "actions": [
+      "Back",
+      "Add to Today",
+      "Show solution"
+    ],
+    "modal": null,
+    "note": "",
+    "kind": "list"
+  },
+  {
+    "id": "M20",
+    "slug": "lesson-solution",
+    "feature": "F06",
+    "section": "Learning",
+    "title": "Context cancellation",
+    "meta": "Solution",
+    "groups": [
+      {
+        "title": "Your answer",
+        "rows": [
+          {
+            "title": "Observe cancellation while waiting.",
+            "meta": "",
+            "action": ""
+          }
+        ]
+      },
+      {
+        "title": "Reference solution",
+        "rows": [
+          {
+            "title": "Select on ctx.Done() and work.",
+            "meta": "Return when cancelled; defer cleanup of owned resources.",
+            "action": ""
+          }
+        ]
+      },
+      {
+        "title": "Self-check",
+        "rows": [
+          {
+            "title": "Cancellation path identified",
+            "meta": "",
+            "action": ""
+          },
+          {
+            "title": "Resources released",
+            "meta": "Self-check",
+            "action": "Acknowledge"
+          }
+        ]
+      }
+    ],
+    "actions": [
+      "Back to exercise",
+      "Complete"
+    ],
+    "modal": null,
+    "note": "",
+    "kind": "list"
+  },
+  {
+    "id": "M21",
+    "slug": "lesson-completion-rotation",
+    "feature": "F06",
+    "section": "Learning",
+    "title": "Learning",
+    "meta": "Go \u00b7 4 available",
+    "groups": [
+      {
+        "title": "Go",
+        "rows": [
+          {
+            "title": "Goroutine leak diagnosis",
+            "meta": "New \u00b7 Code \u00b7 20 min",
+            "action": "Open"
+          },
+          {
+            "title": "Table-driven tests",
+            "meta": "Code \u00b7 20 min",
+            "action": "Open"
+          },
+          {
+            "title": "Small interfaces",
+            "meta": "Design \u00b7 20 min",
+            "action": "Open"
+          },
+          {
+            "title": "Benchmarking Go",
+            "meta": "Question \u00b7 15 min",
+            "action": "Open"
+          }
+        ]
+      }
+    ],
+    "actions": [
+      "History"
+    ],
+    "modal": null,
+    "note": "Context cancellation completed \u00b7 View history",
+    "kind": "list"
+  },
+  {
+    "id": "M22",
+    "slug": "lesson-dismiss",
+    "feature": "F06",
+    "section": "Learning",
+    "title": "Learning",
+    "meta": "Go \u00b7 4 available",
+    "groups": [
+      {
+        "title": "Go",
+        "rows": [
+          {
+            "title": "Small interfaces",
+            "meta": "Design \u00b7 20 min",
+            "action": "Open"
+          }
+        ]
+      }
+    ],
+    "actions": [],
+    "modal": {
+      "title": "Show another lesson?",
+      "fields": [],
+      "actions": [
+        "Cancel",
+        "Replace"
+      ],
+      "body": "Small interfaces moves to Dismissed. You can restore it from History."
+    },
+    "note": "",
+    "kind": "list"
+  },
+  {
+    "id": "M23",
+    "slug": "learning-history",
+    "feature": "F07",
+    "section": "Learning",
+    "title": "History",
+    "meta": "All topics \u00b7 Completed \u00b7 Dismissed",
+    "groups": [
+      {
+        "title": "Today",
+        "rows": [
+          {
+            "title": "Context cancellation",
+            "meta": "Completed \u00b7 Go \u00b7 15 min",
+            "action": "Open"
+          },
+          {
+            "title": "Small interfaces",
+            "meta": "Dismissed \u00b7 Go",
+            "action": "Restore"
+          }
+        ]
+      },
+      {
+        "title": "Yesterday",
+        "rows": [
+          {
+            "title": "JWT validation",
+            "meta": "Completed \u00b7 Security \u00b7 20 min",
+            "action": "Open"
+          }
+        ]
+      }
+    ],
+    "actions": [
+      "Date filter",
+      "Topic filter"
+    ],
+    "modal": null,
+    "note": "",
+    "kind": "list"
+  },
+  {
+    "id": "M24",
+    "slug": "concept-coverage",
+    "feature": "F07",
+    "section": "Learning",
+    "title": "Coverage",
+    "meta": "Go",
+    "groups": [
+      {
+        "title": "Concurrency",
+        "rows": [
+          {
+            "title": "7 of 12 concepts practiced",
+            "meta": "View concepts",
+            "action": ""
+          }
+        ]
+      },
+      {
+        "title": "Testing",
+        "rows": [
+          {
+            "title": "3 of 8 concepts practiced",
+            "meta": "View concepts",
+            "action": ""
+          }
+        ]
+      },
+      {
+        "title": "Performance",
+        "rows": [
+          {
+            "title": "2 of 9 concepts practiced",
+            "meta": "View concepts",
+            "action": ""
+          }
+        ]
+      },
+      {
+        "title": "Concepts",
+        "rows": [
+          {
+            "title": "Channel ownership",
+            "meta": "Practiced \u00b7 26 Sep",
+            "action": ""
+          },
+          {
+            "title": "Backpressure",
+            "meta": "Not practiced",
+            "action": "View lessons"
+          }
+        ]
+      }
+    ],
+    "actions": [],
+    "modal": null,
+    "note": "",
+    "kind": "list"
+  },
+  {
+    "id": "M25",
+    "slug": "generate-lesson",
+    "feature": "F08",
+    "section": "Learning",
+    "title": "Generate lesson",
+    "meta": "Optional AI",
+    "groups": [
+      {
+        "title": "Available",
+        "rows": [
+          {
+            "title": "Your current lessons remain available.",
+            "meta": "",
+            "action": ""
+          }
+        ]
+      }
+    ],
+    "actions": [],
+    "modal": {
+      "title": "Generate lesson",
+      "fields": [
+        [
+          "Topic / Subtopic",
+          "Go / Concurrency"
+        ],
+        [
+          "Concept",
+          "Backpressure"
+        ],
+        [
+          "Type / Difficulty",
+          "Code / Intermediate"
+        ]
+      ],
+      "actions": [
+        "Cancel",
+        "Generate"
+      ],
+      "body": "Sends the selected concept and relevant lesson objectives to your provider."
+    },
+    "note": "",
+    "kind": "list"
+  },
+  {
+    "id": "M26",
+    "slug": "generation-failure",
+    "feature": "F08",
+    "section": "Learning",
+    "title": "Learning",
+    "meta": "Go \u00b7 3 available",
+    "groups": [
+      {
+        "title": "Go",
+        "rows": [
+          {
+            "title": "Table-driven tests",
+            "meta": "Code \u00b7 20 min",
+            "action": "Open"
+          },
+          {
+            "title": "Small interfaces",
+            "meta": "Design \u00b7 20 min",
+            "action": "Open"
+          },
+          {
+            "title": "Benchmarking Go",
+            "meta": "Question \u00b7 15 min",
+            "action": "Open"
+          }
+        ]
+      }
+    ],
+    "actions": [],
+    "modal": {
+      "title": "Lesson not added",
+      "fields": [],
+      "actions": [
+        "Dismiss",
+        "Retry"
+      ],
+      "body": "A similar lesson is already in your history. Your current choices have not changed."
+    },
+    "note": "",
+    "kind": "list"
+  },
+  {
+    "id": "M27",
+    "slug": "projects",
+    "feature": "F10",
+    "section": "Projects",
+    "title": "Projects",
+    "meta": "Kontrol \u00b7 Melotrail \u00b7 Hiragame",
+    "groups": [
+      {
+        "title": "Kontrol",
+        "rows": [
+          {
+            "title": "Swift \u00b7 macOS",
+            "meta": "8 / 14 complete",
+            "action": "Details"
+          }
+        ]
+      },
+      {
+        "title": "Next features",
+        "rows": [
+          {
+            "title": "Learning history",
+            "meta": "Medium \u00b7 Ready",
+            "action": "Mark complete"
+          },
+          {
+            "title": "Local project reader",
+            "meta": "Small \u00b7 Ready",
+            "action": "Mark complete"
+          },
+          {
+            "title": "News topic filters",
+            "meta": "Small \u00b7 Ready",
+            "action": "Mark complete"
+          }
+        ]
+      }
+    ],
+    "actions": [
+      "Add folder",
+      "Refresh"
+    ],
+    "modal": null,
+    "note": "",
+    "kind": "list"
+  },
+  {
+    "id": "M28",
+    "slug": "project-add",
+    "feature": "F09",
+    "section": "Projects",
+    "title": "Projects",
+    "meta": "Add a local folder",
+    "groups": [],
+    "actions": [],
+    "modal": {
+      "title": "Select project folder",
+      "fields": [
+        [
+          "Folder",
+          "~/Projects/Kontrol"
+        ],
+        [
+          "Found",
+          ".kontrol/project.yaml"
+        ],
+        [
+          "Features",
+          "14 valid feature files"
+        ]
+      ],
+      "actions": [
+        "Cancel",
+        "Add project"
+      ],
+      "body": ""
+    },
+    "note": "",
+    "kind": "list"
+  },
+  {
+    "id": "M29",
+    "slug": "project-details",
+    "feature": "F09",
+    "section": "Projects",
+    "title": "Kontrol",
+    "meta": "Details \u00b7 Roadmap \u00b7 Context \u00b7 Rules",
+    "groups": [
+      {
+        "title": "Overview",
+        "rows": [
+          {
+            "title": "Personal macOS dashboard",
+            "meta": "Swift \u00b7 SwiftUI \u00b7 SwiftData",
+            "action": ""
+          }
+        ]
+      },
+      {
+        "title": "Goals",
+        "rows": [
+          {
+            "title": "Plan today",
+            "meta": "",
+            "action": ""
+          },
+          {
+            "title": "Learn continuously",
+            "meta": "",
+            "action": ""
+          },
+          {
+            "title": "Choose a feature to build",
+            "meta": "",
+            "action": ""
+          }
+        ]
+      },
+      {
+        "title": "Roadmap",
+        "rows": [
+          {
+            "title": "Foundation",
+            "meta": "Completed",
+            "action": ""
+          },
+          {
+            "title": "Learning",
+            "meta": "Active",
+            "action": ""
+          },
+          {
+            "title": "News",
+            "meta": "Planned",
+            "action": ""
+          }
+        ]
+      }
+    ],
+    "actions": [
+      "Back",
+      "Refresh"
+    ],
+    "modal": null,
+    "note": "",
+    "kind": "list"
+  },
+  {
+    "id": "M30",
+    "slug": "feature-detail",
+    "feature": "F10",
+    "section": "Projects",
+    "title": "Learning history",
+    "meta": "Medium \u00b7 Ready",
+    "groups": [
+      {
+        "title": "Outcome",
+        "rows": [
+          {
+            "title": "Keep completed lessons searchable.",
+            "meta": "Preserve study history when the catalog changes.",
+            "action": ""
+          }
+        ]
+      },
+      {
+        "title": "Acceptance",
+        "rows": [
+          {
+            "title": "Filter by date and topic",
+            "meta": "",
+            "action": ""
+          },
+          {
+            "title": "Never suggest an exact completed lesson as new",
+            "meta": "",
+            "action": ""
+          }
+        ]
+      },
+      {
+        "title": "Dependencies",
+        "rows": [
+          {
+            "title": "Learning catalog",
+            "meta": "Completed",
+            "action": ""
+          }
+        ]
+      }
+    ],
+    "actions": [
+      "Back",
+      "Mark complete"
+    ],
+    "modal": null,
+    "note": "",
+    "kind": "list"
+  },
+  {
+    "id": "M31",
+    "slug": "feature-completion-undo",
+    "feature": "F11",
+    "section": "Projects",
+    "title": "Kontrol",
+    "meta": "9 / 14 complete",
+    "groups": [
+      {
+        "title": "Next features",
+        "rows": [
+          {
+            "title": "Local project reader",
+            "meta": "Small \u00b7 Ready",
+            "action": "Mark complete"
+          },
+          {
+            "title": "News topic filters",
+            "meta": "Small \u00b7 Ready",
+            "action": "Mark complete"
+          },
+          {
+            "title": "Focus history",
+            "meta": "Small \u00b7 Ready",
+            "action": "Mark complete"
+          }
+        ]
+      },
+      {
+        "title": "Completed",
+        "rows": [
+          {
+            "title": "Learning history",
+            "meta": "Completed just now",
+            "action": "Undo"
+          }
+        ]
+      }
+    ],
+    "actions": [
+      "Refresh"
+    ],
+    "modal": null,
+    "note": "Feature saved",
+    "kind": "list"
+  },
+  {
+    "id": "M32",
+    "slug": "project-write-conflict",
+    "feature": "F11",
+    "section": "Projects",
+    "title": "Kontrol",
+    "meta": "8 / 14 complete",
+    "groups": [
+      {
+        "title": "Next features",
+        "rows": [
+          {
+            "title": "Learning history",
+            "meta": "Medium \u00b7 Ready",
+            "action": "Mark complete"
+          }
+        ]
+      }
+    ],
+    "actions": [],
+    "modal": {
+      "title": "Feature changed on disk",
+      "fields": [],
+      "actions": [
+        "Cancel",
+        "Refresh"
+      ],
+      "body": "Review the latest version before marking it complete."
+    },
+    "note": "",
+    "kind": "list"
+  },
+  {
+    "id": "M33",
+    "slug": "project-validation-access",
+    "feature": "F09",
+    "section": "Projects",
+    "title": "Projects",
+    "meta": "Kontrol \u00b7 Melotrail \u00b7 Hiragame",
+    "groups": [
+      {
+        "title": "Kontrol",
+        "rows": [
+          {
+            "title": "Feature file needs attention",
+            "meta": "learning-history.md \u00b7 duplicate id",
+            "action": "Refresh"
+          }
+        ]
+      },
+      {
+        "title": "Melotrail",
+        "rows": [
+          {
+            "title": "Folder access unavailable",
+            "meta": "Select the folder again.",
+            "action": "Reconnect"
+          }
+        ]
+      }
+    ],
+    "actions": [],
+    "modal": null,
+    "note": "",
+    "kind": "list"
+  },
+  {
+    "id": "M34",
+    "slug": "project-empty-blocked",
+    "feature": "F10",
+    "section": "Projects",
+    "title": "Kontrol",
+    "meta": "8 / 14 complete",
+    "groups": [
+      {
+        "title": "Next features",
+        "rows": [
+          {
+            "title": "No ready features",
+            "meta": "2 blocked \u00b7 4 planned",
+            "action": "View roadmap"
+          }
+        ]
+      },
+      {
+        "title": "Blocked",
+        "rows": [
+          {
+            "title": "Learning history",
+            "meta": "Depends on learning-catalog",
+            "action": ""
+          }
+        ]
+      },
+      {
+        "title": "Planned",
+        "rows": [
+          {
+            "title": "News topic filters",
+            "meta": "Not ready",
+            "action": ""
+          }
+        ]
+      }
+    ],
+    "actions": [
+      "Refresh"
+    ],
+    "modal": null,
+    "note": "",
+    "kind": "list"
+  },
+  {
+    "id": "M35",
+    "slug": "news",
+    "feature": "F12",
+    "section": "News",
+    "title": "News",
+    "meta": "All \u00b7 Go \u00b7 Java \u00b7 Security \u00b7 AI \u00b7 Japan",
+    "groups": [
+      {
+        "title": "Today",
+        "rows": [
+          {
+            "title": "Go tooling notes",
+            "meta": "Go Blog \u00b7 Go \u00b7 Example headline",
+            "action": "Read"
+          },
+          {
+            "title": "API authorization guidance",
+            "meta": "Security feed \u00b7 Example headline",
+            "action": "Read"
+          }
+        ]
+      },
+      {
+        "title": "Yesterday",
+        "rows": [
+          {
+            "title": "Engineering local models",
+            "meta": "AI feed \u00b7 Example headline",
+            "action": "Read"
+          }
+        ]
+      }
+    ],
+    "actions": [
+      "Refresh",
+      "Topics & feeds"
+    ],
+    "modal": null,
+    "note": "",
+    "kind": "list"
+  },
+  {
+    "id": "M36",
+    "slug": "news-topics-feeds",
+    "feature": "F12",
+    "section": "News",
+    "title": "Topics & feeds",
+    "meta": "7 topics selected",
+    "groups": [
+      {
+        "title": "Topics",
+        "rows": [
+          {
+            "title": "Go \u00b7 Java \u00b7 Software Engineering",
+            "meta": "Selected",
+            "action": ""
+          },
+          {
+            "title": "Security \u00b7 System Design \u00b7 AI \u00b7 Japan",
+            "meta": "Selected",
+            "action": ""
+          }
+        ]
+      },
+      {
+        "title": "Feeds",
+        "rows": [
+          {
+            "title": "Go Blog",
+            "meta": "HTTPS feed URL \u00b7 Go",
+            "action": "Edit"
+          },
+          {
+            "title": "Engineering feed",
+            "meta": "HTTPS feed URL \u00b7 Software Engineering",
+            "action": "Remove"
+          }
+        ]
+      }
+    ],
+    "actions": [
+      "+ Feed",
+      "Save"
+    ],
+    "modal": {
+      "title": "Edit feed",
+      "fields": [
+        [
+          "Name",
+          "Go Blog"
+        ],
+        [
+          "Feed URL",
+          "https://example.org/feed.xml"
+        ],
+        [
+          "Topics",
+          "Go"
+        ]
+      ],
+      "actions": [
+        "Cancel",
+        "Save"
+      ],
+      "body": ""
+    },
+    "note": "",
+    "kind": "list"
+  },
+  {
+    "id": "M37",
+    "slug": "news-offline",
+    "feature": "F12",
+    "section": "News",
+    "title": "News",
+    "meta": "Offline \u00b7 Last refreshed 09:40",
+    "groups": [
+      {
+        "title": "Cached",
+        "rows": [
+          {
+            "title": "Go tooling notes",
+            "meta": "Go Blog \u00b7 Example headline",
+            "action": "Read"
+          },
+          {
+            "title": "API authorization guidance",
+            "meta": "Security feed \u00b7 Example headline",
+            "action": "Read"
+          }
+        ]
+      }
+    ],
+    "actions": [
+      "Retry"
+    ],
+    "modal": null,
+    "note": "Showing cached headlines",
+    "kind": "list"
+  },
+  {
+    "id": "M38",
+    "slug": "settings",
+    "feature": "F13",
+    "section": "Settings",
+    "title": "Settings",
+    "meta": "General \u00b7 Appearance \u00b7 Data",
+    "groups": [
+      {
+        "title": "Appearance",
+        "rows": [
+          {
+            "title": "Black / Red Terminal",
+            "meta": "Selected",
+            "action": ""
+          },
+          {
+            "title": "Reduce motion",
+            "meta": "On",
+            "action": ""
+          },
+          {
+            "title": "Text size",
+            "meta": "Default",
+            "action": ""
+          }
+        ]
+      },
+      {
+        "title": "Focus",
+        "rows": [
+          {
+            "title": "Default duration",
+            "meta": "25 minutes",
+            "action": "Edit"
+          }
+        ]
+      },
+      {
+        "title": "Connections",
+        "rows": [
+          {
+            "title": "AI lessons",
+            "meta": "Off",
+            "action": "Configure"
+          },
+          {
+            "title": "News topics & feeds",
+            "meta": "7 topics",
+            "action": "Manage"
+          }
+        ]
+      },
+      {
+        "title": "Data",
+        "rows": [
+          {
+            "title": "Local export",
+            "meta": "JSON archive",
+            "action": "Export"
+          },
+          {
+            "title": "Project folders",
+            "meta": "3 connected",
+            "action": "Manage"
+          }
+        ]
+      }
+    ],
+    "actions": [],
+    "modal": null,
+    "note": "",
+    "kind": "list"
+  },
+  {
+    "id": "M39",
+    "slug": "ai-settings",
+    "feature": "F08",
+    "section": "Settings",
+    "title": "AI lessons",
+    "meta": "Off",
+    "groups": [
+      {
+        "title": "Provider",
+        "rows": [
+          {
+            "title": "OpenAI",
+            "meta": "Configured model",
+            "action": "Edit"
+          }
+        ]
+      },
+      {
+        "title": "Credential",
+        "rows": [
+          {
+            "title": "API key",
+            "meta": "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022",
+            "action": "Remove key"
+          }
+        ]
+      }
+    ],
+    "actions": [
+      "Enable",
+      "Test connection"
+    ],
+    "modal": {
+      "title": "Configure provider",
+      "fields": [
+        [
+          "Provider",
+          "OpenAI"
+        ],
+        [
+          "Model",
+          "Choose a supported model"
+        ],
+        [
+          "API key",
+          "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022"
+        ]
+      ],
+      "actions": [
+        "Cancel",
+        "Save"
+      ],
+      "body": ""
+    },
+    "note": "",
+    "kind": "list"
+  },
+  {
+    "id": "M40",
+    "slug": "data-export",
+    "feature": "F13",
+    "section": "Settings",
+    "title": "Local data",
+    "meta": "Export",
+    "groups": [],
+    "actions": [],
+    "modal": {
+      "title": "Export local data",
+      "fields": [
+        [
+          "Include",
+          "Tasks, schedule, lessons and focus"
+        ],
+        [
+          "Preferences",
+          "News topics and app settings"
+        ],
+        [
+          "File",
+          "kontrol-export-2026-09-27.json"
+        ]
+      ],
+      "actions": [
+        "Cancel",
+        "Export"
+      ],
+      "body": "Credentials and project folder permissions are excluded."
+    },
+    "note": "",
+    "kind": "list"
+  },
+  {
+    "id": "M41",
+    "slug": "remove-project",
+    "feature": "F13",
+    "section": "Settings",
+    "title": "Project folders",
+    "meta": "3 connected",
+    "groups": [
+      {
+        "title": "Folders",
+        "rows": [
+          {
+            "title": "Kontrol",
+            "meta": "Connected",
+            "action": "Remove"
+          },
+          {
+            "title": "Melotrail",
+            "meta": "Connected",
+            "action": "Remove"
+          },
+          {
+            "title": "Hiragame",
+            "meta": "Connected",
+            "action": "Remove"
+          }
+        ]
+      }
+    ],
+    "actions": [],
+    "modal": {
+      "title": "Remove Kontrol?",
+      "fields": [],
+      "actions": [
+        "Cancel",
+        "Remove"
+      ],
+      "body": "Disconnect this folder from Kontrol. The project files remain on disk."
+    },
+    "note": "",
+    "kind": "list"
+  },
+  {
+    "id": "M42",
+    "slug": "design-accessibility",
+    "feature": "F01",
+    "section": "Settings",
+    "title": "Appearance",
+    "meta": "Black / Red Terminal",
+    "groups": [
+      {
+        "title": "Typography",
+        "rows": [
+          {
+            "title": "Text size",
+            "meta": "Large",
+            "action": ""
+          },
+          {
+            "title": "Reduce motion",
+            "meta": "On",
+            "action": ""
+          }
+        ]
+      },
+      {
+        "title": "Navigation",
+        "rows": [
+          {
+            "title": "Icons and labels",
+            "meta": "Visible",
+            "action": ""
+          },
+          {
+            "title": "Keyboard focus",
+            "meta": "Visible outline",
+            "action": ""
+          }
+        ]
+      },
+      {
+        "title": "Status",
+        "rows": [
+          {
+            "title": "Feature complete",
+            "meta": "Checkmark + label",
+            "action": ""
+          },
+          {
+            "title": "Write failed",
+            "meta": "Error icon + label",
+            "action": ""
+          }
+        ]
+      }
+    ],
+    "actions": [],
+    "modal": null,
+    "note": "",
+    "kind": "list"
+  }
+]

@@ -1,0 +1,10 @@
+schema_version: 1
+id: kontrol-example
+name: Kontrol
+stack: [Swift, SwiftUI, SwiftData]
+description: Personal macOS dashboard
+goals:
+  - Plan the day
+  - Learn continuously
+  - Choose a feature to build
+current_focus: [projects]
