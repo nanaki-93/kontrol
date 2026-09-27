@@ -1,0 +1,92 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A00000000000000000000001 /* KontrolApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000011 /* KontrolApp.swift */; };
+		A00000000000000000000002 /* ProjectSmokeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000012 /* ProjectSmokeTests.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		A00000000000000000000031 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A00000000000000000000040 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A00000000000000000000041;
+			remoteInfo = Kontrol;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		A00000000000000000000011 /* KontrolApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KontrolApp.swift; sourceTree = "<group>"; };
+		A00000000000000000000012 /* ProjectSmokeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectSmokeTests.swift; sourceTree = "<group>"; };
+		A00000000000000000000013 /* Kontrol.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Kontrol.entitlements; sourceTree = "<group>"; };
+		A00000000000000000000014 /* Kontrol.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Kontrol.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A00000000000000000000015 /* KontrolTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = KontrolTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A00000000000000000000050 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A00000000000000000000051 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A00000000000000000000020 = {isa = PBXGroup; children = (A00000000000000000000021 /* Kontrol */, A00000000000000000000022 /* KontrolTests */, A00000000000000000000023 /* Products */); sourceTree = "<group>"; };
+		A00000000000000000000021 /* Kontrol */ = {isa = PBXGroup; children = (A00000000000000000000024 /* App */, A00000000000000000000013 /* Kontrol.entitlements */); path = Kontrol; sourceTree = "<group>"; };
+		A00000000000000000000024 /* App */ = {isa = PBXGroup; children = (A00000000000000000000011 /* KontrolApp.swift */); path = App; sourceTree = "<group>"; };
+		A00000000000000000000022 /* KontrolTests */ = {isa = PBXGroup; children = (A00000000000000000000012 /* ProjectSmokeTests.swift */); path = KontrolTests; sourceTree = "<group>"; };
+		A00000000000000000000023 /* Products */ = {isa = PBXGroup; children = (A00000000000000000000014 /* Kontrol.app */, A00000000000000000000015 /* KontrolTests.xctest */); name = Products; sourceTree = "<group>"; };
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A00000000000000000000041 /* Kontrol */ = {
+			isa = PBXNativeTarget; buildConfigurationList = A00000000000000000000061; buildPhases = (A00000000000000000000052 /* Sources */, A00000000000000000000050 /* Frameworks */, A00000000000000000000054 /* Resources */); buildRules = (); dependencies = ();
+			name = Kontrol; productName = Kontrol; productReference = A00000000000000000000014 /* Kontrol.app */; productType = "com.apple.product-type.application";
+		};
+		A00000000000000000000042 /* KontrolTests */ = {
+			isa = PBXNativeTarget; buildConfigurationList = A00000000000000000000062; buildPhases = (A00000000000000000000053 /* Sources */, A00000000000000000000051 /* Frameworks */, A00000000000000000000055 /* Resources */); buildRules = (); dependencies = (A00000000000000000000032 /* PBXTargetDependency */);
+			name = KontrolTests; productName = KontrolTests; productReference = A00000000000000000000015 /* KontrolTests.xctest */; productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A00000000000000000000040 /* Project object */ = {
+			isa = PBXProject; attributes = {BuildIndependentTargetsInParallel = 1; LastUpgradeCheck = 1600; TargetAttributes = {A00000000000000000000041 = {CreatedOnToolsVersion = 16.0; }; A00000000000000000000042 = {CreatedOnToolsVersion = 16.0; TestTargetID = A00000000000000000000041; }; }; };
+			buildConfigurationList = A00000000000000000000060; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base); mainGroup = A00000000000000000000020; productRefGroup = A00000000000000000000023; projectDirPath = ""; projectRoot = ""; targets = (A00000000000000000000041 /* Kontrol */, A00000000000000000000042 /* KontrolTests */);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A00000000000000000000054 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A00000000000000000000055 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A00000000000000000000052 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000001 /* KontrolApp.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
+		A00000000000000000000053 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000002 /* ProjectSmokeTests.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		A00000000000000000000032 /* PBXTargetDependency */ = {isa = PBXTargetDependency; target = A00000000000000000000041 /* Kontrol */; targetProxy = A00000000000000000000031 /* PBXContainerItemProxy */; };
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		A00000000000000000000070 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; CODE_SIGNING_ALLOWED = NO; DEBUG_INFORMATION_FORMAT = dwarf; ENABLE_TESTABILITY = YES; GCC_OPTIMIZATION_LEVEL = 0; MACOSX_DEPLOYMENT_TARGET = 14.0; SDKROOT = macosx; SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG; SWIFT_VERSION = 5.0; }; name = Debug; };
+		A00000000000000000000071 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; CODE_SIGNING_ALLOWED = NO; DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym"; MACOSX_DEPLOYMENT_TARGET = 14.0; SDKROOT = macosx; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_VERSION = 5.0; }; name = Release; };
+		A00000000000000000000072 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_ENTITLEMENTS = Kontrol/Kontrol.entitlements; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_CFBundleDisplayName = Kontrol; MACOSX_DEPLOYMENT_TARGET = 14.0; PRODUCT_BUNDLE_IDENTIFIER = com.kontrol.app; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_VERSION = 5.0; }; name = Debug; };
+		A00000000000000000000073 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_ENTITLEMENTS = Kontrol/Kontrol.entitlements; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_CFBundleDisplayName = Kontrol; MACOSX_DEPLOYMENT_TARGET = 14.0; PRODUCT_BUNDLE_IDENTIFIER = com.kontrol.app; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_VERSION = 5.0; }; name = Release; };
+		A00000000000000000000074 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {BUNDLE_LOADER = "$(TEST_HOST)"; GENERATE_INFOPLIST_FILE = YES; MACOSX_DEPLOYMENT_TARGET = 14.0; PRODUCT_BUNDLE_IDENTIFIER = com.kontrol.app.tests; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_VERSION = 5.0; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Kontrol.app/Contents/MacOS/Kontrol"; }; name = Debug; };
+		A00000000000000000000075 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {BUNDLE_LOADER = "$(TEST_HOST)"; GENERATE_INFOPLIST_FILE = YES; MACOSX_DEPLOYMENT_TARGET = 14.0; PRODUCT_BUNDLE_IDENTIFIER = com.kontrol.app.tests; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_VERSION = 5.0; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Kontrol.app/Contents/MacOS/Kontrol"; }; name = Release; };
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A00000000000000000000060 = {isa = XCConfigurationList; buildConfigurations = (A00000000000000000000070 /* Debug */, A00000000000000000000071 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
+		A00000000000000000000061 = {isa = XCConfigurationList; buildConfigurations = (A00000000000000000000072 /* Debug */, A00000000000000000000073 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
+		A00000000000000000000062 = {isa = XCConfigurationList; buildConfigurations = (A00000000000000000000074 /* Debug */, A00000000000000000000075 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
+/* End XCConfigurationList section */
+	};
+	rootObject = A00000000000000000000040 /* Project object */;
+}
