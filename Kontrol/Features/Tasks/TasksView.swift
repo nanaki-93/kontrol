@@ -1,0 +1,95 @@
+import SwiftUI
+
+/// A value snapshot keeps the read-only UI independent of a repository context.
+struct TaskRow: Identifiable, Equatable {
+    let id: UUID
+    let title: String
+    let plannedDay: KontrolSchemaV1.PlannedDayComponents?
+    let dueAt: Date?
+    let completedAt: Date?
+
+    init(_ task: TaskItem) {
+        id = task.id
+        title = task.title
+        plannedDay = task.plannedDay
+        dueAt = task.dueAt
+        completedAt = task.completedAt
+    }
+
+    static func forToday(_ rows: [TaskRow], at date: Date, calendar: Calendar,
+                         timeZone: TimeZone) -> [TaskRow] {
+        var localCalendar = calendar
+        localCalendar.timeZone = timeZone
+        let today = PlannedDay.today(at: date, calendar: localCalendar, timeZone: timeZone).components
+        let tomorrow = localCalendar.dateInterval(of: .day, for: date)?.end
+        return rows.filter { row in
+            guard row.completedAt == nil else { return false }
+            // The saved plan is a calendar date, not a midnight UTC instant.
+            return row.plannedDay == today || (row.dueAt.map { due in
+                tomorrow.map { due < $0 } ?? false
+            } ?? false)
+        }
+    }
+}
+
+struct TaskRows: View {
+    let rows: [TaskRow]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(rows) { row in
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    Text(row.title)
+                        .foregroundStyle(FoundationStyle.primary)
+                    if row.completedAt != nil {
+                        Text("Completed")
+                            .foregroundStyle(FoundationStyle.secondary)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("task-row-\(row.id.uuidString)")
+                Divider().overlay(FoundationStyle.border)
+            }
+        }
+    }
+}
+
+/// Reads again when navigated to; writes are deliberately left to F02.
+struct TasksView: View {
+    let taskRepository: any TaskRepository
+    @State private var rows: [TaskRow] = []
+    @State private var loadFailed = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            FoundationStyle.heading("Tasks")
+            if loadFailed {
+                Text("Could not load tasks. Return to Tasks to try again.")
+                    .foregroundStyle(FoundationStyle.secondary)
+            } else if rows.isEmpty {
+                Text("No tasks captured yet. Use + Task on Today to add one.")
+                    .foregroundStyle(FoundationStyle.secondary)
+            } else {
+                TaskRows(rows: rows)
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .font(.system(size: 15, design: .monospaced))
+        .padding(.horizontal, FoundationStyle.horizontalInset)
+        .padding(.top, 32)
+        .onAppear(perform: refresh)
+    }
+
+    private func refresh() {
+        do {
+            rows = try taskRepository.fetchAll().map(TaskRow.init)
+            loadFailed = false
+        } catch {
+            rows = []
+            loadFailed = true
+        }
+    }
+}

@@ -44,11 +44,12 @@ struct AppShell: View {
     @FocusState private var focusedDestination: AppDestination?
 
     /// Routing is deliberately limited to the foundation surfaces until their features ship.
-    enum ContentKind: Equatable { case today, settings, foundation(AppDestination) }
+    enum ContentKind: Equatable { case today, tasks, settings, foundation(AppDestination) }
 
     static func contentKind(for destination: AppDestination) -> ContentKind {
         switch destination {
         case .today: .today
+        case .tasks: .tasks
         case .settings: .settings
         default: .foundation(destination)
         }
@@ -66,6 +67,8 @@ struct AppShell: View {
                     switch Self.contentKind(for: navigation.selectedDestination) {
                     case .today:
                         TodayView(taskRepository: SwiftDataTaskRepository(container: dependencies.container))
+                    case .tasks:
+                        TasksView(taskRepository: SwiftDataTaskRepository(container: dependencies.container))
                     case .settings:
                         FoundationSettingsView(dependencies: dependencies)
                     case .foundation(let destination):
