@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kontrol · selected palette</title>
+  <link rel="stylesheet" href="tokens.css">
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--color-background); color: var(--color-text-primary); font: 16px/1.5 var(--font-mono); }
+    header, main, footer { max-width: 1120px; margin: auto; padding: var(--space-6); }
+    header { border-bottom: 1px solid var(--color-border); }
+    h1, h2, h3, p { margin: 0 0 var(--space-3); }
+    h1 { font-size: var(--type-page); }
+    h2 { font-size: var(--type-section); margin-top: var(--space-8); }
+    h3 { font-size: var(--type-body); }
+    p, li { max-width: 78ch; }
+    .muted, small { color: var(--color-text-secondary); }
+    a { color: var(--color-accent); }
+    a:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 4px; }
+    .swatches { display: grid; grid-template-columns: repeat(auto-fit, minmax(218px, 1fr)); gap: var(--space-3); }
+    .swatch { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-medium); overflow: hidden; }
+    .swatch .sample { height: 64px; background: var(--sample); }
+    .swatch .detail { padding: var(--space-3); overflow-wrap: anywhere; }
+    .swatch strong { display: block; }
+    .swatch code { color: var(--color-text-secondary); }
+    .demo { display: flex; flex-wrap: wrap; gap: var(--space-4); }
+    .panel { background: var(--color-raised-surface); border: 1px solid var(--color-border); border-radius: var(--radius-medium); padding: var(--space-6); flex: 1 1 280px; }
+    .panel p { color: var(--color-text-secondary); }
+    .button { display: inline-block; color: var(--color-text-on-accent); background: var(--color-accent); border: 0; padding: var(--space-2) var(--space-4); border-radius: var(--radius-small); font: inherit; }
+    .outlined { display: inline-block; padding: var(--space-2) var(--space-4); border: 1px solid var(--color-control-boundary); border-radius: var(--radius-small); }
+    .focused { outline: 2px solid var(--color-focus-ring); outline-offset: 3px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: var(--space-2); border-bottom: 1px solid var(--color-border); vertical-align: top; }
+    td:last-child { white-space: nowrap; }
+    .tables { overflow-x: auto; }
+    .pass { color: var(--color-success); }
+    .note { padding: var(--space-4); border-left: 3px solid var(--color-control-boundary); background: var(--color-surface); }
+    footer { color: var(--color-text-secondary); }
+  </style>
+</head>
+<body>
+  <header>
+    <p class="muted">F01 · selected design reference · M00 / M42</p>
+    <h1>Black / Red Terminal</h1>
+    <p>One approved fixed-dark direction, not a theme picker or new brand exploration. <a href="typography.html">View the type scale</a>.</p>
+  </header>
+  <main>
+    <section aria-labelledby="swatch-heading">
+      <h2 id="swatch-heading">Color roles</h2>
+      <p>The six approved values are preserved. New roles are selected here for native implementation; aliases intentionally share a single numeric definition in <a href="tokens.css">tokens.css</a>.</p>
+      <div class="swatches">
+        <div class="swatch" style="--sample:var(--color-background)"><div class="sample"></div><div class="detail"><strong>Background · approved</strong><code>--color-background · #0B0B0D</code></div></div>
+        <div class="swatch" style="--sample:var(--color-surface)"><div class="sample"></div><div class="detail"><strong>Surface · approved</strong><code>--color-surface · #151214</code></div></div>
+        <div class="swatch" style="--sample:var(--color-text-primary)"><div class="sample"></div><div class="detail"><strong>Primary text · approved</strong><code>--color-text-primary · #E1DCDB</code></div></div>
+        <div class="swatch" style="--sample:var(--color-text-secondary)"><div class="sample"></div><div class="detail"><strong>Secondary text · approved</strong><code>--color-text-secondary · #AAA0A0</code></div></div>
+        <div class="swatch" style="--sample:var(--color-border)"><div class="sample"></div><div class="detail"><strong>Decorative border · approved</strong><code>--color-border · #3A2B2D</code></div></div>
+        <div class="swatch" style="--sample:var(--color-accent)"><div class="sample"></div><div class="detail"><strong>Accent / selection · approved</strong><code>--color-accent · #D6676B</code></div></div>
+        <div class="swatch" style="--sample:var(--color-surface)"><div class="sample"></div><div class="detail"><strong>Sidebar · alias</strong><code>--color-sidebar → surface · #151214</code></div></div>
+        <div class="swatch" style="--sample:var(--color-raised-surface)"><div class="sample"></div><div class="detail"><strong>Raised surface · selected</strong><code>--color-raised-surface · #211B1E</code></div></div>
+        <div class="swatch" style="--sample:var(--color-success)"><div class="sample"></div><div class="detail"><strong>Success · selected</strong><code>--color-success · #8FC5A6</code></div></div>
+        <div class="swatch" style="--sample:var(--color-warning)"><div class="sample"></div><div class="detail"><strong>Warning · selected</strong><code>--color-warning · #E5BC80</code></div></div>
+        <div class="swatch" style="--sample:var(--color-accent)"><div class="sample"></div><div class="detail"><strong>Error · alias</strong><code>--color-error → accent · #D6676B</code></div></div>
+        <div class="swatch" style="--sample:var(--color-background)"><div class="sample"></div><div class="detail"><strong>On accent · alias</strong><code>--color-text-on-accent → background · #0B0B0D</code></div></div>
+        <div class="swatch" style="--sample:var(--color-text-secondary)"><div class="sample"></div><div class="detail"><strong>Essential boundary · alias</strong><code>--color-control-boundary → secondary text · #AAA0A0</code></div></div>
+        <div class="swatch" style="--sample:var(--color-text-primary)"><div class="sample"></div><div class="detail"><strong>Keyboard focus · alias</strong><code>--color-focus-ring → primary text · #E1DCDB</code></div></div>
+      </div>
+    </section>
+    <section aria-labelledby="usage-heading">
+      <h2 id="usage-heading">Intended use</h2>
+      <div class="demo">
+        <div class="panel"><h3>Next</h3><p>Context cancellation · Go · 15 min</p><span class="button">Open lesson</span> <span class="outlined">Secondary</span></div>
+        <div class="panel"><h3>Focus is not selection</h3><p>Selected item uses the accent; keyboard focus uses a separate light outline.</p><span class="outlined focused">Focused control</span></div>
+      </div>
+      <p class="note">Status uses a symbol and text with its color: ✓ Complete, ! Check input, × Write failed. The muted border is a separator only; essential control edges use <code>--color-control-boundary</code>. The on-accent label must be dark; primary light text on accent is only 2.57:1 and must not be used.</p>
+    </section>
+    <section aria-labelledby="contrast-heading">
+      <h2 id="contrast-heading">Measured contrast · WCAG 2.x</h2>
+      <p>Opaque sRGB hex, relative luminance = 0.2126 R + 0.7152 G + 0.0722 B after sRGB linearization (channel ≤ 0.04045: channel / 12.92; otherwise ((channel + 0.055) / 1.055)<sup>2.4</sup>). Ratio = (lighter + 0.05) / (darker + 0.05), rounded to 2 decimals. Text threshold 4.5:1; essential boundaries and focus 3:1.</p>
+      <div class="tables"><table>
+        <thead><tr><th scope="col">Foreground / indicator</th><th scope="col">Adjacent background</th><th scope="col">Purpose</th><th scope="col">Ratio</th></tr></thead>
+        <tbody>
+          <tr><td>Primary text</td><td>Background / surface / raised</td><td>Text ≥4.5</td><td class="pass">14.48 / 13.70 / 12.47 ✓</td></tr>
+          <tr><td>Secondary text</td><td>Background / surface / raised</td><td>Text ≥4.5</td><td class="pass">7.72 / 7.31 / 6.65 ✓</td></tr>
+          <tr><td>Accent (text / error)</td><td>Background / surface / raised</td><td>Text ≥4.5</td><td class="pass">5.63 / 5.33 / 4.85 ✓</td></tr>
+          <tr><td>Dark text on accent</td><td>Accent fill</td><td>Button text ≥4.5</td><td class="pass">5.63 ✓</td></tr>
+          <tr><td>Success / warning</td><td>Background</td><td>Status text ≥4.5</td><td class="pass">10.02 / 11.08 ✓</td></tr>
+          <tr><td>Success / warning</td><td>Surface</td><td>Status text ≥4.5</td><td class="pass">9.49 / 10.49 ✓</td></tr>
+          <tr><td>Essential boundary (secondary)</td><td>Background / surface / raised</td><td>Control outline ≥3</td><td class="pass">7.72 / 7.31 / 6.65 ✓</td></tr>
+          <tr><td>Focus ring (primary)</td><td>Background / surface / raised</td><td>Focus outline ≥3</td><td class="pass">14.48 / 13.70 / 12.47 ✓</td></tr>
+          <tr><td>Decorative border</td><td>Background / surface</td><td>Not an essential indicator</td><td>1.46 / 1.39 (not eligible)</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+  </main>
+  <footer>Local reference only · no framework, downloaded font, or network dependency.</footer>
+</body>
+</html>

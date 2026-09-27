@@ -7,8 +7,8 @@ Each row links a function to an actual PNG mockup. SVG sources sit beside the PN
 | [F00](../features/F00-foundation.md) | Launch and navigation | [M00 · Today](M00-app-shell.png) |
 | [F00](../features/F00-foundation.md) | Browse imported offline starter topics and lesson summaries (no active choices or progress) | [M43 · Learning starter summary](M43-learning-starter-summary.png) |
 | [F00](../features/F00-foundation.md) | Store open, migration and failure recovery | [M01 · Kontrol](M01-store-recovery.png) |
-| [F01](../features/F01-design-system.md) | Typography, colors and icons | [M42 · Appearance](M42-design-accessibility.png) |
-| [F01](../features/F01-design-system.md) | Navigation, keyboard and focus | [M00 · Today](M00-app-shell.png) |
+| [F01](../features/F01-design-system.md) | Typography, colors and icons | [M42 · Appearance](M42-design-accessibility.png) · [Selected palette + contrast](../../.mockups/design-system/palette.html) · [Type scale (100% / 130%)](../../.mockups/design-system/typography.html) · [Shared tokens](../../.mockups/design-system/tokens.css) |
+| [F01](../features/F01-design-system.md) | Navigation, keyboard and focus | [M00 · Today](M00-app-shell.png) · [Selected palette + focus roles](../../.mockups/design-system/palette.html) |
 | [F02](../features/F02-tasks.md) | Browse today/upcoming and overdue tasks | [M02 · Tasks](M02-tasks.png) |
 | [F02](../features/F02-tasks.md) | Create or edit task, notes and due date | [M03 · Tasks](M03-task-editor.png) |
 | [F02](../features/F02-tasks.md) | Complete or reopen | [M04 · Completed](M04-task-complete-reopen.png) |
