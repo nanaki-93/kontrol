@@ -65,7 +65,7 @@ struct AppShell: View {
                 Group {
                     switch Self.contentKind(for: navigation.selectedDestination) {
                     case .today:
-                        TodayView()
+                        TodayView(taskRepository: SwiftDataTaskRepository(container: dependencies.container))
                     case .settings:
                         FoundationSettingsView(dependencies: dependencies)
                     case .foundation(let destination):
