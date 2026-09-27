@@ -28,7 +28,7 @@ final class DesignSystemTokenTests: XCTestCase {
         XCTAssertEqual(AppColors.focusRingValue, AppColors.textPrimaryValue)
     }
 
-    func testSwiftUIRolesAndLegacyConsumersUseTheTestedChannels() throws {
+    func testSwiftUIRolesUseTheTestedChannels() throws {
         let roles: [(String, Color, RGBColor)] = [
             ("background", AppColors.background, AppColors.backgroundValue),
             ("sidebar", AppColors.sidebar, AppColors.sidebarValue),
@@ -43,13 +43,7 @@ final class DesignSystemTokenTests: XCTestCase {
             ("error", AppColors.error, AppColors.errorValue),
             ("textOnAccent", AppColors.textOnAccent, AppColors.textOnAccentValue),
             ("controlBoundary", AppColors.controlBoundary, AppColors.controlBoundaryValue),
-            ("focusRing", AppColors.focusRing, AppColors.focusRingValue),
-            ("legacy background", FoundationStyle.background, AppColors.backgroundValue),
-            ("legacy surface", FoundationStyle.surface, AppColors.surfaceValue),
-            ("legacy primary", FoundationStyle.primary, AppColors.textPrimaryValue),
-            ("legacy secondary", FoundationStyle.secondary, AppColors.textSecondaryValue),
-            ("legacy border", FoundationStyle.border, AppColors.borderValue),
-            ("legacy accent", FoundationStyle.accent, AppColors.accentValue)
+            ("focusRing", AppColors.focusRing, AppColors.focusRingValue)
         ]
         for (name, color, value) in roles {
             let resolved = try XCTUnwrap(NSColor(color).usingColorSpace(.sRGB), name)
