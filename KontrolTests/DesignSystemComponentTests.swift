@@ -33,6 +33,122 @@ final class DesignSystemComponentTests: XCTestCase {
         try check(host, descendants(inspected))
     }
 
+    private func frame(_ element: AXUIElement) throws -> CGRect {
+        let position = try XCTUnwrap(attribute(element, kAXPositionAttribute))
+        let size = try XCTUnwrap(attribute(element, kAXSizeAttribute))
+        var origin = CGPoint.zero
+        var dimensions = CGSize.zero
+        XCTAssertTrue(AXValueGetValue(unsafeBitCast(position, to: AXValue.self), .cgPoint, &origin))
+        XCTAssertTrue(AXValueGetValue(unsafeBitCast(size, to: AXValue.self), .cgSize, &dimensions))
+        return CGRect(origin: origin, size: dimensions)
+    }
+
+    func testActionVariantsAreNativeNamedButtonsWithTargetsAndSingleCallbacks() throws {
+        var calls = [String]()
+        let view = VStack {
+            ActionButton("Add task", symbol: "plus", variant: .primary) { calls.append("primary") }
+                .accessibilityIdentifier("action-primary")
+                .keyboardShortcut("a", modifiers: .command)
+            ActionButton("Open", variant: .secondary) { calls.append("secondary") }
+                .accessibilityIdentifier("action-secondary")
+            ActionButton("Remove", symbol: "trash", variant: .destructive) { calls.append("destructive") }
+                .accessibilityIdentifier("action-destructive")
+        }.padding(AppMetrics.space4)
+        try inspect(view, width: 340) { _, nodes in
+            for (identifier, name) in [("action-primary", "Add task"),
+                                       ("action-secondary", "Open"),
+                                       ("action-destructive", "Remove")] {
+                let button = try XCTUnwrap(nodes.first { attribute($0, kAXIdentifierAttribute) as? String == identifier })
+                XCTAssertEqual(attribute(button, kAXRoleAttribute) as? String, kAXButtonRole)
+                XCTAssertEqual(attribute(button, kAXDescriptionAttribute) as? String, name)
+                XCTAssertEqual((attribute(button, kAXEnabledAttribute) as? NSNumber)?.boolValue, true)
+                let bounds = try frame(button)
+                XCTAssertGreaterThanOrEqual(bounds.width, AppMetrics.minimumTarget)
+                XCTAssertGreaterThanOrEqual(bounds.height, AppMetrics.minimumTarget)
+                XCTAssertEqual(AXUIElementPerformAction(button, kAXPressAction as CFString), .success)
+            }
+            XCTAssertFalse(nodes.contains { (attribute($0, kAXDescriptionAttribute) as? String) == "plus" ||
+                (attribute($0, kAXDescriptionAttribute) as? String) == "trash" })
+            XCTAssertEqual(calls, ["primary", "secondary", "destructive"])
+        }
+    }
+
+    func testDisabledAndBusyActionsSuppressEvenAccessibilityPressAndKeepBusyName() throws {
+        var calls = 0
+        let view = VStack {
+            ActionButton("Unavailable", isEnabled: false) { calls += 1 }
+                .accessibilityIdentifier("action-disabled")
+            ActionButton("Save changes", symbol: "checkmark", variant: .primary, isBusy: true) { calls += 1 }
+                .accessibilityIdentifier("action-busy")
+        }.padding()
+        try inspect(view, width: 340) { _, nodes in
+            for identifier in ["action-disabled", "action-busy"] {
+                let button = try XCTUnwrap(nodes.first { attribute($0, kAXIdentifierAttribute) as? String == identifier })
+                XCTAssertEqual(attribute(button, kAXRoleAttribute) as? String, kAXButtonRole)
+                XCTAssertEqual((attribute(button, kAXEnabledAttribute) as? NSNumber)?.boolValue, false)
+                let bounds = try frame(button)
+                XCTAssertGreaterThanOrEqual(bounds.width, AppMetrics.minimumTarget)
+                XCTAssertGreaterThanOrEqual(bounds.height, AppMetrics.minimumTarget)
+                _ = AXUIElementPerformAction(button, kAXPressAction as CFString)
+            }
+            let busy = try XCTUnwrap(nodes.first { attribute($0, kAXIdentifierAttribute) as? String == "action-busy" })
+            XCTAssertEqual(attribute(busy, kAXDescriptionAttribute) as? String, "Save changes")
+            XCTAssertEqual(attribute(busy, kAXValueAttribute) as? String, "In progress")
+            XCTAssertEqual(calls, 0)
+        }
+    }
+
+    func testFocusAndCallerKeyboardShortcutWorkWithoutHover() throws {
+        var calls = 0
+        let view = ActionButton("Run", symbol: "play.fill", variant: .primary) { calls += 1 }
+            .accessibilityIdentifier("shortcut-action")
+            .keyboardShortcut("r", modifiers: .command)
+            .padding(AppMetrics.space4)
+        let host = NSHostingView(rootView: view)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 280, height: 160),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.title = "Action focus inspection \(UUID().uuidString)"
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        host.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+        let axWindow = try XCTUnwrap((attribute(app, kAXWindowsAttribute) as? [AXUIElement])?.first {
+            attribute($0, kAXTitleAttribute) as? String == window.title
+        })
+        let button = try XCTUnwrap(descendants(axWindow).first {
+            attribute($0, kAXIdentifierAttribute) as? String == "shortcut-action"
+        })
+        XCTAssertEqual(attribute(button, kAXRoleAttribute) as? String, kAXButtonRole)
+        XCTAssertEqual(AXUIElementSetAttributeValue(button, kAXFocusedAttribute as CFString, kCFBooleanTrue), .success)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        let focused = try XCTUnwrap(attribute(app, kAXFocusedUIElementAttribute))
+        XCTAssertEqual(attribute(unsafeBitCast(focused, to: AXUIElement.self), kAXIdentifierAttribute) as? String,
+                       "shortcut-action")
+        let key = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero,
+                          modifierFlags: .command, timestamp: 0, windowNumber: window.windowNumber,
+                          context: nil, characters: "r", charactersIgnoringModifiers: "r", isARepeat: false, keyCode: 15))
+        XCTAssertTrue(window.performKeyEquivalent(with: key))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        XCTAssertEqual(calls, 1)
+    }
+
+    func testEnlargedLongActionHasContentDrivenHeightAndFullName() throws {
+        let title = "A long action name that must wrap in a narrow panel instead of clipping"
+        try inspect(ActionButton(title, variant: .primary) {}.frame(width: 175).padding()
+            .environment(\.appTextScaleOverride, 1.3)
+            .accessibilityIdentifier("long-action"), width: 220) { _, nodes in
+            let button = try XCTUnwrap(nodes.first { attribute($0, kAXRoleAttribute) as? String == kAXButtonRole })
+            XCTAssertEqual(attribute(button, kAXDescriptionAttribute) as? String, title)
+            let bounds = try frame(button)
+            XCTAssertGreaterThan(bounds.height, AppMetrics.minimumTarget)
+            XCTAssertGreaterThanOrEqual(bounds.width, AppMetrics.minimumTarget)
+            // AX includes the 3-point external focus-ring allowance on each side.
+            XCTAssertLessThanOrEqual(bounds.width, 175 + 6)
+        }
+    }
+
     func testIconLabelHasOneNameWithoutSymbolAnnouncement() throws {
         try inspect(IconLabel(title: "Learning", symbol: "book"), width: 300) { _, nodes in
             let named = nodes.filter { attribute($0, kAXDescriptionAttribute) as? String == "Learning" ||
