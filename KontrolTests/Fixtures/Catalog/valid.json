@@ -1,0 +1,21 @@
+{
+  "catalogID": "starter", "version": 1,
+  "topics": [{"id": "go", "name": "Go"}],
+  "subtopics": [{"id": "go.concurrency", "topicID": "go", "name": "Concurrency"}],
+  "concepts": [
+    {"id": "go.cancel", "subtopicID": "go.concurrency", "name": "Cancellation", "prerequisiteConceptIDs": []},
+    {"id": "go.deadline", "subtopicID": "go.concurrency", "name": "Deadlines", "prerequisiteConceptIDs": ["go.cancel"]}
+  ],
+  "lessons": [{
+    "id": "go.cancel.1", "objectiveKey": "go.concurrency.cancel-work", "title": "Cancel work",
+    "topicID": "go", "subtopicID": "go.concurrency", "conceptIDs": ["go.cancel"],
+    "difficulty": "intermediate", "format": "learn", "estimatedMinutes": 12,
+    "prerequisiteConceptIDs": [], "explanation": "Use a context to signal cancellation.",
+    "workedExample": "A worker checks ctx.Done before its next batch.",
+    "exercise": "Describe how to stop a slow worker.",
+    "referenceAnswer": "Cancel its context and let the worker observe Done.",
+    "selfCheckCriteria": ["Identifies the owner of cancellation"],
+    "contentVersion": 1, "normalizedContentHash": "sha256:example", "source": "seed",
+    "provenance": "Original starter lesson"
+  }]
+}

@@ -16,6 +16,10 @@
 		A00000000000000000000008 /* ContainerFactoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000001B /* ContainerFactoryTests.swift */; };
 		A00000000000000000000009 /* V1FixtureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000001C /* V1FixtureTests.swift */; };
 		A0000000000000000000000A /* V1 in Resources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000001D /* V1 */; };
+		A0000000000000000000000B /* CatalogDTO.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000001E /* CatalogDTO.swift */; };
+		A0000000000000000000000C /* CatalogValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000001F /* CatalogValidator.swift */; };
+		A0000000000000000000000D /* CatalogValidatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000033 /* CatalogValidatorTests.swift */; };
+		A0000000000000000000000E /* Catalog in Resources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000034 /* Catalog */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -40,6 +44,10 @@
 		A0000000000000000000001B /* ContainerFactoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContainerFactoryTests.swift; sourceTree = "<group>"; };
 		A0000000000000000000001C /* V1FixtureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = V1FixtureTests.swift; sourceTree = "<group>"; };
 		A0000000000000000000001D /* V1 */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Fixtures/V1; sourceTree = "<group>"; };
+		A0000000000000000000001E /* CatalogDTO.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CatalogDTO.swift; sourceTree = "<group>"; };
+		A0000000000000000000001F /* CatalogValidator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CatalogValidator.swift; sourceTree = "<group>"; };
+		A00000000000000000000033 /* CatalogValidatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CatalogValidatorTests.swift; sourceTree = "<group>"; };
+		A00000000000000000000034 /* Catalog */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Fixtures/Catalog; sourceTree = "<group>"; };
 		A00000000000000000000014 /* Kontrol.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Kontrol.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A00000000000000000000015 /* KontrolTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = KontrolTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -51,11 +59,12 @@
 
 /* Begin PBXGroup section */
 		A00000000000000000000020 = {isa = PBXGroup; children = (A00000000000000000000021 /* Kontrol */, A00000000000000000000022 /* KontrolTests */, A00000000000000000000023 /* Products */); sourceTree = "<group>"; };
-		A00000000000000000000021 /* Kontrol */ = {isa = PBXGroup; children = (A00000000000000000000024 /* App */, A00000000000000000000025 /* Data */, A00000000000000000000013 /* Kontrol.entitlements */); path = Kontrol; sourceTree = "<group>"; };
+		A00000000000000000000021 /* Kontrol */ = {isa = PBXGroup; children = (A00000000000000000000024 /* App */, A00000000000000000000025 /* Data */, A00000000000000000000027 /* Domain */, A00000000000000000000013 /* Kontrol.entitlements */); path = Kontrol; sourceTree = "<group>"; };
 		A00000000000000000000024 /* App */ = {isa = PBXGroup; children = (A00000000000000000000011 /* KontrolApp.swift */); path = App; sourceTree = "<group>"; };
 		A00000000000000000000025 /* Data */ = {isa = PBXGroup; children = (A00000000000000000000026 /* Persistence */); path = Data; sourceTree = "<group>"; };
 		A00000000000000000000026 /* Persistence */ = {isa = PBXGroup; children = (A00000000000000000000016 /* KontrolSchemaV1.swift */, A00000000000000000000017 /* KontrolMigrationPlan.swift */, A00000000000000000000019 /* ModelContainerFactory.swift */, A0000000000000000000001A /* StoreLocation.swift */); path = Persistence; sourceTree = "<group>"; };
-		A00000000000000000000022 /* KontrolTests */ = {isa = PBXGroup; children = (A00000000000000000000012 /* ProjectSmokeTests.swift */, A00000000000000000000018 /* SchemaTests.swift */, A0000000000000000000001B /* ContainerFactoryTests.swift */, A0000000000000000000001C /* V1FixtureTests.swift */, A0000000000000000000001D /* V1 */); path = KontrolTests; sourceTree = "<group>"; };
+		A00000000000000000000027 /* Domain */ = {isa = PBXGroup; children = (A0000000000000000000001E /* CatalogDTO.swift */, A0000000000000000000001F /* CatalogValidator.swift */); path = Domain; sourceTree = "<group>"; };
+		A00000000000000000000022 /* KontrolTests */ = {isa = PBXGroup; children = (A00000000000000000000012 /* ProjectSmokeTests.swift */, A00000000000000000000018 /* SchemaTests.swift */, A0000000000000000000001B /* ContainerFactoryTests.swift */, A0000000000000000000001C /* V1FixtureTests.swift */, A00000000000000000000033 /* CatalogValidatorTests.swift */, A0000000000000000000001D /* V1 */, A00000000000000000000034 /* Catalog */); path = KontrolTests; sourceTree = "<group>"; };
 		A00000000000000000000023 /* Products */ = {isa = PBXGroup; children = (A00000000000000000000014 /* Kontrol.app */, A00000000000000000000015 /* KontrolTests.xctest */); name = Products; sourceTree = "<group>"; };
 /* End PBXGroup section */
 
@@ -79,12 +88,12 @@
 
 /* Begin PBXResourcesBuildPhase section */
 		A00000000000000000000054 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
-		A00000000000000000000055 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A0000000000000000000000A /* V1 in Resources */); runOnlyForDeploymentPostprocessing = 0; };
+		A00000000000000000000055 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A0000000000000000000000A /* V1 in Resources */, A0000000000000000000000E /* Catalog in Resources */); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		A00000000000000000000052 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000001 /* KontrolApp.swift in Sources */, A00000000000000000000003 /* KontrolSchemaV1.swift in Sources */, A00000000000000000000004 /* KontrolMigrationPlan.swift in Sources */, A00000000000000000000006 /* ModelContainerFactory.swift in Sources */, A00000000000000000000007 /* StoreLocation.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
-		A00000000000000000000053 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000002 /* ProjectSmokeTests.swift in Sources */, A00000000000000000000005 /* SchemaTests.swift in Sources */, A00000000000000000000008 /* ContainerFactoryTests.swift in Sources */, A00000000000000000000009 /* V1FixtureTests.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
+		A00000000000000000000052 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000001 /* KontrolApp.swift in Sources */, A00000000000000000000003 /* KontrolSchemaV1.swift in Sources */, A00000000000000000000004 /* KontrolMigrationPlan.swift in Sources */, A00000000000000000000006 /* ModelContainerFactory.swift in Sources */, A00000000000000000000007 /* StoreLocation.swift in Sources */, A0000000000000000000000B /* CatalogDTO.swift in Sources */, A0000000000000000000000C /* CatalogValidator.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
+		A00000000000000000000053 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000002 /* ProjectSmokeTests.swift in Sources */, A00000000000000000000005 /* SchemaTests.swift in Sources */, A00000000000000000000008 /* ContainerFactoryTests.swift in Sources */, A00000000000000000000009 /* V1FixtureTests.swift in Sources */, A0000000000000000000000D /* CatalogValidatorTests.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
