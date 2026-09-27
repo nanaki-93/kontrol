@@ -6,6 +6,10 @@ import XCTest
 
 @MainActor
 final class AppShellTests: XCTestCase {
+    private func makeDependencies() throws -> AppDependencies {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        return AppDependencies(container: container, catalogRepository: SwiftDataCatalogRepository(container: container))
+    }
     func testNavigationMetadataAndRouting() {
         let destinations = AppDestination.allCases
         XCTAssertEqual(destinations.map(\.title), ["Today", "Learning", "Projects", "Focus", "Tasks", "News", "Settings"])
@@ -16,6 +20,8 @@ final class AppShellTests: XCTestCase {
             XCTAssertEqual(AppShell.navigationTraits(for: destination, selected: .today).contains(.isSelected), destination == .today)
             if destination == .today {
                 XCTAssertEqual(AppShell.contentKind(for: destination), .today)
+            } else if destination == .settings {
+                XCTAssertEqual(AppShell.contentKind(for: destination), .settings)
             } else {
                 XCTAssertEqual(AppShell.contentKind(for: destination), .foundation(destination))
                 XCTAssertFalse(destination.foundationMessage.isEmpty)
@@ -28,7 +34,7 @@ final class AppShellTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         let navigation = NavigationStore(preferences: UserDefaultsDestinationPreferences(defaults: defaults))
-        let host = NSHostingView(rootView: AppShell(navigation: navigation))
+        let host = NSHostingView(rootView: AppShell(navigation: navigation, dependencies: try makeDependencies()))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.title = "AppShell accessibility inspection"
@@ -120,7 +126,7 @@ final class AppShellTests: XCTestCase {
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
         let navigation = NavigationStore(preferences: UserDefaultsDestinationPreferences(defaults: defaults))
-        let host = NSHostingView(rootView: AppShell(navigation: navigation))
+        let host = NSHostingView(rootView: AppShell(navigation: navigation, dependencies: try makeDependencies()))
         for size in [CGSize(width: 1000, height: 700), CGSize(width: 1440, height: 940)] {
             navigation.select(.today)
             host.frame = CGRect(origin: .zero, size: size)

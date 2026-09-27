@@ -40,13 +40,18 @@ extension AppDestination {
 
 struct AppShell: View {
     @ObservedObject var navigation: NavigationStore
+    let dependencies: AppDependencies
     @FocusState private var focusedDestination: AppDestination?
 
     /// Routing is deliberately limited to the foundation surfaces until their features ship.
-    enum ContentKind: Equatable { case today, foundation(AppDestination) }
+    enum ContentKind: Equatable { case today, settings, foundation(AppDestination) }
 
     static func contentKind(for destination: AppDestination) -> ContentKind {
-        destination == .today ? .today : .foundation(destination)
+        switch destination {
+        case .today: .today
+        case .settings: .settings
+        default: .foundation(destination)
+        }
     }
 
     static func navigationTraits(for destination: AppDestination, selected: AppDestination) -> AccessibilityTraits {
@@ -58,10 +63,13 @@ struct AppShell: View {
             navigationBar
             ScrollView {
                 Group {
-                    if Self.contentKind(for: navigation.selectedDestination) == .today {
+                    switch Self.contentKind(for: navigation.selectedDestination) {
+                    case .today:
                         TodayView()
-                    } else {
-                        FoundationView(destination: navigation.selectedDestination)
+                    case .settings:
+                        FoundationSettingsView(dependencies: dependencies)
+                    case .foundation(let destination):
+                        FoundationView(destination: destination)
                     }
                 }
                 .frame(maxWidth: .infinity, minHeight: 500, alignment: .topLeading)
