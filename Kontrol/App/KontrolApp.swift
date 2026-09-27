@@ -42,6 +42,7 @@ struct KontrolApp: App {
         Settings {
             SettingsSceneContent(launch: launch)
         }
+        .defaultSize(width: 520, height: 340)
     }
 }
 
@@ -65,7 +66,9 @@ struct MainWindowContent: View {
             } else if launch.state == .opening, let recoveryFailure {
                 RecoveryView(failure: recoveryFailure, launch: launch)
             } else if launch.state == .opening {
-                ProgressView("Opening Kontrol")
+                LoadingState("Opening Kontrol")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(AppColors.background)
             } else {
                 Text(KontrolApp.bootstrapTitle)
             }
@@ -74,6 +77,7 @@ struct MainWindowContent: View {
             if case .failed(let failure) = newState { recoveryFailure = failure }
             if newState == .ready { recoveryFailure = nil }
         }
+        .preferredColorScheme(.dark)
         .task { await launch.start() }
     }
 }
@@ -85,7 +89,11 @@ struct SettingsSceneContent: View {
     var body: some View {
         Group {
             if let dependencies = launch.dependencies, launch.state == .ready {
-                FoundationSettingsView(dependencies: dependencies)
+                ScrollView {
+                    FoundationSettingsView(dependencies: dependencies)
+                        .frame(maxWidth: .infinity, minHeight: 340, alignment: .topLeading)
+                }
+                .background(AppColors.background)
             } else if case .failed(let failure) = launch.state {
                 RecoveryView(failure: failure, launch: launch, onRetry: {
                     recoveryFailure = failure
@@ -94,10 +102,15 @@ struct SettingsSceneContent: View {
             } else if launch.state == .opening, let recoveryFailure {
                 RecoveryView(failure: recoveryFailure, launch: launch)
             } else {
-                ProgressView("Opening Kontrol")
+                LoadingState("Opening Kontrol")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(AppColors.background)
             }
         }
-        .frame(width: 520, height: 340)
+        // Retain the compact baseline without constraining enlarged content to
+        // a fixed height. Ready Settings can scroll when the window is small.
+        .frame(minWidth: 520, idealWidth: 520, minHeight: 340, idealHeight: 340)
+        .preferredColorScheme(.dark)
         .onChange(of: launch.state) { _, newState in
             if case .failed(let failure) = newState { recoveryFailure = failure }
             if newState == .ready { recoveryFailure = nil }

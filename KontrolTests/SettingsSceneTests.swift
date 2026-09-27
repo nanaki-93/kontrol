@@ -20,6 +20,33 @@ private actor SettingsCatalogGate {
 
 @MainActor
 final class SettingsSceneTests: XCTestCase {
+    private func axAttribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
+        var value: CFTypeRef?
+        return AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success ? value : nil
+    }
+
+    private func axDescendants(_ element: AXUIElement) -> [AXUIElement] {
+        let children = axAttribute(element, kAXChildrenAttribute) as? [AXUIElement] ?? []
+        return children.flatMap { [$0] + axDescendants($0) }
+    }
+
+    private func axWindow(_ window: NSWindow) throws -> AXUIElement {
+        let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+        return try XCTUnwrap((axAttribute(app, kAXWindowsAttribute) as? [AXUIElement])?.first {
+            axAttribute($0, kAXTitleAttribute) as? String == window.title
+        })
+    }
+
+    private func axFrame(_ element: AXUIElement) throws -> CGRect {
+        let position = try XCTUnwrap(axAttribute(element, kAXPositionAttribute))
+        let size = try XCTUnwrap(axAttribute(element, kAXSizeAttribute))
+        var origin = CGPoint.zero
+        var dimensions = CGSize.zero
+        XCTAssertTrue(AXValueGetValue(unsafeBitCast(position, to: AXValue.self), .cgPoint, &origin))
+        XCTAssertTrue(AXValueGetValue(unsafeBitCast(size, to: AXValue.self), .cgSize, &dimensions))
+        return CGRect(origin: origin, size: dimensions)
+    }
+
     func testUnfinishedDestinationsShowHonestNoninteractiveFoundationStates() throws {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 340),
                               styleMask: [.titled], backing: .buffered, defer: false)
@@ -67,6 +94,41 @@ final class SettingsSceneTests: XCTestCase {
         }
     }
 
+    func testCompactSettingsRecoveryActionsRemainVisibleAt130Percent() async throws {
+        var opens = 0
+        let launch = LaunchCoordinator(open: {
+            opens += 1
+            throw NSError(domain: NSCocoaErrorDomain, code: NSFileReadUnknownError)
+        })
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 340),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.title = "Enlarged Settings recovery inspection"
+        window.contentView = NSHostingView(rootView: SettingsSceneContent(launch: launch)
+            .environment(\.appTextScaleOverride, 1.3))
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        let failed = expectation(description: "Settings entered blocking recovery")
+        Task { @MainActor in
+            while launch.state == .idle || launch.state == .opening { await Task.yield() }
+            failed.fulfill()
+        }
+        await fulfillment(of: [failed], timeout: 10)
+        guard case .failed = launch.state else { return XCTFail("Expected failure") }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        let bounds = try axFrame(axWindow(window))
+        let nodes = axDescendants(try axWindow(window))
+        for (identifier, label) in [("recovery-quit", "Quit"), ("recovery-retry", "Try again")] {
+            let action = try XCTUnwrap(nodes.first {
+                axAttribute($0, kAXIdentifierAttribute) as? String == identifier
+            })
+            XCTAssertEqual(axAttribute(action, kAXRoleAttribute) as? String, kAXButtonRole)
+            XCTAssertEqual(axAttribute(action, kAXDescriptionAttribute) as? String, label)
+            XCTAssertTrue(bounds.contains(try axFrame(action)), "\(label) must remain inside compact Settings")
+        }
+        XCTAssertEqual(opens, 1)
+        XCTAssertNil(launch.dependencies)
+    }
+
     func testSettingsOpenedDuringInitializationAndWindowReopenUseOneGraph() async throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         let gate = SettingsCatalogGate()
@@ -90,23 +152,42 @@ final class SettingsSceneTests: XCTestCase {
 
         // Hosting both real scene roots causes each .task to request startup. The
         // Settings scene may be the first window and must not own a separate store.
-        func show<V: View>(_ view: V, title: String) -> NSWindow {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
+        func show<V: View>(_ view: V, title: String, size: CGSize = CGSize(width: 1000, height: 700)) -> NSWindow {
+            let window = NSWindow(contentRect: NSRect(origin: .zero, size: size),
                                   styleMask: [.titled], backing: .buffered, defer: false)
             window.title = title
             window.contentView = NSHostingView(rootView: view)
             window.makeKeyAndOrderFront(nil)
             return window
         }
-        let settingsWindow = show(SettingsSceneContent(launch: launch), title: "Settings scene test")
+        let settingsWindow = show(SettingsSceneContent(launch: launch)
+            .environment(\.appTextScaleOverride, 1.3), title: "Settings scene test",
+            size: CGSize(width: 520, height: 340))
         // NSHostingView-backed XCTest windows are ordered out, not closed, to
         // avoid the SDK's window-close autorelease checker crash.
         defer { settingsWindow.orderOut(nil) }
         await fulfillment(of: [entered], timeout: 10)
         XCTAssertEqual(launch.state, .opening)
         XCTAssertNil(launch.dependencies)
+        XCTAssertEqual(settingsWindow.contentView?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]),
+                       .darkAqua, "Native Settings root must request the fixed dark appearance")
+        let openingSettings = axDescendants(try axWindow(settingsWindow))
+        let loading = try XCTUnwrap(openingSettings.first {
+            axAttribute($0, kAXDescriptionAttribute) as? String == "Loading: Opening Kontrol" ||
+            axAttribute($0, kAXValueAttribute) as? String == "Loading: Opening Kontrol"
+        })
+        XCTAssertFalse(try axFrame(loading).isEmpty, "Loading label must have rendered bounds")
+        XCTAssertFalse(openingSettings.contains { axAttribute($0, kAXIdentifierAttribute) as? String == "settings-content" })
         let mainWindow = show(MainWindowContent(launch: launch, navigation: navigation), title: "Main window test")
         defer { mainWindow.orderOut(nil) }
+        XCTAssertEqual(mainWindow.contentView?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]),
+                       .darkAqua, "Main root must request the fixed dark appearance")
+        let openingMain = axDescendants(try axWindow(mainWindow))
+        XCTAssertTrue(openingMain.contains {
+            axAttribute($0, kAXDescriptionAttribute) as? String == "Loading: Opening Kontrol" ||
+            axAttribute($0, kAXValueAttribute) as? String == "Loading: Opening Kontrol"
+        }, "Main opening must use the same readable loading state")
+        XCTAssertFalse(openingMain.contains { axAttribute($0, kAXIdentifierAttribute) as? String == "settings-content" })
         try await Task.sleep(for: .milliseconds(100))
         XCTAssertEqual(opens, 1)
         XCTAssertEqual(imports, 0)
@@ -156,6 +237,51 @@ final class SettingsSceneTests: XCTestCase {
                            "Foundation Settings must not advertise controls before F13")
         }
         try await Task.sleep(for: .milliseconds(100))
+        // At 130% the Settings scene retains a compact window and its entire
+        // foundation message remains visible. It has no phantom F13 actions.
+        let settingsAX = try axWindow(settingsWindow)
+        let settingsBounds = try axFrame(settingsAX)
+        XCTAssertGreaterThanOrEqual(settingsBounds.width, 520)
+        XCTAssertGreaterThanOrEqual(settingsBounds.height, 340)
+        let settingsNodes = axDescendants(settingsAX)
+        let emptyMessage = try XCTUnwrap(settingsNodes.first {
+            axAttribute($0, kAXValueAttribute) as? String == "No settings available yet." ||
+            axAttribute($0, kAXDescriptionAttribute) as? String == "No settings available yet."
+        })
+        let messageBounds = try axFrame(emptyMessage)
+        XCTAssertTrue(settingsBounds.contains(messageBounds), "130% message must be visible in compact Settings")
+        let enlargedHeading = try XCTUnwrap(settingsNodes.first {
+            axAttribute($0, kAXRoleAttribute) as? String == kAXHeadingRole &&
+            (axAttribute($0, kAXValueAttribute) as? String == "Settings" ||
+             axAttribute($0, kAXDescriptionAttribute) as? String == "Settings")
+        })
+        let standardWindow = show(SettingsSceneContent(launch: launch), title: "Standard Settings comparison",
+                                  size: CGSize(width: 520, height: 340))
+        defer { standardWindow.orderOut(nil) }
+        let standardHeading = try XCTUnwrap(axDescendants(try axWindow(standardWindow)).first {
+            axAttribute($0, kAXRoleAttribute) as? String == kAXHeadingRole &&
+            (axAttribute($0, kAXValueAttribute) as? String == "Settings" ||
+             axAttribute($0, kAXDescriptionAttribute) as? String == "Settings")
+        })
+        XCTAssertGreaterThan(try axFrame(enlargedHeading).height, try axFrame(standardHeading).height)
+        // Stress beyond 130% in the same compact viewport: content must be
+        // scrollable rather than cut off by a 340-point fixed frame.
+        let overflowWindow = show(SettingsSceneContent(launch: launch)
+            .environment(\.appTextScaleOverride, 4), title: "Overflow Settings inspection",
+            size: CGSize(width: 520, height: 340))
+        defer { overflowWindow.orderOut(nil) }
+        func scrollViews(in view: NSView) -> [NSScrollView] {
+            let current = (view as? NSScrollView).map { [$0] } ?? []
+            return current + view.subviews.flatMap(scrollViews)
+        }
+        overflowWindow.contentView?.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        let scroll = try XCTUnwrap(overflowWindow.contentView.flatMap { scrollViews(in: $0).first })
+        scroll.layoutSubtreeIfNeeded()
+        let documentHeight = try XCTUnwrap(scroll.documentView).frame.height
+        XCTAssertGreaterThan(documentHeight, scroll.contentView.bounds.height,
+                             "Oversized Settings content must overflow into a scroll view")
+        XCTAssertEqual(opens, 1, "Appearance/layout changes must not initialize a second graph")
         var windows: CFTypeRef?
         XCTAssertEqual(AXUIElementCopyAttributeValue(appAX, kAXWindowsAttribute as CFString, &windows), .success)
         let visible = try XCTUnwrap(windows as? [AXUIElement])
@@ -178,6 +304,8 @@ final class SettingsSceneTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(100))
         let nativeSettings = try XCTUnwrap(NSApp.windows.first { $0.title == "Kontrol Settings" && $0.isVisible })
         defer { nativeSettings.orderOut(nil) }
+        XCTAssertEqual(nativeSettings.contentView?.frame.width ?? 0, 520, accuracy: 40)
+        XCTAssertEqual(nativeSettings.contentView?.frame.height ?? 0, 340, accuracy: 40)
         var nativeWindows: CFTypeRef?
         XCTAssertEqual(AXUIElementCopyAttributeValue(appAX, kAXWindowsAttribute as CFString, &nativeWindows), .success)
         let nativeAX = try XCTUnwrap((nativeWindows as? [AXUIElement])?.first {
