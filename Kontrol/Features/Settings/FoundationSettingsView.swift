@@ -7,20 +7,19 @@ struct FoundationSettingsView: View {
     let dependencies: AppDependencies
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            FoundationStyle.heading("Settings")
-            Text("No settings available yet.")
-                .font(.system(size: 15, design: .monospaced))
-                .foregroundStyle(FoundationStyle.secondary)
+        VStack(alignment: .leading, spacing: AppMetrics.space4) {
+            PageHeader("Settings")
+            EmptyState("No settings available yet.")
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, FoundationStyle.horizontalInset)
-        .padding(.top, 32)
-        .background(FoundationStyle.background)
-        .foregroundStyle(FoundationStyle.primary)
+        .padding(.horizontal, AppMetrics.horizontalInset)
+        .padding(.top, AppMetrics.space8)
+        .background(AppColors.background)
+        .foregroundStyle(AppColors.textPrimary)
         .preferredColorScheme(.dark)
         .modelContainer(dependencies.container)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("settings-content")
     }
 }

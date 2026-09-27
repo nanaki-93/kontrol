@@ -20,6 +20,53 @@ private actor SettingsCatalogGate {
 
 @MainActor
 final class SettingsSceneTests: XCTestCase {
+    func testUnfinishedDestinationsShowHonestNoninteractiveFoundationStates() throws {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 340),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.title = "Foundation destination inspection"
+        let host = NSHostingView(rootView: FoundationView(destination: .projects)
+            .environment(\.appTextScaleOverride, 1.3))
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        let appAX = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+
+        func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
+            var value: CFTypeRef?
+            return AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success ? value : nil
+        }
+        func descendants(_ element: AXUIElement) -> [AXUIElement] {
+            let children = attribute(element, kAXChildrenAttribute) as? [AXUIElement] ?? []
+            return children.flatMap { [$0] + descendants($0) }
+        }
+        for destination in [AppDestination.projects, .focus, .news] {
+            host.rootView = FoundationView(destination: destination)
+                .environment(\.appTextScaleOverride, 1.3)
+            host.layoutSubtreeIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            var windows: CFTypeRef?
+            XCTAssertEqual(AXUIElementCopyAttributeValue(appAX, kAXWindowsAttribute as CFString, &windows), .success)
+            let axWindow = try XCTUnwrap((windows as? [AXUIElement])?.first {
+                attribute($0, kAXTitleAttribute) as? String == window.title
+            })
+            let surface = try XCTUnwrap(descendants(axWindow).first {
+                attribute($0, kAXIdentifierAttribute) as? String == "\(destination.rawValue)-content"
+            })
+            let nodes = [surface] + descendants(surface)
+            func hasText(_ text: String, role: String? = nil) -> Bool {
+                nodes.contains {
+                    (role == nil || attribute($0, kAXRoleAttribute) as? String == role) &&
+                    (attribute($0, kAXValueAttribute) as? String == text ||
+                     attribute($0, kAXDescriptionAttribute) as? String == text)
+                }
+            }
+            XCTAssertTrue(hasText(destination.title, role: kAXHeadingRole), "\(destination) heading")
+            XCTAssertTrue(hasText(destination.foundationMessage), "\(destination) honest empty state")
+            XCTAssertFalse(nodes.contains { attribute($0, kAXRoleAttribute) as? String == kAXButtonRole },
+                           "\(destination) has no action until its feature ships")
+        }
+    }
+
     func testSettingsOpenedDuringInitializationAndWindowReopenUseOneGraph() async throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         let gate = SettingsCatalogGate()
@@ -85,9 +132,28 @@ final class SettingsSceneTests: XCTestCase {
             var value: CFTypeRef?
             return AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success ? value : nil
         }
-        func containsSettings(_ element: AXUIElement) -> Bool {
-            if attribute(element, kAXIdentifierAttribute) as? String == "settings-content" { return true }
-            return (attribute(element, kAXChildrenAttribute) as? [AXUIElement] ?? []).contains(where: containsSettings)
+        func descendants(_ element: AXUIElement) -> [AXUIElement] {
+            let children = attribute(element, kAXChildrenAttribute) as? [AXUIElement] ?? []
+            return children.flatMap { [$0] + descendants($0) }
+        }
+        func settingsSurface(_ window: AXUIElement) throws -> AXUIElement {
+            try XCTUnwrap(descendants(window).first {
+                attribute($0, kAXIdentifierAttribute) as? String == "settings-content"
+            })
+        }
+        func assertFoundationContent(_ surface: AXUIElement) {
+            let nodes = [surface] + descendants(surface)
+            XCTAssertEqual(nodes.filter {
+                attribute($0, kAXRoleAttribute) as? String == kAXHeadingRole &&
+                (attribute($0, kAXValueAttribute) as? String == "Settings" ||
+                 attribute($0, kAXDescriptionAttribute) as? String == "Settings")
+            }.count, 1)
+            XCTAssertTrue(nodes.contains {
+                attribute($0, kAXValueAttribute) as? String == "No settings available yet." ||
+                attribute($0, kAXDescriptionAttribute) as? String == "No settings available yet."
+            })
+            XCTAssertFalse(nodes.contains { attribute($0, kAXRoleAttribute) as? String == kAXButtonRole },
+                           "Foundation Settings must not advertise controls before F13")
         }
         try await Task.sleep(for: .milliseconds(100))
         var windows: CFTypeRef?
@@ -95,7 +161,7 @@ final class SettingsSceneTests: XCTestCase {
         let visible = try XCTUnwrap(windows as? [AXUIElement])
         for title in ["Settings scene test", "Main window test"] {
             let window = try XCTUnwrap(visible.first { attribute($0, kAXTitleAttribute) as? String == title })
-            XCTAssertTrue(containsSettings(window), "\(title) must display the shared Settings surface")
+            assertFoundationContent(try settingsSurface(window))
         }
 
         // A native Settings scene supplies the standard application-menu command.
@@ -117,7 +183,7 @@ final class SettingsSceneTests: XCTestCase {
         let nativeAX = try XCTUnwrap((nativeWindows as? [AXUIElement])?.first {
             attribute($0, kAXTitleAttribute) as? String == nativeSettings.title
         })
-        XCTAssertTrue(containsSettings(nativeAX))
+        assertFoundationContent(try settingsSurface(nativeAX))
         XCTAssertTrue(launch.dependencies === graph)
         XCTAssertEqual(opens, 1)
         XCTAssertEqual(imports, 1)
