@@ -38,19 +38,9 @@ struct TaskRows: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             ForEach(rows) { row in
-                HStack(alignment: .firstTextBaseline, spacing: 12) {
-                    Text(row.title)
-                        .foregroundStyle(FoundationStyle.primary)
-                    if row.completedAt != nil {
-                        Text("Completed")
-                            .foregroundStyle(FoundationStyle.secondary)
-                    }
-                    Spacer(minLength: 0)
-                }
-                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                .accessibilityElement(children: .combine)
-                .accessibilityIdentifier("task-row-\(row.id.uuidString)")
-                Divider().overlay(FoundationStyle.border)
+                AppListRow(row.title, status: row.completedAt == nil ? nil : StatusPill("Completed", kind: .success))
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("task-row-\(row.id.uuidString)")
             }
         }
     }
@@ -63,23 +53,20 @@ struct TasksView: View {
     @State private var loadFailed = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            FoundationStyle.heading("Tasks")
+        VStack(alignment: .leading, spacing: AppMetrics.space4) {
+            PageHeader("Tasks")
             if loadFailed {
-                Text("Could not load tasks. Return to Tasks to try again.")
-                    .foregroundStyle(FoundationStyle.secondary)
+                ErrorBanner(.readFailed)
             } else if rows.isEmpty {
-                Text("No tasks captured yet. Use + Task on Today to add one.")
-                    .foregroundStyle(FoundationStyle.secondary)
+                EmptyState("No tasks captured yet.", guidance: "Use Add task on Today to capture one.")
             } else {
                 TaskRows(rows: rows)
             }
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .font(.system(size: 15, design: .monospaced))
-        .padding(.horizontal, FoundationStyle.horizontalInset)
-        .padding(.top, 32)
+        .padding(.horizontal, AppMetrics.horizontalInset)
+        .padding(.top, AppMetrics.space8)
         .onAppear(perform: refresh)
     }
 

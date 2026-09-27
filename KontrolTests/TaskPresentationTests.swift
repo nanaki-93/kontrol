@@ -57,6 +57,31 @@ final class TaskPresentationTests: XCTestCase {
         }
     }
 
+    private func frame(_ element: AXUIElement) throws -> CGRect {
+        let position = try XCTUnwrap(attribute(element, kAXPositionAttribute))
+        let size = try XCTUnwrap(attribute(element, kAXSizeAttribute))
+        var origin = CGPoint.zero
+        var dimensions = CGSize.zero
+        XCTAssertTrue(AXValueGetValue(unsafeBitCast(position, to: AXValue.self), .cgPoint, &origin))
+        XCTAssertTrue(AXValueGetValue(unsafeBitCast(size, to: AXValue.self), .cgSize, &dimensions))
+        return CGRect(origin: origin, size: dimensions)
+    }
+
+    private func inspectTasks(_ repository: any TaskRepository, width: CGFloat = 1000,
+                              scale: CGFloat = 1, _ check: (NSWindow) throws -> Void) throws {
+        let host = NSHostingView(rootView: TasksView(taskRepository: repository)
+            .environment(\.appTextScaleOverride, scale))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: 700),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.title = "Tasks state inspection \(UUID().uuidString)"
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        host.layoutSubtreeIfNeeded()
+        settle()
+        try check(window)
+    }
+
     private func inspectToday(_ repository: any TaskRepository, at instant: Date,
                               _ check: (NSWindow) throws -> Void) throws {
         let host = NSHostingView(rootView: TodayView(taskRepository: repository, now: { instant }))
@@ -119,6 +144,89 @@ final class TaskPresentationTests: XCTestCase {
             RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         } while Date() < deadline
         return try XCTUnwrap(elements(in: window, identifier: identifier).first)
+    }
+
+    func testTasksEmptyAndFailedReadRemainDistinctWithoutMutatingSavedRows() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataTaskRepository(container: container)
+        try inspectTasks(repository) { window in
+            let text = visibleText(in: window)
+            XCTAssertTrue(text.contains("Tasks"))
+            XCTAssertTrue(text.contains("No tasks captured yet."))
+            XCTAssertTrue(text.contains("Use Add task on Today to capture one."))
+            XCTAssertFalse(text.contains("Error: Content could not be loaded."))
+            XCTAssertFalse(text.contains("Saved task"))
+        }
+        let id = try repository.create(title: "Saved task", plannedFor: nil)
+        try inspectTasks(FailingReadRepository(storage: repository)) { window in
+            let text = visibleText(in: window)
+            XCTAssertTrue(text.contains("Error: Content could not be loaded."))
+            XCTAssertFalse(text.contains("No tasks captured yet."))
+            XCTAssertFalse(text.contains("Saved task"))
+            XCTAssertTrue(elements(in: window, identifier: "task-row-\(id.uuidString)").isEmpty)
+        }
+        XCTAssertEqual(try repository.fetchAll().map(\.id), [id], "failed rendering cannot change saved tasks")
+    }
+
+    func testTasksRowsKeepSavedIDsAndCompletionStatusWithoutControlsOrWrites() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataTaskRepository(container: container)
+        let openID = try repository.create(title: "Open task", plannedFor: nil)
+        let completedID = UUID()
+        let context = ModelContext(container)
+        context.insert(try TaskItem(id: completedID, title: "Finished task", createdAt: .now,
+                                    completedAt: .now))
+        try context.save()
+        let before = try repository.fetchAll().map(TaskRow.init)
+        try inspectTasks(repository) { window in
+            let text = visibleText(in: window)
+            XCTAssertFalse(text.contains("No tasks captured yet."))
+            XCTAssertFalse(text.contains("Error: Content could not be loaded."))
+            for id in [openID, completedID] {
+                XCTAssertEqual(elements(in: window, identifier: "task-row-\(id.uuidString)").count, 1)
+            }
+            let complete = try XCTUnwrap(elements(in: window, identifier: "task-row-\(completedID.uuidString)").first)
+            let open = try XCTUnwrap(elements(in: window, identifier: "task-row-\(openID.uuidString)").first)
+            let completedName = (attribute(complete, kAXDescriptionAttribute) as? String ?? "") +
+                (attribute(complete, kAXValueAttribute) as? String ?? "")
+            XCTAssertTrue(completedName.contains("Finished task"))
+            XCTAssertTrue(completedName.contains("Success: Completed"), "status retains text and meaning")
+            XCTAssertFalse((attribute(open, kAXDescriptionAttribute) as? String ?? "").contains("Completed"))
+            XCTAssertFalse((attribute(open, kAXValueAttribute) as? String ?? "").contains("Completed"))
+            XCTAssertFalse(text.contains("Due"), "an unassigned due date is not a status")
+            let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+            let windows = attribute(app, kAXWindowsAttribute) as? [AXUIElement] ?? []
+            let host = try XCTUnwrap(windows.first {
+                attribute($0, kAXTitleAttribute) as? String == window.title
+            })
+            XCTAssertFalse(descendants(of: host).contains {
+                attribute($0, kAXRoleAttribute) as? String == kAXButtonRole
+            }, "read-only task rows must not expose a nonfunctional action")
+        }
+        XCTAssertEqual(try repository.fetchAll().map(TaskRow.init), before,
+                       "read-only Tasks presentation must not mutate task snapshots")
+    }
+
+    func testTasksLongTitleWrapsAtEnlargedTextAndKeepsFullAccessibleName() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataTaskRepository(container: container)
+        let title = "Investigate cancellation propagation through nested requests and document every edge case before the next review"
+        let id = try repository.create(title: title, plannedFor: nil)
+        var standardHeight: CGFloat = 0
+        try inspectTasks(repository, width: 360) { window in
+            let row = try XCTUnwrap(elements(in: window, identifier: "task-row-\(id.uuidString)").first)
+            standardHeight = try frame(row).height
+        }
+        try inspectTasks(repository, width: 360, scale: 1.3) { window in
+            let row = try XCTUnwrap(elements(in: window, identifier: "task-row-\(id.uuidString)").first)
+            let bounds = try frame(row)
+            XCTAssertGreaterThan(bounds.height, standardHeight, "text scaling grows the wrapped row")
+            XCTAssertGreaterThan(bounds.height, AppMetrics.preferredTarget, "long title uses multiple lines")
+            XCTAssertLessThanOrEqual(bounds.width, 360 - 2 * AppMetrics.horizontalInset + 1)
+            XCTAssertTrue((attribute(row, kAXDescriptionAttribute) as? String ?? "").contains(title) ||
+                          (attribute(row, kAXValueAttribute) as? String ?? "").contains(title))
+        }
+        XCTAssertEqual(try repository.fetchAll().map(\.id), [id])
     }
 
     func testLocalDayDueBoundaryCompletionAndRepositoryOrder() throws {
