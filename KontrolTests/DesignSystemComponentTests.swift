@@ -338,6 +338,81 @@ final class DesignSystemComponentTests: XCTestCase {
         XCTAssertNotEqual(rendered[0], rendered[1], "static track must render differently from animated spinner")
     }
 
+    func testUndoOnlyInvokesCallerWhenAvailableAndNeverPublishesSuccess() throws {
+        var calls = 0
+        for (available, busy) in [(true, false), (false, false), (true, true)] {
+            try inspect(UndoAffordance("  Task updated  ", isAvailable: available, isBusy: busy) {
+                calls += 1
+            }.frame(width: 200).padding().environment(\.appTextScaleOverride, 1.3), width: 240) { _, nodes in
+                XCTAssertEqual(nodes.filter { attribute($0, kAXDescriptionAttribute) as? String == "Success: Task updated" ||
+                    attribute($0, kAXValueAttribute) as? String == "Success: Task updated" }.count, 1)
+                XCTAssertFalse(nodes.contains { attribute($0, kAXDescriptionAttribute) as? String == "checkmark.circle" })
+                let button = try XCTUnwrap(nodes.first { attribute($0, kAXRoleAttribute) as? String == kAXButtonRole })
+                XCTAssertEqual(attribute(button, kAXDescriptionAttribute) as? String, "Undo")
+                XCTAssertEqual((attribute(button, kAXEnabledAttribute) as? NSNumber)?.boolValue, available && !busy)
+                XCTAssertGreaterThanOrEqual(try frame(button).height, AppMetrics.minimumTarget)
+                XCTAssertEqual(attribute(button, kAXValueAttribute) as? String, busy ? "In progress" : "")
+                _ = AXUIElementPerformAction(button, kAXPressAction as CFString)
+            }
+            XCTAssertEqual(calls, 1, "unavailable or busy Undo cannot reach caller")
+        }
+        try inspect(UndoAffordance(" \n ") { calls += 1 }.padding(), width: 240) { _, nodes in
+            XCTAssertFalse(nodes.contains { attribute($0, kAXRoleAttribute) as? String == kAXButtonRole })
+            XCTAssertFalse(nodes.contains { (attribute($0, kAXDescriptionAttribute) as? String)?.hasPrefix("Success:") == true })
+        }
+        XCTAssertEqual(calls, 1)
+    }
+
+    private struct ConfirmationFixture: View {
+        @State private var presented = false
+        let destructive: Bool
+        let onConfirm: () -> Void
+
+        var body: some View {
+            Button("Show confirmation") { presented = true }
+                .confirmationAffordance(isPresented: $presented, title: "Remove fixture?",
+                                        message: "This action needs confirmation.", confirmTitle: "Remove",
+                                        cancelTitle: "Keep", isDestructive: destructive,
+                                        onConfirm: onConfirm)
+        }
+    }
+
+    func testNativeConfirmationCancelAndConfirmHaveDistinctEffects() throws {
+        for destructive in [false, true] {
+            var confirmations = 0
+            let host = NSHostingView(rootView: ConfirmationFixture(destructive: destructive) { confirmations += 1 })
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 260),
+                                  styleMask: [.titled], backing: .buffered, defer: false)
+            window.title = "Confirmation inspection \(UUID().uuidString)"
+            window.contentView = host
+            window.makeKeyAndOrderFront(nil)
+            defer { window.orderOut(nil) }
+            host.layoutSubtreeIfNeeded()
+            let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+            func named(_ name: String) -> AXUIElement? {
+                let windows = attribute(app, kAXWindowsAttribute) as? [AXUIElement] ?? []
+                return windows.flatMap { descendants($0) }.first {
+                    attribute($0, kAXRoleAttribute) as? String == kAXButtonRole &&
+                    attribute($0, kAXDescriptionAttribute) as? String == name
+                }
+            }
+            for (choice, expected) in [("Keep", 0), ("Remove", 1)] {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+                let trigger = try XCTUnwrap(named("Show confirmation"))
+                XCTAssertEqual(AXUIElementPerformAction(trigger, kAXPressAction as CFString), .success)
+                RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+                let button = try XCTUnwrap(named(choice), "native alert must expose explicit \(choice) button")
+                XCTAssertEqual((attribute(button, kAXEnabledAttribute) as? NSNumber)?.boolValue, true)
+                // Native alerts may invalidate their AX button while AXPress is returning
+                // (cannotComplete); the observable contract is dismissal and callback count.
+                _ = AXUIElementPerformAction(button, kAXPressAction as CFString)
+                RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+                XCTAssertEqual(confirmations, expected, "only confirm reaches the caller")
+                XCTAssertNil(named("Keep"), "alert dismissed and caller binding reset")
+            }
+        }
+    }
+
     func testIconLabelHasOneNameWithoutSymbolAnnouncement() throws {
         try inspect(IconLabel(title: "Learning", symbol: "book"), width: 300) { _, nodes in
             let named = nodes.filter { attribute($0, kAXDescriptionAttribute) as? String == "Learning" ||
