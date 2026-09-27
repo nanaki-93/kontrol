@@ -1,13 +1,13 @@
 import SwiftUI
 
-/// Small, semantic subset of the approved Black / Red Terminal direction.
+/// Temporary compatibility forwarding while existing destinations migrate to AppColors.
 enum FoundationStyle {
-    static let background = Color(red: 0.045, green: 0.045, blue: 0.052)
-    static let surface = Color(red: 0.075, green: 0.068, blue: 0.076)
-    static let primary = Color(red: 0.87, green: 0.85, blue: 0.85)
-    static let secondary = Color(red: 0.68, green: 0.65, blue: 0.66)
-    static let border = Color(red: 0.18, green: 0.14, blue: 0.16)
-    static let accent = Color(red: 0.95, green: 0.36, blue: 0.39)
+    static let background = AppColors.background
+    static let surface = AppColors.surface
+    static let primary = AppColors.textPrimary
+    static let secondary = AppColors.textSecondary
+    static let border = AppColors.border
+    static let accent = AppColors.accent
 
     static let horizontalInset: CGFloat = 32
 
