@@ -41,59 +41,61 @@ struct LearningTopicSummary: Identifiable, Equatable {
 /// M43: unframed, read-only starter rows in the M00 shell; M15's active choices belong to F05.
 struct LearningView: View {
     let container: ModelContainer
+    /// A caller-supplied reader permits isolated empty/failure presentation tests.
+    /// Production still reads the current offline SwiftData definitions.
+    private let load: @MainActor (ModelContainer) throws -> [LearningTopicSummary]
     @State private var topics: [LearningTopicSummary] = []
     @State private var loadFailed = false
 
+    init(container: ModelContainer,
+         load: @escaping @MainActor (ModelContainer) throws -> [LearningTopicSummary] = LearningTopicSummary.load) {
+        self.container = container
+        self.load = load
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            FoundationStyle.heading("Learning")
-            Text("Included starter content · available offline")
-                .foregroundStyle(FoundationStyle.secondary)
+        VStack(alignment: .leading, spacing: AppMetrics.space4) {
+            PageHeader("Learning")
             if loadFailed {
-                Text("Could not load starter content. Return to Learning to try again.")
-                    .foregroundStyle(FoundationStyle.secondary)
+                ErrorBanner(.readFailed)
+                Text("Return to Learning to try again.")
+                    .appTypography(.body)
+                    .foregroundStyle(AppColors.textSecondary)
             } else if topics.isEmpty {
-                Text("No starter topics are installed.")
-                    .foregroundStyle(FoundationStyle.secondary)
+                EmptyState("No starter topics are installed.", guidance: "Starter content is not available yet.")
             } else {
                 // Definitions are not active slots, progress or interactive lessons.
                 ForEach(topics) { topic in
-                    VStack(alignment: .leading, spacing: 6) {
-                        FoundationStyle.section(topic.name)
+                    VStack(alignment: .leading, spacing: AppMetrics.space2) {
+                        SectionHeader(topic.name)
                             .accessibilityIdentifier("learning-topic-\(topic.id)")
                         if topic.lessons.isEmpty {
-                            Text("No starter lesson in this topic yet.")
-                                .foregroundStyle(FoundationStyle.secondary)
+                            EmptyState("No starter lesson in this topic yet.")
                         } else {
-                            ForEach(topic.lessons) { lesson in
-                                HStack(alignment: .firstTextBaseline, spacing: 12) {
-                                    Text(lesson.title)
-                                        .foregroundStyle(FoundationStyle.primary)
-                                    Spacer(minLength: 0)
-                                    Text("\(lesson.format.capitalized) · \(lesson.estimatedMinutes) min")
-                                        .foregroundStyle(FoundationStyle.secondary)
+                            VStack(alignment: .leading, spacing: 0) {
+                                ForEach(topic.lessons) { lesson in
+                                    AppListRow(lesson.title,
+                                               metadata: "\(lesson.format.capitalized) · \(lesson.estimatedMinutes) min")
+                                        .accessibilityElement(children: .combine)
+                                        .accessibilityIdentifier("learning-lesson-\(lesson.id)")
                                 }
-                                .accessibilityElement(children: .combine)
-                                .accessibilityIdentifier("learning-lesson-\(lesson.id)")
                             }
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    Divider().overlay(FoundationStyle.border)
                 }
             }
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .font(.system(size: 15, design: .monospaced))
-        .padding(.horizontal, FoundationStyle.horizontalInset)
-        .padding(.top, 32)
+        .padding(.horizontal, AppMetrics.horizontalInset)
+        .padding(.top, AppMetrics.space8)
         .onAppear(perform: refresh)
     }
 
     private func refresh() {
         do {
-            topics = try LearningTopicSummary.load(from: container)
+            topics = try load(container)
             loadFailed = false
         } catch {
             topics = []
