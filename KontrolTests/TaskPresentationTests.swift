@@ -9,6 +9,15 @@ import XCTest
 final class TaskPresentationTests: XCTestCase {
     private enum SaveError: Error { case injected }
 
+    private final class FailingReadRepository: TaskRepository {
+        let storage: SwiftDataTaskRepository
+        init(storage: SwiftDataTaskRepository) { self.storage = storage }
+        func fetchAll() throws -> [TaskItem] { throw SaveError.injected }
+        func create(title: String, plannedFor: PlannedDay?) throws -> UUID {
+            try storage.create(title: title, plannedFor: plannedFor)
+        }
+    }
+
     private func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
         var value: CFTypeRef?
         return AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success ? value : nil
@@ -36,6 +45,72 @@ final class TaskPresentationTests: XCTestCase {
     }
 
     private func settle() { RunLoop.main.run(until: Date().addingTimeInterval(0.15)) }
+
+    private func visibleText(in window: NSWindow) -> [String] {
+        let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+        let windows = attribute(app, kAXWindowsAttribute) as? [AXUIElement] ?? []
+        guard let host = windows.first(where: { attribute($0, kAXTitleAttribute) as? String == window.title }) else {
+            return []
+        }
+        return descendants(of: host).compactMap {
+            (attribute($0, kAXValueAttribute) as? String) ?? (attribute($0, kAXDescriptionAttribute) as? String)
+        }
+    }
+
+    private func inspectToday(_ repository: any TaskRepository, at instant: Date,
+                              _ check: (NSWindow) throws -> Void) throws {
+        let host = NSHostingView(rootView: TodayView(taskRepository: repository, now: { instant }))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.title = "Today state inspection \(UUID().uuidString)"
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        host.layoutSubtreeIfNeeded()
+        settle()
+        try check(window)
+    }
+
+    func testTodayUsesRealDateSharedSectionsAndHonestEmptyStateWithoutWriting() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataTaskRepository(container: container)
+        let instant = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-01-01T12:00:00Z"))
+        try inspectToday(repository, at: instant) { window in
+            let text = visibleText(in: window)
+            XCTAssertTrue(text.contains("Today"))
+            XCTAssertTrue(text.contains(instant.formatted(.dateTime.weekday(.wide).day().month(.wide))))
+            XCTAssertTrue(text.contains("Next"))
+            XCTAssertTrue(text.contains("No tasks planned or due today."))
+            XCTAssertTrue(text.contains("Schedule"))
+            XCTAssertTrue(text.contains("Scheduling isn't available yet."))
+            XCTAssertFalse(text.contains("No blocks scheduled for today."))
+            let add = try waitForElement("today-add-task", in: window)
+            XCTAssertEqual(attribute(add, kAXRoleAttribute) as? String, kAXButtonRole)
+            XCTAssertEqual(attribute(add, kAXDescriptionAttribute) as? String, "Add task")
+            XCTAssertEqual(AXUIElementPerformAction(add, kAXPressAction as CFString), .success)
+            _ = try waitForElement("quick-capture-title", in: window)
+            XCTAssertTrue(try repository.fetchAll().isEmpty, "opening capture must not save a task")
+        }
+    }
+
+    func testTodayShowsOnlyRealDueOrPlannedTasksAndNeverCallsFailureEmpty() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let instant = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-01-01T12:00:00Z"))
+        let repository = SwiftDataTaskRepository(container: container, now: { instant })
+        let id = try repository.create(title: "Actual planned task", plannedFor: nil)
+        try inspectToday(repository, at: instant) { window in
+            XCTAssertEqual(elements(in: window, identifier: "task-row-\(id.uuidString)").count, 1)
+            XCTAssertFalse(visibleText(in: window).contains("No tasks planned or due today."))
+        }
+        try inspectToday(FailingReadRepository(storage: repository), at: instant) { window in
+            let text = visibleText(in: window)
+            XCTAssertTrue(text.contains("Error: Content could not be loaded."))
+            XCTAssertFalse(text.contains("No tasks planned or due today."))
+            XCTAssertTrue(elements(in: window, identifier: "task-row-\(id.uuidString)").isEmpty)
+            XCTAssertTrue(text.contains("Scheduling isn't available yet."))
+        }
+        XCTAssertEqual(try repository.fetchAll().map(\.id), [id], "rendering a failure must not change tasks")
+    }
 
     private func waitForElement(_ identifier: String, in window: NSWindow) throws -> AXUIElement {
         let deadline = Date().addingTimeInterval(4)
