@@ -1,23 +1,14 @@
 import AppKit
 import SwiftUI
 
-/// A blocking startup surface: the decorative navigation is intentionally not
-/// interactive until the catalog and store have both opened successfully.
+/// Blocking recovery: the frozen shell is context only, never a second navigation surface.
 struct RecoveryView: View {
     let failure: LaunchFailure
     @ObservedObject var launch: LaunchCoordinator
     var onQuit: () -> Void = { NSApp.terminate(nil) }
     var onRetry: (() -> Void)? = nil
-    @FocusState private var focusedAction: Action?
-
-    private enum Action: Hashable { case quit, retry }
-
-    private func cardOffset(for height: CGFloat) -> CGFloat {
-        // Leave room for the dimmed context at the smaller reference size.
-        if height >= 800 { return -110 }
-        if height >= 600 { return -75 }
-        return 0
-    }
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.appTextScaleOverride) private var textScaleOverride
 
     private var title: String {
         switch failure {
@@ -42,125 +33,100 @@ struct RecoveryView: View {
 
     var body: some View {
         GeometryReader { geometry in
-            // The native Settings scene is 520×340. Keep the M01 chrome at
-            // reference sizes, but give its actions priority in small windows.
             let compact = geometry.size.height < 500
+            let scale = AppTypography.scale(for: dynamicTypeSize, override: textScaleOverride)
+            let headerHeight: CGFloat = compact ? 42 : 66
+            let cardHeight = min(max(0, geometry.size.height - headerHeight - 2 * AppMetrics.space2),
+                                 compact ? 300 : (scale >= 1.3 ? 330 : 265))
             VStack(spacing: 0) {
-            HStack(spacing: 12) {
                 Text("KONTROL_")
-                    .foregroundStyle(FoundationStyle.primary)
-                Spacer()
-            }
-            .font(.system(size: 16, design: .monospaced))
-            .padding(.horizontal, FoundationStyle.horizontalInset)
-            .frame(height: compact ? 42 : 66)
-            .overlay(alignment: .bottom) { FoundationStyle.border.frame(height: 1) }
-            .accessibilityHidden(true)
+                    .appTypography(.navigation)
+                    .foregroundStyle(AppColors.textPrimary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, AppMetrics.horizontalInset)
+                    .frame(height: headerHeight)
+                    .overlay(alignment: .bottom) { AppColors.border.frame(height: 1) }
+                    .accessibilityHidden(true)
+                    .allowsHitTesting(false)
 
-            if !compact {
-            // This is M01's frozen shell context, not the usable AppShell: no
-            // destinations are reachable before the store and catalog open.
-            HStack(spacing: 0) {
-                ForEach(AppDestination.allCases, id: \.self) { destination in
-                    VStack(spacing: 0) {
-                        Label(destination.title, systemImage: destination.symbol)
-                            .frame(maxWidth: .infinity, minHeight: 65)
-                            .foregroundStyle(destination == .today
-                                ? FoundationStyle.accent : FoundationStyle.secondary)
-                        Rectangle()
-                            .fill(destination == .today ? FoundationStyle.accent : .clear)
-                            .frame(height: 2)
+                if !compact {
+                    // M01's dimmed, frozen navigation: labels are not controls or AX destinations.
+                    HStack(spacing: 0) {
+                        ForEach(AppDestination.allCases, id: \.self) { destination in
+                            VStack(spacing: 0) {
+                                Label(destination.title, systemImage: destination.symbol)
+                                    .frame(maxWidth: .infinity, minHeight: 65)
+                                    .foregroundStyle(destination == .today ? AppColors.accent : AppColors.textSecondary)
+                                Rectangle()
+                                    .fill(destination == .today ? AppColors.accent : .clear)
+                                    .frame(height: 2)
+                            }
+                        }
                     }
+                    .appTypography(.action)
+                    .padding(.horizontal, AppMetrics.space6)
+                    .frame(height: 67)
+                    .overlay(alignment: .bottom) { AppColors.border.frame(height: 1) }
+                    .accessibilityHidden(true)
+                    .allowsHitTesting(false)
+
+                    VStack(alignment: .leading, spacing: AppMetrics.space2) {
+                        Text("Kontrol").appTypography(.page)
+                        Text(contextMessage).appTypography(.action)
+                    }
+                    .foregroundStyle(AppColors.textSecondary.opacity(0.14))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, AppMetrics.horizontalInset)
+                    .padding(.top, AppMetrics.space8)
+                    .accessibilityHidden(true)
+                    .allowsHitTesting(false)
                 }
-            }
-            .font(.system(size: 14, design: .monospaced))
-            .padding(.horizontal, 20)
-            .frame(height: 67)
-            .overlay(alignment: .bottom) { FoundationStyle.border.frame(height: 1) }
-            .accessibilityHidden(true)
-            .allowsHitTesting(false)
 
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Kontrol")
-                    .font(.system(size: 30, weight: .semibold, design: .monospaced))
-                Text(contextMessage)
-                    .font(.system(size: 14, design: .monospaced))
-            }
-            .foregroundStyle(FoundationStyle.secondary.opacity(0.14))
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, FoundationStyle.horizontalInset)
-            .padding(.top, 32)
-            .accessibilityHidden(true)
-            .allowsHitTesting(false)
-            }
-
-            Spacer(minLength: compact ? 8 : 16)
-            VStack(alignment: .leading, spacing: 12) {
-                Text(title)
-                    .font(.system(size: 25, weight: .medium, design: .monospaced))
-                    .foregroundStyle(FoundationStyle.primary)
-                    .accessibilityAddTraits(.isHeader)
-                    .accessibilityIdentifier("recovery-title")
-                Text(guidance)
-                    .font(.system(size: 16, design: .monospaced))
-                    .foregroundStyle(FoundationStyle.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("recovery-guidance")
-                Spacer(minLength: compact ? 8 : 24)
-                HStack(spacing: 10) {
-                    Button("Quit", action: onQuit)
-                        .buttonStyle(.plain)
-                        .padding(.horizontal, 14)
-                        .frame(minHeight: 36)
-                        .background(FoundationStyle.background)
-                        .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(FoundationStyle.border))
-                        .focusable()
-                        .focused($focusedAction, equals: .quit)
-                        .overlay {
-                            if focusedAction == .quit {
-                                RoundedRectangle(cornerRadius: 4)
-                                    .strokeBorder(FoundationStyle.primary, lineWidth: 2)
-                                    .allowsHitTesting(false)
-                            }
+                Spacer(minLength: AppMetrics.space2)
+                VStack(alignment: .leading, spacing: AppMetrics.space3) {
+                    // Only the copy scrolls. Quit and Retry stay pinned even when the
+                    // title wraps or system text size grows inside the compact scene.
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: AppMetrics.space3) {
+                            Text(title)
+                                .appTypography(.dialog)
+                                .foregroundStyle(AppColors.textPrimary)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .accessibilityAddTraits(.isHeader)
+                                .accessibilityIdentifier("recovery-title")
+                            Text(guidance)
+                                .appTypography(.body)
+                                .foregroundStyle(AppColors.textSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .accessibilityIdentifier("recovery-guidance")
                         }
-                        .accessibilityIdentifier("recovery-quit")
-                    Button("Try again") {
-                        if let onRetry { onRetry() }
-                        else { Task { await launch.retry() } }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                        .buttonStyle(.plain)
-                        .padding(.horizontal, 14)
-                        .frame(minHeight: 36)
-                        .foregroundStyle(FoundationStyle.background)
-                        .background(FoundationStyle.accent, in: RoundedRectangle(cornerRadius: 4))
-                        .focusable()
-                        .focused($focusedAction, equals: .retry)
-                        .overlay {
-                            if focusedAction == .retry {
-                                RoundedRectangle(cornerRadius: 4)
-                                    .strokeBorder(FoundationStyle.primary, lineWidth: 2)
-                                    .allowsHitTesting(false)
-                            }
+                    HStack(spacing: AppMetrics.space2) {
+                        ActionButton("Quit", action: onQuit)
+                            .accessibilityIdentifier("recovery-quit")
+                        ActionButton("Try again", variant: .primary,
+                                     isEnabled: launch.state != .opening,
+                                     isBusy: launch.state == .opening) {
+                            // The coordinator also gates retry synchronously before suspension.
+                            guard launch.state != .opening else { return }
+                            if let onRetry { onRetry() }
+                            else { Task { await launch.retry() } }
                         }
-                        .disabled(launch.state == .opening)
                         .accessibilityIdentifier("recovery-retry")
+                    }
                 }
-                .font(.system(size: 14, design: .monospaced))
-                .foregroundStyle(FoundationStyle.primary)
+                .padding(compact ? AppMetrics.space4 : AppMetrics.space6)
+                .frame(maxWidth: 680, alignment: .leading)
+                .frame(height: cardHeight)
+                .background(AppColors.surface, in: RoundedRectangle(cornerRadius: AppMetrics.mediumRadius))
+                .overlay(RoundedRectangle(cornerRadius: AppMetrics.mediumRadius).strokeBorder(AppColors.border))
+                .padding(.horizontal, AppMetrics.space6)
+                Spacer(minLength: AppMetrics.space2)
             }
-            .padding(compact ? 18 : 28)
-            .frame(maxWidth: 680, minHeight: compact ? 0 : 190,
-                   maxHeight: compact ? nil : 265, alignment: .topLeading)
-            .background(FoundationStyle.surface, in: RoundedRectangle(cornerRadius: 7))
-            .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(FoundationStyle.border))
-            .padding(.horizontal, 24)
-            .offset(y: compact ? 0 : cardOffset(for: geometry.size.height))
-            Spacer(minLength: compact ? 8 : 16)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(FoundationStyle.background)
-        .preferredColorScheme(.dark)
-        .onAppear { focusedAction = .retry }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(AppColors.background)
+            .preferredColorScheme(.dark)
         }
     }
 }

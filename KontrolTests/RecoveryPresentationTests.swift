@@ -150,16 +150,73 @@ final class RecoveryPresentationTests: XCTestCase {
             let path = directory.appendingPathComponent("store-\(Int(size.width))x\(Int(size.height)).png")
             try XCTUnwrap(image.representation(using: .png, properties: [:])).write(to: path)
             XCTAssertEqual(host.frame.size, size)
-            // Guard the M01 shell cues as well as the card. A uniformly dim
-            // navigation bar and blank backdrop previously passed this test.
-            let underline = image.colorAt(x: 80, y: 131)?.usingColorSpace(.deviceRGB)
-            let otherTab = image.colorAt(x: 245, y: 131)?.usingColorSpace(.deviceRGB)
-            XCTAssertGreaterThan(try XCTUnwrap(underline).redComponent,
-                                 try XCTUnwrap(otherTab).redComponent + 0.2)
-            let headingInk = (55..<200).flatMap { x in
-                (175..<215).compactMap { y in image.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB)?.redComponent }
+            // Check the cues by region rather than a single layout-dependent pixel.
+            let accentPixels = (20..<Int(size.width - 20)).filter { x in
+                (65..<135).contains { y in
+                    guard let c = image.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { return false }
+                    return c.redComponent > c.greenComponent + 0.12 && c.redComponent > 0.3
+                }
             }
-            XCTAssertGreaterThan(headingInk.max() ?? 0, 0.08, "Dimmed shell heading must remain visible")
+            XCTAssertGreaterThan(accentPixels.count, 20, "Frozen shell retains the Today accent")
+            let dimInk = (30..<min(350, Int(size.width / 2))).contains { x in
+                (155..<min(300, Int(size.height / 2))).contains { y in
+                    guard let c = image.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { return false }
+                    return c.redComponent > 0.055 && c.redComponent < 0.3
+                }
+            }
+            XCTAssertTrue(dimInk, "Frozen shell context must remain visible")
+        }
+    }
+
+    private func assertActionsVisible(in window: NSWindow) throws {
+        let screenTop = try XCTUnwrap(window.screen).frame.maxY
+        let windowFrame = CGRect(x: window.frame.minX, y: screenTop - window.frame.maxY,
+                                 width: window.frame.width, height: window.frame.height)
+        for id in ["recovery-quit", "recovery-retry"] {
+            let action = try identified(id, in: window)
+            let position = unsafeBitCast(try XCTUnwrap(attribute(action, kAXPositionAttribute)), to: AXValue.self)
+            let size = unsafeBitCast(try XCTUnwrap(attribute(action, kAXSizeAttribute)), to: AXValue.self)
+            var origin = CGPoint.zero
+            var dimensions = CGSize.zero
+            XCTAssertTrue(AXValueGetValue(position, .cgPoint, &origin))
+            XCTAssertTrue(AXValueGetValue(size, .cgSize, &dimensions))
+            let frame = CGRect(origin: origin, size: dimensions)
+            XCTAssertGreaterThanOrEqual(frame.width, AppMetrics.minimumTarget)
+            XCTAssertGreaterThanOrEqual(frame.height, AppMetrics.minimumTarget)
+            XCTAssertTrue(windowFrame.contains(frame), "\(id) clipped: \(frame), window: \(windowFrame)")
+        }
+    }
+
+    func testEnlargedRecoveryKeepsBothActionsVisibleAndFocusable() async throws {
+        let launch = LaunchCoordinator(open: { throw Injected.unavailable })
+        await launch.start()
+        for size in [CGSize(width: 520, height: 340), CGSize(width: 1000, height: 700),
+                     CGSize(width: 1440, height: 940)] {
+            let recovery = window(for: RecoveryView(failure: .store, launch: launch)
+                .environment(\.appTextScaleOverride, 1.3), size: size)
+            defer { recovery.orderOut(nil) }
+            settle()
+            try assertActionsVisible(in: recovery)
+            XCTAssertFalse(try elements(in: recovery).contains {
+                (attribute($0, kAXIdentifierAttribute) as? String)?.hasPrefix("navigation-") == true
+            })
+            XCTAssertEqual(attribute(try identified("recovery-retry", in: recovery), kAXEnabledAttribute) as? NSNumber, true)
+            // Tab visits only Quit and Retry; frozen shell cannot take focus.
+            let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+            let initial = attribute(app, kAXFocusedUIElementAttribute)
+            XCTAssertEqual(attribute(unsafeBitCast(try XCTUnwrap(initial), to: AXUIElement.self),
+                                     kAXIdentifierAttribute) as? String, "recovery-quit")
+            recovery.selectNextKeyView(nil)
+            settle()
+            let first = attribute(app, kAXFocusedUIElementAttribute)
+            XCTAssertEqual(attribute(unsafeBitCast(try XCTUnwrap(first), to: AXUIElement.self),
+                                     kAXIdentifierAttribute) as? String, "recovery-retry")
+            recovery.selectNextKeyView(nil)
+            settle()
+            let second = attribute(app, kAXFocusedUIElementAttribute)
+            XCTAssertEqual(attribute(unsafeBitCast(try XCTUnwrap(second), to: AXUIElement.self),
+                                     kAXIdentifierAttribute) as? String, "recovery-quit")
+            recovery.orderOut(nil)
         }
     }
 
@@ -192,8 +249,6 @@ final class RecoveryPresentationTests: XCTestCase {
         XCTAssertTrue(guidance.contains("not been reset"))
         // Both actions participate in native keyboard focus, in visible order.
         recovery.makeKeyAndOrderFront(nil)
-        recovery.selectNextKeyView(nil)
-        settle()
         let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
         var focused: CFTypeRef?
         XCTAssertEqual(AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &focused), .success)
@@ -205,26 +260,15 @@ final class RecoveryPresentationTests: XCTestCase {
         XCTAssertEqual(AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &focused), .success)
         XCTAssertEqual(attribute(unsafeBitCast(try XCTUnwrap(focused), to: AXUIElement.self),
                                  kAXIdentifierAttribute) as? String, "recovery-retry")
+        recovery.selectNextKeyView(nil)
+        settle()
+        focused = nil
+        XCTAssertEqual(AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &focused), .success)
+        XCTAssertEqual(attribute(unsafeBitCast(try XCTUnwrap(focused), to: AXUIElement.self),
+                                 kAXIdentifierAttribute) as? String, "recovery-quit")
         let quit = try identified("recovery-quit", in: recovery)
         XCTAssertEqual(attribute(quit, kAXRoleAttribute) as? String, kAXButtonRole)
-        // In the compact Settings size both controls must be on-screen, not
-        // merely present in the accessibility hierarchy below the clip.
-        for action in [quit, try identified("recovery-retry", in: recovery)] {
-            let position = unsafeBitCast(try XCTUnwrap(attribute(action, kAXPositionAttribute)), to: AXValue.self)
-            let size = unsafeBitCast(try XCTUnwrap(attribute(action, kAXSizeAttribute)), to: AXValue.self)
-            var origin = CGPoint.zero
-            var dimensions = CGSize.zero
-            XCTAssertTrue(AXValueGetValue(position, .cgPoint, &origin))
-            XCTAssertTrue(AXValueGetValue(size, .cgSize, &dimensions))
-            let frame = CGRect(origin: origin, size: dimensions)
-            // AX uses a top-left screen origin; NSWindow.frame uses a
-            // bottom-left origin. Compare in AX's coordinate system.
-            let screenTop = try XCTUnwrap(recovery.screen).frame.maxY
-            let windowFrame = CGRect(x: recovery.frame.minX,
-                                     y: screenTop - recovery.frame.maxY,
-                                     width: recovery.frame.width, height: recovery.frame.height)
-            XCTAssertTrue(windowFrame.contains(frame), "Recovery action must fit in Settings: \(frame), window: \(windowFrame)")
-        }
+        try assertActionsVisible(in: recovery)
         XCTAssertEqual(AXUIElementPerformAction(quit, kAXPressAction as CFString), .success)
         settle()
         XCTAssertEqual(quits, 1)
