@@ -67,6 +67,32 @@ final class LaunchRecoveryTests: XCTestCase {
         XCTAssertEqual(tasks.map(\.id), [UUID(uuidString: "D07A6D98-65ED-4B59-92B2-DA3CED39F3E5")!])
     }
 
+    func testSignedAppDebugInjectionIsOptInAndUsesOnlyAnIsolatedStore() async throws {
+        let work = FileManager.default.temporaryDirectory
+            .appendingPathComponent("KontrolSignedRecovery-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: work, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: work) }
+
+        let coordinator = makeAppLaunchCoordinator(
+            environment: ["KONTROL_F00_RECOVERY_TEST": "1"], temporaryDirectory: work)
+        await coordinator.start()
+        XCTAssertEqual(coordinator.state, .failed(.store))
+        XCTAssertNil(coordinator.dependencies)
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: work.path).isEmpty,
+                      "Injected first open must do no disk IO")
+        await coordinator.retry()
+        XCTAssertEqual(coordinator.state, .ready)
+        let directories = try FileManager.default.contentsOfDirectory(
+            at: work, includingPropertiesForKeys: nil)
+        XCTAssertEqual(directories.count, 1)
+        let directory = try XCTUnwrap(directories.first)
+        XCTAssertTrue(directory.lastPathComponent.hasPrefix("KontrolF00Recovery-"))
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: directory.appendingPathComponent("Kontrol.store").path))
+        await coordinator.start()
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: work.path).count, 1)
+    }
+
     func testCatalogFailureSerializesRepeatedRetriesAndRetainsOpenedStore() async throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         var opens = 0
