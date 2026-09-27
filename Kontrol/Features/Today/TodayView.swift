@@ -6,6 +6,7 @@ struct TodayView: View {
     var calendar: () -> Calendar = { .current }
     var timeZone: () -> TimeZone = { .current }
     @State private var showingCapture = false
+    @FocusState private var addTaskFocused: Bool
     @State private var rows: [TaskRow] = []
     @State private var loadFailed = false
     @State private var displayedDate = Date.now
@@ -17,6 +18,7 @@ struct TodayView: View {
                     showingCapture = true
                 }
                 .accessibilityIdentifier("today-add-task")
+                .focused($addTaskFocused)
             }
 
             SectionHeader("Next")
@@ -40,7 +42,10 @@ struct TodayView: View {
         .padding(.horizontal, AppMetrics.horizontalInset)
         .padding(.top, AppMetrics.space8)
         .onAppear(perform: refresh)
-        .sheet(isPresented: $showingCapture) {
+        .sheet(isPresented: $showingCapture, onDismiss: {
+            // Wait for the native sheet to finish closing before returning keyboard focus.
+            addTaskFocused = true
+        }) {
             QuickCaptureView(repository: taskRepository, onCancel: {
                 showingCapture = false
             }, onSaved: {

@@ -70,6 +70,45 @@ final class QuickCaptureTests: XCTestCase {
                              file: file, line: line)
     }
 
+    private func focusedIdentifier() -> String? {
+        let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+        guard let focused = attribute(app, kAXFocusedUIElementAttribute) else { return nil }
+        return attribute(unsafeBitCast(focused, to: AXUIElement.self), kAXIdentifierAttribute) as? String
+    }
+
+    private func frame(of element: AXUIElement) throws -> CGRect {
+        let position = try XCTUnwrap(attribute(element, kAXPositionAttribute))
+        let size = try XCTUnwrap(attribute(element, kAXSizeAttribute))
+        var point = CGPoint.zero
+        var dimensions = CGSize.zero
+        XCTAssertTrue(AXValueGetValue(unsafeBitCast(position, to: AXValue.self), .cgPoint, &point))
+        XCTAssertTrue(AXValueGetValue(unsafeBitCast(size, to: AXValue.self), .cgSize, &dimensions))
+        return CGRect(origin: point, size: dimensions)
+    }
+
+    private func scrollViews(in view: NSView) -> [NSScrollView] {
+        ((view as? NSScrollView).map { [$0] } ?? [])
+            + view.subviews.flatMap { scrollViews(in: $0) }
+    }
+
+    // AX coordinates use a top-left screen origin; compare both actions with the
+    // native sheet frame after converting to the same coordinate space.
+    private func assertVisibleActions(in window: NSWindow, file: StaticString = #filePath,
+                                      line: UInt = #line) throws {
+        let sheet = try XCTUnwrap(window.attachedSheet, file: file, line: line)
+        let screen = try XCTUnwrap(sheet.screen, file: file, line: line)
+        let native = sheet.frame
+        let sheetFrame = CGRect(x: native.minX, y: screen.frame.maxY - native.maxY,
+                                width: native.width, height: native.height)
+        for id in ["quick-capture-cancel", "quick-capture-add"] {
+            let action = try frame(of: waitForElement(id, in: window, file: file, line: line))
+            XCTAssertGreaterThanOrEqual(action.width, 32, file: file, line: line)
+            XCTAssertGreaterThanOrEqual(action.height, 32, file: file, line: line)
+            XCTAssertTrue(sheetFrame.insetBy(dx: -2, dy: -2).contains(action),
+                          "\(id) \(action) outside sheet \(sheetFrame)", file: file, line: line)
+        }
+    }
+
     func testBlankDraftNeverSaves() throws {
         let repository = try RecordingRepository()
         let draft = QuickCaptureDraft(repository: repository)
@@ -134,14 +173,22 @@ final class QuickCaptureTests: XCTestCase {
         XCTAssertEqual(repository.calls.count, 1)
         XCTAssertTrue(try repository.fetchAll().isEmpty)
         XCTAssertNotNil(window.attachedSheet)
-        _ = try waitForElement("quick-capture-error", in: window)
+        let error = try waitForElement("quick-capture-error", in: window)
+        XCTAssertTrue((attribute(error, kAXDescriptionAttribute) as? String ?? "")
+            .contains("Error") || (attribute(error, kAXValueAttribute) as? String ?? "")
+            .contains("Error") || descendants(of: error).contains {
+                (attribute($0, kAXDescriptionAttribute) as? String ?? "").contains("Error")
+            })
         XCTAssertEqual(attribute(try waitForElement("quick-capture-title", in: window), kAXValueAttribute) as? String,
                        "  Retry me  ")
+        XCTAssertEqual(focusedIdentifier(), "quick-capture-title")
+        try assertVisibleActions(in: window)
         repository.fail = false
         XCTAssertEqual(AXUIElementPerformAction(try waitForElement("quick-capture-add", in: window),
                                                  kAXPressAction as CFString), .success)
         settle()
         XCTAssertNil(window.attachedSheet)
+        XCTAssertEqual(focusedIdentifier(), "today-add-task")
         XCTAssertEqual(repository.calls.count, 2)
         XCTAssertEqual(try repository.fetchAll().map(\.title), ["Retry me"])
     }
@@ -192,5 +239,93 @@ final class QuickCaptureTests: XCTestCase {
         XCTAssertNil(element("quick-capture-title", in: window))
         XCTAssertTrue(repository.calls.isEmpty)
         XCTAssertTrue(try repository.fetchAll().isEmpty)
+        XCTAssertEqual(focusedIdentifier(), "today-add-task")
+    }
+
+    func testSheetGrowsWithTextAndScrollsBeforeHidingActions() throws {
+        var heights: [CGFloat] = []
+        for scale in [1.0, 1.3, 4.0] {
+            let repository = try RecordingRepository()
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
+                                  styleMask: [.titled], backing: .buffered, defer: false)
+            window.title = "Capture scale \(scale)"
+            let host = NSHostingView(rootView: TodayView(taskRepository: repository)
+                .environment(\.appTextScaleOverride, scale))
+            window.contentView = host
+            window.makeKeyAndOrderFront(nil)
+            defer { window.orderOut(nil) }
+            host.layoutSubtreeIfNeeded()
+            XCTAssertEqual(AXUIElementPerformAction(try waitForElement("today-add-task", in: window),
+                                                     kAXPressAction as CFString), .success)
+            _ = try waitForElement("quick-capture-title", in: window)
+            heights.append(try XCTUnwrap(window.attachedSheet).frame.height)
+            try assertVisibleActions(in: window)
+            XCTAssertEqual(focusedIdentifier(), "quick-capture-title")
+            if scale == 4.0 {
+                repository.fail = true
+                XCTAssertEqual(AXUIElementSetAttributeValue(try waitForElement("quick-capture-title", in: window),
+                                                           kAXValueAttribute as CFString,
+                                                           "Still editable" as CFString), .success)
+                RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+                XCTAssertEqual(AXUIElementPerformAction(try waitForElement("quick-capture-add", in: window),
+                                                         kAXPressAction as CFString), .success)
+                RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+                _ = try waitForElement("quick-capture-error", in: window)
+                let sheet = try XCTUnwrap(window.attachedSheet)
+                XCTAssertLessThan(sheet.frame.height, 700)
+                let scrolls = scrollViews(in: try XCTUnwrap(sheet.contentView))
+                XCTAssertTrue(scrolls.contains {
+                    ($0.documentView?.bounds.height ?? 0) > $0.contentView.bounds.height + 1
+                }, "Oversized fields and error must scroll inside the bounded sheet")
+                try assertVisibleActions(in: window)
+                XCTAssertEqual(focusedIdentifier(), "quick-capture-title")
+            }
+        }
+        XCTAssertGreaterThan(heights[1], heights[0], "The sheet must respond to larger rendered type")
+        XCTAssertGreaterThanOrEqual(heights[2], heights[1])
+        XCTAssertLessThan(heights[2], 700, "The scroll region must bound the sheet at extreme text sizes")
+    }
+
+    func testEnlargedCaptureKeepsFieldsAndActionsReachableOnCompactAndReferenceHosts() throws {
+        for (width, height) in [(1000.0, 700.0), (1440.0, 940.0)] {
+            let repository = try RecordingRepository()
+            repository.fail = true
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: height),
+                                  styleMask: [.titled], backing: .buffered, defer: false)
+            window.title = "Enlarged capture \(width)"
+            let host = NSHostingView(rootView: TodayView(taskRepository: repository)
+                .environment(\.appTextScaleOverride, 1.3))
+            window.contentView = host
+            window.makeKeyAndOrderFront(nil)
+            defer { window.orderOut(nil) }
+            host.layoutSubtreeIfNeeded()
+            XCTAssertEqual(AXUIElementPerformAction(try waitForElement("today-add-task", in: window),
+                                                     kAXPressAction as CFString), .success)
+            let title = try waitForElement("quick-capture-title", in: window)
+            XCTAssertEqual(focusedIdentifier(), "quick-capture-title")
+            XCTAssertEqual(attribute(title, kAXRoleAttribute) as? String, kAXTextFieldRole)
+            XCTAssertNotNil(try waitForElement("quick-capture-plan", in: window))
+            XCTAssertNotNil(try waitForElement("quick-capture-due", in: window))
+            try assertVisibleActions(in: window)
+            XCTAssertEqual((attribute(try waitForElement("quick-capture-add", in: window),
+                                      kAXEnabledAttribute) as? NSNumber)?.boolValue, false)
+            XCTAssertEqual(AXUIElementSetAttributeValue(title, kAXValueAttribute as CFString,
+                                                       "Keep typing" as CFString), .success)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+            XCTAssertEqual(AXUIElementPerformAction(try waitForElement("quick-capture-add", in: window),
+                                                     kAXPressAction as CFString), .success)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+            XCTAssertNotNil(window.attachedSheet)
+            XCTAssertEqual(focusedIdentifier(), "quick-capture-title")
+            _ = try waitForElement("quick-capture-error", in: window)
+            try assertVisibleActions(in: window)
+            XCTAssertEqual(AXUIElementPerformAction(try waitForElement("quick-capture-cancel", in: window),
+                                                     kAXPressAction as CFString), .success)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+            XCTAssertNil(window.attachedSheet)
+            XCTAssertEqual(focusedIdentifier(), "today-add-task")
+            XCTAssertEqual(repository.calls.count, 1)
+            XCTAssertTrue(try repository.fetchAll().isEmpty)
+        }
     }
 }

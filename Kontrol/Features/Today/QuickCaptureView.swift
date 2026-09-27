@@ -28,8 +28,17 @@ final class QuickCaptureDraft: ObservableObject {
     }
 }
 
+private struct CaptureContentHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
 struct QuickCaptureView: View {
     @StateObject private var draft: QuickCaptureDraft
+    // An initial estimate avoids opening a one-point sheet before the first measurement.
+    @State private var fieldsHeight: CGFloat = 200
     let onCancel: () -> Void
     let onSaved: () -> Void
     @FocusState private var titleFocused: Bool
@@ -41,52 +50,70 @@ struct QuickCaptureView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: AppMetrics.space4) {
             Text("New task")
-                .font(.system(size: 24, design: .monospaced))
+                .appTypography(.dialog)
                 .accessibilityAddTraits(.isHeader)
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Title")
-                TextField("Title", text: $draft.title)
-                    .textFieldStyle(.roundedBorder)
-                    .focused($titleFocused)
-                    .accessibilityIdentifier("quick-capture-title")
+            // Measure the fields at their natural height, but cap the scroll region so
+            // the native sheet can always keep its actions outside the overflow area.
+            ScrollView {
+                VStack(alignment: .leading, spacing: AppMetrics.space4) {
+                    VStack(alignment: .leading, spacing: AppMetrics.space2) {
+                        Text("Title")
+                        TextField("Title", text: $draft.title)
+                            .textFieldStyle(.roundedBorder)
+                            .focused($titleFocused)
+                            .accessibilityIdentifier("quick-capture-title")
+                    }
+                    VStack(alignment: .leading, spacing: AppMetrics.space2) {
+                        Text("Plan for")
+                        Text("Today")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .accessibilityLabel("Plan for Today")
+                            .accessibilityIdentifier("quick-capture-plan")
+                    }
+                    VStack(alignment: .leading, spacing: AppMetrics.space2) {
+                        Text("Due")
+                        Text("None")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .accessibilityLabel("Due None")
+                            .accessibilityIdentifier("quick-capture-due")
+                    }
+                    if draft.errorMessage != nil {
+                        ErrorBanner(.saveFailed)
+                            .accessibilityIdentifier("quick-capture-error")
+                        Text("Your title is still here; try again.")
+                            .appTypography(.metadata)
+                            .foregroundStyle(AppColors.textSecondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background {
+                    GeometryReader { geometry in
+                        Color.clear.preference(key: CaptureContentHeightKey.self,
+                                               value: geometry.size.height)
+                    }
+                }
             }
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Plan for")
-                Text("Today")
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .accessibilityLabel("Plan for Today")
-                    .accessibilityIdentifier("quick-capture-plan")
-            }
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Due")
-                Text("None")
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .accessibilityLabel("Due None")
-                    .accessibilityIdentifier("quick-capture-due")
-            }
-            if let error = draft.errorMessage {
-                Text(error)
-                    .foregroundStyle(FoundationStyle.accent)
-                    .accessibilityIdentifier("quick-capture-error")
-            }
-            Spacer(minLength: 16)
-            HStack(spacing: 12) {
-                Button("Cancel", action: onCancel)
+            // Only the fields scroll; the header and native actions stay visible.
+            .frame(height: min(fieldsHeight, 400))
+            .onPreferenceChange(CaptureContentHeightKey.self) { fieldsHeight = $0 }
+            HStack(spacing: AppMetrics.space3) {
+                ActionButton("Cancel", action: onCancel)
                     .keyboardShortcut(.cancelAction)
                     .accessibilityIdentifier("quick-capture-cancel")
-                Button("Add") { draft.add(onSuccess: onSaved) }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(!draft.canAdd)
-                    .accessibilityIdentifier("quick-capture-add")
+                ActionButton("Add", variant: .primary, isEnabled: draft.canAdd) {
+                    draft.add(onSuccess: onSaved)
+                }
+                .keyboardShortcut(.defaultAction)
+                .accessibilityIdentifier("quick-capture-add")
             }
         }
-        .font(.system(size: 14, design: .monospaced))
-        .padding(28)
-        .frame(width: 520, height: 350)
-        .background(FoundationStyle.surface)
-        .foregroundStyle(FoundationStyle.primary)
+        .appTypography(.body)
+        .padding(AppMetrics.contentInset)
+        .frame(width: 520)
+        .background(AppColors.surface)
+        .foregroundStyle(AppColors.textPrimary)
         .onAppear { titleFocused = true }
     }
 }
