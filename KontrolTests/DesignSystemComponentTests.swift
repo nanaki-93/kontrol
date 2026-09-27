@@ -243,6 +243,101 @@ final class DesignSystemComponentTests: XCTestCase {
         }
     }
 
+    func testEmptyStateOmitsBlankGuidanceAndHasNoImplicitAction() throws {
+        try inspect(VStack {
+            EmptyState("No tasks yet")
+            EmptyState("No topics yet", guidance: "  \n ")
+        }.frame(width: 240).padding(), width: 280) { _, nodes in
+            for title in ["No tasks yet", "No topics yet"] {
+                XCTAssertEqual(nodes.filter { attribute($0, kAXValueAttribute) as? String == title ||
+                    attribute($0, kAXDescriptionAttribute) as? String == title }.count, 1)
+            }
+            XCTAssertFalse(nodes.contains { attribute($0, kAXRoleAttribute) as? String == kAXButtonRole })
+            XCTAssertFalse(nodes.contains { attribute($0, kAXValueAttribute) as? String == "" })
+            XCTAssertFalse(nodes.contains { attribute($0, kAXDescriptionAttribute) as? String == "tray" })
+        }
+    }
+
+    func testEmptyStateOmitsWhitespaceOnlyActionEvenWithCallback() throws {
+        var calls = 0
+        try inspect(EmptyState("No tasks yet", actionTitle: "  \n\t ") { calls += 1 }
+            .padding(), width: 280) { _, nodes in
+            XCTAssertTrue(nodes.contains { attribute($0, kAXValueAttribute) as? String == "No tasks yet" ||
+                attribute($0, kAXDescriptionAttribute) as? String == "No tasks yet" })
+            XCTAssertFalse(nodes.contains { attribute($0, kAXRoleAttribute) as? String == kAXButtonRole })
+            XCTAssertEqual(calls, 0)
+        }
+    }
+
+    func testEmptyGuidanceAndCallerActionWrapAtEnlargedText() throws {
+        var calls = 0
+        let guidance = "Add one to keep track of the next important thing you need to finish."
+        try inspect(EmptyState("No tasks yet", guidance: guidance, actionTitle: "  Add task  ") { calls += 1 }
+            .frame(width: 230).padding()
+            .environment(\.appTextScaleOverride, 1.3), width: 270) { _, nodes in
+            let text = try XCTUnwrap(nodes.first { attribute($0, kAXValueAttribute) as? String == guidance })
+            XCTAssertGreaterThan(try frame(text).height, 40, "enlarged guidance wraps")
+            let buttons = nodes.filter { attribute($0, kAXRoleAttribute) as? String == kAXButtonRole }
+            XCTAssertEqual(buttons.count, 1)
+            let button = try XCTUnwrap(buttons.first)
+            XCTAssertEqual(attribute(button, kAXDescriptionAttribute) as? String, "Add task")
+            XCTAssertEqual(AXUIElementPerformAction(button, kAXPressAction as CFString), .success)
+            XCTAssertEqual(calls, 1)
+        }
+    }
+
+    func testErrorBannerExposesSafeErrorMeaningAndOnlyCallerRecovery() throws {
+        var calls = 0
+        // The API takes a closed set of user-facing messages, not an Error or arbitrary path.
+        try inspect(VStack {
+            ErrorBanner(.readFailed)
+            ErrorBanner(.saveFailed, recoveryTitle: "  Try again  ") { calls += 1 }
+        }.frame(width: 280).padding(), width: 320) { _, nodes in
+            for message in [ErrorBanner.Message.readFailed, .saveFailed] {
+                let name = "Error: \(message.rawValue)"
+                XCTAssertEqual(nodes.filter { attribute($0, kAXDescriptionAttribute) as? String == name ||
+                    attribute($0, kAXValueAttribute) as? String == name }.count, 1)
+                XCTAssertFalse(name.contains("/Users/"))
+            }
+            XCTAssertFalse(nodes.contains { (attribute($0, kAXDescriptionAttribute) as? String)?.contains("triangle") == true })
+            let buttons = nodes.filter { attribute($0, kAXRoleAttribute) as? String == kAXButtonRole }
+            XCTAssertEqual(buttons.count, 1, "no recovery action without a callback")
+            let button = try XCTUnwrap(buttons.first)
+            XCTAssertEqual(attribute(button, kAXDescriptionAttribute) as? String, "Try again")
+            XCTAssertEqual(AXUIElementPerformAction(button, kAXPressAction as CFString), .success)
+            XCTAssertEqual(calls, 1)
+        }
+    }
+
+    func testErrorBannerOmitsWhitespaceOnlyRecoveryEvenWithCallback() throws {
+        var calls = 0
+        try inspect(ErrorBanner(.readFailed, recoveryTitle: "  \n\t ") { calls += 1 }
+            .padding(), width: 320) { _, nodes in
+            let error = "Error: \(ErrorBanner.Message.readFailed.rawValue)"
+            XCTAssertEqual(nodes.filter { attribute($0, kAXDescriptionAttribute) as? String == error ||
+                attribute($0, kAXValueAttribute) as? String == error }.count, 1)
+            XCTAssertFalse(nodes.contains { attribute($0, kAXRoleAttribute) as? String == kAXButtonRole })
+            XCTAssertEqual(calls, 0)
+        }
+    }
+
+    func testLoadingLabelRemainsAccessibleWithAndWithoutReducedMotion() throws {
+        var rendered = [Data]()
+        for reduced in [false, true] {
+            try inspect(LoadingState("Opening Kontrol…")
+                .environment(\.loadingReduceMotionOverride, reduced).padding(), width: 300) { host, nodes in
+                XCTAssertEqual(nodes.filter { attribute($0, kAXDescriptionAttribute) as? String == "Loading: Opening Kontrol…" ||
+                    attribute($0, kAXValueAttribute) as? String == "Loading: Opening Kontrol…" }.count, 1)
+                XCTAssertFalse(nodes.contains { attribute($0, kAXRoleAttribute) as? String == kAXButtonRole })
+                let image = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+                host.cacheDisplay(in: host.bounds, to: image)
+                rendered.append(try XCTUnwrap(image.representation(using: .png, properties: [:])))
+            }
+        }
+        XCTAssertEqual(rendered.count, 2)
+        XCTAssertNotEqual(rendered[0], rendered[1], "static track must render differently from animated spinner")
+    }
+
     func testIconLabelHasOneNameWithoutSymbolAnnouncement() throws {
         try inspect(IconLabel(title: "Learning", symbol: "book"), width: 300) { _, nodes in
             let named = nodes.filter { attribute($0, kAXDescriptionAttribute) as? String == "Learning" ||
