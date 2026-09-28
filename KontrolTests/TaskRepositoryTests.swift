@@ -273,6 +273,150 @@ final class TaskRepositoryTests: XCTestCase {
             year: 2024, month: 2, day: 29), timeZoneID: "UTC").validated().timeZoneID, "UTC")
     }
 
+    func testUpdateByUUIDChangesOnlyEditableFieldsAndClearsOptionalValues() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let completed = instant.addingTimeInterval(900)
+        let originalDue = instant.addingTimeInterval(3_600)
+        let originalPlan = PlannedDay(components: .init(calendarIdentifier: "gregorian", year: 2026,
+                                                        month: 1, day: 2), timeZoneID: "UTC")
+        let seed = ModelContext(container)
+        seed.autosaveEnabled = false
+        seed.insert(try TaskItem(id: firstID, title: "Original", createdAt: instant,
+                                 notes: "Old notes", dueAt: originalDue,
+                                 plannedDay: originalPlan.components,
+                                 plannedTimeZoneID: originalPlan.timeZoneID,
+                                 completedAt: completed))
+        seed.insert(try TaskItem(id: secondID, title: "Untouched", createdAt: instant))
+        try seed.save()
+
+        var saves = 0
+        let repository = makeRepository(container, id: UUID(), save: { context in
+            saves += 1
+            try context.save()
+        })
+        let updated = try repository.update(id: firstID, input: TaskInput(title: "  Edited  ",
+            notes: " \n First\nSecond \n ", dueAt: instant,
+            plannedFor: PlannedDay(components: .init(calendarIdentifier: "gregorian",
+                year: 2026, month: 6, day: 5), timeZoneID: "Pacific/Auckland")))
+        XCTAssertEqual(saves, 1)
+        XCTAssertEqual(updated.id, firstID)
+        XCTAssertEqual(updated.createdAt, instant)
+        XCTAssertEqual(updated.completedAt, completed)
+        XCTAssertEqual(updated.title, "Edited")
+        XCTAssertEqual(updated.notes, "First\nSecond")
+        XCTAssertEqual(updated.dueAt, instant)
+        XCTAssertEqual(updated.plannedDay, .init(calendarIdentifier: "gregorian", year: 2026,
+                                                 month: 6, day: 5))
+        XCTAssertEqual(updated.plannedTimeZoneID, "Pacific/Auckland")
+        let cleared = try repository.update(id: firstID, input: TaskInput(title: "Clear",
+                                                                          notes: " \t\n "))
+        XCTAssertEqual(saves, 2)
+        XCTAssertEqual(cleared.id, firstID)
+        XCTAssertEqual(cleared.createdAt, instant)
+        XCTAssertEqual(cleared.completedAt, completed)
+        XCTAssertNil(cleared.notes)
+        XCTAssertNil(cleared.dueAt)
+        XCTAssertNil(cleared.plannedDay)
+        XCTAssertNil(cleared.plannedTimeZoneID)
+        let stored = try repository.fetchAll().map(TaskSnapshot.init)
+        XCTAssertEqual(stored.first { $0.id == firstID }, cleared)
+        XCTAssertEqual(stored.first { $0.id == secondID }?.title, "Untouched")
+    }
+
+    func testUpdateRejectsInvalidInputAndMissingUUIDWithoutSavingOrInserting() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let original = try makeRepository(container, id: firstID).create(input: TaskInput(title: "Original"))
+        var saves = 0
+        var allocatedIDs = 0
+        let repository = SwiftDataTaskRepository(container: container,
+            makeID: { allocatedIDs += 1; return self.secondID },
+            save: { context in saves += 1; try context.save() })
+        let invalidPlan = PlannedDay(components: .init(calendarIdentifier: "gregorian",
+            year: 2025, month: 2, day: 29), timeZoneID: "UTC")
+        XCTAssertThrowsError(try repository.update(id: firstID, input: TaskInput(title: " \n "))) {
+            XCTAssertTrue($0 is KontrolSchemaV1.TaskValidationError)
+        }
+        XCTAssertThrowsError(try repository.update(id: firstID,
+            input: TaskInput(title: "Valid", plannedFor: invalidPlan))) {
+            XCTAssertEqual($0 as? PlannedDay.ValidationError, .invalidDate)
+        }
+        XCTAssertThrowsError(try repository.update(id: secondID, input: TaskInput(title: "Absent"))) {
+            XCTAssertEqual($0 as? TaskRepositoryError, .notFound(self.secondID))
+        }
+        XCTAssertEqual(saves, 0)
+        XCTAssertEqual(allocatedIDs, 0)
+        XCTAssertEqual(try repository.fetchAll().map(TaskSnapshot.init), [original])
+    }
+
+    func testFailedUpdatePreservesSavedRowAndAnotherOwnersPendingEdits() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let original = try makeRepository(container, id: firstID).create(input: TaskInput(title: "Saved"))
+        let independent = ModelContext(container)
+        independent.autosaveEnabled = false
+        let pending = try XCTUnwrap(independent.fetch(FetchDescriptor<TaskItem>())
+            .first { $0.id == firstID })
+        pending.notes = "Another owner's draft"
+        var saves = 0
+        let failing = makeRepository(container, id: secondID, save: { _ in
+            saves += 1
+            throw Injected.saveFailed
+        })
+        XCTAssertThrowsError(try failing.update(id: firstID, input: TaskInput(title: "Failed",
+            notes: "Uncommitted", dueAt: instant))) {
+            XCTAssertTrue($0 is Injected)
+        }
+        XCTAssertEqual(saves, 1)
+        XCTAssertTrue(independent.hasChanges)
+        XCTAssertEqual(pending.title, "Saved")
+        XCTAssertEqual(pending.notes, "Another owner's draft")
+        XCTAssertEqual(try failing.fetchAll().map(TaskSnapshot.init), [original])
+        try independent.save()
+        let persisted = try XCTUnwrap(failing.fetchAll().first)
+        XCTAssertEqual(persisted.title, "Saved")
+        XCTAssertEqual(persisted.notes, "Another owner's draft")
+        XCTAssertNil(persisted.dueAt)
+    }
+
+    func testStaleEditorCannotReopenTaskCompletedAfterDraftWasTaken() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = makeRepository(container, id: firstID)
+        let staleDraft = try repository.create(input: TaskInput(title: "Open"))
+        XCTAssertNil(staleDraft.completedAt)
+        let completion = instant.addingTimeInterval(60)
+        let completionContext = ModelContext(container)
+        completionContext.autosaveEnabled = false
+        let task = try XCTUnwrap(completionContext.fetch(FetchDescriptor<TaskItem>())
+            .first { $0.id == firstID })
+        task.completedAt = completion
+        try completionContext.save()
+
+        let updated = try repository.update(id: staleDraft.id,
+            input: TaskInput(title: "Edited after completion"))
+        XCTAssertEqual(updated.completedAt, completion)
+        XCTAssertEqual(updated.id, staleDraft.id)
+        XCTAssertEqual(updated.createdAt, staleDraft.createdAt)
+        XCTAssertEqual(try repository.fetchAll().first?.completedAt, completion)
+    }
+
+    func testTwoEditorsUseLastSuccessfulSaveForEditableFields() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let original = try makeRepository(container, id: firstID).create(input: TaskInput(title: "Start"))
+        let firstEditor = makeRepository(container, id: secondID)
+        let secondEditor = makeRepository(container, id: secondID)
+        let olderDraft = TaskInput(title: "First draft", notes: "first", dueAt: instant)
+        let newerDraft = TaskInput(title: "Second draft", notes: "second")
+        let secondSave = try secondEditor.update(id: firstID, input: newerDraft)
+        XCTAssertEqual(secondSave.title, "Second draft")
+        let lastSave = try firstEditor.update(id: firstID, input: olderDraft)
+        XCTAssertEqual(lastSave.title, "First draft")
+        XCTAssertEqual(lastSave.notes, "first")
+        XCTAssertEqual(lastSave.dueAt, instant)
+        XCTAssertEqual(lastSave.id, original.id)
+        XCTAssertEqual(lastSave.createdAt, original.createdAt)
+        XCTAssertEqual(lastSave.completedAt, original.completedAt)
+        XCTAssertEqual(try secondEditor.fetchAll().map(TaskSnapshot.init), [lastSave])
+    }
+
     func testClosedTemporaryDiskStoreReopensWithSameIDAndValuesAndNoFailedInsert() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("KontrolTaskRepository-\(UUID().uuidString)", isDirectory: true)

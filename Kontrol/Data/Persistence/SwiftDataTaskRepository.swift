@@ -1,12 +1,17 @@
 import Foundation
 import SwiftData
 
+enum TaskRepositoryError: Error, Equatable {
+    case notFound(UUID)
+}
+
 @MainActor
 protocol TaskRepository {
     /// A nil plan captures today's local calendar day in this foundation slice.
     func create(title: String, plannedFor: PlannedDay?) throws -> UUID
     /// Unlike legacy capture, a nil plan here means unplanned.
     func create(input: TaskInput) throws -> TaskSnapshot
+    func update(id: UUID, input: TaskInput) throws -> TaskSnapshot
     func fetchAll() throws -> [TaskItem]
 }
 
@@ -62,6 +67,27 @@ final class SwiftDataTaskRepository: TaskRepository {
         // shared main context, or save a partially failed operation later.
         try save(context)
         // No post-commit fetch: a read failure must not report a committed insert as failed.
+        return TaskSnapshot(task)
+    }
+
+    func update(id: UUID, input: TaskInput) throws -> TaskSnapshot {
+        // Validate before touching the stored object. Only editable fields are
+        // copied from the draft; completion is always read from the current row.
+        let clean = try input.validated()
+        let context = ModelContext(container)
+        context.autosaveEnabled = false
+        var descriptor = FetchDescriptor<TaskItem>(predicate: #Predicate { $0.id == id })
+        descriptor.fetchLimit = 1
+        guard let task = try context.fetch(descriptor).first else {
+            throw TaskRepositoryError.notFound(id)
+        }
+        task.title = clean.title
+        task.notes = clean.notes
+        task.dueAt = clean.dueAt
+        task.plannedDay = clean.plannedFor?.components
+        task.plannedTimeZoneID = clean.plannedFor?.timeZoneID
+        // A failed save discards this context; no other owner's changes are rolled back.
+        try save(context)
         return TaskSnapshot(task)
     }
 

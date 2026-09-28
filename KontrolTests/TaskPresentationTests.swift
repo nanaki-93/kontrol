@@ -19,6 +19,9 @@ final class TaskPresentationTests: XCTestCase {
         func create(input: TaskInput) throws -> TaskSnapshot {
             try storage.create(input: input)
         }
+        func update(id: UUID, input: TaskInput) throws -> TaskSnapshot {
+            try storage.update(id: id, input: input)
+        }
     }
 
     private func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
