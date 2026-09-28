@@ -8,13 +8,15 @@ final class SchemaTests: XCTestCase {
         try ModelContainerFactory().makeContainer(mode: .inMemory)
     }
 
-    func testV1IsUnchangedAndV2AddsOnlyScheduleBlock() {
+    func testV1AndV2IdentitiesRemainAndV3AddsOnlyFocusSession() {
         XCTAssertEqual(KontrolSchemaV1.versionIdentifier, Schema.Version(1, 0, 0))
         XCTAssertEqual(KontrolSchemaV2.versionIdentifier, Schema.Version(2, 0, 0))
-        XCTAssertEqual(KontrolMigrationPlan.schemas.count, 2)
+        XCTAssertEqual(KontrolSchemaV3.versionIdentifier, Schema.Version(3, 0, 0))
+        XCTAssertEqual(KontrolMigrationPlan.schemas.count, 3)
         XCTAssertTrue(KontrolMigrationPlan.schemas[0] == KontrolSchemaV1.self)
         XCTAssertTrue(KontrolMigrationPlan.schemas[1] == KontrolSchemaV2.self)
-        XCTAssertEqual(KontrolMigrationPlan.stages.count, 1)
+        XCTAssertTrue(KontrolMigrationPlan.schemas[2] == KontrolSchemaV3.self)
+        XCTAssertEqual(KontrolMigrationPlan.stages.count, 2)
         let v1 = KontrolSchemaV1.models
         XCTAssertEqual(Set(v1.map { String(describing: $0) }),
                        Set(["TaskItem", "Topic", "Subtopic", "Concept",
@@ -26,6 +28,63 @@ final class SchemaTests: XCTestCase {
             XCTAssertTrue(original == retained)
         }
         XCTAssertTrue(v2.last == ScheduleBlock.self)
+        let v3 = KontrolSchemaV3.models
+        XCTAssertEqual(v3.count, v2.count + 1)
+        for (original, retained) in zip(v2, v3) {
+            XCTAssertTrue(original == retained)
+        }
+        XCTAssertTrue(v3.last == FocusSession.self)
+    }
+
+    func testFocusSessionScalarFieldsPersistWithoutChangingOtherEntities() throws {
+        let container = try makeContainer()
+        let id = UUID()
+        let taskID = UUID()
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let anchor = start.addingTimeInterval(12.5)
+        let deadline = start.addingTimeInterval(1_500)
+        let session = FocusSession(id: id, state: "running", plannedSeconds: 1_500,
+                                   accumulatedActiveSeconds: 12.5,
+                                   activeSegmentStartedAt: anchor, deadline: deadline,
+                                   startedAt: start, checkpointAt: anchor,
+                                   linkedTaskID: taskID, linkedTitleSnapshot: "Old task title")
+        let context = ModelContext(container)
+        context.insert(session)
+        try context.save()
+
+        let readContext = ModelContext(container)
+        let stored = try XCTUnwrap(readContext.fetch(FetchDescriptor<FocusSession>()).first)
+        XCTAssertEqual(stored.id, id)
+        XCTAssertEqual(stored.state, "running")
+        XCTAssertEqual(stored.plannedSeconds, 1_500)
+        XCTAssertEqual(stored.accumulatedActiveSeconds, 12.5)
+        XCTAssertEqual(stored.activeSegmentStartedAt, anchor)
+        XCTAssertEqual(stored.deadline, deadline)
+        XCTAssertNil(stored.pausedAt)
+        XCTAssertEqual(stored.startedAt, start)
+        XCTAssertNil(stored.endedAt)
+        XCTAssertEqual(stored.checkpointAt, anchor)
+        XCTAssertFalse(stored.recoveryRequired)
+        XCTAssertEqual(stored.linkedTaskID, taskID)
+        XCTAssertNil(stored.linkedLessonID)
+        XCTAssertEqual(stored.linkedTitleSnapshot, "Old task title")
+
+        stored.state = "ended"
+        stored.activeSegmentStartedAt = nil
+        stored.deadline = nil
+        stored.endedAt = anchor
+        stored.linkedTaskID = nil
+        stored.linkedLessonID = "lesson-1"
+        try readContext.save()
+        let updated = try XCTUnwrap(ModelContext(container).fetch(FetchDescriptor<FocusSession>()).first)
+        XCTAssertEqual(updated.state, "ended")
+        XCTAssertNil(updated.activeSegmentStartedAt)
+        XCTAssertNil(updated.deadline)
+        XCTAssertNil(updated.pausedAt)
+        XCTAssertEqual(updated.endedAt, anchor)
+        XCTAssertFalse(updated.recoveryRequired)
+        XCTAssertNil(updated.linkedTaskID)
+        XCTAssertEqual(updated.linkedLessonID, "lesson-1")
     }
 
     func testTaskTrimsTitleRejectsBlankAndDerivesCompletionFromTimestamp() throws {

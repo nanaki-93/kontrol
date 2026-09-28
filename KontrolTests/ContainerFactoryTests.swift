@@ -59,12 +59,13 @@ final class ContainerFactoryTests: XCTestCase {
         XCTAssertTrue(try taskIDs(in: memory).isEmpty)
     }
 
-    func testFreshFactoryStorePersistsV2BlockAndV1TaskAcrossReopen() throws {
+    func testFreshFactoryStorePersistsV3FocusV2BlockAndV1TaskAcrossReopen() throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let url = directory.appendingPathComponent("Kontrol.store")
         let blockID = UUID()
         let taskID = UUID()
+        let focusID = UUID()
         let start = Date(timeIntervalSince1970: 1_700_000_000)
         let end = start.addingTimeInterval(3_600)
 
@@ -76,6 +77,11 @@ final class ContainerFactoryTests: XCTestCase {
                                          lessonID: "missing-lesson",
                                          linkedTitleSnapshot: "Old title"))
             context.insert(try TaskItem(id: taskID, title: "Review", createdAt: start))
+            context.insert(FocusSession(id: focusID, state: "paused", plannedSeconds: 900,
+                                        accumulatedActiveSeconds: 42.25, pausedAt: end,
+                                        startedAt: start, checkpointAt: end,
+                                        recoveryRequired: true, linkedTaskID: taskID,
+                                        linkedTitleSnapshot: "Review"))
             try context.save()
         }
         try writeAndClose()
@@ -92,10 +98,27 @@ final class ContainerFactoryTests: XCTestCase {
             XCTAssertEqual(block.lessonID, "missing-lesson")
             XCTAssertEqual(block.linkedTitleSnapshot, "Old title")
             XCTAssertEqual(try taskIDs(in: container), [taskID])
+            let focus = try XCTUnwrap(ModelContext(container)
+                .fetch(FetchDescriptor<FocusSession>()).first)
+            XCTAssertEqual(focus.id, focusID)
+            XCTAssertEqual(focus.state, "paused")
+            XCTAssertEqual(focus.plannedSeconds, 900)
+            XCTAssertEqual(focus.accumulatedActiveSeconds, 42.25)
+            XCTAssertNil(focus.activeSegmentStartedAt)
+            XCTAssertNil(focus.deadline)
+            XCTAssertEqual(focus.pausedAt, end)
+            XCTAssertEqual(focus.startedAt, start)
+            XCTAssertNil(focus.endedAt)
+            XCTAssertEqual(focus.checkpointAt, end)
+            XCTAssertTrue(focus.recoveryRequired)
+            XCTAssertEqual(focus.linkedTaskID, taskID)
+            XCTAssertNil(focus.linkedLessonID)
+            XCTAssertEqual(focus.linkedTitleSnapshot, "Review")
         }
         try reopenAndCheck()
         let empty = try factory.makeContainer(mode: .inMemory)
         XCTAssertTrue(try ModelContext(empty).fetch(FetchDescriptor<ScheduleBlock>()).isEmpty)
+        XCTAssertTrue(try ModelContext(empty).fetch(FetchDescriptor<FocusSession>()).isEmpty)
     }
 
     func testOpenErrorPropagatesWithoutReplacingExistingFiles() throws {
