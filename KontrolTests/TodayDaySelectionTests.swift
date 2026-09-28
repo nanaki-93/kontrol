@@ -5,6 +5,27 @@ import XCTest
 
 @MainActor
 final class TodayDaySelectionTests: XCTestCase {
+    private enum ReadFailure: Error { case unavailable }
+
+    private final class FailingScheduleRead: ScheduleRepository {
+        let base: SwiftDataScheduleRepository
+        var fails = false
+        init(_ base: SwiftDataScheduleRepository) { self.base = base }
+        func fetchAll() throws -> [ScheduleSnapshot] {
+            if fails { throw ReadFailure.unavailable }
+            return try base.fetchAll()
+        }
+        func create(input: ScheduleInput, allowOverlap: Bool,
+                    review: ScheduleOverlapReview?) throws -> ScheduleSnapshot {
+            try base.create(input: input, allowOverlap: allowOverlap, review: review)
+        }
+        func update(id: UUID, input: ScheduleInput, allowOverlap: Bool,
+                    review: ScheduleOverlapReview?) throws -> ScheduleSnapshot {
+            try base.update(id: id, input: input, allowOverlap: allowOverlap, review: review)
+        }
+        func delete(id: UUID) throws { try base.delete(id: id) }
+    }
+
     private let utc = TimeZone(secondsFromGMT: 0)!
     private let ny = TimeZone(identifier: "America/New_York")!
 
@@ -98,6 +119,56 @@ final class TodayDaySelectionTests: XCTestCase {
         XCTAssertEqual(selection.selectedDate(in: temporal), instant("2019-04-30T12:00:00Z"))
         selection.next(in: temporal)
         XCTAssertEqual(selection.selectedDate(in: temporal), instant("2019-05-01T12:00:00Z"))
+    }
+
+    func testTodaySectionsUseOneSelectedDayAndFailedBlocksNeverAppearEmpty() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let now = instant("2026-06-05T12:00:00Z")
+        let calendar = Calendar(identifier: .gregorian)
+        let tasks = TaskStore(repository: SwiftDataTaskRepository(container: container),
+                              clock: { now }, calendar: { calendar }, timeZone: { self.utc },
+                              scheduleTimer: { _, _ in {} })
+        let repo = FailingScheduleRead(SwiftDataScheduleRepository(container: container))
+        let blocks = ScheduleStore(repository: repo)
+        let overdue = try tasks.create(input: TaskInput(title: "Overdue", dueAt: instant("2026-06-04T10:00:00Z")))
+        let tomorrow = try tasks.create(input: TaskInput(title: "Tomorrow", plannedFor: PlannedDay.today(
+            at: instant("2026-06-06T12:00:00Z"), calendar: calendar, timeZone: utc)))
+        let overnight = try blocks.create(input: ScheduleInput(title: "Overnight",
+            startAt: instant("2026-06-05T23:00:00Z"), endAt: instant("2026-06-06T01:00:00Z")))
+        let midnightInput = ScheduleInput(title: "Ends at midnight",
+            startAt: instant("2026-06-05T22:00:00Z"), endAt: instant("2026-06-06T00:00:00Z"))
+        var receipt: ScheduleOverlapReview?
+        XCTAssertThrowsError(try blocks.create(input: midnightInput)) { error in
+            if case ScheduleRepositoryError.overlap(let review) = error { receipt = review }
+        }
+        let endingAtMidnight = try blocks.create(input: midnightInput, allowOverlap: true,
+                                                   review: try XCTUnwrap(receipt))
+        var first = TodayDaySelection()
+        var second = TodayDaySelection()
+        let today = try XCTUnwrap(TodayView.selectedRows(day: first, tasks: tasks, blocks: blocks))
+        XCTAssertEqual(today.tasks.map(\.id), [overdue.id])
+        XCTAssertEqual(today.blocks.map(\.id), [endingAtMidnight.id, overnight.id])
+        first.next(in: tasks.temporalContext)
+        let next = try XCTUnwrap(TodayView.selectedRows(day: first, tasks: tasks, blocks: blocks))
+        XCTAssertEqual(next.tasks.map(\.id), [overdue.id, tomorrow.id])
+        XCTAssertEqual(next.blocks.map(\.id), [overnight.id])
+        XCTAssertEqual(TodayView.selectedRows(day: second, tasks: tasks, blocks: blocks)?.blocks.count, 2)
+        first.returnToToday()
+        XCTAssertEqual(TodayView.selectedRows(day: first, tasks: tasks, blocks: blocks)?.blocks.count, 2)
+        second.previous(in: tasks.temporalContext)
+        XCTAssertTrue(try XCTUnwrap(TodayView.selectedRows(day: second, tasks: tasks, blocks: blocks)).blocks.isEmpty)
+        XCTAssertTrue(TodayView.showsEmptyBlocks(blocks.readState, rows: [], hasSelectedDay: true) == false)
+        blocks.refresh()
+        XCTAssertTrue(TodayView.showsEmptyBlocks(blocks.readState, rows: [], hasSelectedDay: true))
+        repo.fails = true
+        blocks.refresh()
+        XCTAssertEqual(blocks.readState, .failed(hasStaleRows: true))
+        XCTAssertFalse(TodayView.showsEmptyBlocks(blocks.readState, rows: [], hasSelectedDay: true))
+        XCTAssertEqual(TodayView.selectedRows(day: first, tasks: tasks, blocks: blocks)?.blocks.count, 2)
+        XCTAssertEqual(TodayView.selectedRows(day: first, tasks: tasks, blocks: blocks)?.tasks.map(\.id), [overdue.id])
+        repo.fails = false
+        blocks.retryRead()
+        XCTAssertEqual(blocks.readState, .loaded)
     }
 
     func testIndependentWindowsAndTemporalNotificationsDoNotWriteTasksOrBlocks() throws {

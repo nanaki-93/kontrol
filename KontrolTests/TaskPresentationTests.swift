@@ -159,10 +159,19 @@ final class TaskPresentationTests: XCTestCase {
         try check(window)
     }
 
+    private func todayView(_ store: TaskStore) -> TodayView {
+        // Hosted fixtures use an isolated schedule store; production injects the app-owned one.
+        let container = try! ModelContainerFactory().makeContainer(mode: .inMemory)
+        return TodayView(store: store, scheduleStore: ScheduleStore(repository:
+            SwiftDataScheduleRepository(container: container)))
+    }
+
     private func inspectToday(_ repository: any TaskRepository, at instant: Date,
                               _ check: (NSWindow) throws -> Void) throws {
+        let scheduleContainer = try ModelContainerFactory().makeContainer(mode: .inMemory)
         let host = NSHostingView(rootView: TodayView(store: TaskStore(repository: repository,
-            clock: { instant })))
+            clock: { instant }), scheduleStore: ScheduleStore(repository:
+                SwiftDataScheduleRepository(container: scheduleContainer))))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.title = "Today state inspection \(UUID().uuidString)"
@@ -182,11 +191,10 @@ final class TaskPresentationTests: XCTestCase {
             let text = visibleText(in: window)
             XCTAssertTrue(text.contains("Today"))
             XCTAssertTrue(text.contains(instant.formatted(.dateTime.weekday(.wide).day().month(.wide))))
-            XCTAssertTrue(text.contains("Next"))
-            XCTAssertTrue(text.contains("No tasks planned or due today."))
+            XCTAssertTrue(text.contains("Tasks"))
+            XCTAssertTrue(text.contains("No tasks planned or due on this day."))
             XCTAssertTrue(text.contains("Schedule"))
-            XCTAssertTrue(text.contains("Scheduling isn't available yet."))
-            XCTAssertFalse(text.contains("No blocks scheduled for today."))
+            XCTAssertTrue(text.contains("No blocks on this day."))
             let add = try waitForElement("today-add-task", in: window)
             XCTAssertEqual(attribute(add, kAXRoleAttribute) as? String, kAXButtonRole)
             XCTAssertEqual(attribute(add, kAXDescriptionAttribute) as? String, "Add task")
@@ -229,7 +237,7 @@ final class TaskPresentationTests: XCTestCase {
             return date.formatted(style)
         }
         let firstHeader = header(now, in: zone)
-        let host = NSHostingView(rootView: TodayView(store: store))
+        let host = NSHostingView(rootView: todayView(store))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.title = "Temporal Today inspection \(UUID())"
@@ -274,14 +282,14 @@ final class TaskPresentationTests: XCTestCase {
         let id = try repository.create(title: "Actual planned task", plannedFor: nil)
         try inspectToday(repository, at: instant) { window in
             XCTAssertEqual(elements(in: window, identifier: "task-row-\(id.uuidString)").count, 1)
-            XCTAssertFalse(visibleText(in: window).contains("No tasks planned or due today."))
+            XCTAssertFalse(visibleText(in: window).contains("No tasks planned or due on this day."))
         }
         try inspectToday(FailingReadRepository(storage: repository), at: instant) { window in
             let text = visibleText(in: window)
             XCTAssertTrue(text.contains("Error: Content could not be loaded."))
-            XCTAssertFalse(text.contains("No tasks planned or due today."))
+            XCTAssertFalse(text.contains("No tasks planned or due on this day."))
             XCTAssertTrue(elements(in: window, identifier: "task-row-\(id.uuidString)").isEmpty)
-            XCTAssertTrue(text.contains("Scheduling isn't available yet."))
+            XCTAssertTrue(text.contains("No blocks on this day."))
         }
         XCTAssertEqual(try repository.fetchAll().map(\.id), [id], "rendering a failure must not change tasks")
     }
@@ -335,7 +343,7 @@ final class TaskPresentationTests: XCTestCase {
                                   styleMask: [.titled], backing: .buffered, defer: false)
             window.title = "Row action \(index) \(UUID())"
             window.contentView = NSHostingView(rootView: index == 0 ?
-                AnyView(TodayView(store: store)) : AnyView(TasksView(store: store)))
+                AnyView(todayView(store)) : AnyView(TasksView(store: store)))
             window.makeKeyAndOrderFront(nil)
             return window
         }
@@ -413,7 +421,7 @@ final class TaskPresentationTests: XCTestCase {
                                   styleMask: [.titled], backing: .buffered, defer: false)
             window.title = "Failed row action \(index) \(UUID())"
             window.contentView = NSHostingView(rootView: index == 0 ?
-                AnyView(TodayView(store: store)) : AnyView(TasksView(store: store)))
+                AnyView(todayView(store)) : AnyView(TasksView(store: store)))
             window.makeKeyAndOrderFront(nil)
             return window
         }
@@ -452,7 +460,7 @@ final class TaskPresentationTests: XCTestCase {
                                   styleMask: [.titled], backing: .buffered, defer: false)
             window.title = "Missing row action \(UUID())"
             window.contentView = NSHostingView(rootView: isToday ?
-                AnyView(TodayView(store: store)) : AnyView(TasksView(store: store)))
+                AnyView(todayView(store)) : AnyView(TasksView(store: store)))
             window.makeKeyAndOrderFront(nil)
             defer { window.orderOut(nil) }
             settle()
@@ -962,7 +970,7 @@ final class TaskPresentationTests: XCTestCase {
                                 styleMask: [.titled], backing: .buffered, defer: false)]
         windows[0].title = "Today filter comparison \(UUID())"
         windows[1].title = "Tasks filter comparison \(UUID())"
-        windows[0].contentView = NSHostingView(rootView: TodayView(store: store))
+        windows[0].contentView = NSHostingView(rootView: todayView(store))
         windows[1].contentView = NSHostingView(rootView: TasksView(store: store))
         windows.forEach { $0.makeKeyAndOrderFront(nil) }
         defer { windows.forEach { $0.orderOut(nil) } }
@@ -1075,7 +1083,7 @@ final class TaskPresentationTests: XCTestCase {
                 let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: height),
                                       styleMask: [.titled], backing: .buffered, defer: false)
                 window.title = "Today layout \(UUID())"
-                window.contentView = NSHostingView(rootView: TodayView(store: store)
+                window.contentView = NSHostingView(rootView: todayView(store)
                     .environment(\.appTextScaleOverride, scale))
                 window.makeKeyAndOrderFront(nil)
                 defer { window.orderOut(nil) }
@@ -1269,7 +1277,7 @@ final class TaskPresentationTests: XCTestCase {
             if fail { throw SaveError.injected }
             try context.save()
         })
-        let host = NSHostingView(rootView: TodayView(store: TaskStore(repository: repository)))
+        let host = NSHostingView(rootView: todayView(TaskStore(repository: repository)))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.title = "Today capture list inspection"
@@ -1308,7 +1316,7 @@ final class TaskPresentationTests: XCTestCase {
         let today = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
                              styleMask: [.titled], backing: .buffered, defer: false)
         today.title = "Capture shared Today \(UUID())"
-        today.contentView = NSHostingView(rootView: TodayView(store: store))
+        today.contentView = NSHostingView(rootView: todayView(store))
         today.makeKeyAndOrderFront(nil)
         let tasks = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
                              styleMask: [.titled], backing: .buffered, defer: false)
@@ -1399,7 +1407,7 @@ final class TaskPresentationTests: XCTestCase {
             XCTAssertTrue(text.contains("Error: Content could not be loaded."))
             XCTAssertTrue(text.contains("Could not refresh tasks. Showing previously loaded tasks. Retry to update."))
             XCTAssertFalse(text.contains("Nothing planned or due today."))
-            XCTAssertFalse(text.contains("No tasks planned or due today."))
+            XCTAssertFalse(text.contains("No tasks planned or due on this day."))
             XCTAssertEqual(elements(in: window, identifier: "task-row-\(id.uuidString)").count, 1)
         }
         repository.failRead = false

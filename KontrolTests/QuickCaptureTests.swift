@@ -300,13 +300,19 @@ final class QuickCaptureTests: XCTestCase {
         XCTAssertEqual(repository.calls.count, 2)
     }
 
+    private func todayView(_ repository: RecordingRepository) throws -> TodayView {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        return TodayView(store: TaskStore(repository: repository),
+                         scheduleStore: ScheduleStore(repository: SwiftDataScheduleRepository(container: container)))
+    }
+
     func testRenderedSaveFailureRetainsSheetAndEditableTextUntilRetry() throws {
         let repository = try RecordingRepository()
         repository.fail = true
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.title = "Capture retry test"
-        let host = NSHostingView(rootView: TodayView(store: TaskStore(repository: repository)))
+        let host = NSHostingView(rootView: try todayView(repository))
         window.contentView = host
         window.makeKeyAndOrderFront(nil)
         host.layoutSubtreeIfNeeded()
@@ -346,7 +352,7 @@ final class QuickCaptureTests: XCTestCase {
 
     func testTodayOpensNativeSheetWithReachableControlsAndCancelWithoutInsert() throws {
         let repository = try RecordingRepository()
-        let host = NSHostingView(rootView: TodayView(store: TaskStore(repository: repository)))
+        let host = NSHostingView(rootView: try todayView(repository))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.title = "Quick capture test"
@@ -409,7 +415,7 @@ final class QuickCaptureTests: XCTestCase {
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
                                   styleMask: [.titled], backing: .buffered, defer: false)
             window.title = "Capture scale \(scale)"
-            let host = NSHostingView(rootView: TodayView(store: TaskStore(repository: repository))
+            let host = NSHostingView(rootView: try todayView(repository)
                 .environment(\.appTextScaleOverride, scale))
             window.contentView = host
             window.makeKeyAndOrderFront(nil)
@@ -453,7 +459,7 @@ final class QuickCaptureTests: XCTestCase {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.title = "Capture keyboard \(UUID())"
-        window.contentView = NSHostingView(rootView: TodayView(store: TaskStore(repository: repository)))
+        window.contentView = NSHostingView(rootView: try todayView(repository))
         window.makeKeyAndOrderFront(nil)
         defer { window.orderOut(nil) }
         func key(_ code: UInt16, character: String) {
@@ -493,7 +499,7 @@ final class QuickCaptureTests: XCTestCase {
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: height),
                                   styleMask: [.titled], backing: .buffered, defer: false)
             window.title = "Capture layout \(UUID())"
-            let host = NSHostingView(rootView: TodayView(store: TaskStore(repository: repository))
+            let host = NSHostingView(rootView: try todayView(repository)
                 .environment(\.appTextScaleOverride, scale))
             window.contentView = host
             window.makeKeyAndOrderFront(nil)

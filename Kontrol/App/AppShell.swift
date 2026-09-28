@@ -69,7 +69,7 @@ struct AppShell: View {
                 Group {
                     switch Self.contentKind(for: navigation.selectedDestination) {
                     case .today:
-                        TodayView(store: dependencies.taskStore)
+                        TodayView(store: dependencies.taskStore, scheduleStore: dependencies.scheduleStore)
                     case .learning:
                         LearningView(container: dependencies.container)
                     case .tasks:
