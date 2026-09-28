@@ -5,6 +5,7 @@ import SwiftUI
 struct LearningView: View {
     @ObservedObject var store: LearningCatalogStore
     @State private var selectedTopicID: String?
+    @State private var inspectedLessonID: String?
     @FocusState private var focusedTopicID: String?
 
     private static let topicOrder = ["go", "java", "design", "perf", "security"]
@@ -22,6 +23,13 @@ struct LearningView: View {
         return snapshot.slots.filter { $0.topicID == topicID }
             .sorted { $0.slotIndex < $1.slotIndex }
             .compactMap { definitions[$0.lessonID] }
+    }
+
+    /// Resolve inspection only through a committed slot in the currently selected topic.
+    /// A stale selection cannot expose an unslotted or replaced definition.
+    static func inspectedLesson(_ id: String?, for topicID: String,
+                                in snapshot: LearningCatalogSnapshot) -> LessonDefinitionSnapshot? {
+        choices(for: topicID, in: snapshot).first { $0.id == id }
     }
 
     private func conceptLabels(for lesson: LessonDefinitionSnapshot, in snapshot: LearningCatalogSnapshot) -> String {
@@ -44,7 +52,9 @@ struct LearningView: View {
                 if Self.orderedTopics(in: snapshot).isEmpty {
                     EmptyState("No learning topics are installed.")
                 } else {
-                    catalog(snapshot)
+                    ScrollView(.vertical) {
+                        catalog(snapshot)
+                    }
                 }
             }
             Spacer(minLength: 0)
@@ -66,6 +76,7 @@ struct LearningView: View {
                     let isSelected = selected.id == topic.id
                     Button {
                         selectedTopicID = topic.id
+                        inspectedLessonID = nil
                     } label: {
                         Text(topic.name)
                             .appTypography(.body)
@@ -96,27 +107,70 @@ struct LearningView: View {
                 } else {
                     ForEach(choices) { lesson in
                         VStack(alignment: .leading, spacing: AppMetrics.space2) {
-                            AppListRow(lesson.title,
-                                       metadata: "\(lesson.format.capitalized) · \(lesson.difficulty.capitalized) · \(lesson.estimatedMinutes) min")
-                            Text(lesson.displayObjective)
-                                .appTypography(.body)
-                                .foregroundStyle(AppColors.textPrimary)
-                                .fixedSize(horizontal: false, vertical: true)
-                            Text(conceptLabels(for: lesson, in: snapshot))
-                                .appTypography(.metadata)
-                                .foregroundStyle(AppColors.textSecondary)
-                                .fixedSize(horizontal: false, vertical: true)
+                            VStack(alignment: .leading, spacing: AppMetrics.space2) {
+                                AppListRow(lesson.title,
+                                           metadata: "\(lesson.format.capitalized) · \(lesson.difficulty.capitalized) · \(lesson.estimatedMinutes) min")
+                                Text(lesson.displayObjective)
+                                    .appTypography(.body)
+                                    .foregroundStyle(AppColors.textPrimary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                Text(conceptLabels(for: lesson, in: snapshot))
+                                    .appTypography(.metadata)
+                                    .foregroundStyle(AppColors.textSecondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .accessibilityElement(children: .combine)
+                            .accessibilityIdentifier("learning-lesson-\(lesson.id)")
+                            DisclosureGroup(isExpanded: Binding(
+                                get: { Self.inspectedLesson(inspectedLessonID, for: selected.id, in: snapshot)?.id == lesson.id },
+                                set: { inspectedLessonID = $0 ? lesson.id : nil }
+                            )) {
+                                inspection(lesson)
+                            } label: {
+                                Text("Inspect \(lesson.title) · Read-only reference")
+                                    .appTypography(.body)
+                                    .frame(maxWidth: .infinity, minHeight: AppMetrics.preferredTarget, alignment: .leading)
+                            }
+                            .accessibilityIdentifier("learning-inspect-\(lesson.id)")
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(AppMetrics.space4)
                         .background(AppColors.surface)
                         .clipShape(RoundedRectangle(cornerRadius: AppMetrics.smallRadius))
-                        .accessibilityElement(children: .combine)
-                        .accessibilityIdentifier("learning-lesson-\(lesson.id)")
                     }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func inspection(_ lesson: LessonDefinitionSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: AppMetrics.space4) {
+            Text("Read-only reference · No responses are saved here.")
+                .appTypography(.metadata)
+                .foregroundStyle(AppColors.textSecondary)
+            section("Explanation", text: lesson.explanation)
+            section("Worked example", text: lesson.workedExample)
+            section("Exercise prompt (for reading)", text: lesson.exercise)
+            section("Reference material · Example response", text: lesson.referenceAnswer)
+            section("Reference material · Self-check criteria",
+                    text: lesson.selfCheckCriteria.map { "• \($0)" }.joined(separator: "\n"))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func section(_ heading: String, text: String) -> some View {
+        VStack(alignment: .leading, spacing: AppMetrics.space2) {
+            Text(heading)
+                .appTypography(.body)
+                .foregroundStyle(AppColors.textPrimary)
+            // Verbatim text: authored content is data, never HTML, Markdown, or executable code.
+            Text(verbatim: text)
+                .appTypography(.body)
+                .foregroundStyle(AppColors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

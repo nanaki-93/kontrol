@@ -88,6 +88,47 @@ final class LearningCatalogStoreTests: XCTestCase {
         XCTAssertEqual(repository.writes, 0)
     }
 
+    func testInspectingCommittedSectionsIsReadOnlyAndScopedToSelectedSlot() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataCatalogRepository(container: container)
+        _ = try repository.importIfNeeded(BundledCatalogLoader.load())
+        let store = LearningCatalogStore(repository: repository)
+        store.loadIfNeeded()
+        let snapshot = try XCTUnwrap(store.state.snapshot)
+        let go = try XCTUnwrap(LearningView.choices(for: "go", in: snapshot).first)
+        let selected = try XCTUnwrap(LearningView.inspectedLesson(go.id, for: "go", in: snapshot))
+        XCTAssertEqual(selected, go)
+        XCTAssertNil(LearningView.inspectedLesson(go.id, for: "java", in: snapshot))
+        XCTAssertNil(LearningView.inspectedLesson("not-slotted", for: "go", in: snapshot))
+        XCTAssertNil(LearningView.inspectedLesson(nil, for: "go", in: snapshot))
+        let before = try repository.loadSnapshot()
+        // Local selection, repeated inspection, and navigation only project the committed read.
+        for topic in LearningView.orderedTopics(in: snapshot) {
+            for choice in LearningView.choices(for: topic.id, in: snapshot) {
+                let inspected = try XCTUnwrap(LearningView.inspectedLesson(choice.id, for: topic.id, in: snapshot))
+                XCTAssertEqual(inspected, choice)
+                XCTAssertFalse(inspected.selfCheckCriteria.isEmpty)
+                for section in [inspected.explanation, inspected.workedExample, inspected.exercise,
+                                inspected.referenceAnswer] + inspected.selfCheckCriteria {
+                    XCTAssertFalse(section.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, inspected.id)
+                }
+            }
+        }
+        XCTAssertEqual(try repository.loadSnapshot(), before)
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonProgress>()).isEmpty)
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).isEmpty)
+    }
+
+    func testInspectionProjectionNeverCallsRepositoryWrites() throws {
+        let repository = ReadingCatalogRepository(snapshot())
+        let store = LearningCatalogStore(repository: repository)
+        store.loadIfNeeded()
+        let snapshot = try XCTUnwrap(store.state.snapshot)
+        XCTAssertNil(LearningView.inspectedLesson("go.example", for: "go", in: snapshot))
+        XCTAssertEqual(repository.reads, 1)
+        XCTAssertEqual(repository.writes, 0)
+    }
+
     func testTwoConsumersShareCommittedSlotsWithoutPersonalWrites() throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         let repository = SwiftDataCatalogRepository(container: container)

@@ -104,6 +104,26 @@ final class LearningPresentationTests: XCTestCase {
                 XCTAssertTrue(name.contains(field), "Missing \(field) from \(name)")
             }
         }
+        // Native disclosure exposes all stored sections as text, without creating an attempt.
+        XCTAssertEqual(ids.filter { $0.hasPrefix("learning-inspect-") },
+                       go.map { "learning-inspect-\($0.id)" })
+        let inspected = try XCTUnwrap(go.first)
+        let disclosure = try XCTUnwrap(elements.first {
+            attribute($0, kAXIdentifierAttribute) as? String == "learning-inspect-\(inspected.id)"
+        })
+        XCTAssertEqual(AXUIElementPerformAction(disclosure, kAXPressAction as CFString), .success)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        let expanded = descendants(of: try XCTUnwrap(learningWindow))
+        let expandedText = text(expanded).joined(separator: "\n")
+        for section in ["Read-only reference", "Explanation", "Worked example",
+                        "Exercise prompt (for reading)", "Reference material · Example response",
+                        "Reference material · Self-check criteria", inspected.explanation,
+                        inspected.workedExample, inspected.exercise, inspected.referenceAnswer] + inspected.selfCheckCriteria {
+            XCTAssertTrue(expandedText.contains(section), "Missing read-only section: \(section)")
+        }
+        XCTAssertFalse(identifiers(expanded).contains { $0.hasPrefix("learning-answer-") })
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonProgress>()).isEmpty)
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).isEmpty)
         // Topic controls change this window's projection, not the shared assignments.
         let javaButton = try XCTUnwrap(elements.first { attribute($0, kAXIdentifierAttribute) as? String == "learning-topic-java" })
         XCTAssertEqual(AXUIElementPerformAction(javaButton, kAXPressAction as CFString), .success)
@@ -111,8 +131,10 @@ final class LearningPresentationTests: XCTestCase {
         let javaIDs = identifiers(descendants(of: try XCTUnwrap(learningWindow)))
         XCTAssertEqual(javaIDs.filter { $0.hasPrefix("learning-lesson-") },
                        LearningView.choices(for: "java", in: snapshot).map { "learning-lesson-\($0.id)" })
-        XCTAssertEqual(elements.filter { attribute($0, kAXRoleAttribute) as? String == kAXButtonRole }.count,
-                       AppDestination.allCases.count + topics.count, "Only navigation and topic selection are actionable")
+        XCTAssertEqual(javaIDs.filter { $0.hasPrefix("learning-inspect-") },
+                       LearningView.choices(for: "java", in: snapshot).map { "learning-inspect-\($0.id)" })
+        XCTAssertFalse(text(descendants(of: try XCTUnwrap(learningWindow))).contains(inspected.explanation),
+                       "Changing topics closes the window-local inspection")
         let captureDirectory = URL(fileURLWithPath: "/tmp/kontrol-f01-evidence/fixtures", isDirectory: true)
         try FileManager.default.createDirectory(at: captureDirectory, withIntermediateDirectories: true)
         for size in [CGSize(width: 1000, height: 700), CGSize(width: 1440, height: 940)] {
