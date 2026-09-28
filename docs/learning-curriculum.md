@@ -2,7 +2,7 @@
 
 [Plan](../PLAN.md) · [Choices mockup](mockups/M15-learning-choices.png) · [Lesson formats](features/F06-lesson-experience.md)
 
-F05 targets 8 complete lessons per topic, 40 total. The table is the authoring brief; Go, Java, and System Design are authored and reviewed in catalog version 2 (eight lessons each); Performance and Security still have only their original starter lessons and await their own authoring steps. Every lesson needs stable id/objectiveKey, canonical concept IDs, difficulty, time estimate, explanation, worked example, exercise, reference answer and self-check criteria. Begin at intermediate level with optional basics; do not infer mastery from the user's experience.
+F05 targets 8 complete lessons per topic, 40 total. The table is the authoring brief; Go, Java, System Design, and Performance are authored and reviewed in catalog version 2 (eight lessons each); Security still has only its original starter lesson and awaits its authoring step. Every lesson needs stable id/objectiveKey, canonical concept IDs, difficulty, time estimate, explanation, worked example, exercise, reference answer and self-check criteria. Begin at intermediate level with optional basics; do not infer mastery from the user's experience.
 
 | Topic | Lesson brief | Format | Objective / concept |
 | --- | --- | --- | --- |
@@ -64,7 +64,7 @@ Assumption for all Go lessons: Go 1.22 or later, standard-library APIs unless ex
 | `go.errors.preserve-context.v1` / `go.errors.preserve-context` | [errors.Is](https://pkg.go.dev/errors#Is), [fmt.Errorf](https://pkg.go.dev/fmt#Errorf), [os.ReadFile](https://pkg.go.dev/os#ReadFile) | Checked `%w` retains error identity for `errors.Is`; answer does not log file contents or turn a failed read into success. |
 | `go.network.deadline-boundaries.v1` / `go.network.deadline-boundaries` | [net/http Client and Transport](https://pkg.go.dev/net/http#Client), [NewRequestWithContext](https://pkg.go.dev/net/http#NewRequestWithContext), [Request.Context](https://pkg.go.dev/net/http#Request.Context), [context.WithTimeout](https://pkg.go.dev/context#WithTimeout) | Checked parent request context propagation, deferred cancel and body close on successful `Do`; answer separates overall timeout from transport phase limits. |
 
-Review scope: documentation/API and example-contract review; no Go compiler or executable sample suite is part of the packaged Swift resource. The remaining 16 Performance and Security lessons need equivalent per-lesson reviews in their authoring steps.
+Review scope: documentation/API and example-contract review; no Go compiler or executable sample suite is part of the packaged Swift resource. The remaining Security lessons need equivalent per-lesson reviews in their authoring step.
 
 ## Java content review (catalog version 2)
 
@@ -81,7 +81,7 @@ Assume Java 21 LTS and its standard library for Java lessons unless noted. Param
 | `java.concurrency.shutdown.v1` / `java.concurrency.shutdown` | [ExecutorService shutdown, awaitTermination and shutdownNow](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/ExecutorService.html) | Checked two bounded waits, interrupted-caller flag restoration and that terminated is not equivalent to every task succeeding. |
 | `java.spring.transaction-scope.v1` / `java.spring.transaction-scope` | [Spring 6.1 declarative transactions](https://docs.spring.io/spring-framework/reference/6.1/data-access/transaction/declarative/annotations.html), [rollback rules](https://docs.spring.io/spring-framework/reference/6.1/data-access/transaction/declarative/rolling-back.html) | Checked proxy self-invocation, unchecked versus checked rollback defaults and atomic local order/outbox writes; external email needs duplicate-safe retries. |
 
-Java review scope is API and example-contract review, not running a Java compiler or integration test. The remaining 16 Performance and Security lessons await equivalent per-lesson reviews.
+Java review scope is API and example-contract review, not running a Java compiler or integration test. The remaining Security lessons await equivalent per-lesson reviews.
 
 ## System Design content review (catalog version 2)
 
@@ -98,4 +98,21 @@ Assumptions: these are technology-neutral scenarios, not vendor-specific SLA gua
 | `design.storage.partition-key.v1` / `design.storage.partition-key` | [DynamoDB partition key best practices](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/bp-partition-key-design.html), [Bigtable schema design](https://cloud.google.com/bigtable/docs/schema-design) | Checked hot-tenant bucketing and read fan-out; merged timestamps need a tie-breaker and no global transaction/order is inferred from sharding. |
 | `design.reliability.recovery-plan.v1` / `design.reliability.recovery-plan` | [AWS Well-Architected: disaster recovery](https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/plan-for-disaster-recovery-dr.html), [Google Cloud disaster recovery planning](https://cloud.google.com/architecture/dr-scenarios-planning-guide) | Checked eight-minute replica lag violates five-minute RPO absent recovered logs; fencing, measured restore and external payment reconciliation are part of the drill. |
 
-System Design review scope is scenario arithmetic, architecture tradeoffs, and reference/rubric consistency against cited documentation; no live queue, database, provider, or failover drill was executed. Performance and Security await their own review steps.
+System Design review scope is scenario arithmetic, architecture tradeoffs, and reference/rubric consistency against cited documentation; no live queue, database, provider, or failover drill was executed. Security awaits its review step.
+
+## Performance content review (catalog version 2)
+
+Assumptions: numeric rates, distributions, and budgets are illustrative exercise inputs, not production SLOs. The index example assumes PostgreSQL 16 and its B-tree index and `EXPLAIN` syntax; the other examples are language- and engine-independent. All eight concepts have empty prerequisites, allowing four initial choices and four eligible reserves. Reviewed each exercise against its reference arithmetic and the cited primary documentation; the SQL is teaching text in an offline resource, not executed against a database. Profiles, cache hit rates and mean-capacity arithmetic are not tail-latency guarantees.
+
+| Lesson ID / objective key | Primary documentation consulted | Review outcome |
+| --- | --- | --- |
+| `perf.database.query-count.v1` / `perf.database.query-count` | [PostgreSQL EXPLAIN](https://www.postgresql.org/docs/16/using-explain.html), [SQL SELECT](https://www.postgresql.org/docs/16/sql-select.html) | Retained starter ID; checked 1 + 30 = 31 reads and two-query batched rewrite, bounded parameter lists and fan-out/latency caveat. |
+| `perf.cpu.hot-path.v1` / `perf.cpu.hot-path` | [Linux perf report overhead and children](https://man7.org/linux/man-pages/man1/perf-report.1.html), [Go pprof profiling guide](https://go.dev/blog/pprof) | Checked inclusive versus self samples (60% versus 5% for renderPage); re-profile after changes and compare end-to-end latency under fixed load. |
+| `perf.memory.allocations.v1` / `perf.memory.allocations` | [JDK 21 Flight Recorder allocation events](https://docs.oracle.com/en/java/javase/21/jfapi/flight-recorder-api-programmers-guide.pdf), [Go runtime MemStats](https://pkg.go.dev/runtime#MemStats) | Checked 120 MB/s / 600 = 200 KB/request and 80 MB/s / 600 ≈ 133 KB/request (decimal units); stable versus growing post-GC live heap distinguishes churn from retention. |
+| `perf.network.tail-latency.v1` / `perf.network.tail-latency` | [Google SRE: handling overload](https://sre.google/sre-book/handling-overload/), [gRPC deadlines](https://grpc.io/docs/guides/deadlines/) | Checked parallel max rather than sum: 30 + max(90,140) + 30 = 200 ms with 50 ms slack under 250 ms. End-to-end deadline and bounded retries are not p99 guarantees. |
+| `perf.database.index-access.v1` / `perf.database.index-access` | [PostgreSQL 16 multicolumn indexes](https://www.postgresql.org/docs/16/indexes-multicolumn.html), [CREATE INDEX CONCURRENTLY](https://www.postgresql.org/docs/16/sql-createindex.html), [EXPLAIN ANALYZE](https://www.postgresql.org/docs/16/sql-explain.html) | Checked tenant equality followed by descending timestamp, valid concurrent DDL outside transaction block, representative plan/buffer measurements and write overhead. |
+| `perf.cache.hit-rate-tradeoff.v1` / `perf.cache.hit-rate-tradeoff` | [Redis cache-aside pattern](https://redis.io/docs/latest/develop/use/patterns/cache-aside/), [AWS caching challenges](https://aws.amazon.com/builders-library/caching-challenges-and-strategies/) | Checked 200/s → 100/s origin reads and 11 ms → 9.8 ms illustrative means; miss tails and staleness still require measurement. |
+| `perf.testing.representative-load.v1` / `perf.testing.representative-load` | [Google SRE: load test recommendations](https://sre.google/sre-book/handling-overload/), [Gil Tene: coordinated omission](https://www.infoq.com/presentations/latency-pitfalls/) | Checked 600 × 600 = 360,000 offered requests at peak; scheduled arrivals, late starts, failures and generator capacity must all be reported. |
+| `perf.concurrency.queueing.v1` / `perf.concurrency.queueing` | [AWS Builders' Library: avoiding queue backlogs](https://aws.amazon.com/builders-library/avoiding-insurmountable-queue-backlogs/), [Google SRE: handling overload](https://sre.google/sre-book/handling-overload/) | Checked 12 / 0.15 = 80 jobs/s, 20 jobs/s deficit, 120 / 20 = 6 seconds; downstream saturation can make a larger pool worse. |
+
+Performance review scope is documentation, arithmetic and exercise/reference consistency, not live profiling, load testing or database execution. Security awaits its own review step.

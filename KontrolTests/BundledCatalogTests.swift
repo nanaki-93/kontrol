@@ -3,7 +3,7 @@ import XCTest
 @testable import Kontrol
 
 final class BundledCatalogTests: XCTestCase {
-    func testPackagedAppResourceContainsEightLessonsInEachAuthoredTopicAndTwoOtherUsableTopics() throws {
+    func testPackagedAppResourceContainsEightLessonsInFourAuthoredTopicsAndSecurityStarter() throws {
         // The hosted test loads the app bundle, not a source-tree fixture or test copy.
         let appBundle = Bundle.main
         XCTAssertNotNil(appBundle.url(forResource: "starter-catalog", withExtension: "json"))
@@ -12,7 +12,7 @@ final class BundledCatalogTests: XCTestCase {
         XCTAssertEqual(catalog.version, 2)
         XCTAssertEqual(Set(catalog.topics.map(\.name)),
                        Set(["Go", "Java", "System Design", "Performance", "Security"]))
-        XCTAssertEqual(catalog.lessons.count, 26)
+        XCTAssertEqual(catalog.lessons.count, 33)
         XCTAssertEqual(catalog.topics.map(\.id), ["go", "java", "design", "perf", "security"])
         let goKeys: Set<String> = [
             "go.concurrency.cancel-work", "go.testing.case-design",
@@ -38,6 +38,18 @@ final class BundledCatalogTests: XCTestCase {
         ]
         XCTAssertEqual(Set(catalog.lessons.filter { $0.topicID == "design" }.map(\.objectiveKey)), designKeys)
         XCTAssertTrue(catalog.lessons.contains { $0.id == "design.api.deduplicate-writes.v1" })
+        let perfKeys: Set<String> = [
+            "perf.database.query-count", "perf.cpu.hot-path", "perf.memory.allocations",
+            "perf.network.tail-latency", "perf.database.index-access",
+            "perf.cache.hit-rate-tradeoff", "perf.testing.representative-load",
+            "perf.concurrency.queueing"
+        ]
+        let perfLessons = catalog.lessons.filter { $0.topicID == "perf" }
+        XCTAssertEqual(Set(perfLessons.map(\.objectiveKey)), perfKeys)
+        XCTAssertTrue(perfLessons.contains { $0.id == "perf.database.query-count.v1" })
+        XCTAssertEqual(Set(perfLessons.map(\.exercise)).count, 8)
+        XCTAssertEqual(Set(perfLessons.map(\.referenceAnswer)).count, 8)
+        XCTAssertTrue(perfLessons.allSatisfy { $0.selfCheckCriteria.count >= 3 })
         let rateLimit = try XCTUnwrap(catalog.lessons.first { $0.id == "design.api.rate-limit-consistency.v1" })
         XCTAssertTrue(rateLimit.workedExample.contains("one token every 12 seconds"))
         XCTAssertTrue(rateLimit.workedExample.contains("not enforce a strict maximum of five attempts in any rolling minute"))
@@ -51,7 +63,7 @@ final class BundledCatalogTests: XCTestCase {
         })
         for topic in catalog.topics {
             let lessons = catalog.lessons.filter { $0.topicID == topic.id }
-            XCTAssertEqual(lessons.count, ["go", "java", "design"].contains(topic.id) ? 8 : 1,
+            XCTAssertEqual(lessons.count, topic.id == "security" ? 1 : 8,
                            "Unexpected inventory for \(topic.id)")
             for lesson in lessons {
                 XCTAssertEqual(lesson.source, "seed")
@@ -67,9 +79,9 @@ final class BundledCatalogTests: XCTestCase {
                 XCTAssertGreaterThanOrEqual(lesson.selfCheckCriteria.count, 3)
             }
         }
-        XCTAssertEqual(Set(catalog.lessons.map(\.objectiveKey)).count, 26)
+        XCTAssertEqual(Set(catalog.lessons.map(\.objectiveKey)).count, 33)
         // Each authored topic has four initial choices and four distinct reserves.
-        for topicID in ["go", "java", "design"] {
+        for topicID in ["go", "java", "design", "perf"] {
             XCTAssertEqual(catalog.lessons.filter {
                 $0.topicID == topicID && $0.prerequisiteConceptIDs.isEmpty
             }.count, 8)
