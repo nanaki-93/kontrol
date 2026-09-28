@@ -388,6 +388,118 @@ final class LessonExperienceStoreTests: XCTestCase {
         XCTAssertEqual(drafts.buffers[firstID]?.expectedRevision, 2)
     }
 
+    func testGenerationNoticeDistinguishesRealPartialAndEmptyExhaustion() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataCatalogRepository(container: container)
+        _ = try repository.importIfNeeded(BundledCatalogLoader.load())
+        let initial = try repository.loadSnapshot()
+        let topic = "go"
+        let total = initial.definitions.filter { $0.topicID == topic }.count
+        XCTAssertEqual(total, 8)
+        for step in 0..<(total - 2) {
+            let slot = try XCTUnwrap(repository.loadSnapshot().slots.filter { $0.topicID == topic }
+                .max { $0.slotIndex < $1.slotIndex })
+            _ = try repository.dismiss(lessonID: slot.lessonID, expectedSlot: slot,
+                                       now: Date(timeIntervalSince1970: 2_000_000_000 + Double(step)))
+        }
+        let partial = try repository.loadSnapshot()
+        let choices = LearningView.choices(for: topic, in: partial)
+        XCTAssertEqual(choices.count, 2)
+        XCTAssertEqual(try repository.loadHistory().filter { $0.topicID == topic }.count, total - 2)
+        let notice = LearningView.generationNotice(choiceCount: choices.count)
+        XCTAssertTrue(notice.contains("No additional eligible lessons are installed for this topic"))
+        XCTAssertTrue(notice.contains("Generate… is unavailable offline"))
+        XCTAssertTrue(notice.contains("History or another topic"))
+        for (step, slot) in partial.slots.filter({ $0.topicID == topic }).enumerated() {
+            _ = try repository.dismiss(lessonID: slot.lessonID, expectedSlot: slot,
+                                       now: Date(timeIntervalSince1970: 2_000_000_010 + Double(step)))
+        }
+        let empty = try repository.loadSnapshot()
+        XCTAssertTrue(LearningView.choices(for: topic, in: empty).isEmpty)
+        XCTAssertTrue(LearningView.generationNotice(choiceCount: 0)
+            .contains("No eligible lessons are installed for this topic"))
+        XCTAssertEqual(try repository.loadHistory().filter { $0.topicID == topic }.count, total)
+        XCTAssertEqual(empty.slots.filter { $0.topicID != topic }, initial.slots.filter { $0.topicID != topic })
+    }
+
+    func testCapturedDismissalCancelAndStaleConfirmationNeverReplaceAnOccupant() throws {
+        let (repository, graph, drafts, _, opened) = try draftFixture()
+        let lessonID = opened.detail.id
+        let attempt = try XCTUnwrap(opened.detail.attempt)
+        let before = try XCTUnwrap(graph.learningCatalogStore.state.snapshot)
+        let captured = try XCTUnwrap(LearningView.dismissal(for: lessonID, in: before, attemptID: attempt.id))
+        XCTAssertEqual(captured.slot, before.slots.first { $0.lessonID == lessonID })
+        XCTAssertEqual(captured.slot.assignedAt, before.slots.first { $0.lessonID == lessonID }?.assignedAt)
+        drafts.edit("  unfinished 🧪\n", attemptID: attempt.id)
+        // Cancel is presentation-only: no draft flush, progress or slot mutation.
+        XCTAssertEqual(try repository.loadSnapshot(), before)
+        XCTAssertEqual(try repository.loadLesson(lessonID: lessonID).attempt?.answerDraft, "")
+        XCTAssertTrue(try XCTUnwrap(drafts.buffers[attempt.id]).isDirty)
+
+        let replacement = try repository.dismiss(lessonID: lessonID, expectedSlot: captured.slot, now: .distantFuture)
+        let replacementID = try XCTUnwrap(replacement.catalog.slots.first { $0.key == captured.slot.key }?.lessonID)
+        // Another window replaced the assignment. Its occupant must survive a stale dialog.
+        XCTAssertThrowsError(try drafts.dismiss(lessonID: captured.lessonID,
+                                                expectedSlot: captured.slot, attemptID: captured.attemptID))
+        XCTAssertThrowsError(try graph.learningCatalogStore.dismiss(lessonID: replacementID,
+                                                                     expectedSlot: captured.slot)) {
+            XCTAssertEqual($0 as? LessonExperienceError, .staleSlot)
+        }
+        XCTAssertEqual(try repository.loadLesson(lessonID: replacementID).progress, nil)
+        XCTAssertEqual(try repository.loadSnapshot().slots, replacement.catalog.slots)
+        XCTAssertEqual(drafts.buffers[attempt.id]?.text, "  unfinished 🧪\n")
+    }
+
+    func testDismissalSaveFailureRetainsAssignmentAndExactDraftForRetry() throws {
+        var fail = false
+        let (repository, graph, drafts, _, opened) = try draftFixture(beforeSave: {
+            if fail { throw Injected.save }
+        })
+        let attemptID = try XCTUnwrap(opened.detail.attempt?.id)
+        let snapshot = try XCTUnwrap(graph.learningCatalogStore.state.snapshot)
+        let captured = try XCTUnwrap(LearningView.dismissal(for: opened.detail.id, in: snapshot,
+                                                             attemptID: attemptID))
+        drafts.edit("  keep 🧪\n", attemptID: attemptID)
+        fail = true
+        XCTAssertThrowsError(try drafts.dismiss(lessonID: captured.lessonID,
+                                                expectedSlot: captured.slot, attemptID: captured.attemptID))
+        XCTAssertEqual(try repository.loadSnapshot(), snapshot)
+        XCTAssertEqual(drafts.buffers[attemptID]?.text, "  keep 🧪\n")
+        XCTAssertTrue(try XCTUnwrap(drafts.buffers[attemptID]).isDirty)
+        fail = false
+        let receipt = try drafts.dismiss(lessonID: captured.lessonID,
+                                         expectedSlot: captured.slot, attemptID: captured.attemptID)
+        XCTAssertEqual(receipt.detail.attempt?.answerDraft, "  keep 🧪\n")
+        XCTAssertEqual(receipt.detail.progress?.status, .dismissed)
+    }
+
+    func testConfirmedDismissalRetainsPinnedAnswerAndVacancyWithoutCompletion() throws {
+        let (repository, graph, drafts, _, opened) = try draftFixture()
+        let id = opened.detail.id
+        let attempt = try XCTUnwrap(opened.detail.attempt)
+        let snapshot = try XCTUnwrap(graph.learningCatalogStore.state.snapshot)
+        let captured = try XCTUnwrap(LearningView.dismissal(for: id, in: snapshot, attemptID: attempt.id))
+        drafts.edit("  keep 🧪\n", attemptID: attempt.id)
+        let result = try drafts.dismiss(lessonID: captured.lessonID,
+                                        expectedSlot: captured.slot, attemptID: captured.attemptID)
+        XCTAssertEqual(result.replacedSlot, captured.slot)
+        XCTAssertEqual(result.detail.progress?.status, .dismissed)
+        XCTAssertNil(result.detail.progress?.completedAt)
+        XCTAssertNil(result.detail.attempt?.completedAt)
+        XCTAssertEqual(result.detail.attempt?.pinnedContentData, attempt.pinnedContentData)
+        XCTAssertEqual(result.detail.attempt?.answerDraft, "  keep 🧪\n")
+        XCTAssertEqual(try repository.loadHistory().first?.attempt?.answerDraft, "  keep 🧪\n")
+        XCTAssertFalse(result.catalog.slots.contains { $0.lessonID == id })
+        XCTAssertEqual(result.catalog.slots.filter { $0.key != captured.slot.key },
+                       snapshot.slots.filter { $0.key != captured.slot.key })
+        let partial = LearningCatalogSnapshot(topics: result.catalog.topics,
+            subtopics: result.catalog.subtopics, concepts: result.catalog.concepts,
+            definitions: result.catalog.definitions, progress: result.catalog.progress,
+            slots: result.catalog.slots.filter { $0.topicID != captured.slot.topicID })
+        XCTAssertTrue(LearningView.choices(for: captured.slot.topicID, in: partial).isEmpty)
+        XCTAssertNil(LearningView.dismissal(for: id, in: result.catalog))
+    }
+
     func testDismissFlushesDraftAndCancelledCallbackCannotReviveIt() throws {
         let (repository, graph, drafts, scheduler, opened) = try draftFixture()
         let id = try XCTUnwrap(opened.detail.attempt?.id)

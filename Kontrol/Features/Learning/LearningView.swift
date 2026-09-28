@@ -8,10 +8,37 @@ struct LearningView: View {
     var navigation: NavigationStore? = nil
     @State private var selectedTopicID: String?
     @State private var entryError: LessonExperienceError?
+    @State private var dismissal: DismissalConfirmation?
+    @State private var showingDismissal = false
+    @State private var showingGenerationNotice = false
+    @State private var generationChoiceCount = 0
     @FocusState private var focusedTopicID: String?
     @FocusState private var focusedLessonID: String?
+    @FocusState private var focusedDismissLessonID: String?
 
     private static let topicOrder = ["go", "java", "design", "perf", "security"]
+
+    /// Keep the entire assignment captured when confirmation opens, including assignedAt.
+    struct DismissalConfirmation {
+        let lessonID: String
+        let title: String
+        let slot: LessonSlotSnapshot
+        let attemptID: UUID?
+    }
+
+    static func dismissal(for lessonID: String, in snapshot: LearningCatalogSnapshot,
+                          attemptID: UUID? = nil) -> DismissalConfirmation? {
+        guard let slot = snapshot.slots.first(where: { $0.lessonID == lessonID }),
+              let lesson = snapshot.definitions.first(where: { $0.id == lessonID }) else { return nil }
+        return DismissalConfirmation(lessonID: lessonID, title: lesson.title,
+                                     slot: slot, attemptID: attemptID)
+    }
+
+    static func generationNotice(choiceCount: Int) -> String {
+        let availability = choiceCount == 0 ? "No eligible lessons are installed" :
+            "No additional eligible lessons are installed"
+        return "\(availability) for this topic. Generate… is unavailable offline in this version. Try History or another topic."
+    }
 
     static func orderedTopics(in snapshot: LearningCatalogSnapshot) -> [LearningTopicSnapshot] {
         snapshot.topics.sorted { lhs, rhs in
@@ -49,7 +76,7 @@ struct LearningView: View {
             }
             if entryError != nil {
                 ErrorBanner(.saveFailed)
-                Text("Lesson could not be opened. Check the choice and try again.")
+                Text("Lesson action failed. Your choice and any unfinished work are retained; check the assignment and retry.")
                     .appTypography(.body)
                     .foregroundStyle(AppColors.textSecondary)
             }
@@ -92,7 +119,48 @@ struct LearningView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, AppMetrics.horizontalInset)
         .padding(.top, AppMetrics.space8)
-        .onAppear { store.loadIfNeeded() }
+        .onAppear {
+            store.loadIfNeeded()
+            // Practice returns here after a confirmed dismissal. Its action button no
+            // longer exists, so restore keyboard focus to the topic in the choices view.
+            if let snapshot = store.state.snapshot {
+                let topics = Self.orderedTopics(in: snapshot)
+                if let topic = topics.first(where: { $0.id == (navigation?.selectedTopicID ?? selectedTopicID) })
+                    ?? topics.first {
+                    DispatchQueue.main.async { focusedTopicID = topic.id }
+                }
+            }
+        }
+        .confirmationDialog("Show another instead of \(dismissal?.title ?? "this lesson")?",
+                            isPresented: $showingDismissal, titleVisibility: .visible) {
+            Button("Show another", role: .destructive) {
+                if let dismissal { dismiss(dismissal) }
+            }
+            Button("Keep lesson", role: .cancel) {}
+        } message: {
+            Text("Dismiss this assignment from the choices? Unfinished work stays in History. This does not complete the lesson.")
+        }
+        .onChange(of: showingDismissal) { _, visible in
+            if !visible, let captured = dismissal {
+                dismissal = nil
+                DispatchQueue.main.async {
+                    if store.state.snapshot?.slots.contains(where: { $0 == captured.slot }) == true {
+                        focusedDismissLessonID = captured.lessonID
+                    } else {
+                        focusedTopicID = captured.slot.topicID
+                    }
+                }
+            }
+        }
+        .alert("Generation unavailable", isPresented: $showingGenerationNotice) {
+            if let navigation {
+                Button("History") { navigation.showHistory() }
+            }
+            Button("Another topic") { selectAnotherTopic() }
+            Button("Stay here", role: .cancel) {}
+        } message: {
+            Text(Self.generationNotice(choiceCount: generationChoiceCount))
+        }
     }
 
     @ViewBuilder private func catalog(_ snapshot: LearningCatalogSnapshot, compact: Bool) -> some View {
@@ -161,6 +229,12 @@ struct LearningView: View {
         let choices = Self.choices(for: selected.id, in: snapshot)
         return VStack(alignment: .leading, spacing: AppMetrics.space4) {
                 SectionHeader(selected.name, metadata: "\(choices.count) available")
+                if choices.count < 4 {
+                    Text("\(4 - choices.count) vacant \(4 - choices.count == 1 ? "choice" : "choices") · no eligible lesson is repeated")
+                        .appTypography(.metadata)
+                        .foregroundStyle(AppColors.textSecondary)
+                        .accessibilityIdentifier("learning-vacancy")
+                }
                 if choices.isEmpty {
                     EmptyState("No choices available in \(selected.name).",
                                guidance: "There are no eligible lessons to open right now. Try another topic.")
@@ -190,6 +264,19 @@ struct LearningView: View {
                                 .focusable()
                                 .focused($focusedLessonID, equals: lesson.id)
                                 .accessibilityIdentifier("learning-open-\(lesson.id)")
+                                Button("Show another instead of \(lesson.title)") {
+                                    guard store.state.isAuthoritative,
+                                          let current = store.state.snapshot,
+                                          let captured = Self.dismissal(for: lesson.id, in: current) else {
+                                        entryError = .staleSlot
+                                        return
+                                    }
+                                    dismissal = captured
+                                    showingDismissal = true
+                                }
+                                .focusable()
+                                .focused($focusedDismissLessonID, equals: lesson.id)
+                                .accessibilityIdentifier("learning-dismiss-\(lesson.id)")
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -198,8 +285,42 @@ struct LearningView: View {
                         .clipShape(RoundedRectangle(cornerRadius: AppMetrics.smallRadius))
                     }
                 }
+                if choices.count < 4 {
+                    Button("Generate…") {
+                        generationChoiceCount = choices.count
+                        showingGenerationNotice = true
+                    }
+                        .accessibilityIdentifier("learning-generate-unavailable")
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func dismiss(_ captured: DismissalConfirmation) {
+        do {
+            _ = try navigationDismiss(captured)
+            entryError = nil
+        } catch {
+            entryError = (error as? LessonExperienceError) ?? .persistenceFailure
+        }
+    }
+
+    private func navigationDismiss(_ captured: DismissalConfirmation) throws -> LessonMutationResult {
+        // No new slot lookup here: the repository rejects a replaced occupant or timestamp.
+        // Flush all app-owned buffers before this transition, including a second window's edits.
+        guard let navigation else { throw LessonExperienceError.invalidTransition }
+        guard navigation.flushForLifecycle() else { throw navigation.saveError ?? .persistenceFailure }
+        return try store.dismiss(lessonID: captured.lessonID, expectedSlot: captured.slot)
+    }
+
+    private func selectAnotherTopic() {
+        guard let snapshot = store.state.snapshot else { return }
+        let topics = Self.orderedTopics(in: snapshot)
+        guard topics.count > 1 else { return }
+        let current = navigation?.selectedTopicID ?? selectedTopicID ?? topics[0].id
+        let index = topics.firstIndex(where: { $0.id == current }) ?? 0
+        let next = topics[(index + 1) % topics.count].id
+        if let navigation { navigation.selectTopic(next) } else { selectedTopicID = next }
     }
 
     private func open(_ id: String, using navigation: NavigationStore) {

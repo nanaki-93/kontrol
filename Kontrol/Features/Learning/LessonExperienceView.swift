@@ -41,6 +41,10 @@ struct LessonExperienceView: View {
     @State private var showingSolution = false
     @State private var gateError: LessonExperienceError?
     @State private var completion: LessonMutationResult?
+    @State private var dismissal: LearningView.DismissalConfirmation?
+    @State private var showingDismissal = false
+    @FocusState private var dismissalFocused: Bool
+    @FocusState private var backFocused: Bool
 
     /// A gate is offered only against the current committed detail and its exact saved buffer.
     /// The repository rechecks the revision and all gates during the transaction.
@@ -82,6 +86,7 @@ struct LessonExperienceView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: AppMetrics.space4) {
             Button("Back to choices") { navigation.backToChoices() }
+                .focused($backFocused)
                 .accessibilityIdentifier("lesson-back")
             switch store.detailState {
             case .failed(let id, _) where id == lessonID:
@@ -103,11 +108,34 @@ struct LessonExperienceView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(AppMetrics.horizontalInset)
         .onAppear { loadRequestedDetail() }
+        .confirmationDialog("Show another instead of \(dismissal?.title ?? "this lesson")?",
+                            isPresented: $showingDismissal, titleVisibility: .visible) {
+            Button("Show another", role: .destructive) {
+                if let dismissal { confirmDismissal(dismissal) }
+            }
+            Button("Keep lesson", role: .cancel) {}
+        } message: {
+            Text("Dismiss this assignment? Your unfinished response and studied version are retained in History. This does not complete the lesson.")
+        }
+        .onChange(of: showingDismissal) { _, visible in
+            if !visible, let captured = dismissal {
+                dismissal = nil
+                DispatchQueue.main.async {
+                    if store.state.snapshot?.slots.contains(where: { $0 == captured.slot }) == true {
+                        dismissalFocused = true
+                    } else {
+                        backFocused = true
+                    }
+                }
+            }
+        }
         .onChange(of: lessonID) { _, _ in
             conflict = ConflictComparisonState()
             showingSolution = false
             gateError = nil
             completion = nil
+            dismissal = nil
+            showingDismissal = false
             loadRequestedDetail()
         }
         .onChange(of: store.detailState) { _, state in
@@ -134,6 +162,19 @@ struct LessonExperienceView: View {
                 .appTypography(.metadata)
                 .foregroundStyle(AppColors.textSecondary)
             if let buffer = Self.response(detail, drafts: drafts, lessonID: lessonID) {
+                Button("Show another instead of \(definition.title)") {
+                    guard store.state.isAuthoritative, let snapshot = store.state.snapshot,
+                          let captured = LearningView.dismissal(for: lessonID, in: snapshot,
+                                                                 attemptID: buffer.attemptID) else {
+                        gateError = .staleSlot
+                        return
+                    }
+                    dismissal = captured
+                    showingDismissal = true
+                }
+                .focusable()
+                .focused($dismissalFocused)
+                .accessibilityIdentifier("lesson-dismiss")
                 if showingSolution && detail.attempt?.solutionRevealedAt != nil {
                     Button("Back to exercise") { showingSolution = false }
                         .accessibilityIdentifier("lesson-back-to-exercise")
@@ -213,6 +254,21 @@ struct LessonExperienceView: View {
                     .textSelection(.enabled)
                     .accessibilityIdentifier("lesson-retained-answer")
             }
+        }
+    }
+
+    private func confirmDismissal(_ captured: LearningView.DismissalConfirmation) {
+        do {
+            // Flush before the atomic, exact-assignment dismissal. A failed flush leaves
+            // the route and confirmation's assignment unchanged for a fresh retry.
+            guard navigation.flushForLifecycle() else { throw navigation.saveError ?? .persistenceFailure }
+            let receipt = try drafts.dismiss(lessonID: captured.lessonID,
+                                             expectedSlot: captured.slot, attemptID: captured.attemptID)
+            guard receipt.detail.id == captured.lessonID else { throw LessonExperienceError.invalidStoredData }
+            gateError = nil
+            navigation.backToChoices()
+        } catch {
+            gateError = (error as? LessonExperienceError) ?? .persistenceFailure
         }
     }
 
