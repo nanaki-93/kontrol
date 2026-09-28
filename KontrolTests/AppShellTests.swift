@@ -10,6 +10,21 @@ final class AppShellTests: XCTestCase {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         return AppDependencies(container: container, catalogRepository: SwiftDataCatalogRepository(container: container))
     }
+
+    func testOneStorePerDependencyGraphAcrossRoutesAndWindows() throws {
+        let dependencies = try makeDependencies()
+        let shared = dependencies.taskStore
+        let first = AppShell(navigation: NavigationStore(), dependencies: dependencies)
+        let second = AppShell(navigation: NavigationStore(), dependencies: dependencies)
+        XCTAssertTrue(first.dependencies.taskStore === shared)
+        XCTAssertTrue(second.dependencies.taskStore === shared)
+        XCTAssertTrue((shared.repository as AnyObject) === (dependencies.taskStore.repository as AnyObject))
+
+        let other = try makeDependencies()
+        XCTAssertFalse(other.taskStore === shared)
+        XCTAssertFalse((other.taskStore.repository as AnyObject) === (shared.repository as AnyObject))
+    }
+
     func testNavigationMetadataAndRouting() {
         let destinations = AppDestination.allCases
         XCTAssertEqual(destinations.map(\.title), ["Today", "Learning", "Projects", "Focus", "Tasks", "News", "Settings"])

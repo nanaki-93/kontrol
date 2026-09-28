@@ -11,8 +11,12 @@ final class TaskPresentationTests: XCTestCase {
 
     private final class FailingReadRepository: TaskRepository {
         let storage: SwiftDataTaskRepository
+        var failRead = true
         init(storage: SwiftDataTaskRepository) { self.storage = storage }
-        func fetchAll() throws -> [TaskItem] { throw SaveError.injected }
+        func fetchAll() throws -> [TaskItem] {
+            if failRead { throw SaveError.injected }
+            return try storage.fetchAll()
+        }
         func create(title: String, plannedFor: PlannedDay?) throws -> UUID {
             try storage.create(title: title, plannedFor: plannedFor)
         }
@@ -79,7 +83,7 @@ final class TaskPresentationTests: XCTestCase {
 
     private func inspectTasks(_ repository: any TaskRepository, width: CGFloat = 1000,
                               scale: CGFloat = 1, _ check: (NSWindow) throws -> Void) throws {
-        let host = NSHostingView(rootView: TasksView(taskRepository: repository)
+        let host = NSHostingView(rootView: TasksView(store: TaskStore(repository: repository))
             .environment(\.appTextScaleOverride, scale))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: 700),
                               styleMask: [.titled], backing: .buffered, defer: false)
@@ -94,7 +98,7 @@ final class TaskPresentationTests: XCTestCase {
 
     private func inspectToday(_ repository: any TaskRepository, at instant: Date,
                               _ check: (NSWindow) throws -> Void) throws {
-        let host = NSHostingView(rootView: TodayView(taskRepository: repository, now: { instant }))
+        let host = NSHostingView(rootView: TodayView(store: TaskStore(repository: repository), now: { instant }))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.title = "Today state inspection \(UUID().uuidString)"
@@ -324,7 +328,7 @@ final class TaskPresentationTests: XCTestCase {
             if fail { throw SaveError.injected }
             try context.save()
         })
-        let host = NSHostingView(rootView: TodayView(taskRepository: repository))
+        let host = NSHostingView(rootView: TodayView(store: TaskStore(repository: repository)))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.title = "Today capture list inspection"
@@ -352,6 +356,87 @@ final class TaskPresentationTests: XCTestCase {
         XCTAssertNil(window.attachedSheet)
         XCTAssertEqual(elements(in: window, identifier: rowID).count, 1)
         XCTAssertEqual(try repository.fetchAll().map(\.id), [id])
+    }
+
+    func testSharedCommittedSnapshotAppearsInTwoWindowsWithoutNavigation() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataTaskRepository(container: container)
+        let dependencies = AppDependencies(container: container,
+            catalogRepository: SwiftDataCatalogRepository(container: container), taskRepository: repository)
+        let suite = "SharedTasks.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let todayNavigation = NavigationStore(preferences: UserDefaultsDestinationPreferences(defaults: defaults))
+        let tasksNavigation = NavigationStore(preferences: UserDefaultsDestinationPreferences(defaults: defaults))
+        tasksNavigation.select(.tasks)
+        let windows = [todayNavigation, tasksNavigation].enumerated().map { index, navigation in
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
+                                  styleMask: [.titled], backing: .buffered, defer: false)
+            window.title = "Shared task window \(index) \(UUID())"
+            window.contentView = NSHostingView(rootView: AppShell(navigation: navigation, dependencies: dependencies))
+            window.makeKeyAndOrderFront(nil)
+            return window
+        }
+        defer { windows.forEach { $0.orderOut(nil) } }
+        settle()
+        let planned = PlannedDay.today(at: .now, calendar: .current, timeZone: .current)
+        let committed = try dependencies.taskStore.create(input: TaskInput(title: "Shared task", plannedFor: planned))
+        let rowID = "task-row-\(committed.id.uuidString)"
+        settle()
+        for window in windows {
+            XCTAssertEqual(elements(in: window, identifier: rowID).count, 1)
+        }
+        XCTAssertEqual(dependencies.taskStore.snapshots.map(\.id), [committed.id])
+        XCTAssertEqual(try repository.fetchAll().map(\.id), [committed.id])
+    }
+
+    func testStaleReadErrorIsVisibleOnBothRoutesAndRetryRecovers() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let storage = SwiftDataTaskRepository(container: container)
+        let id = try storage.create(title: "Cached task")
+        let repository = FailingReadRepository(storage: storage)
+        repository.failRead = false
+        let dependencies = AppDependencies(container: container,
+            catalogRepository: SwiftDataCatalogRepository(container: container), taskRepository: repository)
+        let suite = "StaleTasks.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let navigation = NavigationStore(preferences: UserDefaultsDestinationPreferences(defaults: defaults))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.title = "Stale shared task inspection"
+        window.contentView = NSHostingView(rootView: AppShell(navigation: navigation, dependencies: dependencies))
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        settle()
+        XCTAssertEqual(dependencies.taskStore.readState, .loaded)
+        repository.failRead = true
+        navigation.select(.tasks)
+        settle()
+        for route in [AppDestination.tasks, .today] {
+            navigation.select(route)
+            settle()
+            let text = visibleText(in: window)
+            XCTAssertTrue(text.contains("Error: Content could not be loaded."))
+            XCTAssertTrue(text.contains("Could not refresh tasks. Showing previously loaded tasks. Retry to update."))
+            XCTAssertFalse(text.contains("No tasks captured yet."))
+            XCTAssertFalse(text.contains("No tasks planned or due today."))
+            XCTAssertEqual(elements(in: window, identifier: "task-row-\(id.uuidString)").count, 1)
+        }
+        repository.failRead = false
+        let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+        let host = try XCTUnwrap((attribute(app, kAXWindowsAttribute) as? [AXUIElement])?.first {
+            attribute($0, kAXTitleAttribute) as? String == window.title
+        })
+        let retry = try XCTUnwrap(descendants(of: host).first {
+            attribute($0, kAXRoleAttribute) as? String == kAXButtonRole &&
+            attribute($0, kAXDescriptionAttribute) as? String == "Retry"
+        })
+        XCTAssertEqual(AXUIElementPerformAction(retry, kAXPressAction as CFString), .success)
+        settle()
+        XCTAssertEqual(dependencies.taskStore.readState, .loaded)
+        XCTAssertFalse(visibleText(in: window).contains("Error: Content could not be loaded."))
+        XCTAssertEqual(try storage.fetchAll().map(\.id), [id])
     }
 
     func testRenderedTodayAndTasksRefreshWhenNavigatingWithoutDuplicates() throws {

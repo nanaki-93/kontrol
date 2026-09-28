@@ -6,9 +6,12 @@ import SwiftData
 final class AppDependencies {
     let container: ModelContainer
     let catalogRepository: any CatalogRepository
+    let taskStore: TaskStore
 
-    init(container: ModelContainer, catalogRepository: any CatalogRepository) {
+    init(container: ModelContainer, catalogRepository: any CatalogRepository,
+         taskRepository: (any TaskRepository)? = nil) {
         self.container = container
         self.catalogRepository = catalogRepository
+        taskStore = TaskStore(repository: taskRepository ?? SwiftDataTaskRepository(container: container))
     }
 }

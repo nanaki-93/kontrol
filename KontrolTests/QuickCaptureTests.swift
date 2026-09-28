@@ -170,7 +170,7 @@ final class QuickCaptureTests: XCTestCase {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.title = "Capture retry test"
-        let host = NSHostingView(rootView: TodayView(taskRepository: repository))
+        let host = NSHostingView(rootView: TodayView(store: TaskStore(repository: repository)))
         window.contentView = host
         window.makeKeyAndOrderFront(nil)
         host.layoutSubtreeIfNeeded()
@@ -210,7 +210,7 @@ final class QuickCaptureTests: XCTestCase {
 
     func testTodayOpensNativeSheetWithReachableControlsAndCancelWithoutInsert() throws {
         let repository = try RecordingRepository()
-        let host = NSHostingView(rootView: TodayView(taskRepository: repository))
+        let host = NSHostingView(rootView: TodayView(store: TaskStore(repository: repository)))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.title = "Quick capture test"
@@ -264,7 +264,7 @@ final class QuickCaptureTests: XCTestCase {
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
                                   styleMask: [.titled], backing: .buffered, defer: false)
             window.title = "Capture scale \(scale)"
-            let host = NSHostingView(rootView: TodayView(taskRepository: repository)
+            let host = NSHostingView(rootView: TodayView(store: TaskStore(repository: repository))
                 .environment(\.appTextScaleOverride, scale))
             window.contentView = host
             window.makeKeyAndOrderFront(nil)
@@ -310,7 +310,7 @@ final class QuickCaptureTests: XCTestCase {
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: height),
                                   styleMask: [.titled], backing: .buffered, defer: false)
             window.title = "Enlarged capture \(width)"
-            let host = NSHostingView(rootView: TodayView(taskRepository: repository)
+            let host = NSHostingView(rootView: TodayView(store: TaskStore(repository: repository))
                 .environment(\.appTextScaleOverride, 1.3))
             window.contentView = host
             window.makeKeyAndOrderFront(nil)

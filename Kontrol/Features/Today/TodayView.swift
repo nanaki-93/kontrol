@@ -1,14 +1,12 @@
 import SwiftUI
 
 struct TodayView: View {
-    let taskRepository: any TaskRepository
+    @ObservedObject var store: TaskStore
     var now: () -> Date = Date.init
     var calendar: () -> Calendar = { .current }
     var timeZone: () -> TimeZone = { .current }
     @State private var showingCapture = false
     @FocusState private var addTaskFocused: Bool
-    @State private var rows: [TaskRow] = []
-    @State private var loadFailed = false
     @State private var displayedDate = Date.now
 
     var body: some View {
@@ -23,15 +21,19 @@ struct TodayView: View {
 
             SectionHeader("Next")
                 .padding(.top, AppMetrics.space2)
-            if loadFailed {
-                ErrorBanner(.readFailed)
-            } else {
-                let today = TaskRow.forToday(rows, at: displayedDate, calendar: calendar(), timeZone: timeZone())
-                if today.isEmpty {
-                    EmptyState("No tasks planned or due today.", guidance: "Use Add task to capture one.")
-                } else {
-                    TaskRows(rows: today)
-                }
+            if let message = store.readState.message {
+                ErrorBanner(.readFailed, recoveryTitle: "Retry", recovery: store.retryRead)
+                Text(message)
+                    .appTypography(.metadata)
+                    .foregroundStyle(AppColors.textSecondary)
+            }
+            let today = TaskSelection.select(store.snapshots, filter: .today,
+                                             selectedDate: displayedDate, now: displayedDate,
+                                             calendar: calendar(), timeZone: timeZone())
+            if store.readState == .loaded && today.isEmpty {
+                EmptyState("No tasks planned or due today.", guidance: "Use Add task to capture one.")
+            } else if !today.isEmpty {
+                TaskRows(rows: today.map(TaskRow.init))
             }
             Divider().overlay(AppColors.border)
             SectionHeader("Schedule")
@@ -41,28 +43,20 @@ struct TodayView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, AppMetrics.horizontalInset)
         .padding(.top, AppMetrics.space8)
-        .onAppear(perform: refresh)
+        .onAppear {
+            displayedDate = now()
+            store.refresh()
+        }
         .sheet(isPresented: $showingCapture, onDismiss: {
             // Wait for the native sheet to finish closing before returning keyboard focus.
             addTaskFocused = true
         }) {
-            QuickCaptureView(repository: taskRepository, onCancel: {
+            QuickCaptureView(repository: store.repository, onCancel: {
                 showingCapture = false
             }, onSaved: {
                 showingCapture = false
-                refresh()
+                store.refresh()
             })
-        }
-    }
-
-    private func refresh() {
-        displayedDate = now()
-        do {
-            rows = try taskRepository.fetchAll().map(TaskRow.init)
-            loadFailed = false
-        } catch {
-            rows = []
-            loadFailed = true
         }
     }
 }
