@@ -1,5 +1,32 @@
 # Versioned closed SwiftData disk fixtures
 
+## Frozen V4 disk store and rich V3 migration source
+
+`V4/` is a **separate closed V4-only** (4.0.0) store written directly with `KontrolSchemaV4`, not the production migration factory. It contains a topic/subtopic/concept, definition `v4-lesson` with objective `Explain frozen V4 persistence` and content version 2, catalog marker `v4-catalog` version 23, and slot 2 assigned at Unix `1730000000`. It contains **no progress or attempts**. The complete closed file set is `Kontrol.store`, `Kontrol.store-shm`, and `Kontrol.store-wal`. Never regenerate or open these originals in place. The standalone writer is NOT an app/test source. For the initial capture only, from the repository root:
+
+```sh
+xcrun swiftc -o /tmp/kontrol-v4-writer \
+  Kontrol/Data/Persistence/KontrolSchemaV1.swift \
+  Kontrol/Data/Persistence/KontrolSchemaV2.swift \
+  Kontrol/Data/Persistence/KontrolSchemaV3.swift \
+  Kontrol/Data/Persistence/KontrolSchemaV4.swift \
+  KontrolTests/Fixtures/GenerateV4.swift
+base=$(mktemp -d)
+/tmp/kontrol-v4-writer "$base/V4"
+ls -la "$base/V4"
+# Initial capture only, after writer exit: mkdir KontrolTests/Fixtures/V4 && cp "$base/V4/"* KontrolTests/Fixtures/V4/
+```
+
+`CatalogMigrationTests` also seeds a **temporary, rich V3-only** source using the released V3 schema directly. It contains four definitions (available/started/completed/dismissed progress), an unfinished personal answer draft and a completed attempt with an older immutable content snapshot, a catalog marker, task with local-day/time-zone data, linked schedule block, and linked ended focus session. SQLite's backup API produces a transactionally closed source when SwiftData retains WAL handles. The complete closed source is copied before the production V4 factory opens the copy; tests verify its values and the empty V4 objective fallback on two independent opens. Both source and all four frozen versions are byte-compared after migration. The migration does not import a catalog, add progress, or create slots. Opened copies are left for OS cleanup because SwiftData may retain SQLite handles.
+
+```sh
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug \
+  -destination 'platform=macOS' -derivedDataPath /tmp/kontrol-f05-derived \
+  CODE_SIGNING_ALLOWED=NO -only-testing:KontrolTests/CatalogMigrationTests \
+  -only-testing:KontrolTests/FocusMigrationTests \
+  -only-testing:KontrolTests/ScheduleMigrationTests test
+```
+
 ## Frozen V3 disk store
 
 `V3/` is a **closed V3-only** (3.0.0) store produced directly with `KontrolSchemaV3`, without the production factory or a migration plan. It contains a V3 task (`0C8C76A6-085B-47D7-A820-43EA0BDAB311`, title `V3 fixture task`, created Unix `1720000000`, due Unix `1720086400`, notes `Retained task`), a manual block (`88E80A72-F92B-4E9E-A38A-338F54818D9B`, start Unix `1820000000`, end Unix `1820001800`, note `Manual`), and an ended focus session (`83B6B103-03BA-4CD5-8D54-90E3398F6E00`, planned 1500 seconds, actual 72.5 seconds, start Unix `1720000000`, end/checkpoint Unix `1720000073`, linked to the task with its title snapshot). All unspecified optional fields are nil and recovery is false. The complete closed file set is `Kontrol.store`, `Kontrol.store-shm`, and `Kontrol.store-wal`. Freeze these bytes and never open this directory in place or regenerate it on later schema changes.
@@ -18,7 +45,7 @@ ls -la "$base/V3"
 # Initial capture only, after writer exit: mkdir KontrolTests/Fixtures/V3 && cp "$base/V3/"* KontrolTests/Fixtures/V3/
 ```
 
-`FocusMigrationTests` copies all three checked-in versions' complete closed file sets before opening copies. It checks V1/V2 values through the production V3 migration factory on two distinct disk opens and checks V3 directly using its versioned schema (no plan), then through the production factory. Rich V1- and V2-only temporary stores additionally cover every catalog and personal learning entity; original source file names and bytes, including sidecars, are compared after upgrade. Opened copies are left until OS cleanup because SwiftData can retain internal SQLite handles. `LaunchRecoveryTests` and `ScheduleMigrationTests` also exercise injected failed opens and historical stores.
+`FocusMigrationTests` copies the V1/V2/V3 complete closed file sets before opening copies. It checks V1/V2 values through the production migration factory on two distinct disk opens and checks V3 directly using its versioned schema (no plan), then through the production factory. Rich V1- and V2-only temporary stores additionally cover every catalog and personal learning entity; original source file names and bytes, including sidecars, are compared after upgrade. Opened copies are left until OS cleanup because SwiftData can retain internal SQLite handles. `LaunchRecoveryTests` and `ScheduleMigrationTests` also exercise injected failed opens and historical stores.
 
 ```sh
 xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug \
