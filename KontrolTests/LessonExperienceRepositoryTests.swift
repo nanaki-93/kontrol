@@ -587,6 +587,206 @@ final class LessonExperienceRepositoryTests: XCTestCase {
         XCTAssertEqual(try writer.loadLesson(lessonID: id).attempt?.revision, 1)
     }
 
+    private func ready(_ writer: SwiftDataCatalogRepository, id: String) throws -> LessonMutationResult {
+        let opened = try writer.openLesson(lessonID: id, now: first)
+        let attemptID = try XCTUnwrap(opened.detail.attempt?.id)
+        // Empty text is a legitimate saved answer; gates, not answer length, govern completion.
+        let revealed = try writer.revealSolution(attemptID: attemptID, expectedRevision: 0, now: first)
+        return try writer.setSelfCheckAcknowledged(attemptID: attemptID,
+            expectedRevision: try XCTUnwrap(revealed.detail.attempt?.revision),
+            acknowledged: true, now: later)
+    }
+
+    func testCompletionRotatesOnlyConsumedSlotAndIsIdempotentAcrossConsumers() throws {
+        let (container, writer, id) = try setup()
+        let other = SwiftDataCatalogRepository(container: container)
+        let initial = try writer.loadSnapshot()
+        let consumed = try XCTUnwrap(initial.slots.first { $0.lessonID == id })
+        let pinned = try XCTUnwrap(initial.definitions.first { $0.id == id })
+        let prepared = try ready(writer, id: id)
+        let attempt = try XCTUnwrap(prepared.detail.attempt)
+        let answer = "  🧪\n    exact\n\n"
+        let saved = try writer.saveAnswer(attemptID: attempt.id, expectedRevision: attempt.revision, answer: answer)
+        XCTAssertNil(saved.detail.attempt?.selfCheckAcknowledgedAt)
+        XCTAssertThrowsError(try writer.complete(attemptID: attempt.id,
+            expectedRevision: try XCTUnwrap(saved.detail.attempt?.revision), now: later)) {
+            XCTAssertEqual($0 as? LessonExperienceError, .completionRequirementsMissing)
+        }
+        let acknowledged = try other.setSelfCheckAcknowledged(attemptID: attempt.id,
+            expectedRevision: try XCTUnwrap(saved.detail.attempt?.revision), acknowledged: true, now: later)
+        let revision = try XCTUnwrap(acknowledged.detail.attempt?.revision)
+        XCTAssertThrowsError(try writer.complete(attemptID: attempt.id, expectedRevision: revision - 1, now: later)) {
+            XCTAssertEqual($0 as? LessonExperienceError, .staleRevision)
+        }
+        // Exercise the IO boundary, not just the concrete repository API.
+        let completionRepository: any CatalogRepository = other
+        let completed = try completionRepository.complete(attemptID: attempt.id, expectedRevision: revision, now: later)
+        XCTAssertEqual(completed.outcome, .changed)
+        XCTAssertEqual(completed.replacedSlot, consumed)
+        XCTAssertEqual(completed.detail.content, .pinned(pinned))
+        XCTAssertEqual(completed.detail.attempt?.answerDraft, answer)
+        XCTAssertEqual(completed.detail.attempt?.revision, revision + 1)
+        XCTAssertEqual(completed.detail.attempt?.completedAt, later)
+        XCTAssertEqual(completed.detail.progress?.status, .completed)
+        XCTAssertEqual(completed.detail.progress?.completedAt, later)
+        XCTAssertEqual(completed.history.count, 1)
+        XCTAssertEqual(completed.history.first?.attempt, completed.detail.attempt)
+        XCTAssertEqual(completed.history.first?.content, .pinned(pinned))
+        let archived = try XCTUnwrap(completed.detail.attempt?.completedContentSnapshot)
+        XCTAssertEqual(archived, PinnedLessonContent(definition: pinned).completedSnapshot)
+        XCTAssertEqual(completed.catalog.slots.filter { $0.key != consumed.key },
+                       initial.slots.filter { $0.key != consumed.key })
+        XCTAssertNotEqual(completed.catalog.slots.first { $0.key == consumed.key }?.lessonID, id)
+        XCTAssertEqual(try writer.loadLesson(lessonID: id), completed.detail)
+        XCTAssertEqual(try rows(LessonAttempt.self, in: container).filter { $0.lessonID == id }.count, 1)
+        XCTAssertEqual(try rows(LessonProgress.self, in: container).filter { $0.lessonID == id }.count, 1)
+        enum Injected: Error { case save }
+        let noSave = SwiftDataCatalogRepository(container: container, beforeSave: { throw Injected.save })
+        let repeated = try noSave.complete(attemptID: attempt.id, expectedRevision: 0, now: .distantFuture)
+        XCTAssertEqual(repeated.outcome, .unchanged)
+        XCTAssertNil(repeated.replacedSlot)
+        XCTAssertEqual(repeated.detail, completed.detail)
+        XCTAssertEqual(repeated.catalog, completed.catalog)
+        XCTAssertEqual(repeated.history, completed.history)
+        XCTAssertEqual(try other.loadSnapshot(), completed.catalog)
+        XCTAssertThrowsError(try writer.saveAnswer(attemptID: attempt.id,
+            expectedRevision: revision + 1, answer: "late")) {
+            XCTAssertEqual($0 as? LessonExperienceError, .invalidTransition)
+        }
+    }
+
+    func testCompletionArchivesStudiedVersionAfterDefinitionUpgrade() throws {
+        let (container, writer, id) = try setup()
+        let studied = try XCTUnwrap(writer.loadSnapshot().definitions.first { $0.id == id })
+        let prepared = try ready(writer, id: id)
+        let attempt = try XCTUnwrap(prepared.detail.attempt)
+        let upgrade = ModelContext(container)
+        let definition = try XCTUnwrap(upgrade.fetch(FetchDescriptor<LessonDefinition>()).first { $0.id == id })
+        definition.title = "New title"
+        definition.exercise = "New exercise"
+        definition.contentVersion += 1
+        try upgrade.save()
+        let completed = try writer.complete(attemptID: attempt.id, expectedRevision: attempt.revision, now: later)
+        XCTAssertEqual(completed.detail.content, .pinned(studied))
+        XCTAssertEqual(completed.detail.attempt?.contentVersion, studied.contentVersion)
+        XCTAssertEqual(completed.detail.attempt?.completedContentSnapshot,
+                       PinnedLessonContent(definition: studied).completedSnapshot)
+        let reader = SwiftDataCatalogRepository(container: container)
+        XCTAssertEqual(try reader.loadLesson(lessonID: id), completed.detail)
+        let repeated = try reader.complete(attemptID: attempt.id, expectedRevision: 0, now: .distantFuture)
+        XCTAssertEqual(repeated.detail, completed.detail)
+        XCTAssertEqual(repeated.history.first?.content, .pinned(studied))
+    }
+
+    func testCompletionExhaustionAndUnslottedStartedWorkLeaveOtherVacanciesAlone() throws {
+        for removeConsumed in [false, true] {
+            let (container, writer, id) = try setup()
+            let prepared = try ready(writer, id: id)
+            let attempt = try XCTUnwrap(prepared.detail.attempt)
+            let context = ModelContext(container)
+            // All alternative lessons in the consumed topic are terminal, but no
+            // other topic's empty slot should be filled by this completion.
+            let current = try writer.loadSnapshot()
+            let consumed = try XCTUnwrap(current.slots.first { $0.lessonID == id })
+            for definition in current.definitions where definition.topicID == consumed.topicID && definition.id != id {
+                context.insert(LessonProgress(lessonID: definition.id, status: .dismissed, dismissedAt: first))
+            }
+            let vacant = try XCTUnwrap(context.fetch(FetchDescriptor<LessonSlot>()).first {
+                $0.key != consumed.key
+            })
+            context.delete(vacant)
+            if removeConsumed {
+                context.delete(try XCTUnwrap(context.fetch(FetchDescriptor<LessonSlot>()).first {
+                    $0.key == consumed.key
+                }))
+            }
+            try context.save()
+            let before = try writer.loadSnapshot()
+            let result = try writer.complete(attemptID: attempt.id, expectedRevision: attempt.revision, now: later)
+            XCTAssertEqual(result.outcome, .changed)
+            XCTAssertNil(result.catalog.slots.first { $0.key == consumed.key })
+            XCTAssertNil(result.catalog.slots.first { $0.key == vacant.key })
+            XCTAssertEqual(result.catalog.slots.filter { $0.key != consumed.key }, before.slots.filter { $0.key != consumed.key })
+            XCTAssertEqual(result.replacedSlot, removeConsumed ? nil : consumed)
+            XCTAssertEqual(result.history.first?.lessonID, id)
+        }
+    }
+
+    func testCompletionFailuresAreAtomicAfterDiskReopen() throws {
+        enum Injected: Error { case failure }
+        for failBefore in [true, false] {
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "KontrolCompleteFailure-\(UUID().uuidString)/Kontrol.store")
+            var attemptID = UUID()
+            var revision = 0
+            var baseline: LearningCatalogSnapshot?
+            var detail: LessonDetailSnapshot?
+            try autoreleasepool {
+                let container = try ModelContainerFactory().makeContainer(mode: .persistent(url))
+                let writer = SwiftDataCatalogRepository(container: container)
+                _ = try writer.importIfNeeded(BundledCatalogLoader.load())
+                let id = try XCTUnwrap(writer.loadSnapshot().slots.first?.lessonID)
+                let prepared = try ready(writer, id: id)
+                attemptID = try XCTUnwrap(prepared.detail.attempt?.id)
+                revision = try XCTUnwrap(prepared.detail.attempt?.revision)
+                baseline = prepared.catalog
+                detail = prepared.detail
+                let failing = SwiftDataCatalogRepository(container: container,
+                    beforeSave: { if failBefore { throw Injected.failure } },
+                    save: { _ in if !failBefore { throw Injected.failure } })
+                XCTAssertThrowsError(try failing.complete(attemptID: attemptID,
+                    expectedRevision: revision, now: later)) { XCTAssertTrue($0 is Injected) }
+                XCTAssertEqual(try writer.loadSnapshot(), baseline)
+                XCTAssertEqual(try writer.loadLesson(lessonID: id), detail)
+            }
+            try autoreleasepool {
+                let reopened = try ModelContainerFactory().makeContainer(mode: .persistent(url))
+                let writer = SwiftDataCatalogRepository(container: reopened)
+                let id = try XCTUnwrap(detail?.id)
+                XCTAssertEqual(try writer.loadSnapshot(), baseline)
+                XCTAssertEqual(try writer.loadLesson(lessonID: id), detail)
+                XCTAssertNil(try XCTUnwrap(rows(LessonAttempt.self, in: reopened).first {
+                    $0.id == attemptID
+                }).completedContentSnapshot)
+                let retry = try writer.complete(attemptID: attemptID, expectedRevision: revision, now: later)
+                XCTAssertEqual(retry.outcome, .changed)
+                XCTAssertEqual(retry.history.first?.lessonID, id)
+            }
+        }
+    }
+
+    func testCompletionRejectsUngatedUnavailableAndCorruptReceipt() throws {
+        let (container, writer, id) = try setup()
+        let opened = try writer.openLesson(lessonID: id, now: first)
+        let attemptID = try XCTUnwrap(opened.detail.attempt?.id)
+        XCTAssertThrowsError(try writer.complete(attemptID: attemptID, expectedRevision: 0, now: later)) {
+            XCTAssertEqual($0 as? LessonExperienceError, .completionRequirementsMissing)
+        }
+        XCTAssertThrowsError(try writer.complete(attemptID: UUID(), expectedRevision: 0, now: later)) {
+            XCTAssertEqual($0 as? LessonExperienceError, .attemptNotFound)
+        }
+        let prepared = try ready(writer, id: id)
+        let revision = try XCTUnwrap(prepared.detail.attempt?.revision)
+        let invalid = ModelContext(container)
+        invalid.insert(LessonProgress(lessonID: "broken-history", status: .completed, completedAt: later))
+        try invalid.save()
+        XCTAssertThrowsError(try writer.complete(attemptID: attemptID, expectedRevision: revision, now: later)) {
+            XCTAssertEqual($0 as? LessonExperienceError, .invalidStoredData)
+        }
+        XCTAssertEqual(try writer.loadLesson(lessonID: id), prepared.detail)
+        let repair = ModelContext(container)
+        repair.delete(try XCTUnwrap(repair.fetch(FetchDescriptor<LessonProgress>()).first {
+            $0.lessonID == "broken-history"
+        }))
+        let row = try XCTUnwrap(repair.fetch(FetchDescriptor<LessonAttempt>()).first { $0.id == attemptID })
+        row.pinnedContentData = nil
+        try repair.save()
+        XCTAssertThrowsError(try writer.complete(attemptID: attemptID, expectedRevision: revision, now: later)) {
+            XCTAssertEqual($0 as? LessonExperienceError, .contentUnavailable)
+        }
+        XCTAssertNil(try XCTUnwrap(rows(LessonAttempt.self, in: container).first { $0.id == attemptID }).completedAt)
+    }
+
     func testPreSaveAndSaveFailureLeaveNoAttemptProgressOrReceipt() throws {
         for failBefore in [true, false] {
             let (container, writer, id) = try setup()

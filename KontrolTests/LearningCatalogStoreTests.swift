@@ -54,6 +54,11 @@ private final class ReadingCatalogRepository: CatalogRepository {
         writes += 1
         throw ReadError.unavailable
     }
+
+    func complete(attemptID: UUID, expectedRevision: Int, now: Date) throws -> LessonMutationResult {
+        writes += 1
+        throw ReadError.unavailable
+    }
 }
 
 @MainActor

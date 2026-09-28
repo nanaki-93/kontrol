@@ -12,6 +12,7 @@ protocol CatalogRepository {
     func revealSolution(attemptID: UUID, expectedRevision: Int, now: Date) throws -> LessonMutationResult
     func setSelfCheckAcknowledged(attemptID: UUID, expectedRevision: Int,
                                   acknowledged: Bool, now: Date) throws -> LessonMutationResult
+    func complete(attemptID: UUID, expectedRevision: Int, now: Date) throws -> LessonMutationResult
 }
 
 enum CatalogImportResult: Equatable {
@@ -320,6 +321,68 @@ final class SwiftDataCatalogRepository: CatalogRepository {
         }
     }
 
+    func complete(attemptID: UUID, expectedRevision: Int, now: Date) throws -> LessonMutationResult {
+        let context = ModelContext(container)
+        context.autosaveEnabled = false
+        let matches = try context.fetch(FetchDescriptor<LessonAttempt>()).filter { $0.id == attemptID }
+        guard matches.count <= 1 else { throw LessonExperienceError.invalidStoredData }
+        guard let row = matches.first else { throw LessonExperienceError.attemptNotFound }
+        let current = try detail(lessonID: row.lessonID, in: context)
+        guard let attempt = current.attempt, attempt.id == attemptID,
+              let progress = current.progress else { throw LessonExperienceError.invalidStoredData }
+        // The domain gate recognizes this *same* completed attempt before checking
+        // the caller's revision. No slot is consumed twice, even by a stale caller.
+        let finished = try LessonExperience.complete(attempt, progress: progress,
+                                                      expectedRevision: expectedRevision, now: now)
+        if finished == attempt { return try result(.unchanged, detail: current, in: context) }
+
+        let progressRows = try context.fetch(FetchDescriptor<LessonProgress>()).filter { $0.lessonID == row.lessonID }
+        guard progressRows.count == 1, let progressRow = progressRows.first else {
+            throw LessonExperienceError.invalidStoredData
+        }
+        let before = try snapshot(in: context)
+        // An attempt can be resumed outside the four slots after Restore. Only an
+        // assignment actually held by this lesson may be consumed.
+        let consumed = before.slots.first { $0.lessonID == row.lessonID }
+        let terminalAttempts = try context.fetch(FetchDescriptor<LessonAttempt>()).map { item in
+            LessonAttemptSnapshot(id: item.id, lessonID: item.lessonID,
+                contentVersion: item.contentVersion, answerDraft: item.answerDraft,
+                solutionRevealedAt: item.solutionRevealedAt,
+                selfCheckAcknowledgedAt: item.selfCheckAcknowledgedAt,
+                completedAt: item.id == attemptID ? finished.completedAt : item.completedAt,
+                completedContentSnapshot: item.id == attemptID ? finished.completedContentSnapshot : item.completedContentSnapshot,
+                pinnedContentData: item.pinnedContentData, revision: item.id == attemptID ? finished.revision : item.revision)
+        }
+        row.completedAt = finished.completedAt
+        row.completedContentSnapshot = finished.completedContentSnapshot
+        row.revision = finished.revision
+        progressRow.status = .completed
+        progressRow.completedAt = now
+
+        if let consumed {
+            let updated = try snapshot(in: context)
+            let desired = try LessonSelector.replace(consumedSlot: consumed,
+                definitions: updated.definitions, concepts: updated.concepts,
+                progress: updated.progress, slots: updated.slots,
+                terminalAttempts: terminalAttempts, now: now)
+            let slots = try context.fetch(FetchDescriptor<LessonSlot>()).filter { $0.key == consumed.key }
+            guard slots.count == 1, let slot = slots.first else { throw LessonExperienceError.staleSlot }
+            if let replacement = desired.first(where: { $0.key == consumed.key }) {
+                slot.lessonID = replacement.lessonID
+                slot.assignedAt = replacement.assignedAt
+            } else {
+                context.delete(slot)
+            }
+        }
+        // Both History and choices are projected before the single commit. A
+        // failed projection or save cannot publish a partially completed outcome.
+        let detail = try self.detail(lessonID: row.lessonID, in: context)
+        let receipt = try result(.changed, detail: detail, in: context, replacedSlot: consumed)
+        try beforeSave()
+        try save(context)
+        return receipt
+    }
+
     private func transition(attemptID: UUID,
                             apply: (LessonAttemptSnapshot, LessonProgressStatus) throws -> LessonAttemptSnapshot
     ) throws -> LessonMutationResult {
@@ -347,7 +410,7 @@ final class SwiftDataCatalogRepository: CatalogRepository {
     }
 
     private func result(_ outcome: LessonMutationOutcome, detail: LessonDetailSnapshot,
-                        in context: ModelContext) throws -> LessonMutationResult {
+                        in context: ModelContext, replacedSlot: LessonSlotSnapshot? = nil) throws -> LessonMutationResult {
         let catalog = try snapshot(in: context)
         // History is projected from the same write context, never a fallible
         // post-commit read. A future History command can reuse this projection.
@@ -364,7 +427,7 @@ final class SwiftDataCatalogRepository: CatalogRepository {
             return lhs.date > rhs.date
         }
         return LessonMutationResult(outcome: outcome, catalog: catalog, detail: detail,
-                                    history: history, replacedSlot: nil)
+                                    history: history, replacedSlot: replacedSlot)
     }
 
     private func detail(lessonID: String, in context: ModelContext) throws -> LessonDetailSnapshot {

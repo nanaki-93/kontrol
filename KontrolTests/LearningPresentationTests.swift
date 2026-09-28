@@ -400,5 +400,8 @@ private final class FailingCatalogReader: CatalogRepository {
                                   acknowledged: Bool, now: Date) throws -> LessonMutationResult {
         throw ReadError.injected
     }
+    func complete(attemptID: UUID, expectedRevision: Int, now: Date) throws -> LessonMutationResult {
+        throw ReadError.injected
+    }
     func importIfNeeded(_ catalog: ValidatedCatalog) throws -> CatalogImportResult { .unchanged }
 }
