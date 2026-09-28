@@ -1,0 +1,111 @@
+import Combine
+import SwiftData
+import XCTest
+@testable import Kontrol
+
+@MainActor
+private final class ReadingCatalogRepository: CatalogRepository {
+    enum ReadError: Error { case unavailable }
+    var value: LearningCatalogSnapshot
+    var shouldFail = false
+    private(set) var reads = 0
+    private(set) var writes = 0
+
+    init(_ value: LearningCatalogSnapshot) { self.value = value }
+
+    func loadSnapshot() throws -> LearningCatalogSnapshot {
+        reads += 1
+        if shouldFail { throw ReadError.unavailable }
+        return value
+    }
+
+    func importIfNeeded(_ catalog: ValidatedCatalog) throws -> CatalogImportResult {
+        writes += 1
+        return .unchanged
+    }
+
+    func reconcileSlots(now: Date) throws -> LearningCatalogSnapshot {
+        writes += 1
+        return value
+    }
+}
+
+@MainActor
+final class LearningCatalogStoreTests: XCTestCase {
+    private func snapshot(withSlot: Bool = false) -> LearningCatalogSnapshot {
+        LearningCatalogSnapshot(
+            topics: [LearningTopicSnapshot(id: "go", name: "Go")],
+            subtopics: [], concepts: [], definitions: [], progress: [],
+            slots: withSlot ? [LessonSlotSnapshot(topicID: "go", slotIndex: 0,
+                            lessonID: "go.example", assignedAt: Date(timeIntervalSince1970: 100))] : [])
+    }
+
+    func testEmptyIsSuccessfulAndReadFailureIsRetryableNotEmpty() {
+        let repository = ReadingCatalogRepository(snapshot())
+        repository.shouldFail = true
+        let store = LearningCatalogStore(repository: repository)
+        var observed: [LearningCatalogReadState] = []
+        let subscription = store.$state.sink { observed.append($0) }
+        defer { subscription.cancel() }
+        XCTAssertEqual(store.state, .notLoaded)
+        store.loadIfNeeded()
+        XCTAssertEqual(observed, [.notLoaded, .loading, .failed(stale: nil)])
+        XCTAssertEqual(store.state, .failed(stale: nil))
+        XCTAssertNil(store.state.snapshot)
+        store.loadIfNeeded() // not an implicit retry on another consumer's appearance
+        XCTAssertEqual(repository.reads, 1)
+        repository.shouldFail = false
+        store.retry()
+        XCTAssertEqual(store.state, .empty(snapshot()))
+        XCTAssertFalse(store.state.isStale)
+        store.loadIfNeeded()
+        store.retry() // no retry after a successful read
+        XCTAssertEqual(repository.reads, 2)
+        XCTAssertEqual(observed, [.notLoaded, .loading, .failed(stale: nil),
+                                  .loading, .empty(snapshot())])
+        XCTAssertEqual(repository.writes, 0)
+    }
+
+    func testRefreshPublishesWholeSnapshotAndMarksCachedFailureStale() {
+        let initial = snapshot(withSlot: true)
+        let repository = ReadingCatalogRepository(initial)
+        let store = LearningCatalogStore(repository: repository)
+        store.loadIfNeeded()
+        XCTAssertEqual(store.state, .current(initial))
+
+        let updated = snapshot() // no partial slot array is published on a failed read
+        repository.value = updated
+        repository.shouldFail = true
+        store.refresh()
+        XCTAssertEqual(store.state, .failed(stale: initial))
+        XCTAssertEqual(store.state.snapshot?.slots, initial.slots)
+        XCTAssertTrue(store.state.isStale)
+        repository.shouldFail = false
+        store.retry()
+        XCTAssertEqual(store.state, .empty(updated))
+        XCTAssertFalse(store.state.isStale)
+        XCTAssertEqual(repository.reads, 3)
+        XCTAssertEqual(repository.writes, 0)
+    }
+
+    func testTwoConsumersShareCommittedSlotsWithoutPersonalWrites() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataCatalogRepository(container: container)
+        _ = try repository.importIfNeeded(BundledCatalogLoader.load())
+        let dependencies = AppDependencies(container: container, catalogRepository: repository)
+        let first = dependencies.learningCatalogStore
+        let second = dependencies.learningCatalogStore
+        XCTAssertTrue(first === second)
+        XCTAssertEqual(first.state, .notLoaded)
+        first.loadIfNeeded()
+        let committed = try repository.loadSnapshot()
+        XCTAssertEqual(first.state, .current(committed))
+        XCTAssertEqual(second.state.snapshot?.slots, committed.slots)
+        second.loadIfNeeded()
+        first.refresh()
+        XCTAssertEqual(first.state, .current(committed))
+        XCTAssertEqual(first.state.snapshot?.slots.count, 20)
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonProgress>()).isEmpty)
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).isEmpty)
+    }
+}

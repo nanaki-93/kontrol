@@ -7,6 +7,7 @@ import SwiftData
 final class AppDependencies {
     let container: ModelContainer
     let catalogRepository: any CatalogRepository
+    let learningCatalogStore: LearningCatalogStore
     let taskStore: TaskStore
     let scheduleStore: ScheduleStore
     let focusService: FocusService
@@ -19,6 +20,7 @@ final class AppDependencies {
          focusMonotonicClock: @escaping () -> ContinuousClock.Instant = { ContinuousClock().now }) {
         self.container = container
         self.catalogRepository = catalogRepository
+        learningCatalogStore = LearningCatalogStore(repository: catalogRepository)
         taskStore = TaskStore(repository: taskRepository ?? SwiftDataTaskRepository(container: container))
         scheduleStore = ScheduleStore(repository: scheduleRepository ?? SwiftDataScheduleRepository(container: container))
         focusService = FocusService(repository: focusRepository ?? SwiftDataFocusRepository(container: container),

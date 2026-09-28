@@ -55,6 +55,13 @@ final class LaunchCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.state, .ready)
         let graph = try XCTUnwrap(coordinator.dependencies)
         XCTAssertTrue(graph.container === container)
+        XCTAssertEqual(graph.learningCatalogStore.state, .notLoaded)
+        let firstConsumer = graph.learningCatalogStore
+        let secondConsumer = graph.learningCatalogStore
+        XCTAssertTrue(firstConsumer === secondConsumer)
+        firstConsumer.loadIfNeeded()
+        XCTAssertEqual(firstConsumer.state.snapshot?.slots.count, 20)
+        XCTAssertEqual(secondConsumer.state.snapshot?.slots, try graph.catalogRepository.loadSnapshot().slots)
         XCTAssertEqual(opens, 1)
         XCTAssertEqual(imports, 1)
         XCTAssertEqual(try rows(CatalogImportState.self, in: container).count, 1)
