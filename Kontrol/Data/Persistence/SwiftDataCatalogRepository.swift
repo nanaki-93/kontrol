@@ -13,6 +13,10 @@ enum CatalogImportResult: Equatable {
 
 enum CatalogImportError: Error, Equatable {
     case downgrade(installed: Int, requested: Int)
+    case lowerContentVersion
+    case unchangedContentVersionConflict
+    case objectiveIdentityConflict
+    case generatedIDCollision
 }
 
 // Each import owns a fresh context. In particular, neither a failed save nor a
@@ -58,6 +62,24 @@ final class SwiftDataCatalogRepository: CatalogRepository {
         let lessons = Dictionary(uniqueKeysWithValues:
             try context.fetch(FetchDescriptor<LessonDefinition>()).map { ($0.id, $0) })
 
+        // Preflight the entire upgrade before touching even a topic name. A failed
+        // compatibility check must not leave partial changes in this context.
+        for item in value.lessons {
+            guard let existing = lessons[item.id] else { continue }
+            if existing.source == "generated" && item.source == "seed" {
+                throw CatalogImportError.generatedIDCollision
+            }
+            if existing.objectiveKey != item.objectiveKey {
+                throw CatalogImportError.objectiveIdentityConflict
+            }
+            if item.contentVersion < existing.contentVersion {
+                throw CatalogImportError.lowerContentVersion
+            }
+            if item.contentVersion == existing.contentVersion && !Self.matches(existing, item) {
+                throw CatalogImportError.unchangedContentVersionConflict
+            }
+        }
+
         for item in value.topics {
             if let existing = topics[item.id] {
                 existing.name = item.name
@@ -98,10 +120,11 @@ final class SwiftDataCatalogRepository: CatalogRepository {
                     exercise: item.exercise, referenceAnswer: item.referenceAnswer,
                     selfCheckCriteria: item.selfCheckCriteria, contentVersion: item.contentVersion,
                     normalizedContentHash: item.normalizedContentHash, source: item.source,
-                    provenance: item.provenance)
+                    provenance: item.provenance, objective: item.objective)
                 context.insert(definition)
             }
             definition.objectiveKey = item.objectiveKey
+            definition.objective = item.objective
             definition.title = item.title
             definition.topicID = item.topicID
             definition.subtopicID = item.subtopicID
@@ -131,5 +154,29 @@ final class SwiftDataCatalogRepository: CatalogRepository {
         try beforeSave()
         try save(context)
         return .imported
+    }
+
+    // The content fingerprint covers teaching sections only. Metadata, including
+    // the explicit objective, must also be unchanged at a fixed content version.
+    private static func matches(_ stored: LessonDefinition, _ incoming: LessonDTO) -> Bool {
+        stored.objectiveKey == incoming.objectiveKey &&
+        stored.objective == incoming.objective &&
+        stored.title == incoming.title &&
+        stored.topicID == incoming.topicID &&
+        stored.subtopicID == incoming.subtopicID &&
+        stored.conceptIDs == incoming.conceptIDs &&
+        stored.difficulty == incoming.difficulty &&
+        stored.format == incoming.format &&
+        stored.estimatedMinutes == incoming.estimatedMinutes &&
+        stored.prerequisiteConceptIDs == incoming.prerequisiteConceptIDs &&
+        stored.explanation == incoming.explanation &&
+        stored.workedExample == incoming.workedExample &&
+        stored.exercise == incoming.exercise &&
+        stored.referenceAnswer == incoming.referenceAnswer &&
+        stored.selfCheckCriteria == incoming.selfCheckCriteria &&
+        stored.contentVersion == incoming.contentVersion &&
+        stored.normalizedContentHash == incoming.normalizedContentHash &&
+        stored.source == incoming.source &&
+        stored.provenance == incoming.provenance
     }
 }

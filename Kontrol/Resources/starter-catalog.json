@@ -451,7 +451,7 @@
         "Makes the channel send selectable against ctx.Done() so it cannot wait forever.",
         "Explains that cancellation is cooperative and the worker must return and clean up."
       ],
-      "contentVersion": 1,
+      "contentVersion": 2,
       "normalizedContentHash": "sha256:e752c4c155eb0a0f7b546726ff2e2f706c1e13ef77ceb0c81ded95df913b5ef7",
       "source": "seed",
       "provenance": "Original Kontrol starter lesson; docs/learning-curriculum.md: Go / Context cancellation; Go standard library context package semantics"
@@ -675,7 +675,7 @@
         "Counts nonblank lines and propagates read/close failures without swallowing them.",
         "Does not close a caller-owned stream or Path."
       ],
-      "contentVersion": 1,
+      "contentVersion": 2,
       "normalizedContentHash": "sha256:3a896f4abee568c12881fbce54f408e70df65621df21ecf25e92d0778a044b87",
       "source": "seed",
       "provenance": "Java 21 LTS; original Kontrol starter lesson; reviewed against Oracle try-with-resources (https://docs.oracle.com/javase/tutorial/essential/exceptions/tryResourceClose.html), AutoCloseable (https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/AutoCloseable.html), Files.newBufferedReader (https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/file/Files.html#newBufferedReader(java.nio.file.Path)); docs/learning-curriculum.md"
@@ -899,7 +899,7 @@
         "Handles simultaneous claims atomically and replays the same committed result after a lost response.",
         "Acknowledges external side-effect uncertainty and defines a provider/reconciliation strategy and retention limit."
       ],
-      "contentVersion": 1,
+      "contentVersion": 2,
       "normalizedContentHash": "sha256:3c0784dc9be939e19d8c07567c7feb6991def39b54683ddfcb0265abfb5e9b09",
       "source": "seed",
       "provenance": "Original Kontrol starter lesson; reviewed against Stripe idempotent requests (https://docs.stripe.com/api/idempotent_requests) and AWS prescriptive guidance idempotency pattern; docs/learning-curriculum.md; not a provider-specific guarantee"
@@ -1123,7 +1123,7 @@
         "Batches tag reads and preserves articles with zero tags.",
         "Tests query-count growth and checks fan-out, limits, and measured latency rather than assuming every join is faster."
       ],
-      "contentVersion": 1,
+      "contentVersion": 2,
       "normalizedContentHash": "sha256:48ca55e36d2add08c36abd665bc7359cc6c5a45bb7e422cc9bf6bec80171d921",
       "source": "seed",
       "provenance": "Original Kontrol starter lesson; docs/learning-curriculum.md: Performance / N+1 query diagnosis; database-agnostic example"
@@ -1151,7 +1151,7 @@
         "Constrains the delete by both object ID and authorized account/membership at mutation time.",
         "Does not expose the existence or content of another account's note on denial."
       ],
-      "contentVersion": 1,
+      "contentVersion": 2,
       "normalizedContentHash": "sha256:e9fc9e61a77c3fa51be8d9b4f26eeea61f4dc61ab1c54659e48215a7ecb34fb4",
       "source": "seed",
       "provenance": "Original Kontrol starter lesson; docs/learning-curriculum.md: Security / Authorization checks; generic SQL pseudocode"

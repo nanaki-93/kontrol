@@ -72,13 +72,20 @@ final class BundledCatalogTests: XCTestCase {
             lesson.selfCheckCriteria.allSatisfy { $0.count >= 60 } &&
             lesson.referenceAnswer.count > lesson.exercise.count
         })
+        // Retained V1 identities gained explicit objectives (and two changed
+        // provenance); all other definitions are new in this release.
+        let upgradedV1IDs: Set<String> = [
+            "go.concurrency.cancel-work.v1", "java.io.resource-ownership.v1",
+            "design.api.deduplicate-writes.v1", "perf.database.query-count.v1",
+            "security.api.object-access.v1"
+        ]
         for topic in catalog.topics {
             let lessons = catalog.lessons.filter { $0.topicID == topic.id }
             XCTAssertEqual(lessons.count, 8,
                            "Unexpected inventory for \(topic.id)")
             for lesson in lessons {
                 XCTAssertEqual(lesson.source, "seed")
-                XCTAssertEqual(lesson.contentVersion, 1)
+                XCTAssertEqual(lesson.contentVersion, upgradedV1IDs.contains(lesson.id) ? 2 : 1)
                 XCTAssertEqual(lesson.normalizedContentHash, BundledCatalogLoader.fingerprint(for: lesson))
                 XCTAssertEqual(lesson.objectiveKey, lesson.conceptIDs.first)
                 XCTAssertFalse(lesson.objective.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
