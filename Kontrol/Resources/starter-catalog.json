@@ -40,6 +40,26 @@
       "name": "API reliability"
     },
     {
+      "id": "design.queues",
+      "topicID": "design",
+      "name": "Delivery and load"
+    },
+    {
+      "id": "design.reliability",
+      "topicID": "design",
+      "name": "Reliability planning"
+    },
+    {
+      "id": "design.cache",
+      "topicID": "design",
+      "name": "Cache freshness"
+    },
+    {
+      "id": "design.storage",
+      "topicID": "design",
+      "name": "Data distribution"
+    },
+    {
       "id": "perf.database",
       "topicID": "perf",
       "name": "Database performance"
@@ -122,6 +142,48 @@
       "id": "design.api.deduplicate-writes",
       "subtopicID": "design.api",
       "name": "Idempotent writes",
+      "prerequisiteConceptIDs": []
+    },
+    {
+      "id": "design.api.rate-limit-consistency",
+      "subtopicID": "design.api",
+      "name": "Distributed rate limits",
+      "prerequisiteConceptIDs": []
+    },
+    {
+      "id": "design.queues.delivery-guarantees",
+      "subtopicID": "design.queues",
+      "name": "Notification delivery guarantees",
+      "prerequisiteConceptIDs": []
+    },
+    {
+      "id": "design.reliability.retry-budget",
+      "subtopicID": "design.reliability",
+      "name": "Bounded retries",
+      "prerequisiteConceptIDs": []
+    },
+    {
+      "id": "design.cache.freshness",
+      "subtopicID": "design.cache",
+      "name": "Cache freshness",
+      "prerequisiteConceptIDs": []
+    },
+    {
+      "id": "design.queues.bounded-load",
+      "subtopicID": "design.queues",
+      "name": "Backpressure",
+      "prerequisiteConceptIDs": []
+    },
+    {
+      "id": "design.storage.partition-key",
+      "subtopicID": "design.storage",
+      "name": "Partition-key selection",
+      "prerequisiteConceptIDs": []
+    },
+    {
+      "id": "design.reliability.recovery-plan",
+      "subtopicID": "design.reliability",
+      "name": "Failure recovery",
       "prerequisiteConceptIDs": []
     },
     {
@@ -696,7 +758,161 @@
       "contentVersion": 1,
       "normalizedContentHash": "sha256:3c0784dc9be939e19d8c07567c7feb6991def39b54683ddfcb0265abfb5e9b09",
       "source": "seed",
-      "provenance": "Original Kontrol starter lesson; docs/learning-curriculum.md: System Design / API idempotency; design exercise, not a provider-specific guarantee"
+      "provenance": "Original Kontrol starter lesson; reviewed against Stripe idempotent requests (https://docs.stripe.com/api/idempotent_requests) and AWS prescriptive guidance idempotency pattern; docs/learning-curriculum.md; not a provider-specific guarantee"
+    },
+    {
+      "id": "design.api.rate-limit-consistency.v1",
+      "objectiveKey": "design.api.rate-limit-consistency",
+      "objective": "Choose a rate-limit enforcement boundary and explain its consistency and failure behavior.",
+      "title": "Limit requests across API replicas",
+      "topicID": "design",
+      "subtopicID": "design.api",
+      "conceptIDs": ["design.api.rate-limit-consistency"],
+      "difficulty": "intermediate",
+      "format": "design",
+      "estimatedMinutes": 17,
+      "prerequisiteConceptIDs": [],
+      "explanation": "A per-process counter cannot enforce a shared quota when requests land on different replicas. Define the principal and operation being limited, the window or token refill rule, and the desired bound before choosing a store. A shared atomic token-bucket operation can give a per-key bound while its store is reachable; replicated or eventually consistent counters permit overshoot. Rate limiting is not authorization: authenticate before deriving the key, bound unauthenticated traffic separately, and do not trust a caller-supplied tenant ID. Specify how store outages affect availability and abuse risk.",
+      "workedExample": "A login API permits an initial burst of five attempts per account across three replicas, then refills one token every 12 seconds (average five per minute). This does not enforce a strict maximum of five attempts in any rolling minute: refilled tokens can be spent in that minute too. Each replica atomically consumes from the same capacity-five bucket keyed by normalized account identifier. Separate local capacity-five buckets could permit a burst of fifteen attempts across the replicas. The API returns 429 with a bounded retry hint when depleted; a separate IP-level guard limits unknown accounts without assuming IP identifies one user.",
+      "exercise": "Design a 100-requests-per-minute limit for authenticated tenant writes served by six replicas. Identify the key, atomic operation, consistency guarantee, 429 response, observability, and policy if the counter store fails. Discuss a local fallback versus rejecting writes.",
+      "referenceAnswer": "Derive tenant ID from the verified principal and key an atomic shared token bucket by tenant and write class. Set capacity 100 and a refill rate matching the published policy (a token bucket permits bursts, unlike a strict rolling window); consume before accepting work and return 429 plus a conservative Retry-After when empty. Track allowed, rejected, store-error and per-tenant aggregate saturation without logging secrets. If the store is unavailable, a local bounded fallback favors availability but can exceed the global limit by up to the number of replicas; fail-closed for costly or abuse-sensitive writes if that is unacceptable. Neither option is globally exact during partition; document the policy.",
+      "selfCheckCriteria": ["Keys by verified tenant and uses one atomic cross-replica decision rather than local counters.", "States bucket burst behavior and a bounded rejection response with observable error paths.", "Makes outage tradeoff explicit and does not promise strict global enforcement with a local fallback."],
+      "contentVersion": 1,
+      "normalizedContentHash": "sha256:f165279c0bb38d489d6627348f5c6c2d99caf1d8ae1a8c29888370e82f02866d",
+      "source": "seed",
+      "provenance": "Original scenario; reviewed against IETF RFC 6585 section 4 (429) and RFC 9110 Retry-After; docs/learning-curriculum.md"
+    },
+    {
+      "id": "design.queues.delivery-guarantees.v1",
+      "objectiveKey": "design.queues.delivery-guarantees",
+      "objective": "Design notification delivery with durable retries and explicit duplicate handling.",
+      "title": "Deliver notifications despite worker crashes",
+      "topicID": "design",
+      "subtopicID": "design.queues",
+      "conceptIDs": ["design.queues.delivery-guarantees"],
+      "difficulty": "intermediate",
+      "format": "design",
+      "estimatedMinutes": 18,
+      "prerequisiteConceptIDs": [],
+      "explanation": "An acknowledgement tells a broker that a delivery attempt finished; it does not prove the external notification was seen exactly once. A worker can send an email and crash before acknowledging, causing redelivery. Persist the notification intent alongside the triggering database change, publish it reliably, and acknowledge only after durable handling. Use a stable notification ID for deduplication where supported, bounded retry with a dead-letter path, and a delivery status that distinguishes queued, attempted, and provider-accepted from user-read. An outbox prevents lost intents but does not make a remote provider transactional.",
+      "workedExample": "An order commit writes an order and outbox event N42 in one transaction. A publisher may enqueue N42 twice after a crash; the worker records N42's provider request key and submits it. If it crashes after provider acceptance but before acknowledgement, a retry uses the same provider idempotency key or reconciles status before sending again. If the provider lacks deduplication, duplicate emails remain possible and the product must tolerate them.",
+      "exercise": "Sketch order-confirmation notification delivery through a queue. An order is committed, the broker briefly goes offline, and later a worker dies after a provider call. Explain durable intent, acknowledgement point, retries, duplicate policy, and what the dashboard may honestly call delivered.",
+      "referenceAnswer": "Write the order and an outbox row with stable notification ID in the same local transaction. A retrying publisher transfers the row to the broker and marks publication only after confirmation; publication itself may repeat. The worker sends with the stable ID where the provider supports dedupe, persists attempt/provider status, then acknowledges; after a crash it retries or reconciles uncertain outcomes. Back off transient errors, cap attempts, alert on dead-lettered messages, and provide a manual replay path. Report provider-accepted, not user-read or exactly-once delivery. Without provider idempotency, state that duplicates can still occur.",
+      "selfCheckCriteria": ["Prevents an order commit without a durable notification intent during broker outage.", "Addresses crash-after-send redelivery with stable identity and an honest duplicate policy.", "Separates broker acknowledgement and provider acceptance from actual receipt or reading."],
+      "contentVersion": 1,
+      "normalizedContentHash": "sha256:686db06cd39c465f09f83efa8500ec6ffbcd1d2a8f55ad20b7387ce2233580df",
+      "source": "seed",
+      "provenance": "Original scenario; reviewed against AWS SQS at-least-once delivery and AWS prescriptive guidance transactional outbox pattern; docs/learning-curriculum.md"
+    },
+    {
+      "id": "design.reliability.retry-budget.v1",
+      "objectiveKey": "design.reliability.retry-budget",
+      "objective": "Bound retries by deadline and capacity rather than amplifying an overloaded dependency.",
+      "title": "Spend a retry budget wisely",
+      "topicID": "design",
+      "subtopicID": "design.reliability",
+      "conceptIDs": ["design.reliability.retry-budget"],
+      "difficulty": "intermediate",
+      "format": "question",
+      "estimatedMinutes": 14,
+      "prerequisiteConceptIDs": [],
+      "explanation": "Retries can turn one user request into many backend calls exactly when the backend is struggling. Retry only failures classified as transient and only operations safe to repeat, or use an idempotency key for writes. Put one retry layer near the call boundary, cap total attempts and elapsed time under the caller deadline, and use exponential backoff with jitter to avoid synchronized bursts. A Retry-After hint can inform a delay but cannot override the remaining deadline. Track original requests, attempts, and successes separately; a retry budget limits extra load, not just per-request latency.",
+      "workedExample": "A service has a 900 ms remaining deadline and a read dependency returns 503 after 100 ms. It can schedule at most one jittered retry after 150–250 ms with a 300 ms per-attempt timeout, leaving time to respond. If the first attempt takes 700 ms, there is insufficient budget and the service fails promptly. Three nested layers each attempting three times could instead issue up to 27 dependency requests for one caller.",
+      "exercise": "A checkout write times out after 700 ms of a 1-second deadline. The gateway and two internal services each retry three times, and the provider's result is uncertain. Should the gateway retry immediately? Give a safe decision rule, maximum amplification of this policy, and metrics to determine whether a new policy helps.",
+      "referenceAnswer": "Do not blindly retry an uncertain non-idempotent charge with only 300 ms left. Return an uncertain/pending result for reconciliation, or retry only with a stable provider-supported idempotency key and enough deadline for a bounded attempt. Three attempts at each of three layers can multiply to 27 leaf calls per original request; consolidate retries at one layer, cap attempts and extra calls with a shared retry budget, and add exponential jitter for genuinely transient errors. Measure attempts per original request, dependency load, final success and p95/p99 latency, timeouts and duplicate charges. A 4xx validation failure is not a transient retry candidate.",
+      "selfCheckCriteria": ["Rejects blind retry of an uncertain charge and uses stable idempotency or reconciliation.", "Computes 27 possible leaf calls and limits attempts by remaining deadline and shared budget.", "Distinguishes transient from permanent failures and measures amplification as well as success."],
+      "contentVersion": 1,
+      "normalizedContentHash": "sha256:3f3eca01774c081d9208e96fcec9d49cc5eebf2fc1730c448c84f1395371ad75",
+      "source": "seed",
+      "provenance": "Original scenario; reviewed against AWS Builders' Library Timeouts, retries, and backoff with jitter and RFC 9110 retry semantics; docs/learning-curriculum.md"
+    },
+    {
+      "id": "design.cache.freshness.v1",
+      "objectiveKey": "design.cache.freshness",
+      "objective": "Explain the stale-read window and invalidation race in a cache-aside design.",
+      "title": "Know when a cached value is stale",
+      "topicID": "design",
+      "subtopicID": "design.cache",
+      "conceptIDs": ["design.cache.freshness"],
+      "difficulty": "basic",
+      "format": "learn",
+      "estimatedMinutes": 13,
+      "prerequisiteConceptIDs": [],
+      "explanation": "In cache-aside reads, a miss loads from the source and populates the cache; writes update the source and invalidate the corresponding key after commit. A TTL limits how long an unrefreshed entry survives, not the maximum staleness under every race. A concurrent reader can miss, fetch the old value before a write commits, then populate the cache after the writer invalidates it. Define freshness needs per data class; versioned keys or version checks can avoid stale fills, while strongly consistent reads may bypass the cache. Cache availability and origin load also matter during eviction storms.",
+      "workedExample": "A product price cache has a 60-second TTL. Reader R misses and reads price 20 from the database. Writer W commits price 25 and deletes the cache entry. R then fills the cache with 20. Buyers could observe 20 until that entry expires unless a version guard rejects R's old fill or the checkout path reads authoritative pricing. Simply invalidating after commit did not serialize R's read with W's write.",
+      "exercise": "A catalog page tolerates 60 seconds of stale price display, but checkout must charge the current authoritative price. Explain a cache-aside read and post-commit invalidation, the miss/fill race, and a separate strategy for checkout. What signals would reveal a stale-data or stampede problem?",
+      "referenceAnswer": "Use cache-aside with a 60-second TTL for browsing: on miss load source and fill, and after a committed price update evict its key. A pre-commit read can fill an old value after eviction; if this exceeds the browsing contract, compare source versions when filling or use versioned cache keys. Checkout revalidates price against the authoritative store under its transaction/consistency policy rather than trusting the display cache. Track cache hit and miss rates, origin traffic, version mismatches and observed age; single-flight or bounded refresh can reduce concurrent miss storms. TTL alone is not a consistency guarantee.",
+      "selfCheckCriteria": ["Explains the stale fill after invalidation instead of promising instant consistency.", "Separates tolerant browsing reads from authoritative checkout decisions.", "Specifies a freshness bound or version guard and monitors origin pressure on misses."],
+      "contentVersion": 1,
+      "normalizedContentHash": "sha256:d75ed1edd74996e4c3d0c8680b0a440fb0735a18855a591dae71b98f259cd2f4",
+      "source": "seed",
+      "provenance": "Original scenario; reviewed against AWS Builders' Library Caching challenges and strategies and Redis cache-aside documentation; docs/learning-curriculum.md"
+    },
+    {
+      "id": "design.queues.bounded-load.v1",
+      "objectiveKey": "design.queues.bounded-load",
+      "objective": "Apply backpressure with bounded queues and explicit overload responses.",
+      "title": "Keep a busy worker queue bounded",
+      "topicID": "design",
+      "subtopicID": "design.queues",
+      "conceptIDs": ["design.queues.bounded-load"],
+      "difficulty": "intermediate",
+      "format": "learn",
+      "estimatedMinutes": 14,
+      "prerequisiteConceptIDs": [],
+      "explanation": "A queue decouples arrivals from workers, but an unbounded backlog converts a throughput shortfall into growing wait time and memory use. If input averages more than sustainable service rate, no finite queue can absorb it indefinitely. Set a maximum in-flight and waiting count, measure queue age as well as depth, and decide whether producers wait, shed low-priority work, or receive an overload response. Limit retry traffic too: rejecting work without a client backoff contract can worsen overload. Durable queues protect accepted work; they do not manufacture processing capacity.",
+      "workedExample": "Four workers each complete 25 image jobs per second, while 150 jobs per second arrive for a minute. The 50-job-per-second deficit adds roughly 3,000 jobs if arrivals continue. With a queue cap of 500, the system reaches capacity in about 10 seconds from empty, then rejects or delays new submissions. A 202 response means a job was durably admitted, not processed; a full queue should not return 202 for work it discarded.",
+      "exercise": "Design an image-processing intake with four 25-job/s workers, 150-job/s burst arrivals, and a 500-job queue. Estimate when the queue fills from empty and choose admission, client response, retry guidance, and two overload metrics. How would you preserve already accepted jobs on restart?",
+      "referenceAnswer": "Capacity is 100 jobs/s, leaving 50 jobs/s excess; 500 waiting slots fill in about 10 seconds absent other effects. Persist accepted jobs before returning 202 and ensure workers acknowledge after durable completion; during saturation return 429 or 503 with bounded backoff guidance rather than silently drop work. Apply per-client admission limits and jittered client retry to avoid a synchronized surge. Observe oldest-job age, depth, rejection rate and completion throughput; reduce admission or add capacity when sustained demand exceeds service rate. On restart recover durable unacknowledged jobs, accepting possible duplicate processing and using stable job IDs to deduplicate effects.",
+      "selfCheckCriteria": ["Computes the 50-job/s deficit and approximate 10-second fill time.", "Never calls rejected or merely queued work completed; defines an overload response.", "Uses durable admission and bounded retry plus queue-age and throughput signals."],
+      "contentVersion": 1,
+      "normalizedContentHash": "sha256:0510d7c667bb6289da452460ddc9c4e25a9952e01545cdab6cb2ecec30538cd6",
+      "source": "seed",
+      "provenance": "Original scenario; reviewed against AWS Builders' Library Avoiding insurmountable queue backlogs and RFC 6585 section 4; docs/learning-curriculum.md"
+    },
+    {
+      "id": "design.storage.partition-key.v1",
+      "objectiveKey": "design.storage.partition-key",
+      "objective": "Choose a partition key that distributes writes without breaking the main read path.",
+      "title": "Partition an event store without hotspots",
+      "topicID": "design",
+      "subtopicID": "design.storage",
+      "conceptIDs": ["design.storage.partition-key"],
+      "difficulty": "advanced",
+      "format": "design",
+      "estimatedMinutes": 18,
+      "prerequisiteConceptIDs": [],
+      "explanation": "A partition key determines where records are written and which queries can target a bounded set of partitions. A timestamp-only key can hotspot the current interval, while random distribution makes a per-tenant timeline expensive to read. Start with query and write rates, distribution and growth, then choose a composite or bucketed key. A very large tenant may still create a hot partition; split it into deterministic buckets and merge bounded results when reading. Cross-partition ordering and transactions require an explicit contract rather than assuming one global sequence.",
+      "workedExample": "An audit service writes events for 10,000 tenants; most need a recent tenant timeline, but one tenant generates half of all writes. Keying only by day concentrates today's traffic, while hash(tenantID) makes tenant reads local but leaves the large tenant hot. Bucket that tenant by a stable hash of event ID into, say, 16 lanes within a time interval; read its 16 lanes for a recent window and merge by event timestamp plus ID as tie-breaker. The lane count and read fan-out need measurement.",
+      "exercise": "Design partitioning for a multi-tenant audit log with per-tenant last-24-hour queries, append-only writes and one tenant producing 50% of traffic. Specify a key, how to route that hot tenant, bounded timeline reads, ordering limits and a migration signal when the distribution shifts.",
+      "referenceAnswer": "Partition by tenant and coarse time bucket for normal tenants so recent reads target a few bounded ranges; measure per-partition write rate and storage. For the exceptional tenant, add deterministic lanes using hash(eventID) mod N within each time bucket; route writes by stable ID and query the N lanes for the requested period, merge/paginate by (timestamp, eventID). This spreads writes at the cost of read fan-out and no single-partition total order; use an assigned sequence or explicit ordering policy if stronger order is required. Watch hottest-partition throttles, skew, query fan-out and tenant growth before changing N; plan a versioned routing transition so old and new buckets remain readable.",
+      "selfCheckCriteria": ["Aligns normal partitioning with tenant/time queries and addresses the 50% hot tenant.", "Explains lane read fan-out, bounded pagination and lack of automatic global ordering.", "Includes skew measurements and a way to read data across a key migration."],
+      "contentVersion": 1,
+      "normalizedContentHash": "sha256:3515b2a4a283566eca35b59d90c94dff6e4201cb585390572f5ca4b87f1b19fa",
+      "source": "seed",
+      "provenance": "Original scenario; reviewed against Amazon DynamoDB partition-key best practices and Google Cloud Bigtable schema design guidance; docs/learning-curriculum.md"
+    },
+    {
+      "id": "design.reliability.recovery-plan.v1",
+      "objectiveKey": "design.reliability.recovery-plan",
+      "objective": "Build a recovery plan with tested restore, explicit RPO and RTO, and safe replay.",
+      "title": "Recover after a region failure",
+      "topicID": "design",
+      "subtopicID": "design.reliability",
+      "conceptIDs": ["design.reliability.recovery-plan"],
+      "difficulty": "advanced",
+      "format": "question",
+      "estimatedMinutes": 16,
+      "prerequisiteConceptIDs": [],
+      "explanation": "Recovery point objective (RPO) bounds acceptable data loss; recovery time objective (RTO) bounds time to restore service. A backup is not a recovery plan until a restore and application replay have been tested. Asynchronous replication can lose acknowledged writes on failover; a stale secondary must not accept conflicting writes alongside the former primary. Plan detection, fencing or lease ownership, restore validation, and controlled traffic switching. Retained logs and backups need independent protection from operator error or corruption. Replaying jobs can duplicate external effects, so use stable operation IDs and reconcile uncertain outcomes.",
+      "workedExample": "An orders service promises RPO 5 minutes and RTO 1 hour. Nightly snapshots alone miss the RPO; periodic snapshots plus tested continuous log archiving could meet it if log gaps are monitored. During a primary-region loss, operators fence the old writer, restore or promote a verified replica, replay logs to a known point, then enable writes and switch traffic. They reconcile payments whose provider acknowledgement was lost rather than blindly resending charges.",
+      "exercise": "A service has nightly snapshots, asynchronous replication, a payment provider, and an advertised 5-minute RPO / 60-minute RTO. A region stops responding while the replica is 8 minutes behind. Can the team claim its objectives were met? Outline an ordered recovery and a drill that tests data and duplicate safety.",
+      "referenceAnswer": "No: promoting a replica eight minutes behind can lose acknowledged writes beyond the 5-minute RPO; nightly snapshots alone are worse. First declare incident and freeze/fence the old writer to prevent split brain. Determine the latest consistent replica/log point, restore missing archived logs if available and verify order counts/checksums before traffic switch; disclose any remaining loss and measure actual time against 60-minute RTO. Reconcile provider payments by stable operation ID before replaying queued work. Drill with isolated restored infrastructure, timed failover and application-level integrity checks, including replayed jobs, and monitor replication lag and backup restore success between drills.",
+      "selfCheckCriteria": ["Rejects the 8-minute-lag promotion as satisfying a 5-minute RPO without recovered logs.", "Fences the old writer and validates a consistent restore before allowing new writes.", "Measures RTO in a drill and reconciles uncertain external effects rather than duplicating them."],
+      "contentVersion": 1,
+      "normalizedContentHash": "sha256:76e512ebe5a9ed7af0890476ce33c13502299c03b05f94b109658e8c72632c16",
+      "source": "seed",
+      "provenance": "Original scenario; reviewed against AWS Well-Architected Reliability Pillar disaster recovery guidance and Google Cloud disaster recovery planning guide; docs/learning-curriculum.md"
     },
     {
       "id": "perf.database.query-count.v1",
