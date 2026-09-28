@@ -1,88 +1,50 @@
-import SwiftData
 import SwiftUI
 
-/// Read-only definition snapshots; opening Learning does not create personal progress.
-struct LearningTopicSummary: Identifiable, Equatable {
-    struct StarterLesson: Identifiable, Equatable {
-        let id: String
-        let title: String
-        let format: String
-        let estimatedMinutes: Int
-    }
+/// Window-local topic selection over the app-owned, committed catalog projection.
+/// Reading or switching topics never reconciles slots or creates personal records.
+struct LearningView: View {
+    @ObservedObject var store: LearningCatalogStore
+    @State private var selectedTopicID: String?
+    @FocusState private var focusedTopicID: String?
 
-    let id: String
-    let name: String
-    let lessons: [StarterLesson]
+    private static let topicOrder = ["go", "java", "design", "perf", "security"]
 
-    @MainActor
-    static func load(from container: ModelContainer) throws -> [LearningTopicSummary] {
-        let context = ModelContext(container)
-        context.autosaveEnabled = false
-        let topics = try context.fetch(FetchDescriptor<Topic>())
-        let lessons = try context.fetch(FetchDescriptor<LessonDefinition>())
-        // Match the agreed starter topic order; still show imported future topics.
-        let order = ["go", "java", "design", "perf", "security"]
-        return topics.map { topic in
-            LearningTopicSummary(
-                id: topic.id, name: topic.name,
-                lessons: lessons.filter { $0.topicID == topic.id }
-                    .sorted { $0.id < $1.id }
-                    .map { StarterLesson(id: $0.id, title: $0.title,
-                                         format: $0.format, estimatedMinutes: $0.estimatedMinutes) }
-            )
-        }.sorted { lhs, rhs in
-            let left = order.firstIndex(of: lhs.id) ?? order.count
-            let right = order.firstIndex(of: rhs.id) ?? order.count
-            return left == right ? lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending : left < right
+    static func orderedTopics(in snapshot: LearningCatalogSnapshot) -> [LearningTopicSnapshot] {
+        snapshot.topics.sorted { lhs, rhs in
+            let left = topicOrder.firstIndex(of: lhs.id) ?? topicOrder.count
+            let right = topicOrder.firstIndex(of: rhs.id) ?? topicOrder.count
+            return left == right ? lhs.id < rhs.id : left < right
         }
     }
-}
 
-/// M43: unframed, read-only starter rows in the M00 shell; M15's active choices belong to F05.
-struct LearningView: View {
-    let container: ModelContainer
-    /// A caller-supplied reader permits isolated empty/failure presentation tests.
-    /// Production still reads the current offline SwiftData definitions.
-    private let load: @MainActor (ModelContainer) throws -> [LearningTopicSummary]
-    @State private var topics: [LearningTopicSummary] = []
-    @State private var loadFailed = false
+    static func choices(for topicID: String, in snapshot: LearningCatalogSnapshot) -> [LessonDefinitionSnapshot] {
+        let definitions = Dictionary(uniqueKeysWithValues: snapshot.definitions.map { ($0.id, $0) })
+        return snapshot.slots.filter { $0.topicID == topicID }
+            .sorted { $0.slotIndex < $1.slotIndex }
+            .compactMap { definitions[$0.lessonID] }
+    }
 
-    init(container: ModelContainer,
-         load: @escaping @MainActor (ModelContainer) throws -> [LearningTopicSummary] = LearningTopicSummary.load) {
-        self.container = container
-        self.load = load
+    private func conceptLabels(for lesson: LessonDefinitionSnapshot, in snapshot: LearningCatalogSnapshot) -> String {
+        let concepts = Dictionary(uniqueKeysWithValues: snapshot.concepts.map { ($0.id, $0.name) })
+        return lesson.conceptIDs.map { concepts[$0] ?? $0 }.joined(separator: " · ")
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppMetrics.space4) {
             PageHeader("Learning")
-            if loadFailed {
+            switch store.state {
+            case .notLoaded, .loading:
+                LoadingState("Loading learning choices")
+            case .failed:
                 ErrorBanner(.readFailed)
-                Text("Return to Learning to try again.")
+                Text("Learning choices could not be loaded.")
                     .appTypography(.body)
                     .foregroundStyle(AppColors.textSecondary)
-            } else if topics.isEmpty {
-                EmptyState("No starter topics are installed.", guidance: "Starter content is not available yet.")
-            } else {
-                // Definitions are not active slots, progress or interactive lessons.
-                ForEach(topics) { topic in
-                    VStack(alignment: .leading, spacing: AppMetrics.space2) {
-                        SectionHeader(topic.name)
-                            .accessibilityIdentifier("learning-topic-\(topic.id)")
-                        if topic.lessons.isEmpty {
-                            EmptyState("No starter lesson in this topic yet.")
-                        } else {
-                            VStack(alignment: .leading, spacing: 0) {
-                                ForEach(topic.lessons) { lesson in
-                                    AppListRow(lesson.title,
-                                               metadata: "\(lesson.format.capitalized) · \(lesson.estimatedMinutes) min")
-                                        .accessibilityElement(children: .combine)
-                                        .accessibilityIdentifier("learning-lesson-\(lesson.id)")
-                                }
-                            }
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            case .empty(let snapshot), .current(let snapshot):
+                if Self.orderedTopics(in: snapshot).isEmpty {
+                    EmptyState("No learning topics are installed.")
+                } else {
+                    catalog(snapshot)
                 }
             }
             Spacer(minLength: 0)
@@ -90,16 +52,72 @@ struct LearningView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, AppMetrics.horizontalInset)
         .padding(.top, AppMetrics.space8)
-        .onAppear(perform: refresh)
+        .onAppear { store.loadIfNeeded() }
     }
 
-    private func refresh() {
-        do {
-            topics = try load(container)
-            loadFailed = false
-        } catch {
-            topics = []
-            loadFailed = true
+    private func catalog(_ snapshot: LearningCatalogSnapshot) -> some View {
+        let topics = Self.orderedTopics(in: snapshot)
+        let selected = topics.first { $0.id == selectedTopicID } ?? topics[0]
+        let choices = Self.choices(for: selected.id, in: snapshot)
+        return HStack(alignment: .top, spacing: AppMetrics.space6) {
+            VStack(alignment: .leading, spacing: AppMetrics.space2) {
+                SectionHeader("Topics")
+                ForEach(topics) { topic in
+                    let isSelected = selected.id == topic.id
+                    Button {
+                        selectedTopicID = topic.id
+                    } label: {
+                        Text(topic.name)
+                            .appTypography(.body)
+                            .frame(maxWidth: .infinity, minHeight: AppMetrics.preferredTarget, alignment: .leading)
+                            .foregroundStyle(isSelected ? AppColors.accent : AppColors.textPrimary)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .focusable()
+                    .focused($focusedTopicID, equals: topic.id)
+                    .overlay {
+                        if focusedTopicID == topic.id {
+                            RoundedRectangle(cornerRadius: AppMetrics.smallRadius)
+                                .strokeBorder(AppColors.focusRing, lineWidth: 2)
+                                .allowsHitTesting(false)
+                        }
+                    }
+                    .accessibilityLabel(topic.name)
+                    .accessibilityAddTraits(isSelected ? .isSelected : [])
+                    .accessibilityIdentifier("learning-topic-\(topic.id)")
+                }
+            }
+            .frame(width: 190, alignment: .leading)
+            VStack(alignment: .leading, spacing: AppMetrics.space4) {
+                SectionHeader(selected.name, metadata: "\(choices.count) available")
+                if choices.isEmpty {
+                    EmptyState("No choices available in \(selected.name).")
+                } else {
+                    ForEach(choices) { lesson in
+                        VStack(alignment: .leading, spacing: AppMetrics.space2) {
+                            AppListRow(lesson.title,
+                                       metadata: "\(lesson.format.capitalized) · \(lesson.difficulty.capitalized) · \(lesson.estimatedMinutes) min")
+                            Text(lesson.displayObjective)
+                                .appTypography(.body)
+                                .foregroundStyle(AppColors.textPrimary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text(conceptLabels(for: lesson, in: snapshot))
+                                .appTypography(.metadata)
+                                .foregroundStyle(AppColors.textSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(AppMetrics.space4)
+                        .background(AppColors.surface)
+                        .clipShape(RoundedRectangle(cornerRadius: AppMetrics.smallRadius))
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier("learning-lesson-\(lesson.id)")
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

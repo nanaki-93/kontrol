@@ -72,7 +72,7 @@ struct AppShell: View {
                     case .today:
                         TodayView(store: dependencies.taskStore, scheduleStore: dependencies.scheduleStore)
                     case .learning:
-                        LearningView(container: dependencies.container)
+                        LearningView(store: dependencies.learningCatalogStore)
                     case .focus:
                         FocusView(service: dependencies.focusService, taskStore: dependencies.taskStore)
                     case .tasks:
