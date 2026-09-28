@@ -3,16 +3,16 @@ import XCTest
 @testable import Kontrol
 
 final class BundledCatalogTests: XCTestCase {
-    func testPackagedAppResourceContainsEightLessonsInFourAuthoredTopicsAndSecurityStarter() throws {
+    func testPackagedAppResourceContainsReviewedFortyLessonContract() throws {
         // The hosted test loads the app bundle, not a source-tree fixture or test copy.
         let appBundle = Bundle.main
         XCTAssertNotNil(appBundle.url(forResource: "starter-catalog", withExtension: "json"))
         let catalog = try BundledCatalogLoader.load(from: appBundle).value
         XCTAssertEqual(catalog.catalogID, "kontrol.starter")
         XCTAssertEqual(catalog.version, 2)
-        XCTAssertEqual(Set(catalog.topics.map(\.name)),
-                       Set(["Go", "Java", "System Design", "Performance", "Security"]))
-        XCTAssertEqual(catalog.lessons.count, 33)
+        XCTAssertEqual(catalog.topics.map(\.name),
+                       ["Go", "Java", "System Design", "Performance", "Security"])
+        XCTAssertEqual(catalog.lessons.count, 40)
         XCTAssertEqual(catalog.topics.map(\.id), ["go", "java", "design", "perf", "security"])
         let goKeys: Set<String> = [
             "go.concurrency.cancel-work", "go.testing.case-design",
@@ -50,6 +50,17 @@ final class BundledCatalogTests: XCTestCase {
         XCTAssertEqual(Set(perfLessons.map(\.exercise)).count, 8)
         XCTAssertEqual(Set(perfLessons.map(\.referenceAnswer)).count, 8)
         XCTAssertTrue(perfLessons.allSatisfy { $0.selfCheckCriteria.count >= 3 })
+        let securityKeys: Set<String> = [
+            "security.auth.token-validation", "security.api.object-access",
+            "security.secrets.lifecycle", "security.design.trust-boundaries",
+            "security.input.boundary-validation", "security.auth.session-lifecycle",
+            "security.dependencies.risk-review", "security.observability.safe-audit"
+        ]
+        let securityLessons = catalog.lessons.filter { $0.topicID == "security" }
+        XCTAssertEqual(Set(securityLessons.map(\.objectiveKey)), securityKeys)
+        XCTAssertTrue(securityLessons.contains { $0.id == "security.api.object-access.v1" })
+        XCTAssertEqual(Set(securityLessons.map(\.exercise)).count, 8)
+        XCTAssertEqual(Set(securityLessons.map(\.referenceAnswer)).count, 8)
         let rateLimit = try XCTUnwrap(catalog.lessons.first { $0.id == "design.api.rate-limit-consistency.v1" })
         XCTAssertTrue(rateLimit.workedExample.contains("one token every 12 seconds"))
         XCTAssertTrue(rateLimit.workedExample.contains("not enforce a strict maximum of five attempts in any rolling minute"))
@@ -63,7 +74,7 @@ final class BundledCatalogTests: XCTestCase {
         })
         for topic in catalog.topics {
             let lessons = catalog.lessons.filter { $0.topicID == topic.id }
-            XCTAssertEqual(lessons.count, topic.id == "security" ? 1 : 8,
+            XCTAssertEqual(lessons.count, 8,
                            "Unexpected inventory for \(topic.id)")
             for lesson in lessons {
                 XCTAssertEqual(lesson.source, "seed")
@@ -71,17 +82,24 @@ final class BundledCatalogTests: XCTestCase {
                 XCTAssertEqual(lesson.normalizedContentHash, BundledCatalogLoader.fingerprint(for: lesson))
                 XCTAssertEqual(lesson.objectiveKey, lesson.conceptIDs.first)
                 XCTAssertFalse(lesson.objective.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                XCTAssertFalse(lesson.provenance.isEmpty)
+                XCTAssertFalse(lesson.provenance.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 XCTAssertGreaterThan(lesson.explanation.count, 150)
                 XCTAssertGreaterThan(lesson.workedExample.count, 150)
                 XCTAssertGreaterThan(lesson.exercise.count, 100)
                 XCTAssertGreaterThan(lesson.referenceAnswer.count, 150)
                 XCTAssertGreaterThanOrEqual(lesson.selfCheckCriteria.count, 3)
+                XCTAssertTrue(lesson.selfCheckCriteria.allSatisfy {
+                    !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                })
             }
         }
-        XCTAssertEqual(Set(catalog.lessons.map(\.objectiveKey)).count, 33)
-        // Each authored topic has four initial choices and four distinct reserves.
-        for topicID in ["go", "java", "design", "perf"] {
+        let expectedKeys = goKeys.union(javaKeys).union(designKeys).union(perfKeys).union(securityKeys)
+        XCTAssertEqual(expectedKeys.count, 40)
+        XCTAssertEqual(Set(catalog.lessons.map(\.objectiveKey)), expectedKeys)
+        XCTAssertEqual(Set(catalog.lessons.map(\.id)).count, 40)
+        XCTAssertEqual(Set(catalog.lessons.map(\.normalizedContentHash)).count, 40)
+        // Four initial choices and four distinct eligible reserves per topic.
+        for topicID in ["go", "java", "design", "perf", "security"] {
             XCTAssertEqual(catalog.lessons.filter {
                 $0.topicID == topicID && $0.prerequisiteConceptIDs.isEmpty
             }.count, 8)
@@ -92,9 +110,19 @@ final class BundledCatalogTests: XCTestCase {
         let url = try XCTUnwrap(Bundle.main.url(forResource: "starter-catalog", withExtension: "json"))
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
         XCTAssertEqual(Set(object.keys), Set(["catalogID", "version", "topics", "subtopics", "concepts", "lessons"]))
-        for lesson in try XCTUnwrap(object["lessons"] as? [[String: Any]]) {
-            XCTAssertTrue(Set(lesson.keys).isDisjoint(with: ["progress", "attempts", "activeSlots", "answerDraft", "completedAt"]))
+        let personalFields: Set<String> = [
+            "progress", "attempts", "activeSlots", "slots", "answerDraft", "answerText",
+            "completedAt", "dismissedAt", "startedAt", "assignedAt", "userID", "userEmail"
+        ]
+        func assertDefinitionOnly(_ value: Any) {
+            if let dictionary = value as? [String: Any] {
+                XCTAssertTrue(Set(dictionary.keys).isDisjoint(with: personalFields))
+                dictionary.values.forEach(assertDefinitionOnly)
+            } else if let array = value as? [Any] {
+                array.forEach(assertDefinitionOnly)
+            }
         }
+        assertDefinitionOnly(object)
     }
 
     func testChangedTeachingTextInvalidatesFingerprint() throws {

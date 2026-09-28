@@ -70,6 +70,36 @@
       "name": "API authorization"
     },
     {
+      "id": "security.auth",
+      "topicID": "security",
+      "name": "Token and session boundaries"
+    },
+    {
+      "id": "security.secrets",
+      "topicID": "security",
+      "name": "Secret lifecycle"
+    },
+    {
+      "id": "security.design",
+      "topicID": "security",
+      "name": "Threat modeling"
+    },
+    {
+      "id": "security.input",
+      "topicID": "security",
+      "name": "Input boundaries"
+    },
+    {
+      "id": "security.dependencies",
+      "topicID": "security",
+      "name": "Dependency risk"
+    },
+    {
+      "id": "security.observability",
+      "topicID": "security",
+      "name": "Safe audit trails"
+    },
+    {
       "id": "go.testing",
       "topicID": "go",
       "name": "Testing"
@@ -226,6 +256,48 @@
       "id": "security.api.object-access",
       "subtopicID": "security.api",
       "name": "Per-object authorization",
+      "prerequisiteConceptIDs": []
+    },
+    {
+      "id": "security.auth.token-validation",
+      "subtopicID": "security.auth",
+      "name": "JWT validation",
+      "prerequisiteConceptIDs": []
+    },
+    {
+      "id": "security.secrets.lifecycle",
+      "subtopicID": "security.secrets",
+      "name": "Secret lifecycle",
+      "prerequisiteConceptIDs": []
+    },
+    {
+      "id": "security.design.trust-boundaries",
+      "subtopicID": "security.design",
+      "name": "Trust boundaries",
+      "prerequisiteConceptIDs": []
+    },
+    {
+      "id": "security.input.boundary-validation",
+      "subtopicID": "security.input",
+      "name": "Boundary validation",
+      "prerequisiteConceptIDs": []
+    },
+    {
+      "id": "security.auth.session-lifecycle",
+      "subtopicID": "security.auth",
+      "name": "Session lifecycle",
+      "prerequisiteConceptIDs": []
+    },
+    {
+      "id": "security.dependencies.risk-review",
+      "subtopicID": "security.dependencies",
+      "name": "Dependency risk review",
+      "prerequisiteConceptIDs": []
+    },
+    {
+      "id": "security.observability.safe-audit",
+      "subtopicID": "security.observability",
+      "name": "Safe audit logging",
       "prerequisiteConceptIDs": []
     },
     {
@@ -1279,6 +1351,160 @@
       "normalizedContentHash": "sha256:28fc09a27472c07e6c7c1937e025982b4f3eb49040923674b593527b4d15d823",
       "source": "seed",
       "provenance": "Original Kontrol curriculum; docs/learning-curriculum.md: Performance / Recognize pool saturation; see Performance content review"
+    },
+    {
+      "id": "security.auth.token-validation.v1",
+      "objectiveKey": "security.auth.token-validation",
+      "objective": "Validate a JWT's signature, allowed algorithm, issuer, audience and lifetime before trusting its claims.",
+      "title": "Decide whether a bearer token is valid",
+      "topicID": "security",
+      "subtopicID": "security.auth",
+      "conceptIDs": ["security.auth.token-validation"],
+      "difficulty": "intermediate",
+      "format": "question",
+      "estimatedMinutes": 13,
+      "prerequisiteConceptIDs": [],
+      "explanation": "A decoded JWT payload is untrusted input until a verifier checks its signature with a configured key and an explicit allowed algorithm. Bind the verifier to the expected issuer and this API's audience; enforce expiration and not-before with a small documented clock tolerance. Choose verification keys from a trusted issuer configuration, not arbitrary token-supplied locations. A valid token authenticates a principal but does not authorize access to every resource. Never put secrets in JWT payloads: base64url encoding is not encryption.",
+      "workedExample": "An API expects issuer https://identity.example and audience notes-api. Token A has a valid signature but audience billing-api; reject it. Token B has the right audience but is expired; reject it. Token C has matching issuer, audience and time claims and a verified signature under an allowed algorithm; it may identify its subject, but GET /notes/82 still needs a per-object authorization check. A header advertising an unconfigured algorithm is not a reason to switch verifiers.",
+      "exercise": "An endpoint accepts a bearer JWT with a valid signature and an expiration 30 minutes in the future. Its audience is mobile-ui rather than notes-api, and the request asks for another account's note. Should the endpoint serve the note? List the independent validation and authorization decisions and what to do with a token that requests an unexpected algorithm.",
+      "referenceAnswer": "Reject the token for this API because its audience is not notes-api even though its signature and expiration look valid. The server must use an allowlisted verifier/key, check expected issuer, audience, expiration and not-before with bounded skew, then derive a subject. If those checks pass, separately enforce the subject's permission for the requested note at the data boundary. Reject unexpected algorithms rather than accepting the token header's choice. Do not expose token bytes or sensitive claims in diagnostics.",
+      "selfCheckCriteria": ["Rejects the wrong audience independently of signature validity and remaining token lifetime.", "Names configured algorithm/key, trusted issuer, audience and time checks before trusting the subject.", "Separates token authentication from per-object authorization and rejects algorithm substitution."],
+      "contentVersion": 1,
+      "normalizedContentHash": "sha256:796c0f21a6cfd8aa410a58ad82b8a78576abdd087c0815c568823ca3ad221f24",
+      "source": "seed",
+      "provenance": "Original Kontrol curriculum; docs/learning-curriculum.md: Security / JWT validation; see Security content review"
+    },
+    {
+      "id": "security.secrets.lifecycle.v1",
+      "objectiveKey": "security.secrets.lifecycle",
+      "objective": "Keep service secrets out of source and logs while planning scoped access and rotation.",
+      "title": "Manage a secret from issue to revocation",
+      "topicID": "security",
+      "subtopicID": "security.secrets",
+      "conceptIDs": ["security.secrets.lifecycle"],
+      "difficulty": "basic",
+      "format": "learn",
+      "estimatedMinutes": 12,
+      "prerequisiteConceptIDs": [],
+      "explanation": "Treat API keys and database credentials as sensitive throughout issuance, use, rotation and revocation. Store them in an access-controlled secret service, not a repository, build artifact, crash log or support ticket. Give each workload only the scope it needs; separate environments and identities. Encryption at rest alone does not stop a broadly authorized process from reading a secret. Avoid echoing secret values in command output and telemetry. Rotation needs consumer coordination, a bounded overlap where supported, and confirmation that the old credential is revoked.",
+      "workedExample": "A worker reads a payment credential at startup from a managed secret reference using its workload identity. To rotate, issue a new scoped credential, update the reference, roll workers and verify successful authorized calls before revoking the old credential. During overlap both credentials may be usable, so constrain the window and monitor access. A masked UI value is not proof that logs, environment dumps or build artifacts are safe.",
+      "exercise": "A deployment embeds one production API key in a checked-in configuration file shared by staging and production. Outline a migration with no key value in the answer: where to place the replacement, how to restrict readers, how to switch consumers and how to handle the exposed old key and any leaked history.",
+      "referenceAnswer": "Treat the checked-in key as compromised: issue a new least-privilege production credential in a secret manager, grant only the production workload identity read access, and point deployment configuration at its secret reference. Coordinate rollout and verify calls before revoking the exposed credential as soon as safely possible; investigate usage and clean exposed copies under the incident policy. Give staging a separate credential. Removing a commit is not enough to erase clones, logs or artifacts; do not paste either key into the incident record.",
+      "selfCheckCriteria": ["Treats the checked-in key as exposed and plans revocation, not just deletion of a file.", "Separates production from staging and grants secret access only to the consuming workload.", "Coordinates rollout and overlap without reproducing a secret value in logs or the exercise."],
+      "contentVersion": 1,
+      "normalizedContentHash": "sha256:689daf045f1d92a4dcc54d617d9ac70494ccfe62e2c757413c28e2df2ee51a0a",
+      "source": "seed",
+      "provenance": "Original Kontrol curriculum; docs/learning-curriculum.md: Security / Secret storage; see Security content review"
+    },
+    {
+      "id": "security.design.trust-boundaries.v1",
+      "objectiveKey": "security.design.trust-boundaries",
+      "objective": "Map assets, actors and trust boundaries to prioritized controls for an API change.",
+      "title": "Threat-model a document export",
+      "topicID": "security",
+      "subtopicID": "security.design",
+      "conceptIDs": ["security.design.trust-boundaries"],
+      "difficulty": "intermediate",
+      "format": "design",
+      "estimatedMinutes": 18,
+      "prerequisiteConceptIDs": [],
+      "explanation": "A useful threat model begins with assets and data flow, not a generic list of vulnerabilities. Identify who controls each input, where identities or privilege levels change, which data could be exposed or modified, and where a control is enforced. For each plausible abuse path, describe impact and a testable mitigation at the relevant boundary. Authentication at the edge does not automatically protect background jobs, object storage or download links. Revisit the model when flows or privileges change.",
+      "workedExample": "An authenticated client requests an export of one workspace, an API enqueues a job, a worker writes a file to private object storage and the API issues a short-lived download link. Boundaries include client to API, API to queue, worker to storage and link holder to storage. The job carries a server-validated workspace ID and scoped principal; a worker rechecks current authorization before reading data. An unguessable link still needs bounded lifetime and storage-side access control.",
+      "exercise": "Design a threat model for a workspace export that can include sensitive customer notes. A former member may retain an old link and jobs may be delayed after membership removal. Name assets, actors, boundaries, two concrete abuse paths and mitigations. State how you would test denied access and what remains risky with short-lived links.",
+      "referenceAnswer": "Assets are workspace notes, export files and membership decisions. Actors include current and former members, the API, queue worker and anyone holding a link. The API must authorize the requested workspace using server-derived identity; the worker must revalidate membership when executing delayed work rather than trusting queued client input. Store files privately with narrow worker permissions, scope or expire links and remove exports on a retention schedule. Test a cross-workspace request and revocation before job execution; verify both return no data. A still-valid bearer download link can be forwarded or used after membership removal unless downloads are mediated by fresh authorization or links are revocable; document that residual risk.",
+      "selfCheckCriteria": ["Names assets, actors and at least two distinct trust boundaries in the export data flow.", "Handles both cross-workspace request abuse and delayed work after membership revocation.", "Explains a testable control and residual bearer-link risk instead of assuming short expiry solves revocation."],
+      "contentVersion": 1,
+      "normalizedContentHash": "sha256:3008546d1c1c30d040c68d09b59d597b9b2a78511c1f0328235a0304192850a7",
+      "source": "seed",
+      "provenance": "Original Kontrol curriculum; docs/learning-curriculum.md: Security / API threat model; see Security content review"
+    },
+    {
+      "id": "security.input.boundary-validation.v1",
+      "objectiveKey": "security.input.boundary-validation",
+      "objective": "Validate client input and use parameterized data operations at the server boundary.",
+      "title": "Constrain a search boundary",
+      "topicID": "security",
+      "subtopicID": "security.input",
+      "conceptIDs": ["security.input.boundary-validation"],
+      "difficulty": "intermediate",
+      "format": "code",
+      "estimatedMinutes": 16,
+      "prerequisiteConceptIDs": [],
+      "explanation": "Client-side form checks are usability aids, not a server trust boundary. Parse each field to an explicit type, bound its length and range, and reject unsupported options before database work. Pass values as bound parameters instead of interpolating them into a query. Parameters protect values, not SQL identifiers: choose sort columns and directions from a server-owned allowlist. Authorization and output encoding are separate decisions; syntactically valid input does not authorize access or make reflected text safe in HTML.",
+      "workedExample": "A search request has query text, page size and sort key. The server accepts query text of at most 100 characters, an integer page size from 1 to 50 and sort key 'created' or 'title'. It maps the sort key to a fixed SQL fragment and binds the query and limit as values. An unknown sort key fails validation; the client never supplies an arbitrary ORDER BY expression. The database query is additionally scoped to the verified tenant identity.",
+      "exercise": "Rewrite this unsafe search boundary as pseudocode: concatenate client query, sort and limit directly into SQL for SELECT notes WHERE title LIKE ... ORDER BY ... LIMIT .... Require tenant scoping, bound query values, a page size of 1 to 50 and only 'created' or 'title' sort. Explain how an invalid sort is handled.",
+      "referenceAnswer": "Parse limit as a strict integer and reject values outside 1...50; reject query text longer than 100 characters. Map sort using a server-side table, e.g. created to created_at and title to title; reject other keys with a validation error. Construct the query only from fixed SQL and the allowlisted column, with WHERE tenant_id = :tenant AND title LIKE :pattern ORDER BY <mapped column> LIMIT :limit. Bind tenant from the verified principal, pattern from escaped search text under the chosen LIKE semantics, and limit as typed values. Parameterization is not a substitute for tenant authorization or context-appropriate output encoding.",
+      "selfCheckCriteria": ["Checks server-side types and bounds, rejecting an unknown sort instead of interpolating it.", "Binds values and chooses SQL identifiers only from server-owned constants, with tenant identity from the principal.", "Does not confuse query parameterization with authorization or safe rendering of search output."],
+      "contentVersion": 1,
+      "normalizedContentHash": "sha256:0b466ced3ef246a33b5718b057f0a88d9805b18d3149b68b4ecef1c696387fee",
+      "source": "seed",
+      "provenance": "Original Kontrol curriculum; docs/learning-curriculum.md: Security / Input validation; generic SQL pseudocode; see Security content review"
+    },
+    {
+      "id": "security.auth.session-lifecycle.v1",
+      "objectiveKey": "security.auth.session-lifecycle",
+      "objective": "Design server-enforced session expiry and revocation for a web application.",
+      "title": "Expire and revoke a session",
+      "topicID": "security",
+      "subtopicID": "security.auth",
+      "conceptIDs": ["security.auth.session-lifecycle"],
+      "difficulty": "intermediate",
+      "format": "design",
+      "estimatedMinutes": 17,
+      "prerequisiteConceptIDs": [],
+      "explanation": "Sessions need server-enforced lifetime and an explicit revocation path. An idle timeout limits unattended reuse while an absolute lifetime limits a continuously active session; each request must check the relevant deadline on the server. Logout must invalidate server-side state or a revocable session identifier, not just remove a browser cookie. Protect cookies with Secure, HttpOnly and an appropriate SameSite policy, but still assess CSRF for state-changing requests. Rotate session identifiers after privilege changes to reduce fixation risk. Stateless access tokens require a short lifetime or a revocation strategy with explicit propagation delay.",
+      "workedExample": "A session has a 30-minute idle limit and a 12-hour absolute limit. A request 25 minutes after the last accepted request can renew the idle deadline, but one after 31 minutes cannot; neither may extend beyond 12 hours from issue. On logout the server revokes the identifier and the browser clears its cookie. A second browser using a previously copied cookie must fail once revocation is visible to the session store.",
+      "exercise": "Design session handling for an admin dashboard used from shared workstations. Specify idle and absolute expiry, logout, privilege-change rotation and cookie properties. Explain how the server responds to a request after expiry or from a second device after logout, and name one risk not solved by HttpOnly cookies.",
+      "referenceAnswer": "Issue an opaque, unpredictable session ID backed by server-side state; configure a short idle limit (for example 15 minutes) and an absolute cap (for example 8 hours), checking both on every protected request. Renew only the idle deadline on accepted activity, never past the absolute cap. Revoke the ID on logout and rotate it when privilege changes, invalidating the old ID. Send it in a Secure, HttpOnly cookie with an appropriate SameSite setting; reject expired or revoked requests and require sign-in again. Another holder of the revoked ID must also fail. Evaluate CSRF on state-changing endpoints and avoid assuming cookie flags prevent all browser-originated requests.",
+      "selfCheckCriteria": ["Distinguishes idle renewal from a fixed absolute deadline and enforces both on the server.", "Revokes on logout and rotates privilege-changing identifiers so a copied old cookie fails.", "Specifies cookie flags but still addresses cross-site request forgery separately."],
+      "contentVersion": 1,
+      "normalizedContentHash": "sha256:f473b4a5aca8aaba575915d126798b468422514f400c7e1da0d506f7c13e45a3",
+      "source": "seed",
+      "provenance": "Original Kontrol curriculum; docs/learning-curriculum.md: Security / Session expiry; see Security content review"
+    },
+    {
+      "id": "security.dependencies.risk-review.v1",
+      "objectiveKey": "security.dependencies.risk-review",
+      "objective": "Prioritize a vulnerable dependency update using affected version, reachability and mitigation evidence.",
+      "title": "Triage a dependency advisory",
+      "topicID": "security",
+      "subtopicID": "security.dependencies",
+      "conceptIDs": ["security.dependencies.risk-review"],
+      "difficulty": "intermediate",
+      "format": "question",
+      "estimatedMinutes": 13,
+      "prerequisiteConceptIDs": [],
+      "explanation": "An advisory is a starting signal, not proof of exploitability or safety. Identify the exact resolved version and where the dependency runs, compare affected ranges, check whether untrusted input reaches the vulnerable functionality, and read vendor fix guidance. Transitive packages count too. If exposure is plausible, plan a tested upgrade or documented temporary mitigation with an owner and deadline; lack of known exploits is not proof of safety. Preserve the lockfile and verify the deployed artifact actually contains the fixed version.",
+      "workedExample": "An application pins parser 2.4 through a transitive dependency. The vendor advisory affects 2.0 through 2.5 when parsing untrusted uploads and recommends 2.6. The upload endpoint calls that parser, so the path is reachable. Updating only a declared top-level range without checking the resolved lockfile might leave 2.4 deployed. Test representative uploads and inspect the built dependency inventory after upgrading.",
+      "exercise": "A service's lockfile resolves parser 2.4, affected through 2.5; a vendor patch is 2.6. Public uploads reach the parser, but a developer says there is no published exploit. State priority, an immediate containment option, upgrade verification steps and what evidence would justify a lower priority in a different service.",
+      "referenceAnswer": "Treat the public upload path as urgent because affected code is reachable from untrusted input; do not rely on absence of a public exploit. If a safe upgrade cannot ship immediately, temporarily restrict or disable the upload route under an owned, time-bounded mitigation. Upgrade to a vendor-supported fixed version, check the resolved lockfile and built artifact for 2.6 or later, run parser regression tests and monitor failures. A lower priority for another service needs evidence such as no deployed copy or no path to vulnerable functionality, plus a recorded owner and reassessment date, not an unverified assertion.",
+      "selfCheckCriteria": ["Uses the resolved deployed version and reachable untrusted upload path, not just an advisory score.", "Includes a time-bounded containment option and a tested upgrade verified in the built artifact.", "Does not treat lack of a public exploit as evidence that a reachable affected version is safe."],
+      "contentVersion": 1,
+      "normalizedContentHash": "sha256:cc8bf913709f64a8fc6d5d6dba49ced863fa45719dd5e89e80cf5ca9e7b4eebf",
+      "source": "seed",
+      "provenance": "Original Kontrol curriculum; docs/learning-curriculum.md: Security / Dependency updates; hypothetical advisory; see Security content review"
+    },
+    {
+      "id": "security.observability.safe-audit.v1",
+      "objectiveKey": "security.observability.safe-audit",
+      "objective": "Record security decisions with useful correlation while excluding credentials and sensitive payloads.",
+      "title": "Log an access decision safely",
+      "topicID": "security",
+      "subtopicID": "security.observability",
+      "conceptIDs": ["security.observability.safe-audit"],
+      "difficulty": "basic",
+      "format": "learn",
+      "estimatedMinutes": 12,
+      "prerequisiteConceptIDs": [],
+      "explanation": "An audit event should explain who attempted which action on which class of resource, when, and whether the server allowed it, without becoming a second store of secrets. Emit events from the authoritative server decision boundary, not only from client instrumentation. Use a correlation ID, a minimally necessary pseudonymous actor/resource identifier, action and outcome; avoid authorization headers, session IDs, credentials and raw request bodies. Restrict log readers, set retention and protect integrity. An audit trail supports investigation but does not itself prevent unauthorized access.",
+      "workedExample": "A DELETE /notes/82 decision yields an event with UTC time, request correlation ID, actor's internal identifier, action note.delete, resource type note, a scoped resource reference and outcome denied. The event omits the note body and bearer token. Authorized investigators can correlate it to a separate request trace without storing full headers. For unknown IDs, the public response remains generic; internal logging must also respect retention and reader permissions.",
+      "exercise": "A handler logs the complete Authorization header and request JSON whenever a note delete is denied. Propose a safe event schema that still helps investigate repeated cross-account denials. Say where it is emitted, which fields are excluded, and how access and retention should be controlled.",
+      "referenceAnswer": "Emit a structured event at the server's authorization decision: timestamp, correlation ID, pseudonymous principal ID, operation note.delete, resource type and an appropriately scoped resource reference, outcome denied, and a finite reason code. Never log bearer tokens, passwords, session cookies, raw request bodies or note contents. Limit access to authorized responders, enforce retention and integrity controls, and alert on repeated denials using bounded aggregation. Avoid leaking whether a note exists in the client response; treat audit events as evidence, not as authorization enforcement.",
+      "selfCheckCriteria": ["Places the event at the server authorization boundary with actor, action, outcome and correlation.", "Excludes token/header values, raw bodies and note contents while retaining useful bounded identifiers.", "Specifies restricted readers, retention and integrity without treating logging as a preventive control."],
+      "contentVersion": 1,
+      "normalizedContentHash": "sha256:58bdd74db481e519bd219057453e4b19bd9caa6daf14c005008db2bc8091205b",
+      "source": "seed",
+      "provenance": "Original Kontrol curriculum; docs/learning-curriculum.md: Security / Audit logging; see Security content review"
     }
   ]
 }
