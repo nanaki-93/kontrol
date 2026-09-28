@@ -13,8 +13,12 @@ final class ScheduleEditorDraft: ObservableObject {
     @Published var note: String { didSet { fieldsChanged() } }
     @Published private(set) var saveError: ScheduleMutationError?
     @Published private(set) var overlapReview: ScheduleOverlapReview?
+    @Published private(set) var deleteError: ScheduleMutationError?
+    @Published private(set) var deletionRequested = false
 
     let editingID: UUID?
+    /// The committed title, not unsaved editor text, names the destructive target.
+    let deletionTitle: String?
     private let store: ScheduleStore
     private var reviewedInput: ScheduleInput?
     private var finished = false
@@ -25,6 +29,7 @@ final class ScheduleEditorDraft: ObservableObject {
     init(creatingOn selectedDate: Date, calendar: Calendar, in store: ScheduleStore) {
         self.store = store
         editingID = nil
+        deletionTitle = nil
         title = ""
         note = ""
         let dayStart = calendar.startOfDay(for: selectedDate)
@@ -40,6 +45,7 @@ final class ScheduleEditorDraft: ObservableObject {
     init(editing snapshot: ScheduleSnapshot, in store: ScheduleStore) {
         self.store = store
         editingID = snapshot.id
+        deletionTitle = snapshot.title
         title = snapshot.title
         startAt = snapshot.startAt
         endAt = snapshot.endAt
@@ -57,16 +63,51 @@ final class ScheduleEditorDraft: ObservableObject {
         return fields
     }
 
-    var canSubmit: Bool { !finished && !submitting && invalidFields.isEmpty }
+    var canSubmit: Bool {
+        !finished && !submitting && !deletionRequested && deleteError != .notFound && invalidFields.isEmpty
+    }
     var canKeepBoth: Bool { canSubmit && overlapReview != nil && reviewedInput == input }
+    var canRequestDeletion: Bool {
+        editingID != nil && !finished && !submitting && !deletionRequested &&
+            saveError != .notFound && deleteError != .notFound
+    }
+
+    /// The first action only opens a block-specific confirmation; it never writes.
+    func requestDeletion() {
+        guard canRequestDeletion else { return }
+        deleteError = nil
+        deletionRequested = true
+    }
+
+    func cancelDeletion() { deletionRequested = false }
+
+    /// Called only from the destructive confirmation action. Failure leaves this
+    /// draft and all published rows intact; a retry must request confirmation again.
+    func confirmDeletion(onSuccess: () -> Void) {
+        guard deletionRequested, let editingID, !finished, !submitting else { return }
+        deletionRequested = false
+        submitting = true
+        defer { submitting = false }
+        do {
+            try store.delete(id: editingID)
+            finished = true
+            deleteError = nil
+            onSuccess()
+        } catch {
+            // ScheduleStore refreshes missing IDs, retaining explicitly stale rows on read failure.
+            deleteError = store.mutationError ?? .persistence
+        }
+    }
 
     /// Edit time/dismissal removes approval but retains every editable field.
     func editTime() { clearReview() }
 
-    func cancel() {
-        guard !submitting else { return }
+    @discardableResult func cancel() -> Bool {
+        guard !submitting else { return false }
         finished = true
+        deletionRequested = false
         clearReview()
+        return true
     }
 
     /// Initial Save always checks for conflicts. An old review cannot be used here.

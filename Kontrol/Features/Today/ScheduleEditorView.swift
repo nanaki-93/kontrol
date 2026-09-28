@@ -7,17 +7,19 @@ struct ScheduleEditorView: View {
     @ObservedObject var temporalStore: TaskStore
     let onCancel: () -> Void
     let onSaved: () -> Void
+    let onDeleted: () -> Void
     let onMissingBlock: () -> Void
     @Environment(\.locale) private var locale
     @FocusState private var titleFocused: Bool
 
     init(draft: ScheduleEditorDraft, temporalStore: TaskStore,
          onCancel: @escaping () -> Void, onSaved: @escaping () -> Void,
-         onMissingBlock: @escaping () -> Void) {
+         onDeleted: @escaping () -> Void, onMissingBlock: @escaping () -> Void) {
         _draft = StateObject(wrappedValue: draft)
         self.temporalStore = temporalStore
         self.onCancel = onCancel
         self.onSaved = onSaved
+        self.onDeleted = onDeleted
         self.onMissingBlock = onMissingBlock
     }
 
@@ -114,6 +116,22 @@ struct ScheduleEditorView: View {
                 }
                 .frame(maxHeight: 440)
             }
+            if let deleteError = draft.deleteError {
+                ErrorBanner(.saveFailed)
+                    .accessibilityIdentifier("schedule-editor-delete-error")
+                Text(deleteError == .notFound
+                     ? "This block is no longer available. The list has been refreshed; close the editor."
+                     : "The block and your edits are still here. Try deleting again or close the editor.")
+                    .appTypography(.metadata)
+                    .foregroundStyle(AppColors.textSecondary)
+                if deleteError == .notFound {
+                    ActionButton("Close editor", action: onMissingBlock)
+                        .accessibilityIdentifier("schedule-editor-delete-close-missing")
+                } else {
+                    ActionButton("Try deleting again") { draft.requestDeletion() }
+                        .accessibilityIdentifier("schedule-editor-delete-retry")
+                }
+            }
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: AppMetrics.space3) { decisionActions }
                 VStack(alignment: .leading, spacing: AppMetrics.space2) { decisionActions }
@@ -126,12 +144,31 @@ struct ScheduleEditorView: View {
         .environment(\.calendar, pickerCalendar)
         .environment(\.timeZone, context.timeZone)
         .onAppear { titleFocused = true }
+        .alert("Delete \"\(draft.deletionTitle ?? "block")\"?", isPresented: Binding(
+            get: { draft.deletionRequested },
+            // SwiftUI may set this false before running the destructive button action.
+            // The explicit Cancel action disarms the request instead.
+            set: { _ in }
+        )) {
+            Button("Cancel", role: .cancel) { draft.cancelDeletion() }
+            Button("Delete block", role: .destructive) {
+                draft.confirmDeletion(onSuccess: onDeleted)
+            }
+        } message: {
+            Text("This removes only this block. This action cannot be undone.")
+        }
     }
 
     @ViewBuilder private var decisionActions: some View {
+        if draft.editingID != nil {
+            ActionButton("Delete", variant: .destructive, isEnabled: draft.canRequestDeletion) {
+                draft.requestDeletion()
+            }
+            .accessibilityLabel("Delete \(draft.deletionTitle ?? "block")")
+            .accessibilityIdentifier("schedule-editor-delete")
+        }
         ActionButton("Cancel") {
-            draft.cancel()
-            onCancel()
+            if draft.cancel() { onCancel() }
         }
         .keyboardShortcut(.cancelAction)
         .accessibilityIdentifier("schedule-editor-cancel")

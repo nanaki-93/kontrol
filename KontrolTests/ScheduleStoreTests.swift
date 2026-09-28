@@ -206,6 +206,40 @@ final class ScheduleStoreTests: XCTestCase {
         XCTAssertTrue(store.snapshots.isEmpty)
     }
 
+    func testDeleteFailureAndMissingTargetNeverPublishThenSuccessRemovesOnlyOneAcrossConsumers() throws {
+        let spy = try makeSpy()
+        let store = ScheduleStore(repository: spy)
+        store.refresh()
+        let target = try store.create(input: input("Target"))
+        let peer = try store.create(input: input("Peer", offset: 7200))
+        var first: [[ScheduleSnapshot]] = []
+        var second: [[ScheduleSnapshot]] = []
+        let a = store.$snapshots.dropFirst().sink { first.append($0) }
+        let b = store.$snapshots.dropFirst().sink { second.append($0) }
+        defer { a.cancel(); b.cancel() }
+        spy.failWrites = true
+        XCTAssertThrowsError(try store.delete(id: target.id))
+        XCTAssertEqual(store.mutationError, .persistence)
+        XCTAssertEqual(store.snapshots, [target, peer])
+        XCTAssertEqual(try spy.storage.fetchAll(), [target, peer])
+        XCTAssertTrue(first.isEmpty)
+        XCTAssertTrue(second.isEmpty)
+        spy.failWrites = false
+        try store.delete(id: target.id)
+        XCTAssertEqual(store.snapshots, [peer])
+        XCTAssertEqual(first, [[peer]])
+        XCTAssertEqual(second, [[peer]])
+        XCTAssertEqual(try spy.storage.fetchAll(), [peer])
+        XCTAssertEqual(spy.fetchCount, 1, "committed delete does not need a post-save fetch")
+        XCTAssertThrowsError(try store.delete(id: target.id)) {
+            XCTAssertEqual($0 as? ScheduleRepositoryError, .notFound(target.id))
+        }
+        XCTAssertEqual(store.mutationError, .notFound)
+        XCTAssertEqual(store.snapshots, [peer])
+        XCTAssertEqual(first, [[peer], [peer]], "missing ID refresh cannot erase another row")
+        XCTAssertEqual(second, first)
+    }
+
     func testOneActivationObserverRefreshesSharedStoreAndIsRemovedOnRelease() throws {
         let spy = try makeSpy()
         let center = NotificationProbe()

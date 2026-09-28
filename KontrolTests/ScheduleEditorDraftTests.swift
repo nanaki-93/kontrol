@@ -376,6 +376,102 @@ final class ScheduleEditorDraftTests: XCTestCase {
         XCTAssertEqual(try storage.repository.fetchAll(), [original])
     }
 
+    func testDeletionRequiresConfirmationNamesCommittedBlockAndCancelPreservesEverything() throws {
+        let storage = try store()
+        let target = try storage.create(input: ScheduleInput(title: "Original", startAt: date(2026, 5, 1, 9),
+                                                              endAt: date(2026, 5, 1, 10)))
+        let peer = try storage.create(input: ScheduleInput(title: "Peer", startAt: date(2026, 5, 1, 11),
+                                                            endAt: date(2026, 5, 1, 12)))
+        let create = ScheduleEditorDraft(creatingOn: date(2026, 5, 1), calendar: calendar(), in: storage)
+        XCTAssertNil(create.deletionTitle)
+        XCTAssertFalse(create.canRequestDeletion)
+        create.requestDeletion()
+        create.confirmDeletion { XCTFail("Create cannot delete") }
+
+        let edit = ScheduleEditorDraft(editing: target, in: storage)
+        edit.title = "Unsaved rename"
+        edit.note = "Unsaved note"
+        XCTAssertEqual(edit.deletionTitle, "Original")
+        edit.confirmDeletion { XCTFail("No confirmation") }
+        XCTAssertEqual(try storage.repository.fetchAll(), [target, peer])
+        edit.requestDeletion()
+        XCTAssertTrue(edit.deletionRequested)
+        XCTAssertFalse(edit.canSubmit)
+        XCTAssertEqual(try storage.repository.fetchAll(), [target, peer])
+        edit.cancelDeletion()
+        edit.confirmDeletion { XCTFail("Canceled confirmation") }
+        XCTAssertEqual(edit.title, "Unsaved rename")
+        XCTAssertEqual(try storage.repository.fetchAll(), [target, peer])
+        edit.cancel()
+        edit.requestDeletion()
+        XCTAssertFalse(edit.deletionRequested)
+        XCTAssertEqual(try storage.repository.fetchAll(), [target, peer])
+    }
+
+    func testFailedDeletionRetainsDraftAndBlockUntilExplicitReconfirmation() throws {
+        var fail = false
+        let storage = try store(save: { context in
+            if fail { throw InjectedFailure.save }
+            try context.save()
+        })
+        let target = try storage.create(input: ScheduleInput(title: "Original", startAt: date(2026, 5, 1, 9),
+                                                              endAt: date(2026, 5, 1, 10)))
+        let peer = try storage.create(input: ScheduleInput(title: "Peer", startAt: date(2026, 5, 1, 11),
+                                                            endAt: date(2026, 5, 1, 12)))
+        let edit = ScheduleEditorDraft(editing: target, in: storage)
+        edit.title = "Unsaved"
+        edit.startAt = date(2026, 5, 2, 9)
+        edit.note = "Still here"
+        fail = true
+        edit.requestDeletion()
+        var callbacks = 0
+        edit.confirmDeletion { callbacks += 1 }
+        XCTAssertEqual(edit.deleteError, .persistence)
+        XCTAssertFalse(edit.deletionRequested)
+        XCTAssertEqual(callbacks, 0)
+        edit.confirmDeletion { XCTFail("Failure cannot auto-retry") }
+        XCTAssertEqual(edit.title, "Unsaved")
+        XCTAssertEqual(edit.startAt, date(2026, 5, 2, 9))
+        XCTAssertEqual(edit.note, "Still here")
+        XCTAssertEqual(storage.snapshots, [target, peer])
+        XCTAssertEqual(try storage.repository.fetchAll(), [target, peer])
+        fail = false
+        edit.requestDeletion()
+        edit.confirmDeletion {
+            callbacks += 1
+            edit.requestDeletion()
+            edit.confirmDeletion { XCTFail("Reentrant delete") }
+        }
+        edit.confirmDeletion { XCTFail("Repeated delete") }
+        XCTAssertEqual(callbacks, 1)
+        XCTAssertNil(edit.deleteError)
+        XCTAssertFalse(edit.canRequestDeletion)
+        XCTAssertEqual(storage.snapshots, [peer])
+        XCTAssertEqual(try storage.repository.fetchAll(), [peer])
+    }
+
+    func testMissingDeletionRefreshesAndOffersSafeDismissalWithoutRecreatingRow() throws {
+        let storage = try store()
+        let target = try storage.create(input: ScheduleInput(title: "Removed elsewhere",
+                                                              startAt: date(2026, 5, 1, 9),
+                                                              endAt: date(2026, 5, 1, 10)))
+        let peer = try storage.create(input: ScheduleInput(title: "Peer", startAt: date(2026, 5, 1, 11),
+                                                            endAt: date(2026, 5, 1, 12)))
+        let edit = ScheduleEditorDraft(editing: target, in: storage)
+        edit.note = "Unsaved"
+        try storage.repository.delete(id: target.id) // Simulate a different owner/process.
+        edit.requestDeletion()
+        edit.confirmDeletion { XCTFail("Missing target deleted") }
+        XCTAssertEqual(edit.deleteError, .notFound)
+        XCTAssertFalse(edit.canRequestDeletion)
+        XCTAssertFalse(edit.canSubmit)
+        XCTAssertEqual(edit.note, "Unsaved")
+        XCTAssertEqual(storage.readState, .loaded)
+        XCTAssertEqual(storage.snapshots, [peer], "Missing ID triggers a safe refresh")
+        XCTAssertEqual(try storage.repository.fetchAll(), [peer])
+        XCTAssertTrue(edit.cancel()) // Close editor, never insert a replacement.
+    }
+
     func testIndependentDraftsNeverShareUnsavedFieldsOrApproval() throws {
         let storage = try store()
         _ = try storage.create(input: ScheduleInput(title: "Peer", startAt: date(2026, 5, 1, 10),

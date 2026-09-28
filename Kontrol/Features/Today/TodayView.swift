@@ -152,7 +152,10 @@ struct TodayView: View {
                 blockPresentation = nil
             }, onSaved: {
                 blockPresentation = nil
+            }, onDeleted: {
+                blockPresentation = nil
             }, onMissingBlock: {
+                item.draft.cancel()
                 blockPresentation = nil
             })
         }
