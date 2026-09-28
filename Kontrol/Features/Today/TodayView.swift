@@ -34,7 +34,7 @@ struct TodayView: View {
             if store.readState == .loaded && today.isEmpty {
                 EmptyState("No tasks planned or due today.", guidance: "Use Add task to capture one.")
             } else if !today.isEmpty {
-                TaskRows(rows: today.map(TaskRow.init))
+                TaskRows(rows: today, temporalContext: store.temporalContext)
             }
             Divider().overlay(AppColors.border)
             SectionHeader("Schedule")

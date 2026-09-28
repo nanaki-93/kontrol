@@ -238,59 +238,168 @@ final class TaskPresentationTests: XCTestCase {
         try inspectTasks(repository) { window in
             let text = visibleText(in: window)
             XCTAssertTrue(text.contains("Tasks"))
-            XCTAssertTrue(text.contains("No tasks captured yet."))
-            XCTAssertTrue(text.contains("Use Add task on Today to capture one."))
+            XCTAssertTrue(text.contains("Nothing planned or due today."))
+            XCTAssertTrue(text.contains("Check Upcoming for other open tasks, or use Add task on Today."))
             XCTAssertFalse(text.contains("Error: Content could not be loaded."))
             XCTAssertFalse(text.contains("Saved task"))
+            XCTAssertEqual(AXUIElementPerformAction(try waitForElement("tasks-filter-upcoming", in: window),
+                                                     kAXPressAction as CFString), .success)
+            settle()
+            XCTAssertTrue(visibleText(in: window).contains("No upcoming tasks."))
+            XCTAssertTrue(visibleText(in: window).contains(where: { $0.contains("including unscheduled tasks") }))
         }
         let id = try repository.create(title: "Saved task", plannedFor: nil)
         try inspectTasks(FailingReadRepository(storage: repository)) { window in
             let text = visibleText(in: window)
             XCTAssertTrue(text.contains("Error: Content could not be loaded."))
-            XCTAssertFalse(text.contains("No tasks captured yet."))
+            XCTAssertFalse(text.contains("Nothing planned or due today."))
             XCTAssertFalse(text.contains("Saved task"))
             XCTAssertTrue(elements(in: window, identifier: "task-row-\(id.uuidString)").isEmpty)
         }
         XCTAssertEqual(try repository.fetchAll().map(\.id), [id], "failed rendering cannot change saved tasks")
     }
 
-    func testTasksRowsKeepSavedIDsAndCompletionStatusWithoutControlsOrWrites() throws {
+    func testTasksFiltersPartitionSavedRowsWithCountsMetadataAndNoWrites() throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
-        let repository = SwiftDataTaskRepository(container: container)
-        let openID = try repository.create(title: "Open task", plannedFor: nil)
-        let completedID = UUID()
-        let context = ModelContext(container)
-        context.insert(try TaskItem(id: completedID, title: "Finished task", createdAt: .now,
-                                    completedAt: .now))
-        try context.save()
-        let before = try repository.fetchAll().map(TaskRow.init)
-        try inspectTasks(repository) { window in
-            let text = visibleText(in: window)
-            XCTAssertFalse(text.contains("No tasks captured yet."))
-            XCTAssertFalse(text.contains("Error: Content could not be loaded."))
-            for id in [openID, completedID] {
-                XCTAssertEqual(elements(in: window, identifier: "task-row-\(id.uuidString)").count, 1)
-            }
-            let complete = try XCTUnwrap(elements(in: window, identifier: "task-row-\(completedID.uuidString)").first)
-            let open = try XCTUnwrap(elements(in: window, identifier: "task-row-\(openID.uuidString)").first)
-            let completedName = (attribute(complete, kAXDescriptionAttribute) as? String ?? "") +
-                (attribute(complete, kAXValueAttribute) as? String ?? "")
-            XCTAssertTrue(completedName.contains("Finished task"))
-            XCTAssertTrue(completedName.contains("Success: Completed"), "status retains text and meaning")
-            XCTAssertFalse((attribute(open, kAXDescriptionAttribute) as? String ?? "").contains("Completed"))
-            XCTAssertFalse((attribute(open, kAXValueAttribute) as? String ?? "").contains("Completed"))
-            XCTAssertFalse(text.contains("Due"), "an unassigned due date is not a status")
-            let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
-            let windows = attribute(app, kAXWindowsAttribute) as? [AXUIElement] ?? []
-            let host = try XCTUnwrap(windows.first {
-                attribute($0, kAXTitleAttribute) as? String == window.title
-            })
-            XCTAssertFalse(descendants(of: host).contains {
-                attribute($0, kAXRoleAttribute) as? String == kAXButtonRole
-            }, "read-only task rows must not expose a nonfunctional action")
+        var saves = 0
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-01-01T12:00:00Z"))
+        let zone = try XCTUnwrap(TimeZone(identifier: "UTC"))
+        let repository = SwiftDataTaskRepository(container: container, save: { context in
+            saves += 1
+            try context.save()
+        })
+        let plan = PlannedDay.today(at: now, calendar: .current, timeZone: zone)
+        let today = try repository.create(input: TaskInput(title: "Today task", plannedFor: plan))
+        let overdue = try repository.create(input: TaskInput(title: "Late task", dueAt: now.addingTimeInterval(-3600)))
+        let undated = try repository.create(input: TaskInput(title: "Unscheduled task"))
+        let past = try repository.create(input: TaskInput(title: "Past plan", plannedFor:
+            PlannedDay.today(at: now.addingTimeInterval(-86400), calendar: .current, timeZone: zone)))
+        let completed = try repository.create(input: TaskInput(title: "Finished task"))
+        _ = try repository.setCompleted(id: completed.id, completed: true)
+        let before = try repository.fetchAll().map(TaskSnapshot.init)
+        let initialSaves = saves
+        let store = TaskStore(repository: repository, clock: { now }, timeZone: { zone })
+        let host = NSHostingView(rootView: TasksView(store: store))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.title = "Filtered tasks inspection \(UUID())"
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        host.layoutSubtreeIfNeeded()
+        settle()
+        func present(_ ids: [UUID], absent: [UUID]) {
+            for id in ids { XCTAssertEqual(elements(in: window, identifier: "task-row-\(id.uuidString)").count, 1) }
+            for id in absent { XCTAssertTrue(elements(in: window, identifier: "task-row-\(id.uuidString)").isEmpty) }
         }
-        XCTAssertEqual(try repository.fetchAll().map(TaskRow.init), before,
-                       "read-only Tasks presentation must not mutate task snapshots")
+        func choose(_ name: String) throws {
+            let button = try waitForElement("tasks-filter-\(name)", in: window)
+            XCTAssertEqual(AXUIElementPerformAction(button, kAXPressAction as CFString), .success)
+            settle()
+            XCTAssertEqual(attribute(try waitForElement("tasks-filter-\(name)", in: window),
+                                     kAXValueAttribute) as? String, "Selected")
+        }
+        present([today.id, overdue.id], absent: [undated.id, past.id, completed.id])
+        for (name, count) in [("today", 2), ("upcoming", 2), ("completed", 1)] {
+            let button = try waitForElement("tasks-filter-\(name)", in: window)
+            XCTAssertEqual(attribute(button, kAXDescriptionAttribute) as? String,
+                           "\(name.capitalized), \(count) tasks")
+        }
+        XCTAssertTrue(visibleText(in: window).contains(where: { $0.contains("Overdue") }))
+        try choose("upcoming")
+        present([undated.id, past.id], absent: [today.id, overdue.id, completed.id])
+        XCTAssertTrue(visibleText(in: window).contains(where: { $0.contains("Unscheduled") }))
+        XCTAssertTrue(visibleText(in: window).contains(where: { $0.contains("Planned (past)") }))
+        try choose("completed")
+        present([completed.id], absent: [today.id, overdue.id, undated.id, past.id])
+        XCTAssertTrue(visibleText(in: window).contains(where: { $0.contains("Completed") }))
+        try choose("today")
+        present([today.id, overdue.id], absent: [completed.id, undated.id, past.id])
+        XCTAssertEqual(saves, initialSaves, "filtering is read-only")
+        XCTAssertEqual(try repository.fetchAll().map(TaskSnapshot.init), before)
+    }
+
+    func testCrossCalendarPlanMetadataAgreesWithFiltersAndRetainsUnscheduledPastPlan() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        var saves = 0
+        let repository = SwiftDataTaskRepository(container: container, save: { context in
+            saves += 1
+            try context.save()
+        })
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-01-01T12:00:00Z"))
+        let deviceZone = try XCTUnwrap(TimeZone(identifier: "UTC"))
+        let savedZone = try XCTUnwrap(TimeZone(identifier: "Pacific/Honolulu"))
+        let todayPlan = PlannedDay.today(at: now, calendar: Calendar(identifier: .buddhist), timeZone: savedZone)
+        let pastPlan = PlannedDay.today(at: now.addingTimeInterval(-86400),
+                                        calendar: Calendar(identifier: .buddhist), timeZone: savedZone)
+        let today = try repository.create(input: TaskInput(title: "Buddhist today", plannedFor: todayPlan))
+        let past = try repository.create(input: TaskInput(title: "Buddhist past", plannedFor: pastPlan))
+        let initialSaves = saves
+        let store = TaskStore(repository: repository, clock: { now },
+                              calendar: { Calendar(identifier: .gregorian) }, timeZone: { deviceZone })
+        let host = NSHostingView(rootView: TasksView(store: store))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.title = "Cross-calendar plan inspection \(UUID())"
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        host.layoutSubtreeIfNeeded()
+        settle()
+        func rowText(_ id: UUID) throws -> String {
+            let row = try waitForElement("task-row-\(id.uuidString)", in: window)
+            return (attribute(row, kAXDescriptionAttribute) as? String) ??
+                   (attribute(row, kAXValueAttribute) as? String) ?? ""
+        }
+        XCTAssertTrue(try rowText(today.id).contains("Planned Today"))
+        XCTAssertTrue(elements(in: window, identifier: "task-row-\(past.id.uuidString)").isEmpty)
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement("tasks-filter-upcoming", in: window),
+                                                 kAXPressAction as CFString), .success)
+        settle()
+        let metadata = try rowText(past.id)
+        XCTAssertTrue(metadata.contains("Planned (past)"), metadata)
+        XCTAssertTrue(metadata.contains("Unscheduled"), metadata)
+        XCTAssertTrue(elements(in: window, identifier: "task-row-\(today.id.uuidString)").isEmpty)
+        XCTAssertEqual(saves, initialSaves, "filtering and metadata must not write plans")
+        XCTAssertEqual(try repository.fetchAll().first { $0.id == past.id }?.plannedDay, pastPlan.components)
+    }
+
+    func testTasksTodayMatchesTodayNextAndEmptyFiltersGiveSpecificGuidance() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let instant = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-06-05T12:00:00Z"))
+        let zone = try XCTUnwrap(TimeZone(identifier: "UTC"))
+        let repository = SwiftDataTaskRepository(container: container)
+        let due = try repository.create(input: TaskInput(title: "Due today", dueAt: instant))
+        let later = try repository.create(input: TaskInput(title: "Later", dueAt: instant.addingTimeInterval(86400)))
+        let store = TaskStore(repository: repository, clock: { instant }, timeZone: { zone })
+        let windows = [NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
+                                styleMask: [.titled], backing: .buffered, defer: false),
+                       NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
+                                styleMask: [.titled], backing: .buffered, defer: false)]
+        windows[0].title = "Today filter comparison \(UUID())"
+        windows[1].title = "Tasks filter comparison \(UUID())"
+        windows[0].contentView = NSHostingView(rootView: TodayView(store: store))
+        windows[1].contentView = NSHostingView(rootView: TasksView(store: store))
+        windows.forEach { $0.makeKeyAndOrderFront(nil) }
+        defer { windows.forEach { $0.orderOut(nil) } }
+        settle()
+        let dueRow = "task-row-\(due.id.uuidString)"
+        let laterRow = "task-row-\(later.id.uuidString)"
+        for window in windows {
+            XCTAssertEqual(elements(in: window, identifier: dueRow).count, 1)
+            XCTAssertTrue(elements(in: window, identifier: laterRow).isEmpty)
+        }
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement("tasks-filter-upcoming", in: windows[1]),
+                                                 kAXPressAction as CFString), .success)
+        settle()
+        XCTAssertEqual(elements(in: windows[1], identifier: laterRow).count, 1)
+        XCTAssertTrue(elements(in: windows[1], identifier: dueRow).isEmpty)
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement("tasks-filter-completed", in: windows[1]),
+                                                 kAXPressAction as CFString), .success)
+        settle()
+        XCTAssertTrue(visibleText(in: windows[1]).contains("No completed tasks yet."))
+        XCTAssertTrue(visibleText(in: windows[1]).contains("Completed tasks will appear here after you finish one."))
+        XCTAssertEqual(try repository.fetchAll().count, 2)
     }
 
     func testTasksLongTitleWrapsAtEnlargedTextAndKeepsFullAccessibleName() throws {
@@ -341,16 +450,16 @@ final class TaskPresentationTests: XCTestCase {
         ]
         tasks.forEach(context.insert)
         try context.save()
-        let ordered = try SwiftDataTaskRepository(container: container).fetchAll().map(TaskRow.init)
+        let ordered = try SwiftDataTaskRepository(container: container).fetchAll().map(TaskSnapshot.init)
         XCTAssertEqual(ordered.map(\.id), ids.sorted { $0.uuidString < $1.uuidString })
-        let visible = TaskRow.forToday(ordered, at: instant, calendar: calendar, timeZone: zone)
+        let visible = TaskSelection.select(ordered, filter: .today, selectedDate: instant, now: instant, calendar: calendar, timeZone: zone)
         XCTAssertEqual(Set(visible.map(\.id)), Set([ids[0], ids[1]]))
         XCTAssertEqual(visible.count, 2) // A planned and due task must not appear twice.
-        XCTAssertEqual(Set(TaskRow.forToday(ordered, at: next, calendar: calendar, timeZone: zone).map(\.id)),
+        XCTAssertEqual(Set(TaskSelection.select(ordered, filter: .today, selectedDate: next, now: next, calendar: calendar, timeZone: zone).map(\.id)),
                        Set([ids[0], ids[1], ids[2]]))
         // Changing device zone must not reinterpret a saved planned date as a UTC midnight.
-        XCTAssertEqual(TaskRow.forToday(ordered, at: instant, calendar: calendar,
-                                        timeZone: TimeZone(secondsFromGMT: 0)!).map(\.id),
+        XCTAssertEqual(TaskSelection.select(ordered, filter: .today, selectedDate: instant, now: instant,
+                             calendar: calendar, timeZone: TimeZone(secondsFromGMT: 0)!).map(\.id),
                        [ids[3]])
     }
 
@@ -386,10 +495,11 @@ final class TaskPresentationTests: XCTestCase {
         // Release every owner before reopening, as in a new app process.
         try autoreleasepool {
             let reopened = try ModelContainerFactory().makeContainer(mode: .persistent(store))
-            let persisted = try SwiftDataTaskRepository(container: reopened).fetchAll().map(TaskRow.init)
+            let persisted = try SwiftDataTaskRepository(container: reopened).fetchAll().map(TaskSnapshot.init)
             XCTAssertEqual(persisted.map(\.id), [id])
             XCTAssertEqual(persisted.map(\.title), ["One capture"])
-            let today = TaskRow.forToday(persisted, at: instant, calendar: .current, timeZone: zone)
+            let today = TaskSelection.select(persisted, filter: .today, selectedDate: instant,
+                                             now: instant, calendar: .current, timeZone: zone)
             XCTAssertEqual(today.map(\.id), [id])
         }
     }
@@ -531,7 +641,7 @@ final class TaskPresentationTests: XCTestCase {
             let text = visibleText(in: window)
             XCTAssertTrue(text.contains("Error: Content could not be loaded."))
             XCTAssertTrue(text.contains("Could not refresh tasks. Showing previously loaded tasks. Retry to update."))
-            XCTAssertFalse(text.contains("No tasks captured yet."))
+            XCTAssertFalse(text.contains("Nothing planned or due today."))
             XCTAssertFalse(text.contains("No tasks planned or due today."))
             XCTAssertEqual(elements(in: window, identifier: "task-row-\(id.uuidString)").count, 1)
         }
