@@ -3,7 +3,7 @@ import XCTest
 @testable import Kontrol
 
 final class BundledCatalogTests: XCTestCase {
-    func testPackagedAppResourceContainsEightGoLessonsAndFourOtherUsableTopics() throws {
+    func testPackagedAppResourceContainsEightGoAndJavaLessonsAndThreeOtherUsableTopics() throws {
         // The hosted test loads the app bundle, not a source-tree fixture or test copy.
         let appBundle = Bundle.main
         XCTAssertNotNil(appBundle.url(forResource: "starter-catalog", withExtension: "json"))
@@ -12,7 +12,7 @@ final class BundledCatalogTests: XCTestCase {
         XCTAssertEqual(catalog.version, 2)
         XCTAssertEqual(Set(catalog.topics.map(\.name)),
                        Set(["Go", "Java", "System Design", "Performance", "Security"]))
-        XCTAssertEqual(catalog.lessons.count, 12)
+        XCTAssertEqual(catalog.lessons.count, 19)
         XCTAssertEqual(catalog.topics.map(\.id), ["go", "java", "design", "perf", "security"])
         let goKeys: Set<String> = [
             "go.concurrency.cancel-work", "go.testing.case-design",
@@ -22,9 +22,18 @@ final class BundledCatalogTests: XCTestCase {
         ]
         XCTAssertEqual(Set(catalog.lessons.filter { $0.topicID == "go" }.map(\.objectiveKey)), goKeys)
         XCTAssertTrue(catalog.lessons.contains { $0.id == "go.concurrency.cancel-work.v1" })
+        let javaKeys: Set<String> = [
+            "java.concurrency.task-lifecycle", "java.collections.key-contract",
+            "java.testing.case-design", "java.jvm.profile-interpretation",
+            "java.io.resource-ownership", "java.language.value-boundaries",
+            "java.concurrency.shutdown", "java.spring.transaction-scope"
+        ]
+        XCTAssertEqual(Set(catalog.lessons.filter { $0.topicID == "java" }.map(\.objectiveKey)), javaKeys)
+        XCTAssertTrue(catalog.lessons.contains { $0.id == "java.io.resource-ownership.v1" })
         for topic in catalog.topics {
             let lessons = catalog.lessons.filter { $0.topicID == topic.id }
-            XCTAssertEqual(lessons.count, topic.id == "go" ? 8 : 1, "Unexpected inventory for \(topic.id)")
+            XCTAssertEqual(lessons.count, ["go", "java"].contains(topic.id) ? 8 : 1,
+                           "Unexpected inventory for \(topic.id)")
             for lesson in lessons {
                 XCTAssertEqual(lesson.source, "seed")
                 XCTAssertEqual(lesson.contentVersion, 1)
@@ -39,10 +48,13 @@ final class BundledCatalogTests: XCTestCase {
                 XCTAssertGreaterThanOrEqual(lesson.selfCheckCriteria.count, 3)
             }
         }
-        XCTAssertEqual(Set(catalog.lessons.map(\.objectiveKey)).count, 12)
-        // All eight Go lessons are initially eligible; reserve inventory remains
-        // after four choices are selected by the later slot implementation.
-        XCTAssertEqual(catalog.lessons.filter { $0.topicID == "go" && $0.prerequisiteConceptIDs.isEmpty }.count, 8)
+        XCTAssertEqual(Set(catalog.lessons.map(\.objectiveKey)).count, 19)
+        // Both authored topics have four initial choices and four distinct reserves.
+        for topicID in ["go", "java"] {
+            XCTAssertEqual(catalog.lessons.filter {
+                $0.topicID == topicID && $0.prerequisiteConceptIDs.isEmpty
+            }.count, 8)
+        }
     }
 
     func testPackagedResourceHasOnlyDefinitionsNotPersonalRecords() throws {

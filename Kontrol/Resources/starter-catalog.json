@@ -73,6 +73,36 @@
       "id": "go.network",
       "topicID": "go",
       "name": "HTTP boundaries"
+    },
+    {
+      "id": "java.concurrency",
+      "topicID": "java",
+      "name": "Concurrency"
+    },
+    {
+      "id": "java.collections",
+      "topicID": "java",
+      "name": "Collections"
+    },
+    {
+      "id": "java.testing",
+      "topicID": "java",
+      "name": "Testing"
+    },
+    {
+      "id": "java.jvm",
+      "topicID": "java",
+      "name": "JVM diagnosis"
+    },
+    {
+      "id": "java.language",
+      "topicID": "java",
+      "name": "Value boundaries"
+    },
+    {
+      "id": "java.spring",
+      "topicID": "java",
+      "name": "Transactions"
     }
   ],
   "concepts": [
@@ -146,6 +176,48 @@
       "id": "go.network.deadline-boundaries",
       "subtopicID": "go.network",
       "name": "HTTP deadline boundaries",
+      "prerequisiteConceptIDs": []
+    },
+    {
+      "id": "java.concurrency.task-lifecycle",
+      "subtopicID": "java.concurrency",
+      "name": "Virtual thread task lifecycle",
+      "prerequisiteConceptIDs": []
+    },
+    {
+      "id": "java.collections.key-contract",
+      "subtopicID": "java.collections",
+      "name": "HashMap key contract",
+      "prerequisiteConceptIDs": []
+    },
+    {
+      "id": "java.testing.case-design",
+      "subtopicID": "java.testing",
+      "name": "Parameterized test cases",
+      "prerequisiteConceptIDs": []
+    },
+    {
+      "id": "java.jvm.profile-interpretation",
+      "subtopicID": "java.jvm",
+      "name": "Profile interpretation",
+      "prerequisiteConceptIDs": []
+    },
+    {
+      "id": "java.language.value-boundaries",
+      "subtopicID": "java.language",
+      "name": "Immutable value boundaries",
+      "prerequisiteConceptIDs": []
+    },
+    {
+      "id": "java.concurrency.shutdown",
+      "subtopicID": "java.concurrency",
+      "name": "Executor shutdown",
+      "prerequisiteConceptIDs": []
+    },
+    {
+      "id": "java.spring.transaction-scope",
+      "subtopicID": "java.spring",
+      "name": "Spring transaction scope",
       "prerequisiteConceptIDs": []
     }
   ],
@@ -400,7 +472,203 @@
       "contentVersion": 1,
       "normalizedContentHash": "sha256:3a896f4abee568c12881fbce54f408e70df65621df21ecf25e92d0778a044b87",
       "source": "seed",
-      "provenance": "Original Kontrol starter lesson; docs/learning-curriculum.md: Java / Resource cleanup; Java AutoCloseable and try-with-resources semantics"
+      "provenance": "Java 21 LTS; original Kontrol starter lesson; reviewed against Oracle try-with-resources (https://docs.oracle.com/javase/tutorial/essential/exceptions/tryResourceClose.html), AutoCloseable (https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/AutoCloseable.html), Files.newBufferedReader (https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/file/Files.html#newBufferedReader(java.nio.file.Path)); docs/learning-curriculum.md"
+    },
+    {
+      "id": "java.concurrency.task-lifecycle.v1",
+      "objectiveKey": "java.concurrency.task-lifecycle",
+      "objective": "Own the lifetime of a virtual-thread task and propagate cancellation through interruption.",
+      "title": "Bound the lifetime of a virtual-thread task",
+      "topicID": "java",
+      "subtopicID": "java.concurrency",
+      "conceptIDs": [
+        "java.concurrency.task-lifecycle"
+      ],
+      "difficulty": "intermediate",
+      "format": "learn",
+      "estimatedMinutes": 14,
+      "prerequisiteConceptIDs": [],
+      "explanation": "Java 21 virtual threads are Thread instances suited to blocking I/O, not a way to make CPU work faster. Thread.startVirtualThread starts work immediately and returns a handle; virtual threads are not pooled. The caller must retain a handle or use an executor, wait for completion at a defined boundary, and decide what to do on timeout or cancellation. Interrupt is a cooperative request: blocking interruptible operations may throw InterruptedException, but application code must not swallow it and continue as if work completed. Bound concurrency to a scarce downstream service separately (for example with a Semaphore), rather than pooling virtual threads.",
+      "workedExample": "A request handler starts a virtual thread to query a remote service and retains its Thread handle. If the request is abandoned, it calls interrupt() and waits for the worker to exit at a bounded shutdown boundary. The worker catches InterruptedException from an interruptible wait, restores the interrupt flag if it cannot propagate the exception, and exits after closing any resource it opened. A database driver or non-interruptible library may not stop promptly; interrupt is not a kill switch.",
+      "exercise": "A batch starts a virtual thread for each file fetch and returns before any fetch finishes. Describe two lifecycle bugs, how to bound calls to a service allowing only ten simultaneous requests, and what must happen if a waiting caller is interrupted.",
+      "referenceAnswer": "The batch needs to retain task handles or submit to a try-with-resources ExecutorService, collect results and failures, and wait before reporting success. Guard each service call with a ten-permit Semaphore, releasing permits in finally; do not use a ten-thread pool to limit virtual threads. If interrupted while acquiring a permit or waiting for completion, propagate InterruptedException or restore the flag and abort the batch, cancel outstanding tasks, and avoid claiming success. Executor close waits for tasks; use an explicit cancellation policy if a bounded exit is required.",
+      "selfCheckCriteria": [
+        "Explains who waits for and cancels tasks rather than abandoning them.",
+        "Uses a semaphore to limit scarce I/O rather than pooling virtual threads.",
+        "Treats interrupt as cooperative and does not report unfinished work as successful."
+      ],
+      "contentVersion": 1,
+      "normalizedContentHash": "sha256:52648d20ff9d40171f08d1750b770346acac14b16dd20a33e25ea43a2763821f",
+      "source": "seed",
+      "provenance": "Java 21 LTS; reviewed Oracle JDK 21 Thread.startVirtualThread and virtual threads guide (https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/Thread.html#startVirtualThread(java.lang.Runnable); https://docs.oracle.com/en/java/javase/21/core/virtual-threads.html); docs/learning-curriculum.md"
+    },
+    {
+      "id": "java.collections.key-contract.v1",
+      "objectiveKey": "java.collections.key-contract",
+      "objective": "Explain how equality, hash codes, and mutation affect HashMap lookup correctness.",
+      "title": "Choose a stable HashMap key",
+      "topicID": "java",
+      "subtopicID": "java.collections",
+      "conceptIDs": [
+        "java.collections.key-contract"
+      ],
+      "difficulty": "basic",
+      "format": "question",
+      "estimatedMinutes": 12,
+      "prerequisiteConceptIDs": [],
+      "explanation": "HashMap uses hashCode to find a bucket and equals to identify a matching key. Equal keys must have equal hash codes; unequal keys may collide, which affects cost but not correctness. A key whose equality-relevant fields change after insertion may become unreachable by lookup, even with the same object reference. HashMap permits one null key, is not synchronized, and makes no iteration-order promise. Java 21 records make convenient immutable key shapes when their component values are themselves stable; an array component still uses array identity equality unless explicitly handled.",
+      "workedExample": "For record CustomerKey(String tenant, long id) {}, two instances with the same tenant and id compare equal and have equal hashes. A map.put(new CustomerKey(\"a\", 17), \"paid\") can be retrieved with a fresh equal CustomerKey. A mutable key whose tenant changes from \"a\" to \"b\" after put can no longer be reliably found in its original bucket. A hash collision between distinct customers does not mean one overwrites the other.",
+      "exercise": "A teammate proposes using a mutable List<String> of tags as a HashMap key, then appending a tag after inserting it. Predict the lookup risk. Should a collision imply two values become one? Suggest a safer key, and say whether HashMap is appropriate for concurrent writes.",
+      "referenceAnswer": "List equality and hashCode depend on contents; appending changes the hash after insertion, so a later get with that list can miss. Distinct keys with the same hash are separated using equals, not automatically merged. Copy the tags into an unmodifiable snapshot such as List.copyOf(tags) before using it as the key (provided its elements have stable equality), or use a record of stable identifiers. HashMap is not safe for unsynchronized concurrent structural updates; choose suitable synchronization or ConcurrentHashMap with its different null policy.",
+      "selfCheckCriteria": [
+        "Relates equal keys to equal hash codes and explains mutation after insertion.",
+        "Does not mistake a hash collision for equality or promise iteration order.",
+        "Proposes a stable copied key and addresses concurrent mutation separately."
+      ],
+      "contentVersion": 1,
+      "normalizedContentHash": "sha256:4e88c095693bb8c39a48c8cc0fc18477bb7bac46b871a864f754692ac872d1f8",
+      "source": "seed",
+      "provenance": "Java 21 LTS; reviewed Oracle JDK 21 HashMap, Object.equals/hashCode, List.copyOf and ConcurrentHashMap (https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/HashMap.html; https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/Object.html#hashCode()); docs/learning-curriculum.md"
+    },
+    {
+      "id": "java.testing.case-design.v1",
+      "objectiveKey": "java.testing.case-design",
+      "objective": "Write independent parameterized cases for normal, boundary, and invalid inputs.",
+      "title": "Parameterize boundary tests in JUnit",
+      "topicID": "java",
+      "subtopicID": "java.testing",
+      "conceptIDs": [
+        "java.testing.case-design"
+      ],
+      "difficulty": "basic",
+      "format": "code",
+      "estimatedMinutes": 16,
+      "prerequisiteConceptIDs": [],
+      "explanation": "JUnit Jupiter 5.10 parameterized tests need the junit-jupiter-params artifact in addition to the Jupiter API and engine. @ParameterizedTest invokes the test once per argument row. @CsvSource is useful for simple scalar cases; use @MethodSource when inputs or expected errors need richer types. Give rows meaningful names or a display-name template and assert the specific result. Separate invalid-input assertions from successful-output rows rather than claiming every exception proves the same behavior. Avoid shared mutable test data between invocations.",
+      "workedExample": "For a clamp(int n, int lo, int hi) contract with lo <= hi, rows (-2,0,10,0), (0,0,10,0), (6,0,10,6), (10,0,10,10), and (12,0,10,10) exercise below, lower, inside, upper, and above. A separate assertThrows test covers lo > hi only if the production contract specifies an exception.",
+      "exercise": "Write a JUnit Jupiter parameterized test for those five clamp cases using @CsvSource. State a second test for inverted bounds if the contract says IllegalArgumentException. Include assertions with expected and actual values; do not assume an undocumented inverted-bounds policy.",
+      "referenceAnswer": "@ParameterizedTest(name = \"clamp({0}, {1}, {2}) = {3}\") @CsvSource({\"-2,0,10,0\", \"0,0,10,0\", \"6,0,10,6\", \"10,0,10,10\", \"12,0,10,10\"}) void clampCases(int n, int lo, int hi, int expected) { assertEquals(expected, clamp(n, lo, hi)); } If the stated API rejects inverted bounds, add @Test void rejectsInvertedBounds() { assertThrows(IllegalArgumentException.class, () -> clamp(3, 10, 0)); }. Import org.junit.jupiter.params.ParameterizedTest, org.junit.jupiter.params.provider.CsvSource, org.junit.jupiter.api.Test, and static org.junit.jupiter.api.Assertions.*; include junit-jupiter-params 5.10 on the test classpath.",
+      "selfCheckCriteria": [
+        "Specifies five distinct expected outputs and a parameterized invocation per row.",
+        "Uses JUnit Jupiter params and a separate contract-dependent exception test.",
+        "Avoids guessing unsupported behavior or sharing mutable case fixtures."
+      ],
+      "contentVersion": 1,
+      "normalizedContentHash": "sha256:ef48e195d2927c51d2956c6b1a678486e2d6b208619a6bef5e02ae6ef0e07b05",
+      "source": "seed",
+      "provenance": "Java 21 LTS; reviewed JUnit 5.10 user guide Parameterized Tests and @CsvSource (https://docs.junit.org/5.10.2/user-guide/#writing-tests-parameterized-tests; https://docs.junit.org/5.10.2/api/org.junit.jupiter.params/org/junit/jupiter/params/provider/CsvSource.html); docs/learning-curriculum.md"
+    },
+    {
+      "id": "java.jvm.profile-interpretation.v1",
+      "objectiveKey": "java.jvm.profile-interpretation",
+      "objective": "Distinguish CPU hot paths from allocation pressure using representative JVM recordings.",
+      "title": "Read a JVM profile before tuning",
+      "topicID": "java",
+      "subtopicID": "java.jvm",
+      "conceptIDs": [
+        "java.jvm.profile-interpretation"
+      ],
+      "difficulty": "intermediate",
+      "format": "learn",
+      "estimatedMinutes": 14,
+      "prerequisiteConceptIDs": [],
+      "explanation": "Java Flight Recorder (JFR) samples execution and records events; a CPU sample stack suggests where sampled running time occurred, not an exact per-method stopwatch or proof of causality. Allocation events and GC pauses answer different questions. Capture under a representative workload after JVM warmup, record JDK version and workload, then compare before and after under similar conditions. JFR settings affect overhead and sampling coverage. Avoid interpreting a single startup recording as steady-state performance or equating high allocation rate with CPU saturation.",
+      "workedExample": "A service has 95th-percentile latency spikes. A Java 21 JFR recording shows many execution samples in JSON encoding while allocation events show large temporary byte arrays and GC pause events cluster near spikes. This suggests inspecting payload size and encoding reuse, but does not prove GC caused all slow requests. Correlate request timings, CPU use, allocation rate, and pause durations; change one thing and record again at comparable load.",
+      "exercise": "A developer sees an expensive-looking method near the top of a startup CPU profile and proposes caching its output. Describe the next measurements, how to tell CPU from allocation/GC pressure, and why a hotspot alone is not a guaranteed latency win.",
+      "referenceAnswer": "Warm up and record the same production-like request mix and concurrency with JFR, noting the JDK and recording settings. Examine execution sample stacks and CPU saturation for CPU cost; inspect allocation events, heap behavior and GC pause durations for allocation pressure. Compare request latency distributions before and after one controlled change. A sampled stack can include work unrelated to the slow request, and a cache may add synchronization or memory pressure, so test the actual end-to-end effect.",
+      "selfCheckCriteria": [
+        "Separates sampled CPU stacks from allocations and GC pause evidence.",
+        "Calls for warmup, comparable workload, and before/after latency measurement.",
+        "Does not infer causation or guaranteed speedup from one profile."
+      ],
+      "contentVersion": 1,
+      "normalizedContentHash": "sha256:353ef0baf5a490455c113d41c23c7244cd2a94c134d8017ae3dd187b5cdf6d06",
+      "source": "seed",
+      "provenance": "Java 21 LTS; reviewed Oracle JDK 21 JFR runtime guide and jcmd JFR.start (https://docs.oracle.com/en/java/javase/21/jfapi/flight-recorder-api-programmers-guide.pdf; https://docs.oracle.com/en/java/javase/21/docs/specs/man/jcmd.html); docs/learning-curriculum.md"
+    },
+    {
+      "id": "java.language.value-boundaries.v1",
+      "objectiveKey": "java.language.value-boundaries",
+      "objective": "Design an immutable Java value type that cannot leak a mutable collection through construction or access.",
+      "title": "Defend an immutable value boundary",
+      "topicID": "java",
+      "subtopicID": "java.language",
+      "conceptIDs": [
+        "java.language.value-boundaries"
+      ],
+      "difficulty": "intermediate",
+      "format": "design",
+      "estimatedMinutes": 15,
+      "prerequisiteConceptIDs": [],
+      "explanation": "A final field prevents reassignment of a reference, not mutation of the referenced object. A record supplies accessors and value equality, but its default constructor and accessor do not defensively copy mutable components. At a boundary, snapshot incoming mutable collections and reject invalid values; prefer immutable element types too. List.copyOf produces an unmodifiable copy and rejects null elements, but deep immutability requires copying mutable elements separately. Java 21 records are appropriate for a compact value carrier, not for concealing shared mutable state.",
+      "workedExample": "A receipt record holds List<String> lineItems. If its constructor stores the caller list directly, the caller can add an item later and silently change the receipt. A compact constructor assigning lineItems = List.copyOf(lineItems) takes a snapshot. Its accessor returns that unmodifiable list; strings are immutable so elements are safe in this example. If the list contained mutable arrays, copying only the list would still expose mutable arrays.",
+      "exercise": "Design a public Java 21 record Receipt(String id, List<String> lines) used as a snapshot in an audit log. Show validation and defensive copying in the constructor. Explain how you would test caller mutation, accessor mutation, and a null element, and name a limitation if lines held mutable objects.",
+      "referenceAnswer": "public record Receipt(String id, List<String> lines) { public Receipt { if (id == null || id.isBlank()) throw new IllegalArgumentException(\"id\"); lines = List.copyOf(Objects.requireNonNull(lines)); } } Import java.util.List and java.util.Objects. Build a Receipt from an ArrayList, mutate the original, and assert the record still has the old lines; assertThrows(UnsupportedOperationException.class, () -> receipt.lines().add(\"x\")); assertThrows(NullPointerException.class, () -> new Receipt(\"r\", Arrays.asList(\"ok\", null))). This is shallow: for mutable elements make immutable element snapshots as well.",
+      "selfCheckCriteria": [
+        "Shows a compact constructor with validation and List.copyOf snapshot semantics.",
+        "Tests both source and accessor mutation plus null-element rejection.",
+        "Distinguishes shallow list immutability from deep immutability."
+      ],
+      "contentVersion": 1,
+      "normalizedContentHash": "sha256:0484a550c8837066bc13841317ae524be38a19e62ab34b148a1a3f1c0ce39587",
+      "source": "seed",
+      "provenance": "Java 21 LTS; reviewed Oracle JDK 21 record classes and List.copyOf (https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/Record.html; https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/List.html#copyOf(java.util.Collection)); docs/learning-curriculum.md"
+    },
+    {
+      "id": "java.concurrency.shutdown.v1",
+      "objectiveKey": "java.concurrency.shutdown",
+      "objective": "Shut down an executor and handle an interrupted wait without claiming unfinished work completed.",
+      "title": "Shut down an executor without losing tasks",
+      "topicID": "java",
+      "subtopicID": "java.concurrency",
+      "conceptIDs": [
+        "java.concurrency.shutdown"
+      ],
+      "difficulty": "intermediate",
+      "format": "code",
+      "estimatedMinutes": 17,
+      "prerequisiteConceptIDs": [],
+      "explanation": "In Java 21 ExecutorService.close initiates orderly shutdown and waits for submitted tasks, but an unbounded wait is not suitable for every service stop. shutdown() rejects new work while allowing existing work to finish; awaitTermination(timeout, unit) bounds the wait. If it expires, shutdownNow() attempts to interrupt active work and returns queued work that never began. Tasks may ignore interruption, so neither method guarantees termination. If awaitTermination throws InterruptedException, request cancellation, restore the calling thread interrupt flag, and report that termination is uncertain.",
+      "workedExample": "A worker service receives a stop signal with 2 seconds of grace. It calls shutdown(), awaits termination for 2 seconds, then calls shutdownNow() if workers remain; it optionally awaits a second bounded period. It logs the count of queued tasks returned by shutdownNow() for recovery instead of pretending they ran. A task blocked in non-interruptible I/O may still remain alive.",
+      "exercise": "Write a Java method stop(ExecutorService pool) that gives tasks two seconds to finish, interrupts remaining tasks, then waits one second. On InterruptedException, request immediate shutdown and restore the interrupt flag. Do not print success unconditionally; return whether termination was observed.",
+      "referenceAnswer": "boolean stop(ExecutorService pool) { pool.shutdown(); try { if (!pool.awaitTermination(2, TimeUnit.SECONDS)) { pool.shutdownNow(); return pool.awaitTermination(1, TimeUnit.SECONDS); } return true; } catch (InterruptedException e) { pool.shutdownNow(); Thread.currentThread().interrupt(); return false; } } Import java.util.concurrent.ExecutorService and TimeUnit. Production code should record or reschedule the not-started Runnables returned by shutdownNow() if losing them is unacceptable. A true result means termination was observed, not that every submitted task succeeded.",
+      "selfCheckCriteria": [
+        "Calls shutdown before a bounded await and shutdownNow after timeout.",
+        "On interruption requests cancellation and restores the interrupt flag.",
+        "Distinguishes terminated executor from successfully completed tasks and accounts for queued work."
+      ],
+      "contentVersion": 1,
+      "normalizedContentHash": "sha256:2b2989bba4b47d1d3db565ccfc6c4e9cf9f9d4f77ae376517cb4b5e7f947d271",
+      "source": "seed",
+      "provenance": "Java 21 LTS; reviewed Oracle JDK 21 ExecutorService shutdown/awaitTermination/shutdownNow/close (https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/ExecutorService.html); docs/learning-curriculum.md"
+    },
+    {
+      "id": "java.spring.transaction-scope.v1",
+      "objectiveKey": "java.spring.transaction-scope",
+      "objective": "Choose a Spring transaction boundary that keeps related database writes atomic without assuming external calls roll back.",
+      "title": "Place a Spring transaction at the write boundary",
+      "topicID": "java",
+      "subtopicID": "java.spring",
+      "conceptIDs": [
+        "java.spring.transaction-scope"
+      ],
+      "difficulty": "advanced",
+      "format": "design",
+      "estimatedMinutes": 17,
+      "prerequisiteConceptIDs": [],
+      "explanation": "Assume Spring Framework 6.1, proxy-based declarative @Transactional, and a single transactional database. A public service method invoked through the Spring proxy can group repository writes; self-invocation within the same object bypasses proxy advice. By default unchecked RuntimeException and Error trigger rollback, while checked exceptions do not unless rollbackFor is configured. Network calls cannot join a local database transaction by annotation alone. Keep the transaction short, persist a durable outbox event in the same database transaction, and send it asynchronously with idempotent consumption rather than holding locks during a slow external request.",
+      "workedExample": "A checkout service writes an order and an outbox row in one @Transactional public method invoked by a controller through the Spring bean proxy. If the order write fails with a runtime exception, neither row commits. A separate dispatcher reads committed outbox rows and calls the email provider; retries can deliver twice, so the receiver or delivery adapter deduplicates by message ID. Putting @Transactional on a private helper called by this service would not create a new proxy boundary.",
+      "exercise": "Design an order creation service that saves an order and requests a confirmation email. Specify the transaction entry point, what goes in the local transaction, failure/retry behavior for email, and the behavior if a checked IOException escapes. State why calling a second annotated method on this within the same bean is unsafe as a boundary.",
+      "referenceAnswer": "Expose a public @Transactional service method through a Spring bean proxy; write order and outbox message atomically in one database transaction and return after commit. An outbox worker retries email with a stable message ID; never claim the DB can roll back an email already sent. If a checked IOException must roll back this transaction, declare @Transactional(rollbackFor = IOException.class) or translate it to an appropriate unchecked failure; by default checked exceptions do not trigger rollback. A call to this.annotatedMethod() bypasses the proxy in proxy mode; move the boundary to an externally invoked bean or use a suitable programmatic transaction.",
+      "selfCheckCriteria": [
+        "Locates the proxy-invoked service transaction around both local writes, not the network call.",
+        "Handles default checked-exception rollback policy and self-invocation correctly.",
+        "Includes durable outbox and duplicate-safe retry rather than promising exactly-once email."
+      ],
+      "contentVersion": 1,
+      "normalizedContentHash": "sha256:48855a1f4385ca62591cb176553545ddc7e3afee06a14325ed1e90ebca6b9b85",
+      "source": "seed",
+      "provenance": "Java 21 LTS; reviewed Spring Framework 6.1 transaction declarative semantics and rollback rules (https://docs.spring.io/spring-framework/reference/6.1/data-access/transaction/declarative/annotations.html; https://docs.spring.io/spring-framework/reference/6.1/data-access/transaction/declarative/rolling-back.html); docs/learning-curriculum.md"
     },
     {
       "id": "design.api.deduplicate-writes.v1",
