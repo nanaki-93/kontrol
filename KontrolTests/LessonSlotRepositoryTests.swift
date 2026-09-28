@@ -157,6 +157,76 @@ final class LessonSlotRepositoryTests: XCTestCase {
         XCTAssertTrue(after.progress.isEmpty)
     }
 
+    func testFailedReplacementDoesNotCommitSlotsOrPersonalChangesAcrossReopen() throws {
+        enum Injected: Error { case failure }
+        let catalog = try seed()
+        for failBeforeSave in [true, false] {
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "KontrolSlotFailure-\(UUID().uuidString)/Kontrol.store")
+            var previous: [LessonSlotSnapshot] = []
+            let timestamp = Date(timeIntervalSince1970: 1_700_000_000)
+            let attemptID = UUID()
+            try autoreleasepool {
+                let container = try ModelContainerFactory().makeContainer(mode: .persistent(url))
+                let repository = SwiftDataCatalogRepository(container: container)
+                try repository.importIfNeeded(catalog)
+                previous = try repository.loadSnapshot().slots
+                let victim = try XCTUnwrap(previous.first { $0.topicID == "go" })
+                let personal = ModelContext(container)
+                personal.insert(LessonProgress(lessonID: victim.lessonID, status: .completed,
+                    firstShownAt: timestamp, startedAt: timestamp, completedAt: timestamp))
+                personal.insert(LessonAttempt(id: attemptID, lessonID: victim.lessonID,
+                    contentVersion: 2, answerDraft: "preserved answer", completedAt: timestamp))
+                try personal.save()
+                let independent = ModelContext(container)
+                independent.autosaveEnabled = false
+                let draft = try TaskItem(id: UUID(), title: "Pending task", createdAt: timestamp)
+                independent.insert(draft)
+                let failing = SwiftDataCatalogRepository(container: container,
+                    beforeSave: { if failBeforeSave { throw Injected.failure } },
+                    save: { context in
+                        if !failBeforeSave { throw Injected.failure }
+                        try context.save()
+                    })
+                XCTAssertThrowsError(try failing.reconcileSlots(now: timestamp)) {
+                    XCTAssertTrue($0 is Injected)
+                }
+                XCTAssertTrue(independent.hasChanges)
+                XCTAssertEqual(try repository.loadSnapshot().slots, previous)
+                XCTAssertEqual(try rows(CatalogImportState.self, container).map(\.lastImportedVersion), [2])
+                XCTAssertTrue(try rows(TaskItem.self, container).isEmpty)
+                try autoreleasepool {
+                    let reopened = try ModelContainerFactory().makeContainer(mode: .persistent(url))
+                    XCTAssertEqual(try SwiftDataCatalogRepository(container: reopened).loadSnapshot().slots, previous)
+                    XCTAssertEqual(try rows(CatalogImportState.self, reopened).map(\.lastImportedVersion), [2])
+                    XCTAssertTrue(try rows(TaskItem.self, reopened).isEmpty)
+                    let progress = try XCTUnwrap(try rows(LessonProgress.self, reopened).first)
+                    XCTAssertEqual(progress.lessonID, victim.lessonID)
+                    XCTAssertEqual(progress.completedAt, timestamp)
+                    let attempt = try XCTUnwrap(try rows(LessonAttempt.self, reopened).first)
+                    XCTAssertEqual(attempt.id, attemptID)
+                    XCTAssertEqual(attempt.answerDraft, "preserved answer")
+                    XCTAssertEqual(attempt.completedAt, timestamp)
+                }
+                XCTAssertTrue(independent.hasChanges)
+                try independent.save()
+            }
+            try autoreleasepool {
+                let reopened = try ModelContainerFactory().makeContainer(mode: .persistent(url))
+                let repository = SwiftDataCatalogRepository(container: reopened)
+                XCTAssertEqual(try repository.loadSnapshot().slots, previous)
+                XCTAssertEqual(try rows(TaskItem.self, reopened).count, 1)
+                let repaired = try repository.reconcileSlots(now: timestamp)
+                XCTAssertEqual(repaired.slots.count, 20)
+                XCTAssertFalse(repaired.slots.map(\.lessonID).contains(previous.first {
+                    $0.topicID == "go"
+                }!.lessonID))
+                XCTAssertEqual(repaired.progress.first?.completedAt, timestamp)
+                XCTAssertEqual(try rows(LessonAttempt.self, reopened).first?.id, attemptID)
+            }
+        }
+    }
+
     func testDiskReopenPreservesSlotsAndAssignments() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(
             "KontrolSlot-\(UUID().uuidString)/Kontrol.store")

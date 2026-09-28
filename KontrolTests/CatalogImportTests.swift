@@ -588,6 +588,92 @@ final class CatalogImportTests: XCTestCase {
         XCTAssertNil(lastContainer, "Final SwiftData container must deallocate before the test returns")
     }
 
+    func testDiskFailuresPreserveFreshAndUpgradedTransactionsAndUnrelatedDrafts() throws {
+        let seed = try catalog()
+        let upgrade = try revised(seed)
+        // Each case gets an independent disk store. Reopen before any successful
+        // retry so an in-memory context cannot hide a partially committed write.
+        for upgradedStore in [false, true] {
+            for failure in ["validation", "beforeSave", "save"] {
+                let url = FileManager.default.temporaryDirectory.appendingPathComponent(
+                    "KontrolAtomic-\(UUID().uuidString)/Kontrol.store")
+                let attemptID = UUID()
+                let draftID = UUID()
+                let timestamp = Date(timeIntervalSince1970: 1_700_000_000)
+                var before: LearningCatalogSnapshot?
+                try autoreleasepool {
+                    let container = try ModelContainerFactory().makeContainer(mode: .persistent(url))
+                    let repository = SwiftDataCatalogRepository(container: container)
+                    if upgradedStore {
+                        XCTAssertEqual(try repository.importIfNeeded(seed), .imported)
+                        let personal = ModelContext(container)
+                        personal.insert(LessonProgress(lessonID: seed.value.lessons[0].id,
+                            status: .started, firstShownAt: timestamp, startedAt: timestamp,
+                            lastOpenedAt: timestamp))
+                        personal.insert(LessonAttempt(id: attemptID, lessonID: seed.value.lessons[0].id,
+                            contentVersion: seed.value.lessons[0].contentVersion,
+                            answerDraft: "private draft"))
+                        try personal.save()
+                    }
+                    before = try repository.loadSnapshot()
+                    let independent = ModelContext(container)
+                    independent.autosaveEnabled = false
+                    independent.insert(try TaskItem(id: draftID, title: "Pending independent task",
+                                                    createdAt: timestamp))
+                    if failure == "validation" {
+                        var invalid = (upgradedStore ? upgrade : seed).value
+                        invalid.lessons[0].exercise += " Unhashed change"
+                        XCTAssertThrowsError(try CatalogValidator.validate(invalid)) {
+                            XCTAssertEqual($0 as? CatalogValidationError, .invalid(.invalidFingerprint))
+                        }
+                    } else {
+                        let failing = SwiftDataCatalogRepository(container: container,
+                            beforeSave: { if failure == "beforeSave" { throw Injected.failure } },
+                            save: { context in
+                                if failure == "save" { throw Injected.failure }
+                                try context.save()
+                            })
+                        XCTAssertThrowsError(try failing.importIfNeeded(upgradedStore ? upgrade : seed)) {
+                            XCTAssertTrue($0 is Injected)
+                        }
+                    }
+                    XCTAssertTrue(independent.hasChanges)
+                    XCTAssertEqual(try repository.loadSnapshot(), before)
+                    XCTAssertEqual(try records(CatalogImportState.self, in: container)
+                        .map(\.lastImportedVersion), upgradedStore ? [seed.value.version] : [])
+                    XCTAssertTrue(try records(TaskItem.self, in: container).isEmpty)
+                    XCTAssertEqual(try records(LessonAttempt.self, in: container).count,
+                                   upgradedStore ? 1 : 0)
+                    // Leave the independent context pending across the disk read.
+                    try autoreleasepool {
+                        let reopened = try ModelContainerFactory().makeContainer(mode: .persistent(url))
+                        XCTAssertEqual(try SwiftDataCatalogRepository(container: reopened).loadSnapshot(), before)
+                        XCTAssertEqual(try records(CatalogImportState.self, in: reopened)
+                            .map(\.lastImportedVersion), upgradedStore ? [seed.value.version] : [])
+                        XCTAssertTrue(try records(TaskItem.self, in: reopened).isEmpty)
+                        let attempts = try records(LessonAttempt.self, in: reopened)
+                        XCTAssertEqual(attempts.count, upgradedStore ? 1 : 0)
+                        if upgradedStore {
+                            XCTAssertEqual(attempts.first?.id, attemptID)
+                            XCTAssertEqual(attempts.first?.answerDraft, "private draft")
+                            XCTAssertEqual(attempts.first?.contentVersion,
+                                           seed.value.lessons[0].contentVersion)
+                        }
+                    }
+                    XCTAssertTrue(independent.hasChanges)
+                    try independent.save()
+                }
+                try autoreleasepool {
+                    let reopened = try ModelContainerFactory().makeContainer(mode: .persistent(url))
+                    XCTAssertEqual(try SwiftDataCatalogRepository(container: reopened).loadSnapshot(), before)
+                    XCTAssertEqual(try records(TaskItem.self, in: reopened).map(\.id), [draftID])
+                    XCTAssertEqual(try records(CatalogImportState.self, in: reopened)
+                        .map(\.lastImportedVersion), upgradedStore ? [seed.value.version] : [])
+                }
+            }
+        }
+    }
+
     func testPrivateContextNeverSavesOrRollsBackUnrelatedUnsavedWork() throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         let independent = ModelContext(container)

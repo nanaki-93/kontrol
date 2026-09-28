@@ -188,6 +188,101 @@ final class LaunchRecoveryTests: XCTestCase {
         XCTAssertTrue(coordinator.dependencies?.container === container)
     }
 
+    func testInvalidCatalogAndFailedSaveRetryOnOpenedContainerWithoutPartialPublication() async throws {
+        for failure in ["validation", "beforeSave", "save"] {
+            let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+            let calls = RecoveryCalls()
+            var opens = 0
+            var commits = 0
+            let coordinator = LaunchCoordinator(open: {
+                opens += 1
+                return container
+            }, loadCatalog: {
+                let seed = try BundledCatalogLoader.load()
+                let loadNumber = await calls.next()
+                if failure == "validation" && loadNumber == 1 {
+                    var invalid = seed.value
+                    invalid.lessons[0].exercise += " Unhashed change"
+                    return try CatalogValidator.validate(invalid)
+                }
+                return seed
+            }, makeRepository: { container in
+                SwiftDataCatalogRepository(container: container,
+                    beforeSave: {
+                        if failure == "beforeSave" && commits == 0 {
+                            commits += 1
+                            throw Injected.catalog
+                        }
+                    }, save: { context in
+                        if failure == "save" && commits == 0 {
+                            commits += 1
+                            throw Injected.catalog
+                        }
+                        commits += 1
+                        try context.save()
+                    })
+            })
+            await coordinator.start()
+            XCTAssertEqual(coordinator.state, .failed(.catalog))
+            XCTAssertNil(coordinator.dependencies)
+            XCTAssertEqual(opens, 1)
+            XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonDefinition>()).isEmpty)
+            XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonSlot>()).isEmpty)
+            XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<CatalogImportState>()).isEmpty)
+            await coordinator.retry()
+            XCTAssertEqual(coordinator.state, .ready)
+            XCTAssertTrue(coordinator.dependencies?.container === container)
+            XCTAssertEqual(opens, 1)
+            XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<LessonSlot>()).count, 20)
+            XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<CatalogImportState>())
+                .map(\.lastImportedVersion), [2])
+            XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonProgress>()).isEmpty)
+            XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).isEmpty)
+        }
+    }
+
+    func testCancellationAfterSynchronousCommitKeepsDataAndRetryRecognizesIt() async throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        var opens = 0
+        var saves = 0
+        var attempts = 0
+        let coordinator = LaunchCoordinator(open: {
+            opens += 1
+            return container
+        }, loadCatalog: { try BundledCatalogLoader.load() }, makeRepository: { container in
+            SwiftDataCatalogRepository(container: container, beforeSave: {
+                attempts += 1
+                if attempts == 1 { throw Injected.catalog }
+            }, save: { context in
+                saves += 1
+                try context.save()
+                // ModelContext.save has completed; cancel before launch can publish.
+                withUnsafeCurrentTask { $0?.cancel() }
+            })
+        })
+        await coordinator.start()
+        XCTAssertEqual(coordinator.state, .failed(.catalog))
+        XCTAssertNil(coordinator.dependencies)
+        let pending = Task { await coordinator.retry() }
+        await pending.value
+        XCTAssertEqual(coordinator.state, .failed(.catalog))
+        XCTAssertNil(coordinator.dependencies)
+        XCTAssertEqual(opens, 1)
+        XCTAssertEqual(saves, 1)
+        let persisted = try SwiftDataCatalogRepository(container: container).loadSnapshot()
+        XCTAssertEqual(persisted.definitions.count, 40)
+        XCTAssertEqual(persisted.slots.count, 20)
+        XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<CatalogImportState>())
+            .map(\.lastImportedVersion), [2])
+        await coordinator.retry()
+        XCTAssertEqual(coordinator.state, .ready)
+        XCTAssertTrue(coordinator.dependencies?.container === container)
+        XCTAssertEqual(opens, 1)
+        XCTAssertEqual(attempts, 2, "equal-version retry needs no second commit")
+        XCTAssertEqual(saves, 1, "equal-version retry must recognize the completed commit")
+        XCTAssertEqual(try SwiftDataCatalogRepository(container: container).loadSnapshot(), persisted)
+    }
+
     func testDiagnosticsNeverIncludeUntrustedDomainOrDescription() {
         let hostile = NSError(domain: "/Users/person/secret answer", code: 42,
                               userInfo: [NSLocalizedDescriptionKey: "private task and catalog body"])
