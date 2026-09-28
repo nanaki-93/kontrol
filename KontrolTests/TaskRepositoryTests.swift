@@ -523,6 +523,71 @@ final class TaskRepositoryTests: XCTestCase {
         }
     }
 
+    func testDeleteRemovesOnlySelectedUUIDWithOneSave() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let first = try makeRepository(container, id: firstID).create(input: TaskInput(title: "Delete me"))
+        let second = try makeRepository(container, id: secondID).create(input: TaskInput(title: "Keep me"))
+        let thirdID = UUID(uuidString: "00000000-0000-0000-0000-000000000003")!
+        let third = try makeRepository(container, id: thirdID).create(input: TaskInput(title: "Also keep"))
+        var saves = 0
+        var allocatedIDs = 0
+        let repository = SwiftDataTaskRepository(container: container,
+            makeID: { allocatedIDs += 1; return UUID() },
+            save: { context in saves += 1; try context.save() })
+        try repository.delete(id: first.id)
+        XCTAssertEqual(saves, 1)
+        XCTAssertEqual(allocatedIDs, 0)
+        XCTAssertEqual(try repository.fetchAll().map(TaskSnapshot.init), [second, third])
+        XCTAssertFalse(try repository.fetchAll().contains { $0.id == first.id })
+    }
+
+    func testDeleteMissingUUIDDoesNotSaveOrInsertReplacement() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let saved = try makeRepository(container, id: firstID).create(input: TaskInput(title: "Keep"))
+        var saves = 0
+        var allocatedIDs = 0
+        let repository = SwiftDataTaskRepository(container: container,
+            makeID: { allocatedIDs += 1; return self.secondID },
+            save: { context in saves += 1; try context.save() })
+        XCTAssertThrowsError(try repository.delete(id: secondID)) {
+            XCTAssertEqual($0 as? TaskRepositoryError, .notFound(self.secondID))
+        }
+        XCTAssertEqual(saves, 0)
+        XCTAssertEqual(allocatedIDs, 0)
+        XCTAssertEqual(try repository.fetchAll().map(TaskSnapshot.init), [saved])
+    }
+
+    func testFailedDeleteRetainsTargetAndOtherOwnersPendingEdits() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let target = try makeRepository(container, id: firstID).create(input: TaskInput(title: "Target"))
+        _ = try makeRepository(container, id: secondID).create(input: TaskInput(title: "Other"))
+        let independent = ModelContext(container)
+        independent.autosaveEnabled = false
+        let pending = try XCTUnwrap(independent.fetch(FetchDescriptor<TaskItem>())
+            .first { $0.id == secondID })
+        pending.notes = "Pending elsewhere"
+        var saves = 0
+        let failing = makeRepository(container, id: UUID(), save: { _ in
+            saves += 1
+            throw Injected.saveFailed
+        })
+        XCTAssertThrowsError(try failing.delete(id: firstID)) {
+            XCTAssertTrue($0 is Injected)
+        }
+        XCTAssertEqual(saves, 1)
+        XCTAssertTrue(independent.hasChanges)
+        XCTAssertEqual(pending.notes, "Pending elsewhere")
+        let beforeOtherSave = try failing.fetchAll().map(TaskSnapshot.init)
+        XCTAssertEqual(beforeOtherSave.count, 2)
+        XCTAssertEqual(beforeOtherSave.first { $0.id == firstID }, target)
+        XCTAssertNil(beforeOtherSave.first { $0.id == secondID }?.notes)
+        try independent.save()
+        let persisted = try failing.fetchAll().map(TaskSnapshot.init)
+        XCTAssertEqual(persisted.count, 2)
+        XCTAssertEqual(persisted.first { $0.id == firstID }, target)
+        XCTAssertEqual(persisted.first { $0.id == secondID }?.notes, "Pending elsewhere")
+    }
+
     func testClosedTemporaryDiskStoreReopensWithSameIDAndValuesAndNoFailedInsert() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("KontrolTaskRepository-\(UUID().uuidString)", isDirectory: true)

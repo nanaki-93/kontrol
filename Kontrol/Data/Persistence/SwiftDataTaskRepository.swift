@@ -13,6 +13,7 @@ protocol TaskRepository {
     func create(input: TaskInput) throws -> TaskSnapshot
     func update(id: UUID, input: TaskInput) throws -> TaskSnapshot
     func setCompleted(id: UUID, completed: Bool) throws -> TaskSnapshot
+    func delete(id: UUID) throws
     func fetchAll() throws -> [TaskItem]
 }
 
@@ -106,6 +107,19 @@ final class SwiftDataTaskRepository: TaskRepository {
         task.completedAt = completed ? now() : nil
         try save(context)
         return TaskSnapshot(task)
+    }
+
+    func delete(id: UUID) throws {
+        let context = ModelContext(container)
+        context.autosaveEnabled = false
+        var descriptor = FetchDescriptor<TaskItem>(predicate: #Predicate { $0.id == id })
+        descriptor.fetchLimit = 1
+        guard let task = try context.fetch(descriptor).first else {
+            throw TaskRepositoryError.notFound(id)
+        }
+        context.delete(task)
+        // A failed save discards only this private context's deletion.
+        try save(context)
     }
 
     func fetchAll() throws -> [TaskItem] {

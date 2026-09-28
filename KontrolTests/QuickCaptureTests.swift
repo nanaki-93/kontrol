@@ -39,6 +39,8 @@ final class QuickCaptureTests: XCTestCase {
             try storage.setCompleted(id: id, completed: completed)
         }
 
+        func delete(id: UUID) throws { try storage.delete(id: id) }
+
         func fetchAll() throws -> [TaskItem] { try storage.fetchAll() }
     }
 
