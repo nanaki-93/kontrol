@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>F03 · Schedule editor endpoint and validation reference</title>
+<link rel="stylesheet" href="../../design-system/tokens.css">
+<link rel="stylesheet" href="../../design-system/components.css">
+<style>
+  body { margin: 0; background: #0c0b0d; color: #eee; font: 15px system-ui, sans-serif; }
+  header { padding: 16px 24px; border-bottom: 1px solid #403639; }
+  main { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: center; gap: 24px; padding: 32px 16px; }
+  section { background: #191518; border: 1px solid #403639; border-radius: 8px; padding: 24px; width: min(100%, 540px); box-sizing: border-box; }
+  h2 { margin: 0 0 20px; font-size: 24px; font-weight: 500; }
+  label { display: block; margin: 14px 0 5px; }
+  input, textarea { box-sizing: border-box; width: 100%; background: #0c0b0d; color: #eee; border: 1px solid #66565a; border-radius: 4px; padding: 9px; font: inherit; }
+  small { display: block; color: #bcb3b5; margin-top: 5px; line-height: 1.4; }
+  .error { color: #ef858b; }
+  footer { display: flex; gap: 10px; margin-top: 24px; }
+  button { padding: 9px 18px; background: #251f22; border: 1px solid #66565a; border-radius: 4px; color: #eee; }
+  button.primary { background: #d66872; color: #110d0e; border-color: #d66872; }
+  button:disabled { opacity: .55; }
+</style>
+</head>
+<body>
+<header><strong>F03 · M07 endpoint states</strong> — focused reference, not a redesign. Native date/time controls in production.</header>
+<main>
+<section aria-label="Overnight edit example"><h2>Edit block · overnight</h2>
+<label for="title">Title</label><input id="title" value="Evening review">
+<label for="start">Start date and time</label><input id="start" value="Nov 1, 2026 · 1:30 AM · EDT (UTC−04:00)" readonly>
+<small>Local time · America/New_York. Show the offset in the repeated hour.</small>
+<label for="end">End date and time</label><input id="end" value="Nov 2, 2026 · 2:15 AM · EST (UTC−05:00)" readonly>
+<small>Both dates stay visible; a day change is never inferred from the clock time.</small>
+<label for="note">Note (optional)</label><textarea id="note" rows="3">Review the notes.</textarea>
+<footer><button>Cancel</button><button class="primary">Save</button></footer></section>
+<section aria-label="Invalid range example"><h2>New block · check times</h2>
+<label for="blank">Title</label><input id="blank" value=" " aria-invalid="true"><small class="error">Enter a title.</small>
+<label for="invalid-start">Start date and time</label><input id="invalid-start" value="Mar 8, 2026 · 3:00 AM · EDT (UTC−04:00)" readonly>
+<small>The picker resolved an unavailable 2:30 AM wall time to 3:00 AM. Show the selected instant before Save.</small>
+<label for="invalid-end">End date and time</label><input id="invalid-end" value="Mar 8, 2026 · 3:00 AM · EDT (UTC−04:00)" readonly>
+<small class="error">End must be after Start.</small>
+<label for="empty-note">Note (optional)</label><textarea id="empty-note" rows="3"></textarea>
+<footer><button>Cancel</button><button class="primary" disabled>Save</button></footer></section>
+</main>
+</body>
+</html>

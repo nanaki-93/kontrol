@@ -15,7 +15,7 @@ Each row links a function to an actual PNG mockup. SVG sources sit beside the PN
 | [F02](../features/F02-tasks.md) | Delete task | [M05 · Tasks](M05-task-delete.png) |
 | [F02](../features/F02-tasks.md) | Quick capture | [M09 · Today](M09-quick-capture.png) |
 | [F03](../features/F03-today-schedule.md) | Select day and open linked items | [M06 · Today](M06-today.png) |
-| [F03](../features/F03-today-schedule.md) | Add, move, edit or delete a schedule block | [M07 · Today](M07-schedule-editor.png) |
+| [F03](../features/F03-today-schedule.md) | Add, move, edit or delete a schedule block | [M07 · Today](M07-schedule-editor.png) · [Endpoint/validation states](../../.mockups/screens/f03/schedule-editor-endpoints.html) |
 | [F03](../features/F03-today-schedule.md) | Resolve overlap | [M08 · Today](M08-schedule-overlap.png) |
 | [F04](../features/F04-focus.md) | Configure duration and optional link | [M10 · Focus](M10-focus-ready.png) |
 | [F04](../features/F04-focus.md) | Run session | [M11 · Focus](M11-focus-running.png) |

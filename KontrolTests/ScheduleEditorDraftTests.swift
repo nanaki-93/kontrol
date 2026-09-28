@@ -267,6 +267,62 @@ final class ScheduleEditorDraftTests: XCTestCase {
         XCTAssertEqual(try storage.repository.fetchAll().count, 2)
     }
 
+    func testEndpointLabelsDisambiguateFallBackAndShowBothOvernightDates() throws {
+        let zone = try XCTUnwrap(TimeZone(identifier: "America/New_York"))
+        let localCalendar = calendar(zone)
+        let locale = Locale(identifier: "en_US")
+        let first = Date(timeIntervalSince1970: 1_793_511_000) // 2026-11-01 05:30 UTC
+        let second = first.addingTimeInterval(3_600)
+        let firstLabel = ScheduleEditorView.endpointLabel(first, calendar: localCalendar,
+                                                          timeZone: zone, locale: locale)
+        let secondLabel = ScheduleEditorView.endpointLabel(second, calendar: localCalendar,
+                                                           timeZone: zone, locale: locale)
+        XCTAssertTrue(firstLabel.contains("UTC−04:00"), firstLabel)
+        XCTAssertTrue(secondLabel.contains("UTC−05:00"), secondLabel)
+        XCTAssertNotEqual(firstLabel, secondLabel)
+
+        let storage = try store()
+        let original = try storage.create(input: ScheduleInput(title: "Overnight", startAt: first,
+                                                              endAt: date(2026, 11, 2, 3, zone: zone)))
+        let draft = ScheduleEditorDraft(editing: original, in: storage)
+        let startLabel = ScheduleEditorView.endpointLabel(draft.startAt, calendar: localCalendar,
+                                                          timeZone: zone, locale: locale)
+        let endLabel = ScheduleEditorView.endpointLabel(draft.endAt, calendar: localCalendar,
+                                                        timeZone: zone, locale: locale)
+        XCTAssertTrue(startLabel.contains("November 1"), startLabel)
+        XCTAssertTrue(endLabel.contains("November 2"), endLabel)
+        let utcLabel = ScheduleEditorView.endpointLabel(draft.startAt, calendar: calendar(),
+                                                        timeZone: TimeZone(secondsFromGMT: 0)!, locale: locale)
+        XCTAssertNotEqual(utcLabel, startLabel)
+        XCTAssertEqual(draft.startAt, original.startAt) // Reformatting after travel cannot move an instant.
+        XCTAssertEqual(draft.endAt, original.endAt)
+        XCTAssertEqual(try storage.repository.fetchAll(), [original])
+    }
+
+    func testPickerSelectedInstantsStayInDraftAfterFailedEditAndCancel() throws {
+        var fail = false
+        let storage = try store(save: { context in
+            if fail { throw InjectedFailure.save }
+            try context.save()
+        })
+        let original = try storage.create(input: ScheduleInput(title: "Original", startAt: date(2026, 3, 7, 9),
+                                                              endAt: date(2026, 3, 7, 10)))
+        let draft = ScheduleEditorDraft(editing: original, in: storage)
+        // Dates supplied by a native picker are already resolved instants, even on a 23-hour day.
+        let normalized = date(2026, 3, 8, 3, zone: TimeZone(identifier: "America/New_York")!)
+        draft.startAt = normalized
+        draft.endAt = normalized.addingTimeInterval(3_600)
+        draft.note = "still here"
+        fail = true
+        draft.submit { _ in XCTFail("Failed save") }
+        XCTAssertEqual(draft.saveError, .persistence)
+        XCTAssertEqual(draft.startAt, normalized)
+        XCTAssertEqual(draft.endAt, normalized.addingTimeInterval(3_600))
+        XCTAssertEqual(draft.note, "still here")
+        draft.cancel()
+        XCTAssertEqual(try storage.repository.fetchAll(), [original])
+    }
+
     func testIndependentDraftsNeverShareUnsavedFieldsOrApproval() throws {
         let storage = try store()
         _ = try storage.create(input: ScheduleInput(title: "Peer", startAt: date(2026, 5, 1, 10),

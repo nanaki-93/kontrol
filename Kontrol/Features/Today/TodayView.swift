@@ -6,6 +6,10 @@ struct TodayView: View {
     @State private var daySelection = TodayDaySelection()
     @State private var showingCapture = false
     @State private var presentation: EditorPresentation?
+    @State private var blockPresentation: BlockPresentation?
+    @State private var lastBlockTriggerID: UUID?
+    @FocusState private var addBlockFocused: Bool
+    @FocusState private var editBlockFocusedID: UUID?
     @State private var editorOpenError = false
     @State private var actionError: TaskMutationError?
     @State private var lastEditorTriggerID: UUID?
@@ -15,6 +19,25 @@ struct TodayView: View {
     private struct EditorPresentation: Identifiable {
         let id = UUID()
         let draft: TaskEditorDraft
+    }
+
+    private struct BlockPresentation: Identifiable {
+        let id = UUID()
+        let draft: ScheduleEditorDraft
+    }
+
+    private func editBlock(_ block: ScheduleSnapshot) {
+        lastBlockTriggerID = block.id
+        blockPresentation = BlockPresentation(draft: ScheduleEditorDraft(editing: block, in: scheduleStore))
+    }
+
+    private func addBlock() {
+        guard let selectedDate else { return }
+        lastBlockTriggerID = nil
+        var calendar = store.temporalContext.calendar
+        calendar.timeZone = store.temporalContext.timeZone
+        blockPresentation = BlockPresentation(draft: ScheduleEditorDraft(
+            creatingOn: selectedDate, calendar: calendar, in: scheduleStore))
     }
 
     private func edit(_ row: TaskSnapshot) {
@@ -108,6 +131,24 @@ struct TodayView: View {
             store.refresh()
             scheduleStore.refresh()
         }
+        .sheet(item: $blockPresentation, onDismiss: {
+            if let id = lastBlockTriggerID,
+               let blocks = Self.selectedRows(day: daySelection, tasks: store, blocks: scheduleStore)?.blocks,
+               blocks.contains(where: { $0.id == id }) {
+                editBlockFocusedID = id
+            } else {
+                addBlockFocused = true
+            }
+            lastBlockTriggerID = nil
+        }) { item in
+            ScheduleEditorView(draft: item.draft, temporalStore: store, onCancel: {
+                blockPresentation = nil
+            }, onSaved: {
+                blockPresentation = nil
+            }, onMissingBlock: {
+                blockPresentation = nil
+            })
+        }
         .sheet(isPresented: $showingCapture, onDismiss: {
             // Wait for the native sheet to finish closing before returning keyboard focus.
             addTaskFocused = true
@@ -159,9 +200,9 @@ struct TodayView: View {
             }
             .accessibilityIdentifier("today-add-task")
             .focused($addTaskFocused)
-            // The block editor is wired in Step 3.2. Do not offer a no-op save.
-            ActionButton("Add block", symbol: "plus", isEnabled: false, action: {})
+            ActionButton("Add block", symbol: "plus", isEnabled: selectedDate != nil, action: addBlock)
                 .accessibilityIdentifier("today-add-block")
+                .focused($addBlockFocused)
         }
     }
 
@@ -230,9 +271,15 @@ struct TodayView: View {
                 EmptyState("No blocks on this day.", guidance: "Use Add block to plan a time.")
             } else {
                 ForEach(blocks) { block in
-                    AppListRow(block.title, metadata: blockMetadata(block))
-                        .accessibilityElement(children: .combine)
-                        .accessibilityIdentifier("schedule-row-\(block.id.uuidString)")
+                    HStack(spacing: AppMetrics.space3) {
+                        AppListRow(block.title, metadata: blockMetadata(block))
+                            .accessibilityElement(children: .combine)
+                            .accessibilityIdentifier("schedule-row-\(block.id.uuidString)")
+                        ActionButton("Edit") { editBlock(block) }
+                            .accessibilityLabel("Edit \(block.title)")
+                            .accessibilityIdentifier("schedule-edit-\(block.id.uuidString)")
+                            .focused($editBlockFocusedID, equals: block.id)
+                    }
                 }
             }
         }
