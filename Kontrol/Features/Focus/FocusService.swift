@@ -34,6 +34,12 @@ struct FocusMutationFailure: Equatable {
     let error: FocusError
 }
 
+struct FocusTemporalContext {
+    let now: Date
+    let calendar: Calendar
+    let timeZone: TimeZone
+}
+
 /// One publication point per app dependency graph. View appearance never invokes
 /// startup reconciliation; a failed attempt is retried explicitly via retryRead.
 @MainActor
@@ -46,10 +52,21 @@ final class FocusService: ObservableObject {
     @Published private(set) var checkpointError: FocusError?
     @Published private(set) var mutationFailure: FocusMutationFailure?
     @Published private(set) var completionPendingError: FocusError?
+    @Published private(set) var temporalContext: FocusTemporalContext
+
+    func history(_ filter: FocusHistoryFilter) -> FocusHistoryResult {
+        FocusHistorySelection.select(snapshots, filter: filter, now: temporalContext.now,
+                                     calendar: temporalContext.calendar, timeZone: temporalContext.timeZone)
+    }
 
     private let wallClock: () -> Date
     private let monotonicClock: () -> ContinuousClock.Instant
     private let scheduleTick: (@escaping () -> Void) -> () -> Void
+    private let currentCalendar: () -> Calendar
+    private let currentTimeZone: () -> TimeZone
+    private let scheduleMidnight: (Date, @escaping () -> Void) -> () -> Void
+    private var cancelMidnight: (() -> Void)?
+    private var midnightGeneration = 0
     private let notificationCenter: NotificationCenter
     private let workspaceNotificationCenter: NotificationCenter
     private var observers: [(NotificationCenter, NSObjectProtocol)] = []
@@ -71,17 +88,30 @@ final class FocusService: ObservableObject {
              return { timer.invalidate() }
          },
          notificationCenter: NotificationCenter = .default,
-         workspaceNotificationCenter: NotificationCenter = NSWorkspace.shared.notificationCenter) {
+         workspaceNotificationCenter: NotificationCenter = NSWorkspace.shared.notificationCenter,
+         calendar: @escaping () -> Calendar = { .current },
+         timeZone: @escaping () -> TimeZone = { .current },
+         scheduleMidnight: @escaping (Date, @escaping () -> Void) -> () -> Void = { boundary, callback in
+             let timer = Timer(fire: boundary, interval: 0, repeats: false) { _ in callback() }
+             RunLoop.main.add(timer, forMode: .common)
+             return { timer.invalidate() }
+         }) {
         self.repository = repository
         self.wallClock = wallClock
         self.monotonicClock = monotonicClock
         self.scheduleTick = scheduleTick
+        self.currentCalendar = calendar
+        self.currentTimeZone = timeZone
+        self.scheduleMidnight = scheduleMidnight
+        temporalContext = FocusTemporalContext(now: wallClock(), calendar: calendar(), timeZone: timeZone())
         self.notificationCenter = notificationCenter
         self.workspaceNotificationCenter = workspaceNotificationCenter
         observeLifecycle()
+        rescheduleMidnight()
     }
 
     deinit {
+        cancelMidnight?()
         cancelTick?()
         for (center, observer) in observers { center.removeObserver(observer) }
     }
@@ -91,8 +121,16 @@ final class FocusService: ObservableObject {
                      NSApplication.willTerminateNotification] {
             let token = notificationCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
+                    self?.refreshTemporalContext()
                     self?.sampleTick(forceCheckpoint: name != NSApplication.didBecomeActiveNotification)
                 }
+            }
+            observers.append((notificationCenter, token))
+        }
+        for name in [Notification.Name.NSCalendarDayChanged, .NSSystemTimeZoneDidChange,
+                     NSLocale.currentLocaleDidChangeNotification] {
+            let token = notificationCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.refreshTemporalContext() }
             }
             observers.append((notificationCenter, token))
         }
@@ -101,6 +139,28 @@ final class FocusService: ObservableObject {
                 MainActor.assumeIsolated { self?.sampleTick(forceCheckpoint: true) }
             }
         observers.append((workspaceNotificationCenter, token))
+    }
+
+    private func refreshTemporalContext() {
+        temporalContext = FocusTemporalContext(now: wallClock(), calendar: currentCalendar(),
+                                               timeZone: currentTimeZone())
+        rescheduleMidnight()
+    }
+
+    private func rescheduleMidnight() {
+        midnightGeneration &+= 1
+        cancelMidnight?()
+        cancelMidnight = nil
+        var local = temporalContext.calendar
+        local.timeZone = temporalContext.timeZone
+        guard let boundary = local.dateInterval(of: .day, for: temporalContext.now)?.end else { return }
+        let owner = midnightGeneration
+        cancelMidnight = scheduleMidnight(boundary) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.midnightGeneration == owner else { return }
+                self.refreshTemporalContext()
+            }
+        }
     }
 
     func loadIfNeeded() {
@@ -383,6 +443,7 @@ final class FocusService: ObservableObject {
     }
 
     private func publish(_ rows: [FocusSessionSnapshot]) {
+        refreshTemporalContext()
         snapshots = rows
         activeSession = rows.first(where: { $0.state.isActive })
         if let activeSession, activeSession.state == .paused {
