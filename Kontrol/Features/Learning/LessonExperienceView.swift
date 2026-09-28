@@ -156,6 +156,8 @@ struct LessonExperienceView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier("lesson-completion-receipt")
             Button("Back to choices") { navigation.backToChoices() }
+        } else if detail.progress?.status == .completed || detail.progress?.status == .dismissed {
+            terminalContent(detail)
         } else if let definition = Self.studiedDefinition(detail, lessonID: lessonID) {
             PageHeader(definition.title)
             Text("\(definition.format.capitalized) · \(definition.difficulty.capitalized) · \(definition.estimatedMinutes) min · Studied version \(definition.contentVersion)")
@@ -254,6 +256,49 @@ struct LessonExperienceView: View {
                     .textSelection(.enabled)
                     .accessibilityIdentifier("lesson-retained-answer")
             }
+        }
+    }
+
+    /// Schedule links may outlive their slot and the installed definition. Terminal
+    /// routes display only stored read-only content; they never open another attempt.
+    @ViewBuilder private func terminalContent(_ detail: LessonDetailSnapshot) -> some View {
+        let status = detail.progress?.status == .completed ? "Completed" : "Dismissed"
+        PageHeader(status == "Completed" ? "Completed lesson" : "Dismissed lesson")
+        Text("\(status) · Read-only. Browse History to restore dismissed lessons.")
+            .appTypography(.metadata)
+        if detail.progress?.status == .dismissed && detail.attempt == nil {
+            Text("Dismissed before study. No studied version was archived.")
+                .appTypography(.body)
+        }
+        switch detail.content {
+        case .pinned(let definition):
+            SectionHeader(definition.title)
+            section("Explanation", text: definition.explanation, code: definition.format == "code")
+            section("Worked example", text: definition.workedExample, code: definition.format == "code")
+            section("Exercise", text: definition.exercise, code: definition.format == "code")
+            section("Reference solution", text: definition.referenceAnswer, code: definition.format == "code")
+        case .legacyCompleted(let content):
+            SectionHeader(content.title)
+            section("Explanation", text: content.explanation, code: content.format == "code")
+            section("Worked example", text: content.workedExample, code: content.format == "code")
+            section("Exercise", text: content.exercise, code: content.format == "code")
+            section("Reference solution", text: content.referenceAnswer, code: content.format == "code")
+        case .current(let definition):
+            SectionHeader(definition.title)
+            Text("Current reference material; no studied version was archived.")
+                .appTypography(.metadata)
+            section("Explanation", text: definition.explanation, code: definition.format == "code")
+            section("Worked example", text: definition.workedExample, code: definition.format == "code")
+            section("Exercise", text: definition.exercise, code: definition.format == "code")
+        case .unavailable:
+            Text("Saved content unavailable. Current catalog content is not substituted.")
+                .appTypography(.body)
+        }
+        if let attempt = detail.attempt {
+            SectionHeader("Saved answer")
+            Text(attempt.answerDraft.isEmpty ? "(Blank response)" : attempt.answerDraft)
+                .appTypography(.body)
+                .textSelection(.enabled)
         }
     }
 

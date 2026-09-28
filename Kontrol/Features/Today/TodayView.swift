@@ -10,6 +10,7 @@ struct TodayView: View {
     @State private var presentation: EditorPresentation?
     @State private var blockPresentation: BlockPresentation?
     @State private var lastBlockTriggerID: UUID?
+    @State private var linkedLessonError: (blockID: UUID, title: String, reason: LessonExperienceError)?
     @FocusState private var addBlockFocused: Bool
     @FocusState private var editBlockFocusedID: UUID?
     @State private var editorOpenError = false
@@ -54,6 +55,32 @@ struct TodayView: View {
         calendar.timeZone = temporal.timeZone
         return ScheduleEditorDraft(creatingOn: temporal.now, calendar: calendar,
                                    in: schedule, lesson: suggestion)
+    }
+
+    /// The block retains its own identity and title even when choices rotate or the
+    /// definition disappears. Reading the exact ID is required before any mutation;
+    /// the navigation barrier runs before opening an active lesson.
+    static func openLinkedBlock(_ block: ScheduleSnapshot,
+                                learning: LearningCatalogStore, navigation: NavigationStore) throws {
+        guard let id = block.lessonID, !id.isEmpty else { throw LessonExperienceError.lessonNotFound }
+        guard navigation.flushForLifecycle() else {
+            throw navigation.saveError ?? LessonExperienceError.persistenceFailure
+        }
+        let detail = try learning.loadLinkedBlockDetail(lessonID: id)
+        guard detail.id == id else { throw LessonExperienceError.invalidStoredData }
+        switch detail.progress?.status ?? .available {
+        case .completed, .dismissed:
+            // Never resume terminal work. The pinned/archived content is read-only.
+            guard detail.content != .unavailable else { throw LessonExperienceError.contentUnavailable }
+        case .available, .started:
+            switch detail.content {
+            case .current, .pinned: break
+            case .legacyCompleted, .unavailable: throw LessonExperienceError.contentUnavailable
+            }
+            let receipt = try learning.openLesson(lessonID: id)
+            guard receipt.detail.id == id else { throw LessonExperienceError.invalidStoredData }
+        }
+        navigation.enterLesson(id: id)
     }
 
     private func editBlock(_ block: ScheduleSnapshot) {
@@ -315,6 +342,24 @@ struct TodayView: View {
                     .appTypography(.metadata)
                     .foregroundStyle(AppColors.textSecondary)
             }
+            if let error = linkedLessonError, blocks.contains(where: { $0.id == error.blockID }) {
+                let unavailable = error.reason == .lessonNotFound || error.reason == .contentUnavailable ||
+                    error.reason == .invalidStoredData
+                Text("Could not open \(error.title). " + (unavailable
+                     ? "Lesson content is unavailable; the block is unchanged. You can still edit this block or open another lesson."
+                     : "Your block and location are unchanged. Retry Open lesson after resolving the read or save error."))
+                    .appTypography(.body)
+                    .foregroundStyle(AppColors.error)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("schedule-lesson-error-\(error.blockID.uuidString)")
+                if let learningStore, case .failed(let id, _) = learningStore.detailState,
+                   blocks.contains(where: { $0.id == error.blockID && $0.lessonID == id }) {
+                    ActionButton("Retry lesson read") {
+                        _ = try? learningStore.retryDetail(lessonID: id)
+                    }
+                    .accessibilityIdentifier("schedule-lesson-retry-\(error.blockID.uuidString)")
+                }
+            }
             if Self.showsEmptyBlocks(scheduleStore.readState, rows: blocks,
                                      hasSelectedDay: selectedDate != nil) {
                 EmptyState("No blocks on this day.", guidance: "Use Add block to plan a time.")
@@ -324,6 +369,12 @@ struct TodayView: View {
                     HStack(spacing: AppMetrics.space3) {
                         VStack(alignment: .leading, spacing: AppMetrics.space2) {
                             AppListRow(block.title, metadata: blockMetadata(block))
+                            if block.lessonID != nil {
+                                Text("Linked lesson · \(block.linkedTitleSnapshot ?? "Title unavailable")")
+                                    .appTypography(.metadata)
+                                    .foregroundStyle(AppColors.textSecondary)
+                                    .accessibilityIdentifier("schedule-lesson-title-\(block.id.uuidString)")
+                            }
                             if !conflicts.isEmpty {
                                 Label("Overlaps \(conflicts.count) block\(conflicts.count == 1 ? "" : "s")",
                                       systemImage: "exclamationmark.triangle")
@@ -334,6 +385,19 @@ struct TodayView: View {
                         }
                             .accessibilityElement(children: .combine)
                             .accessibilityIdentifier("schedule-row-\(block.id.uuidString)")
+                        if block.lessonID != nil, let learningStore, let navigation {
+                            ActionButton("Open lesson") {
+                                do {
+                                    try Self.openLinkedBlock(block, learning: learningStore, navigation: navigation)
+                                    linkedLessonError = nil
+                                } catch {
+                                    linkedLessonError = (block.id, block.linkedTitleSnapshot ?? block.title,
+                                                         (error as? LessonExperienceError) ?? .persistenceFailure)
+                                }
+                            }
+                            .accessibilityLabel("Open linked lesson: \(block.linkedTitleSnapshot ?? block.title)")
+                            .accessibilityIdentifier("schedule-open-lesson-\(block.id.uuidString)")
+                        }
                         ActionButton("Edit") { editBlock(block) }
                             .accessibilityLabel("Edit \(block.title)")
                             .accessibilityIdentifier("schedule-edit-\(block.id.uuidString)")

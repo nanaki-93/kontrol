@@ -9,6 +9,7 @@ final class TodayLessonIntegrationTests: XCTestCase {
     private final class FailingRead: CatalogRepository {
         let base: SwiftDataCatalogRepository
         var fail = false
+        var failDetail = false
         init(_ base: SwiftDataCatalogRepository) { self.base = base }
         func loadSnapshot() throws -> LearningCatalogSnapshot {
             if fail { throw Injected.read }
@@ -16,7 +17,10 @@ final class TodayLessonIntegrationTests: XCTestCase {
         }
         func importIfNeeded(_ catalog: ValidatedCatalog) throws -> CatalogImportResult { try base.importIfNeeded(catalog) }
         func reconcileSlots(now: Date) throws -> LearningCatalogSnapshot { try base.reconcileSlots(now: now) }
-        func loadLesson(lessonID: String) throws -> LessonDetailSnapshot { try base.loadLesson(lessonID: lessonID) }
+        func loadLesson(lessonID: String) throws -> LessonDetailSnapshot {
+            if failDetail { throw Injected.read }
+            return try base.loadLesson(lessonID: lessonID)
+        }
         func loadHistory() throws -> [LessonHistorySnapshot] { try base.loadHistory() }
         func openLesson(lessonID: String, now: Date) throws -> LessonMutationResult { try base.openLesson(lessonID: lessonID, now: now) }
         func saveAnswer(attemptID: UUID, expectedRevision: Int, answer: String) throws -> LessonMutationResult {
@@ -163,6 +167,130 @@ final class TodayLessonIntegrationTests: XCTestCase {
         XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<ScheduleBlock>()).isEmpty)
         XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<TaskItem>()).isEmpty)
         XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<FocusSession>()).isEmpty)
+    }
+
+    func testLinkedBlockOpensRotatedLessonByIDAndTerminalIsReadOnly() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repo = SwiftDataCatalogRepository(container: container)
+        _ = try repo.importIfNeeded(BundledCatalogLoader.load())
+        let graph = AppDependencies(container: container, catalogRepository: repo)
+        let learning = graph.learningCatalogStore
+        learning.loadIfNeeded()
+        let nav = navigation(graph.lessonDraftStore)
+        let id = try XCTUnwrap(learning.state.snapshot?.slots.first?.lessonID)
+        let now = Date()
+        let block = try graph.scheduleStore.create(input: ScheduleInput(
+            title: "Study block", startAt: now, endAt: now.addingTimeInterval(1800), lessonID: id))
+        let captured = try XCTUnwrap(block.linkedTitleSnapshot)
+        XCTAssertNil(try repo.loadLesson(lessonID: id).attempt)
+        let first = try learning.openLesson(lessonID: id)
+        let attempt = try XCTUnwrap(first.detail.attempt)
+        let revealed = try learning.revealSolution(attemptID: attempt.id, expectedRevision: attempt.revision)
+        let acknowledged = try learning.setSelfCheckAcknowledged(
+            attemptID: attempt.id, expectedRevision: try XCTUnwrap(revealed.detail.attempt).revision,
+            acknowledged: true)
+        _ = try learning.complete(attemptID: attempt.id,
+                                  expectedRevision: try XCTUnwrap(acknowledged.detail.attempt).revision)
+        XCTAssertFalse(try XCTUnwrap(learning.state.snapshot).slots.contains { $0.lessonID == id })
+        let completedAt = try XCTUnwrap(repo.loadLesson(lessonID: id).attempt?.completedAt)
+        try TodayView.openLinkedBlock(block, learning: learning, navigation: nav)
+        XCTAssertEqual(nav.selectedDestination, .learning)
+        XCTAssertEqual(nav.learningRoute, .detail(id))
+        XCTAssertEqual(try repo.loadLesson(lessonID: id).attempt?.completedAt, completedAt)
+        XCTAssertEqual(try repo.loadLesson(lessonID: id).progress?.status, .completed)
+        // A terminal pin remains readable by ID even if the installed definition goes away.
+        let context = ModelContext(container)
+        context.delete(try XCTUnwrap(context.fetch(FetchDescriptor<LessonDefinition>()).first { $0.id == id }))
+        try context.save()
+        nav.select(.today)
+        try TodayView.openLinkedBlock(block, learning: learning, navigation: nav)
+        XCTAssertEqual(nav.learningRoute, .detail(id))
+        XCTAssertEqual(try repo.loadLesson(lessonID: id).attempt?.completedAt, completedAt)
+        XCTAssertEqual(try graph.scheduleStore.repository.fetchAll().first?.linkedTitleSnapshot, captured)
+        XCTAssertEqual(try graph.scheduleStore.repository.fetchAll().first?.lessonID, id)
+        XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).count, 1)
+    }
+
+    func testMissingLinkAndFailedReadKeepCapturedBlockWithoutAttemptOrPartialRoute() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let base = SwiftDataCatalogRepository(container: container)
+        _ = try base.importIfNeeded(BundledCatalogLoader.load())
+        let repo = FailingRead(base)
+        let graph = AppDependencies(container: container, catalogRepository: repo)
+        let learning = graph.learningCatalogStore
+        learning.loadIfNeeded()
+        let nav = navigation(graph.lessonDraftStore)
+        let id = try XCTUnwrap(learning.state.snapshot?.slots.first?.lessonID)
+        let now = Date()
+        let block = try graph.scheduleStore.create(input: ScheduleInput(
+            title: "Study block", startAt: now, endAt: now.addingTimeInterval(1800), lessonID: id))
+        repo.failDetail = true
+        XCTAssertThrowsError(try TodayView.openLinkedBlock(block, learning: learning, navigation: nav))
+        XCTAssertEqual(nav.selectedDestination, .today)
+        XCTAssertEqual(nav.learningRoute, .choices)
+        XCTAssertNil(try base.loadLesson(lessonID: id).attempt)
+        let otherID = try XCTUnwrap(learning.state.snapshot?.slots.first { $0.lessonID != id }?.lessonID)
+        XCTAssertThrowsError(try learning.openLesson(lessonID: otherID)) { error in
+            XCTAssertEqual(error as? LessonExperienceError, .invalidTransition)
+        }
+        repo.failDetail = false
+        _ = try learning.retryDetail(lessonID: id)
+        let context = ModelContext(container)
+        let definitions = try context.fetch(FetchDescriptor<LessonDefinition>())
+        context.delete(try XCTUnwrap(definitions.first { $0.id == id }))
+        try context.save()
+        XCTAssertThrowsError(try TodayView.openLinkedBlock(block, learning: learning, navigation: nav)) { error in
+            XCTAssertEqual(error as? LessonExperienceError, .lessonNotFound)
+        }
+        XCTAssertEqual(nav.selectedDestination, .today)
+        XCTAssertEqual(nav.learningRoute, .choices)
+        XCTAssertEqual(try graph.scheduleStore.repository.fetchAll(), [block])
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).isEmpty)
+        // A permanently missing block target must not poison the shared detail
+        // read and prevent an unrelated Start now from committing an attempt.
+        if case .failed = learning.detailState { XCTFail("Missing link blocked unrelated lessons") }
+        XCTAssertNil(learning.error)
+        let other = try XCTUnwrap(TodayLessonSelection.suggestions(from: learning.state)?
+            .first { $0.id != id })
+        try TodayView.startNow(other, learning: learning, navigation: nav)
+        XCTAssertEqual(nav.learningRoute, .detail(other.id))
+        XCTAssertEqual(try base.loadLesson(lessonID: other.id).attempt?.lessonID, other.id)
+        XCTAssertEqual(try graph.scheduleStore.repository.fetchAll(), [block])
+    }
+
+    func testLinkedBlockFlushFailureDoesNotOpenThenRetryEntersExactLesson() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        var failSave = false
+        let repo = SwiftDataCatalogRepository(container: container, beforeSave: {
+            if failSave { throw Injected.save }
+        })
+        _ = try repo.importIfNeeded(BundledCatalogLoader.load())
+        let graph = AppDependencies(container: container, catalogRepository: repo)
+        let learning = graph.learningCatalogStore
+        learning.loadIfNeeded()
+        let nav = navigation(graph.lessonDraftStore)
+        let ids = try XCTUnwrap(learning.state.snapshot?.slots.prefix(2).map(\.lessonID))
+        let now = Date()
+        let block = try graph.scheduleStore.create(input: ScheduleInput(
+            title: "Study", startAt: now, endAt: now.addingTimeInterval(1800), lessonID: ids[1]))
+        let opened = try learning.openLesson(lessonID: ids[0])
+        let attempt = try XCTUnwrap(opened.detail.attempt)
+        graph.lessonDraftStore.observe(opened.detail)
+        graph.lessonDraftStore.edit("  keep this 🧪\n", attemptID: attempt.id)
+        failSave = true
+        XCTAssertThrowsError(try TodayView.openLinkedBlock(block, learning: learning, navigation: nav))
+        XCTAssertEqual(nav.selectedDestination, .today)
+        XCTAssertEqual(nav.learningRoute, .choices)
+        XCTAssertNil(nav.pendingTransition)
+        XCTAssertNil(try repo.loadLesson(lessonID: ids[1]).attempt)
+        XCTAssertEqual(graph.lessonDraftStore.buffers[attempt.id]?.text, "  keep this 🧪\n")
+        XCTAssertEqual(try graph.scheduleStore.repository.fetchAll(), [block])
+        failSave = false
+        try TodayView.openLinkedBlock(block, learning: learning, navigation: nav)
+        XCTAssertEqual(nav.learningRoute, .detail(ids[1]))
+        XCTAssertEqual(nav.selectedDestination, .learning)
+        XCTAssertNotNil(try repo.loadLesson(lessonID: ids[1]).attempt)
+        XCTAssertEqual(try repo.loadLesson(lessonID: ids[0]).attempt?.answerDraft, "  keep this 🧪\n")
     }
 
     func testFailedReadAndFailedDraftSaveNeverStartOrNavigate() throws {

@@ -105,10 +105,22 @@ final class LearningCatalogStore: ObservableObject {
         return try loadHistory()
     }
 
+    /// Schedule links can outlive an unstarted lesson's definition. A confirmed
+    /// absence is local to that block, not a failed shared read that should prevent
+    /// all other lessons from being opened. Other failures remain retryable here.
+    @discardableResult
+    func loadLinkedBlockDetail(lessonID: String) throws -> LessonDetailSnapshot {
+        try readDetail(lessonID: lessonID, missingLinkIsLocal: true)
+    }
+
     /// Reading a detail or History never creates progress. A failed read retains
     /// only a same-ID detail as stale, and disables writes until repaired.
     @discardableResult
     func loadDetail(lessonID: String) throws -> LessonDetailSnapshot {
+        try readDetail(lessonID: lessonID, missingLinkIsLocal: false)
+    }
+
+    private func readDetail(lessonID: String, missingLinkIsLocal: Bool) throws -> LessonDetailSnapshot {
         do {
             let detail = try repository.loadLesson(lessonID: lessonID)
             guard detail.id == lessonID else { throw LessonExperienceError.invalidStoredData }
@@ -116,6 +128,11 @@ final class LearningCatalogStore: ObservableObject {
             clearErrorIfHealthy()
             return detail
         } catch {
+            // Do not publish a permanent global failure for a deleted schedule
+            // target. Preserve any prior detail/read error rather than clearing it.
+            if missingLinkIsLocal, (error as? LessonExperienceError) == .lessonNotFound {
+                throw error
+            }
             let stale: LessonDetailSnapshot?
             switch projection.detail {
             case .current(let value): stale = value.id == lessonID ? value : nil
