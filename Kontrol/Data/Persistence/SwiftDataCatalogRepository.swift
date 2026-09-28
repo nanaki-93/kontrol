@@ -8,6 +8,7 @@ protocol CatalogRepository {
     func reconcileSlots(now: Date) throws -> LearningCatalogSnapshot
     func openLesson(lessonID: String, now: Date) throws -> LessonMutationResult
     func loadLesson(lessonID: String) throws -> LessonDetailSnapshot
+    func saveAnswer(attemptID: UUID, expectedRevision: Int, answer: String) throws -> LessonMutationResult
 }
 
 enum CatalogImportResult: Equatable {
@@ -271,6 +272,32 @@ final class SwiftDataCatalogRepository: CatalogRepository {
         let detail = try self.detail(lessonID: lessonID, in: context)
         let receipt = try result(changed ? .changed : .unchanged, detail: detail, in: context)
         if !changed { return receipt }
+        try beforeSave()
+        try save(context)
+        return receipt
+    }
+
+    func saveAnswer(attemptID: UUID, expectedRevision: Int, answer: String) throws -> LessonMutationResult {
+        let context = ModelContext(container)
+        context.autosaveEnabled = false
+        let matches = try context.fetch(FetchDescriptor<LessonAttempt>()).filter { $0.id == attemptID }
+        guard matches.count <= 1 else { throw LessonExperienceError.invalidStoredData }
+        guard let row = matches.first else { throw LessonExperienceError.attemptNotFound }
+        // Detail checks the unique progress/attempt pairing and decodes the studied
+        // pin. Never choose an arbitrary unfinished row if storage is contradictory.
+        let current = try detail(lessonID: row.lessonID, in: context)
+        guard let attempt = current.attempt, attempt.id == attemptID,
+              let progress = current.progress else { throw LessonExperienceError.invalidStoredData }
+        let edited = try LessonExperience.edit(attempt, status: progress.status,
+                                               expectedRevision: expectedRevision, answer: answer)
+        if edited == attempt { return try result(.unchanged, detail: current, in: context) }
+        row.answerDraft = edited.answerDraft
+        row.selfCheckAcknowledgedAt = edited.selfCheckAcknowledgedAt
+        row.revision = edited.revision
+        // Project the complete receipt in the write context before the commit;
+        // a failed save cannot publish speculative text or a bumped revision.
+        let updated = try detail(lessonID: row.lessonID, in: context)
+        let receipt = try result(.changed, detail: updated, in: context)
         try beforeSave()
         try save(context)
         return receipt

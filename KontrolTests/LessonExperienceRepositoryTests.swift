@@ -255,6 +255,168 @@ final class LessonExperienceRepositoryTests: XCTestCase {
         }
     }
 
+    func testExactAnswerRevisionAndAcknowledgementAreCommittedTogether() throws {
+        let (container, writer, id) = try setup()
+        let other = SwiftDataCatalogRepository(container: container)
+        let opened = try writer.openLesson(lessonID: id, now: first)
+        let initial = try XCTUnwrap(opened.detail.attempt)
+        let originalProgress = opened.detail.progress
+        let originalSlots = opened.catalog.slots
+        let originalPin = initial.pinnedContentData
+        let exact = "  🧪答え\n    let value = 1\n\n"
+        let saved = try other.saveAnswer(attemptID: initial.id, expectedRevision: 0, answer: exact)
+        XCTAssertEqual(saved.outcome, .changed)
+        XCTAssertEqual(saved.detail.attempt?.answerDraft, exact)
+        XCTAssertEqual(saved.detail.attempt?.revision, 1)
+        XCTAssertEqual(saved.detail.attempt?.pinnedContentData, originalPin)
+        XCTAssertEqual(saved.detail.progress, originalProgress)
+        XCTAssertEqual(saved.catalog.slots, originalSlots)
+        XCTAssertTrue(saved.history.isEmpty)
+        XCTAssertNil(saved.replacedSlot)
+        XCTAssertEqual(try writer.loadLesson(lessonID: id), saved.detail)
+
+        // Even a no-op with an old revision must not conceal a stale editor.
+        for text in ["stale", exact] {
+            XCTAssertThrowsError(try writer.saveAnswer(attemptID: initial.id, expectedRevision: 0, answer: text)) {
+                XCTAssertEqual($0 as? LessonExperienceError, .staleRevision)
+            }
+        }
+        enum Injected: Error { case unexpectedSave }
+        let noSave = SwiftDataCatalogRepository(container: container,
+            beforeSave: { throw Injected.unexpectedSave })
+        let unchanged = try noSave.saveAnswer(attemptID: initial.id, expectedRevision: 1, answer: exact)
+        XCTAssertEqual(unchanged.outcome, .unchanged)
+        XCTAssertEqual(unchanged.detail, saved.detail)
+        let blank = try writer.saveAnswer(attemptID: initial.id, expectedRevision: 1, answer: "")
+        XCTAssertEqual(blank.detail.attempt?.answerDraft, "")
+        XCTAssertEqual(blank.detail.attempt?.revision, 2)
+
+        // An existing acknowledgement must be cleared in the *same* write as
+        // new text; reveal remains durable and no other attempt field changes.
+        let gated = ModelContext(container)
+        let row = try XCTUnwrap(gated.fetch(FetchDescriptor<LessonAttempt>()).first { $0.id == initial.id })
+        row.solutionRevealedAt = first
+        row.selfCheckAcknowledgedAt = later
+        row.revision = 3
+        try gated.save()
+        let changed = try other.saveAnswer(attemptID: initial.id, expectedRevision: 3, answer: exact)
+        XCTAssertEqual(changed.detail.attempt?.answerDraft, exact)
+        XCTAssertEqual(changed.detail.attempt?.revision, 4)
+        XCTAssertEqual(changed.detail.attempt?.solutionRevealedAt, first)
+        XCTAssertNil(changed.detail.attempt?.selfCheckAcknowledgedAt)
+        XCTAssertNil(try XCTUnwrap(rows(LessonAttempt.self, in: container).first).selfCheckAcknowledgedAt)
+        XCTAssertEqual(try noSave.saveAnswer(attemptID: initial.id, expectedRevision: 4,
+                                             answer: exact).outcome, .unchanged)
+    }
+
+    func testDelayedWritesCannotReviveDismissedOrChangeCompletedAnswers() throws {
+        let (container, writer, id) = try setup()
+        let opened = try writer.openLesson(lessonID: id, now: first)
+        let attempt = try XCTUnwrap(opened.detail.attempt)
+        _ = try writer.saveAnswer(attemptID: attempt.id, expectedRevision: 0, answer: "keep")
+        let context = ModelContext(container)
+        let progress = try XCTUnwrap(context.fetch(FetchDescriptor<LessonProgress>()).first { $0.lessonID == id })
+        progress.status = .dismissed
+        progress.dismissedAt = later
+        try context.save()
+        for revision in [0, 1] {
+            XCTAssertThrowsError(try writer.saveAnswer(attemptID: attempt.id, expectedRevision: revision, answer: "late")) {
+                XCTAssertEqual($0 as? LessonExperienceError, .invalidTransition)
+            }
+        }
+        XCTAssertEqual(try writer.loadLesson(lessonID: id).attempt?.answerDraft, "keep")
+        let completed = ModelContext(container)
+        let archived = try XCTUnwrap(completed.fetch(FetchDescriptor<LessonAttempt>()).first { $0.id == attempt.id })
+        let completedProgress = try XCTUnwrap(completed.fetch(FetchDescriptor<LessonProgress>()).first { $0.lessonID == id })
+        archived.completedAt = later
+        archived.completedContentSnapshot = try PinnedLessonContent.decode(archived.pinnedContentData,
+            lessonID: id, contentVersion: archived.contentVersion).completedSnapshot
+        completedProgress.status = .completed
+        completedProgress.completedAt = later
+        try completed.save()
+        XCTAssertThrowsError(try writer.saveAnswer(attemptID: attempt.id, expectedRevision: 1, answer: "late")) {
+            XCTAssertEqual($0 as? LessonExperienceError, .invalidTransition)
+        }
+        let read = try writer.loadLesson(lessonID: id)
+        XCTAssertEqual(read.attempt?.answerDraft, "keep")
+        XCTAssertEqual(read.attempt?.revision, 1)
+        XCTAssertEqual(read.attempt?.completedAt, later)
+        XCTAssertEqual(read.progress?.status, .completed)
+        XCTAssertThrowsError(try writer.saveAnswer(attemptID: UUID(), expectedRevision: 0, answer: "x")) {
+            XCTAssertEqual($0 as? LessonExperienceError, .attemptNotFound)
+        }
+    }
+
+    func testInvalidPinOrReceiptCannotCommitAnAnswer() throws {
+        let (container, writer, id) = try setup()
+        let attempt = try XCTUnwrap(writer.openLesson(lessonID: id, now: first).detail.attempt)
+        let broken = ModelContext(container)
+        let row = try XCTUnwrap(broken.fetch(FetchDescriptor<LessonAttempt>()).first { $0.id == attempt.id })
+        row.pinnedContentData = Data("invalid".utf8)
+        try broken.save()
+        XCTAssertThrowsError(try writer.saveAnswer(attemptID: attempt.id, expectedRevision: 0, answer: "new")) {
+            XCTAssertEqual($0 as? LessonExperienceError, .invalidStoredData)
+        }
+        XCTAssertEqual(try XCTUnwrap(rows(LessonAttempt.self, in: container).first).answerDraft, "")
+        let repaired = ModelContext(container)
+        try XCTUnwrap(repaired.fetch(FetchDescriptor<LessonAttempt>()).first { $0.id == attempt.id })
+            .pinnedContentData = attempt.pinnedContentData
+        try repaired.save()
+
+        // The result's History projection is also validated before save. A
+        // broken unrelated terminal row must not turn a committed edit into a
+        // reported error after the fact.
+        let invalid = ModelContext(container)
+        invalid.insert(LessonProgress(lessonID: "broken-history", status: .completed,
+                                      completedAt: later))
+        try invalid.save()
+        XCTAssertThrowsError(try writer.saveAnswer(attemptID: attempt.id, expectedRevision: 0, answer: "new")) {
+            XCTAssertEqual($0 as? LessonExperienceError, .invalidStoredData)
+        }
+        let persisted = try XCTUnwrap(rows(LessonAttempt.self, in: container).first { $0.id == attempt.id })
+        XCTAssertEqual(persisted.answerDraft, "")
+        XCTAssertEqual(persisted.revision, 0)
+    }
+
+    func testFailedAnswerSavePreservesCommittedTextAndRevisionAcrossReopen() throws {
+        enum Injected: Error { case failure }
+        for failBefore in [true, false] {
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "KontrolAnswerFailure-\(UUID().uuidString)/Kontrol.store")
+            var attemptID = UUID()
+            var committed: LessonDetailSnapshot?
+            try autoreleasepool {
+                let container = try ModelContainerFactory().makeContainer(mode: .persistent(url))
+                let writer = SwiftDataCatalogRepository(container: container)
+                _ = try writer.importIfNeeded(BundledCatalogLoader.load())
+                let id = try XCTUnwrap(writer.loadSnapshot().slots.first?.lessonID)
+                attemptID = try XCTUnwrap(writer.openLesson(lessonID: id, now: first).detail.attempt).id
+                committed = try writer.saveAnswer(attemptID: attemptID, expectedRevision: 0,
+                                                   answer: "  committed\n").detail
+                let failing = SwiftDataCatalogRepository(container: container,
+                    beforeSave: { if failBefore { throw Injected.failure } },
+                    save: { _ in if !failBefore { throw Injected.failure } })
+                XCTAssertThrowsError(try failing.saveAnswer(attemptID: attemptID,
+                    expectedRevision: 1, answer: "  🧪\n    unsaved\n")) {
+                    XCTAssertTrue($0 is Injected)
+                }
+                XCTAssertEqual(try writer.loadLesson(lessonID: id), committed)
+                XCTAssertEqual(try XCTUnwrap(rows(LessonAttempt.self, in: container).first).revision, 1)
+            }
+            try autoreleasepool {
+                let reopened = try ModelContainerFactory().makeContainer(mode: .persistent(url))
+                let reader = SwiftDataCatalogRepository(container: reopened)
+                let id = try XCTUnwrap(committed?.id)
+                XCTAssertEqual(try reader.loadLesson(lessonID: id), committed)
+                XCTAssertEqual(try XCTUnwrap(rows(LessonAttempt.self, in: reopened).first).revision, 1)
+                let retry = try reader.saveAnswer(attemptID: attemptID, expectedRevision: 1,
+                                                  answer: "  🧪\n    unsaved\n")
+                XCTAssertEqual(retry.detail.attempt?.revision, 2)
+                XCTAssertEqual(retry.detail.attempt?.answerDraft, "  🧪\n    unsaved\n")
+            }
+        }
+    }
+
     func testPreSaveAndSaveFailureLeaveNoAttemptProgressOrReceipt() throws {
         for failBefore in [true, false] {
             let (container, writer, id) = try setup()
