@@ -13,12 +13,14 @@ final class SchemaTests: XCTestCase {
         XCTAssertEqual(KontrolSchemaV2.versionIdentifier, Schema.Version(2, 0, 0))
         XCTAssertEqual(KontrolSchemaV3.versionIdentifier, Schema.Version(3, 0, 0))
         XCTAssertEqual(KontrolSchemaV4.versionIdentifier, Schema.Version(4, 0, 0))
-        XCTAssertEqual(KontrolMigrationPlan.schemas.count, 4)
+        XCTAssertEqual(KontrolSchemaV5.versionIdentifier, Schema.Version(5, 0, 0))
+        XCTAssertEqual(KontrolMigrationPlan.schemas.count, 5)
         XCTAssertTrue(KontrolMigrationPlan.schemas[0] == KontrolSchemaV1.self)
         XCTAssertTrue(KontrolMigrationPlan.schemas[1] == KontrolSchemaV2.self)
         XCTAssertTrue(KontrolMigrationPlan.schemas[2] == KontrolSchemaV3.self)
         XCTAssertTrue(KontrolMigrationPlan.schemas[3] == KontrolSchemaV4.self)
-        XCTAssertEqual(KontrolMigrationPlan.stages.count, 3)
+        XCTAssertTrue(KontrolMigrationPlan.schemas[4] == KontrolSchemaV5.self)
+        XCTAssertEqual(KontrolMigrationPlan.stages.count, 4)
         let v1 = KontrolSchemaV1.models
         XCTAssertEqual(Set(v1.map { String(describing: $0) }),
                        Set(["TaskItem", "Topic", "Subtopic", "Concept",
@@ -44,6 +46,14 @@ final class SchemaTests: XCTestCase {
         XCTAssertFalse(v4.contains { $0 == KontrolSchemaV1.LessonDefinition.self })
         XCTAssertTrue(v4.contains { $0 == LessonDefinition.self })
         XCTAssertTrue(v4.contains { $0 == LessonSlot.self })
+        XCTAssertTrue(v4.contains { $0 == KontrolSchemaV1.LessonAttempt.self })
+        let v5 = KontrolSchemaV5.models
+        XCTAssertEqual(v5.count, v4.count)
+        for historical in v4 where historical != KontrolSchemaV1.LessonAttempt.self {
+            XCTAssertTrue(v5.contains { $0 == historical })
+        }
+        XCTAssertFalse(v5.contains { $0 == KontrolSchemaV1.LessonAttempt.self })
+        XCTAssertTrue(v5.contains { $0 == LessonAttempt.self })
     }
 
     func testV4SlotScalarKeysAndDefinitionObjectiveSurviveReopen() throws {
@@ -219,6 +229,8 @@ final class SchemaTests: XCTestCase {
         XCTAssertNil(attempt.solutionRevealedAt)
         XCTAssertNil(attempt.selfCheckAcknowledgedAt)
         XCTAssertNil(attempt.completedAt)
+        XCTAssertNil(attempt.pinnedContentData)
+        XCTAssertEqual(attempt.revision, 0)
         XCTAssertEqual(try context.fetch(FetchDescriptor<CatalogImportState>()).first?.lastImportedVersion, 3)
 
         let snapshot = KontrolSchemaV1.LessonContentSnapshot(
@@ -229,6 +241,8 @@ final class SchemaTests: XCTestCase {
             selfCheckCriteria: lesson.selfCheckCriteria)
         attempt.completedContentSnapshot = snapshot
         attempt.completedAt = Date(timeIntervalSince1970: 2_000)
+        attempt.pinnedContentData = Data([0, 1, 255])
+        attempt.revision = 3
         lesson.title = "Corrected title"
         try context.save()
         let reopened = ModelContext(container)
@@ -243,6 +257,8 @@ final class SchemaTests: XCTestCase {
         XCTAssertEqual(savedAttempt.completedContentSnapshot?.title, "Cancel work")
         XCTAssertEqual(savedAttempt.answerDraft, "Personal draft")
         XCTAssertEqual(savedAttempt.contentVersion, 2)
+        XCTAssertEqual(savedAttempt.pinnedContentData, Data([0, 1, 255]))
+        XCTAssertEqual(savedAttempt.revision, 3)
         XCTAssertNotNil(savedAttempt.completedAt)
         XCTAssertEqual(savedProgress.lessonID, lesson.id)
         XCTAssertEqual(savedProgress.status, .available)

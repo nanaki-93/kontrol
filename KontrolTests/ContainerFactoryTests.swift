@@ -125,7 +125,7 @@ final class ContainerFactoryTests: XCTestCase {
                 normalizedContentHash: "historical-hash", source: "seed", provenance: "old-bundle")
             context.insert(historical)
             context.insert(LessonProgress(lessonID: lessonID, status: .started, startedAt: startedAt))
-            context.insert(LessonAttempt(id: attemptID, lessonID: lessonID, contentVersion: 3,
+            context.insert(KontrolSchemaV1.LessonAttempt(id: attemptID, lessonID: lessonID, contentVersion: 3,
                                          answerDraft: "Do not discard"))
             context.insert(CatalogImportState(catalogID: "kontrol.starter", lastImportedVersion: 1))
             try context.save()
@@ -164,6 +164,8 @@ final class ContainerFactoryTests: XCTestCase {
             XCTAssertEqual(try context.fetch(FetchDescriptor<LessonProgress>()).first?.startedAt, startedAt)
             XCTAssertEqual(try context.fetch(FetchDescriptor<LessonAttempt>()).first?.id, attemptID)
             XCTAssertEqual(try context.fetch(FetchDescriptor<LessonAttempt>()).first?.answerDraft, "Do not discard")
+            XCTAssertNil(try context.fetch(FetchDescriptor<LessonAttempt>()).first?.pinnedContentData)
+            XCTAssertEqual(try context.fetch(FetchDescriptor<LessonAttempt>()).first?.revision, 0)
             XCTAssertEqual(try context.fetch(FetchDescriptor<CatalogImportState>()).first?.lastImportedVersion, 1)
             XCTAssertTrue(try context.fetch(FetchDescriptor<LessonSlot>()).isEmpty)
         }

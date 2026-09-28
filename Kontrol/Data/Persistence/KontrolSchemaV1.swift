@@ -237,5 +237,4 @@ typealias Topic = KontrolSchemaV1.Topic
 typealias Subtopic = KontrolSchemaV1.Subtopic
 typealias Concept = KontrolSchemaV1.Concept
 typealias LessonProgress = KontrolSchemaV1.LessonProgress
-typealias LessonAttempt = KontrolSchemaV1.LessonAttempt
 typealias CatalogImportState = KontrolSchemaV1.CatalogImportState

@@ -193,7 +193,7 @@ final class ScheduleMigrationTests: XCTestCase {
             context.insert(LessonProgress(lessonID: "lesson-1", status: .completed,
                                           firstShownAt: stamp, startedAt: later,
                                           completedAt: later, dismissedAt: nil, lastOpenedAt: later))
-            context.insert(LessonAttempt(id: attemptID, lessonID: "lesson-1", contentVersion: 7,
+            context.insert(KontrolSchemaV1.LessonAttempt(id: attemptID, lessonID: "lesson-1", contentVersion: 7,
                                          answerDraft: "My answer", solutionRevealedAt: stamp,
                                          selfCheckAcknowledgedAt: later, completedAt: later,
                                          completedContentSnapshot: content))

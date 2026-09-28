@@ -206,9 +206,9 @@ final class CatalogMigrationTests: XCTestCase {
                                           completedAt: later, lastOpenedAt: later))
             context.insert(LessonProgress(lessonID: "dismissed", status: .dismissed,
                                           firstShownAt: start, dismissedAt: later, lastOpenedAt: later))
-            context.insert(LessonAttempt(id: draftID, lessonID: "started", contentVersion: 7,
+            context.insert(KontrolSchemaV1.LessonAttempt(id: draftID, lessonID: "started", contentVersion: 7,
                                          answerDraft: "Unsent personal draft"))
-            context.insert(LessonAttempt(id: completedID, lessonID: "completed", contentVersion: 6,
+            context.insert(KontrolSchemaV1.LessonAttempt(id: completedID, lessonID: "completed", contentVersion: 6,
                                          answerDraft: "Archived personal answer", solutionRevealedAt: start,
                                          selfCheckAcknowledgedAt: later, completedAt: later,
                                          completedContentSnapshot: snapshot()))
