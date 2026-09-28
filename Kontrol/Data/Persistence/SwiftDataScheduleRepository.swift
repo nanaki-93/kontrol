@@ -24,6 +24,8 @@ struct ScheduleOverlapReview: Equatable {
 enum ScheduleRepositoryError: Error, Equatable {
     case validation(ScheduleValidationError)
     case notFound(UUID)
+    case lessonNotFound(String)
+    case lessonUnreadable(String)
     case overlap(ScheduleOverlapReview)
     case persistence
 }
@@ -44,16 +46,20 @@ final class SwiftDataScheduleRepository: ScheduleRepository {
     private let container: ModelContainer
     private let makeID: () -> UUID
     private let fetch: (ModelContext) throws -> [ScheduleBlock]
+    private let fetchLessons: (ModelContext) throws -> [LessonDefinition]
     // Hooks fail before commit, not after it. Never report a committed write as failed.
     private let save: (ModelContext) throws -> Void
 
     init(container: ModelContainer, makeID: @escaping () -> UUID = UUID.init,
          fetch: @escaping (ModelContext) throws -> [ScheduleBlock] = {
              try $0.fetch(FetchDescriptor<ScheduleBlock>())
+         }, fetchLessons: @escaping (ModelContext) throws -> [LessonDefinition] = {
+             try $0.fetch(FetchDescriptor<LessonDefinition>())
          }, save: @escaping (ModelContext) throws -> Void = { try $0.save() }) {
         self.container = container
         self.makeID = makeID
         self.fetch = fetch
+        self.fetchLessons = fetchLessons
         self.save = save
     }
 
@@ -67,11 +73,13 @@ final class SwiftDataScheduleRepository: ScheduleRepository {
         let clean = try validate(input)
         let context = privateContext()
         let existing = try snapshots(in: context)
+        let linkedTitle = try clean.lessonID.map { try resolveTitle(for: $0, in: context) }
         let approval = try requireOverlapDecision(for: input, clean: clean, against: existing,
                                                    excluding: nil, allowOverlap: allowOverlap,
                                                    review: review)
         let block = ScheduleBlock(id: makeID(), title: clean.title, startAt: clean.startAt,
-                                  endAt: clean.endAt, note: clean.note)
+                                  endAt: clean.endAt, note: clean.note,
+                                  lessonID: clean.lessonID, linkedTitleSnapshot: linkedTitle)
         context.insert(block)
         try commit(context)
         approval?.approval.consumed = true
@@ -122,6 +130,21 @@ final class SwiftDataScheduleRepository: ScheduleRepository {
     private func validate(_ input: ScheduleInput) throws -> ScheduleInput {
         do { return try input.validated() }
         catch let error as ScheduleValidationError { throw ScheduleRepositoryError.validation(error) }
+    }
+
+    /// Resolve in the same private write context as the block. Neither a failed fetch nor
+    /// contradictory/blank stored content may turn a requested link into an unlinked save.
+    private func resolveTitle(for lessonID: String, in context: ModelContext) throws -> String {
+        let definitions: [LessonDefinition]
+        do { definitions = try fetchLessons(context) }
+        catch { throw ScheduleRepositoryError.lessonUnreadable(lessonID) }
+        let matches = definitions.filter { $0.id == lessonID }
+        guard !matches.isEmpty else { throw ScheduleRepositoryError.lessonNotFound(lessonID) }
+        guard matches.count == 1,
+              !matches[0].title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ScheduleRepositoryError.lessonUnreadable(lessonID)
+        }
+        return matches[0].title
     }
 
     private func persistedBlocks(in context: ModelContext) throws -> [ScheduleBlock] {

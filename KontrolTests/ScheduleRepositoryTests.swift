@@ -17,6 +17,20 @@ final class ScheduleRepositoryTests: XCTestCase {
                       endAt: base.addingTimeInterval(end), note: note)
     }
 
+    private func seedLesson(_ container: ModelContainer, id: String = "lesson-1",
+                            title: String = "Original lesson") throws {
+        let context = ModelContext(container)
+        context.autosaveEnabled = false
+        context.insert(LessonDefinition(
+            id: id, objectiveKey: "objective", title: title, topicID: "go",
+            subtopicID: "go-basics", conceptIDs: [], difficulty: "beginner",
+            format: "learn", estimatedMinutes: 20, explanation: "Explanation",
+            workedExample: "Example", exercise: "Exercise", referenceAnswer: "Answer",
+            selfCheckCriteria: ["Check"], contentVersion: 1,
+            normalizedContentHash: "hash", source: "bundle", provenance: "Test"))
+        try context.save()
+    }
+
     private func repository(_ container: ModelContainer, id: UUID) -> SwiftDataScheduleRepository {
         SwiftDataScheduleRepository(container: container, makeID: { id })
     }
@@ -59,6 +73,78 @@ final class ScheduleRepositoryTests: XCTestCase {
             XCTAssertEqual($0 as? ScheduleRepositoryError, .persistence)
         }
         XCTAssertEqual(try rows(container), [saved])
+    }
+
+    func testLinkedCreateResolvesDefinitionAndCapturesTitleWithoutChangingLesson() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        try seedLesson(container)
+        let writer = repository(container, id: first)
+        let linked = try writer.create(input: ScheduleInput(title: "  Study  ", startAt: base,
+            endAt: base.addingTimeInterval(3600), lessonID: "lesson-1"))
+        XCTAssertEqual(linked.lessonID, "lesson-1")
+        XCTAssertEqual(linked.linkedTitleSnapshot, "Original lesson")
+        XCTAssertEqual(linked.title, "Study")
+        XCTAssertEqual(try rows(container), [linked])
+        let context = ModelContext(container)
+        let definitions = try context.fetch(FetchDescriptor<LessonDefinition>())
+        XCTAssertEqual(definitions.count, 1)
+        XCTAssertEqual(definitions.first?.title, "Original lesson")
+        XCTAssertTrue(try context.fetch(FetchDescriptor<LessonProgress>()).isEmpty)
+        let progress = LessonProgress(lessonID: "lesson-1", status: .completed)
+        context.insert(progress)
+        try context.save()
+        XCTAssertEqual(try rows(container), [linked], "completion cannot move or unlink a block")
+        progress.status = .dismissed
+        try context.save()
+        XCTAssertEqual(try rows(container), [linked], "dismissal cannot move or unlink a block")
+        // A changed or removed definition does not alter the captured block.
+        let definition = try XCTUnwrap(definitions.first)
+        definition.title = "Revised lesson"
+        try context.save()
+        XCTAssertEqual(try rows(container), [linked])
+        context.delete(definition)
+        try context.save()
+        XCTAssertEqual(try rows(container), [linked])
+        let edited = try writer.update(id: first, input: ScheduleInput(
+            title: "Moved", startAt: base.addingTimeInterval(3600),
+            endAt: base.addingTimeInterval(7200), lessonID: "nonexistent-edit-link"))
+        XCTAssertEqual(edited.lessonID, linked.lessonID)
+        XCTAssertEqual(edited.linkedTitleSnapshot, linked.linkedTitleSnapshot)
+        XCTAssertEqual(edited.startAt, base.addingTimeInterval(3600))
+    }
+
+    func testMissingUnreadableAndFailedLinkedWritesNeverCreateUnlinkedBlock() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let linked = ScheduleInput(title: "Study", startAt: base,
+            endAt: base.addingTimeInterval(3600), lessonID: "lesson-1")
+        var saves = 0
+        let writer = SwiftDataScheduleRepository(container: container, makeID: { self.first },
+            save: { context in saves += 1; try context.save() })
+        XCTAssertThrowsError(try writer.create(input: linked)) {
+            XCTAssertEqual($0 as? ScheduleRepositoryError, .lessonNotFound("lesson-1"))
+        }
+        try seedLesson(container, title: "  ")
+        XCTAssertThrowsError(try writer.create(input: linked)) {
+            XCTAssertEqual($0 as? ScheduleRepositoryError, .lessonUnreadable("lesson-1"))
+        }
+        let context = ModelContext(container)
+        try XCTUnwrap(context.fetch(FetchDescriptor<LessonDefinition>()).first).title = "Ready"
+        try context.save()
+        let unreadable = SwiftDataScheduleRepository(container: container,
+            fetchLessons: { _ in throw Injected.failed })
+        XCTAssertThrowsError(try unreadable.create(input: linked)) {
+            XCTAssertEqual($0 as? ScheduleRepositoryError, .lessonUnreadable("lesson-1"))
+        }
+        let failing = SwiftDataScheduleRepository(container: container, makeID: { self.first },
+            save: { _ in throw Injected.failed })
+        XCTAssertThrowsError(try failing.create(input: linked)) {
+            XCTAssertEqual($0 as? ScheduleRepositoryError, .persistence)
+        }
+        XCTAssertEqual(saves, 0)
+        XCTAssertTrue(try rows(container).isEmpty)
+        XCTAssertEqual(try writer.create(input: linked).linkedTitleSnapshot, "Ready")
+        XCTAssertEqual(saves, 1)
+        XCTAssertEqual(try rows(container).count, 1)
     }
 
     func testInvalidInputsNeverAllocateReadOrSave() throws {
@@ -248,6 +334,33 @@ final class ScheduleRepositoryTests: XCTestCase {
         }.conflicts.count, 2)
         XCTAssertEqual(ids, 1)
         XCTAssertEqual(saves, 1)
+        XCTAssertEqual(try rows(container), [peer, saved])
+    }
+
+    func testChangingLessonInvalidatesKeepBothAndFailedResolutionRetainsPeers() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        try seedLesson(container)
+        try seedLesson(container, id: "lesson-2", title: "Second lesson")
+        let peer = try repository(container, id: first).create(input: input("Peer", 0, 3600))
+        let writer = repository(container, id: second)
+        func linked(_ id: String) -> ScheduleInput {
+            ScheduleInput(title: "Study", startAt: base.addingTimeInterval(1800),
+                          endAt: base.addingTimeInterval(5400), lessonID: id)
+        }
+        let old = try warning { try writer.create(input: linked("lesson-1")) }
+        XCTAssertEqual(try warning {
+            try writer.create(input: linked("lesson-2"), allowOverlap: true, review: old)
+        }.conflicts.count, 1)
+        XCTAssertEqual(try rows(container), [peer])
+        XCTAssertThrowsError(try writer.create(input: linked("missing"), allowOverlap: true,
+                                                review: old)) {
+            XCTAssertEqual($0 as? ScheduleRepositoryError, .lessonNotFound("missing"))
+        }
+        XCTAssertEqual(try rows(container), [peer])
+        let fresh = try warning { try writer.create(input: linked("lesson-2")) }
+        let saved = try writer.create(input: linked("lesson-2"), allowOverlap: true, review: fresh)
+        XCTAssertEqual(saved.lessonID, "lesson-2")
+        XCTAssertEqual(saved.linkedTitleSnapshot, "Second lesson")
         XCTAssertEqual(try rows(container), [peer, saved])
     }
 

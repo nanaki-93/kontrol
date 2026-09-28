@@ -40,6 +40,22 @@ final class ScheduleSelectionTests: XCTestCase {
             .validated().note)
     }
 
+    func testValidationPreservesOptionalLessonIDAndEqualityDistinguishesLinks() throws {
+        let start = date("2026-06-05T10:00:00Z")
+        let end = start.addingTimeInterval(3600)
+        let linked = ScheduleInput(title: " Study ", startAt: start, endAt: end,
+                                   note: " Note ", lessonID: "lesson-1")
+        XCTAssertEqual(try linked.validated(), ScheduleInput(title: "Study", startAt: start,
+            endAt: end, note: "Note", lessonID: "lesson-1"))
+        XCTAssertEqual(linked.lessonID, "lesson-1")
+        XCTAssertNotEqual(linked, ScheduleInput(title: " Study ", startAt: start, endAt: end,
+                                                note: " Note ", lessonID: "lesson-2"))
+        XCTAssertNotEqual(linked, ScheduleInput(title: " Study ", startAt: start, endAt: end,
+                                                note: " Note "))
+        XCTAssertNil(try ScheduleInput(title: "Study", startAt: start, endAt: end)
+            .validated().lessonID)
+    }
+
     func testValidationRejectsBlankAndNonFiniteOrUnorderedEndpoints() {
         let start = date("2026-06-05T10:00:00Z")
         let end = start.addingTimeInterval(60)

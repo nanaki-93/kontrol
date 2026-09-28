@@ -158,6 +158,32 @@ final class ScheduleStoreTests: XCTestCase {
         XCTAssertNil(store.mutationError)
     }
 
+    func testLinkedResolutionErrorsAreClassifiedWithoutPublishingOrLosingDraftLink() throws {
+        let spy = try makeSpy()
+        let store = ScheduleStore(repository: spy)
+        store.refresh()
+        let linked = ScheduleInput(title: "Study", startAt: start,
+            endAt: start.addingTimeInterval(3600), lessonID: "missing")
+        XCTAssertThrowsError(try store.create(input: linked)) {
+            XCTAssertEqual($0 as? ScheduleRepositoryError, .lessonNotFound("missing"))
+        }
+        XCTAssertEqual(store.mutationError, .lessonNotFound)
+        XCTAssertTrue(store.mutationError!.message.contains("Choose another lesson"))
+        XCTAssertEqual(linked.lessonID, "missing")
+        XCTAssertTrue(store.snapshots.isEmpty)
+        XCTAssertEqual(spy.fetchCount, 1)
+        XCTAssertEqual(try spy.storage.fetchAll(), [])
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let unreadableStore = ScheduleStore(repository: SwiftDataScheduleRepository(
+            container: container, fetchLessons: { _ in throw Injected.read }))
+        XCTAssertThrowsError(try unreadableStore.create(input: linked)) {
+            XCTAssertEqual($0 as? ScheduleRepositoryError, .lessonUnreadable("missing"))
+        }
+        XCTAssertEqual(unreadableStore.mutationError, .lessonUnreadable)
+        XCTAssertTrue(unreadableStore.mutationError!.message.contains("Retry"))
+        XCTAssertTrue(unreadableStore.snapshots.isEmpty)
+    }
+
     func testReviewedOverlapPublishesOnlyCommittedTargetAndNeverRefetches() throws {
         let spy = try makeSpy()
         let store = ScheduleStore(repository: spy)

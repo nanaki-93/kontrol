@@ -23,6 +23,8 @@ enum ScheduleReadState: Equatable {
 enum ScheduleMutationError: Equatable {
     case validation(ScheduleValidationError)
     case notFound
+    case lessonNotFound
+    case lessonUnreadable
     case overlap
     case persistence
 
@@ -30,6 +32,8 @@ enum ScheduleMutationError: Equatable {
         switch self {
         case .validation: return "Check the block title and times, then try again."
         case .notFound: return "This block is no longer available. Refresh the list and try again."
+        case .lessonNotFound: return "This lesson is no longer available. Choose another lesson or remove the link, then save again."
+        case .lessonUnreadable: return "Could not read this lesson. Retry, choose another lesson, or remove the link."
         case .overlap: return "This time overlaps another block. Review the conflicts before saving."
         case .persistence: return "Could not save the block. Please try again."
         }
@@ -129,6 +133,8 @@ final class ScheduleStore: ObservableObject {
             switch error {
             case ScheduleRepositoryError.validation(let reason): mutationError = .validation(reason)
             case ScheduleRepositoryError.overlap: mutationError = .overlap
+            case ScheduleRepositoryError.lessonNotFound: mutationError = .lessonNotFound
+            case ScheduleRepositoryError.lessonUnreadable: mutationError = .lessonUnreadable
             case ScheduleRepositoryError.notFound:
                 mutationError = .notFound
                 // A second owner may have deleted it; failed refresh keeps stale rows.

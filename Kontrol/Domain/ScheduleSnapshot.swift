@@ -13,12 +13,15 @@ struct ScheduleInput: Equatable {
     let startAt: Date
     let endAt: Date
     let note: String?
+    let lessonID: String?
 
-    init(title: String, startAt: Date, endAt: Date, note: String? = nil) {
+    init(title: String, startAt: Date, endAt: Date, note: String? = nil,
+         lessonID: String? = nil) {
         self.title = title
         self.startAt = startAt
         self.endAt = endAt
         self.note = note
+        self.lessonID = lessonID
     }
 
     func validated() throws -> ScheduleInput {
@@ -33,7 +36,8 @@ struct ScheduleInput: Equatable {
         guard endAt > startAt else { throw ScheduleValidationError.endNotAfterStart }
         let trimmedNote = note?.trimmingCharacters(in: .whitespacesAndNewlines)
         return ScheduleInput(title: trimmedTitle, startAt: startAt, endAt: endAt,
-                             note: trimmedNote.flatMap { $0.isEmpty ? nil : $0 })
+                             note: trimmedNote.flatMap { $0.isEmpty ? nil : $0 },
+                             lessonID: lessonID)
     }
 }
 
