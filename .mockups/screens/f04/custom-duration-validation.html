@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>F04 · Custom duration validation</title>
+<link rel="stylesheet" href="../../design-system/tokens.css">
+<link rel="stylesheet" href="../../design-system/components.css">
+<style>
+  body { margin: 0; background: var(--color-background); color: var(--color-text-primary); font: var(--type-body)/var(--leading-body) var(--font-mono); }
+  .mock-meta { padding: var(--space-2) var(--space-6); border-bottom: 1px solid var(--color-border); color: var(--color-text-secondary); font-size: var(--type-metadata); }
+  .mock-meta strong { color: var(--color-text-primary); }
+  main { max-width: 1000px; margin: auto; padding: var(--space-8) var(--space-6); }
+  .field { max-width: 480px; margin: var(--space-8) 0 var(--space-6); }
+  label, .field p { display: block; margin: 0 0 var(--space-2); }
+  input { width: 100%; min-height: 36px; padding: var(--space-2); background: var(--color-surface); color: var(--color-text-primary); border: 1px solid var(--color-control-boundary); border-radius: var(--radius-small); font: inherit; }
+  input:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 3px; }
+  input[aria-invalid="true"] { border-color: var(--color-error); }
+  .field p { margin-top: var(--space-2); color: var(--color-text-secondary); }
+  .field .validation { color: var(--color-text-primary); }
+  .actions { display: flex; flex-wrap: wrap; gap: var(--space-3); margin-top: var(--space-6); }
+</style>
+</head>
+<body>
+<header class="mock-meta"><strong>F04 · M10 extension · Custom duration</strong> — static invalid state; values shown are reference copy, not session data.</header>
+<main>
+  <header class="page-header"><div class="page-header__content"><h3>Focus</h3><span class="page-header__meta">Ready · No session started</span></div></header>
+  <section aria-labelledby="duration-heading">
+    <h2 id="duration-heading" class="type-section">Duration</h2>
+    <p>Choose 15, 25 (default), 50 minutes, or Custom before starting.</p>
+    <div class="field">
+      <label for="custom">Custom · whole minutes</label>
+      <input id="custom" type="text" inputmode="numeric" value="" aria-invalid="true" aria-describedby="custom-error custom-hint">
+      <p id="custom-error" class="validation" role="alert">Enter a positive whole number of minutes before starting.</p>
+      <p id="custom-hint">Blank, fractions, zero, negative values, and numbers too large to convert to seconds are not valid. Correct the value or select a preset.</p>
+    </div>
+    <div class="actions"><button type="button" class="btn btn--primary" disabled>Start</button><button type="button" class="btn">Choose a preset</button></div>
+  </section>
+</main>
+</body>
+</html>

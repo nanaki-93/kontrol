@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>F04 · No available task selection</title>
+<link rel="stylesheet" href="../../design-system/tokens.css">
+<link rel="stylesheet" href="../../design-system/components.css">
+<style>
+  body { margin: 0; background: var(--color-background); color: var(--color-text-primary); font: var(--type-body)/var(--leading-body) var(--font-mono); }
+  .mock-meta { padding: var(--space-2) var(--space-6); border-bottom: 1px solid var(--color-border); color: var(--color-text-secondary); font-size: var(--type-metadata); }
+  .mock-meta strong { color: var(--color-text-primary); }
+  main { max-width: 1000px; margin: auto; padding: var(--space-8) var(--space-6); }
+  .countdown { margin: var(--space-6) 0; color: var(--color-accent); font-size: clamp(40px, 8vw, 72px); line-height: 1.25; }
+  .detail { max-width: 720px; padding: var(--space-4) 0; border-bottom: 1px solid var(--color-border); }
+  .detail h2 { margin: 0 0 var(--space-2); }
+  .detail p { margin: 0 0 var(--space-3); color: var(--color-text-secondary); }
+  .actions { display: flex; flex-wrap: wrap; gap: var(--space-3); margin-top: var(--space-6); }
+</style>
+</head>
+<body>
+<header class="mock-meta"><strong>F04 · M10 extension · No open tasks</strong> — static unlinked configuration; duration is the documented default, not sample data.</header>
+<main>
+  <header class="page-header"><div class="page-header__content"><h3>Focus</h3><span class="page-header__meta">Ready · No session started</span></div></header>
+  <p class="countdown" aria-label="Default duration: 25 minutes">25:00</p>
+  <section class="detail" aria-labelledby="task-heading">
+    <h2 id="task-heading" class="type-section">Linked task · None</h2>
+    <div class="empty-state"><div class="empty-state__copy"><strong>No open tasks to link</strong><p>Task links are optional. Start without a task, or create an open task in Tasks and return to choose it before starting.</p></div></div>
+    <button type="button" class="btn" disabled>Choose task (none available)</button>
+  </section>
+  <section class="detail" aria-label="Duration"><h2 class="type-section">Duration</h2><p>25 minutes · default; choose 15, 50, or Custom before starting.</p></section>
+  <div class="actions"><button type="button" class="btn btn--primary">Start without task</button><button type="button" class="btn">Sessions</button></div>
+</main>
+</body>
+</html>

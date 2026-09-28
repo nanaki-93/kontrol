@@ -17,11 +17,11 @@ Each row links a function to an actual PNG mockup. SVG sources sit beside the PN
 | [F03](../features/F03-today-schedule.md) | Select day and open linked items | [M06 · Today](M06-today.png) |
 | [F03](../features/F03-today-schedule.md) | Add, move, edit or delete a schedule block | [M07 · Today](M07-schedule-editor.png) · [Endpoint/validation states](../../.mockups/screens/f03/schedule-editor-endpoints.html) |
 | [F03](../features/F03-today-schedule.md) | Resolve overlap | [M08 · Today](M08-schedule-overlap.png) · [Multiple-conflict decision](../../.mockups/screens/f03/schedule-overlap-multiple.html) |
-| [F04](../features/F04-focus.md) | Configure duration and optional link | [M10 · Focus](M10-focus-ready.png) |
-| [F04](../features/F04-focus.md) | Run session | [M11 · Focus](M11-focus-running.png) |
+| [F04](../features/F04-focus.md) | Configure duration and optional link | [M10 · Focus](M10-focus-ready.png) · [Custom duration validation](../../.mockups/screens/f04/custom-duration-validation.html) · [No open tasks](../../.mockups/screens/f04/no-available-tasks.html) |
+| [F04](../features/F04-focus.md) | Run session | [M11 · Focus](M11-focus-running.png) · [Read/Start persistence failure](../../.mockups/screens/f04/persistence-failure.html) |
 | [F04](../features/F04-focus.md) | Pause or resume | [M12 · Focus](M12-focus-paused.png) |
 | [F04](../features/F04-focus.md) | Recover after relaunch | [M13 · Focus](M13-focus-recovery.png) |
-| [F04](../features/F04-focus.md) | End/completed session and history | [M14 · Sessions](M14-focus-history.png) |
+| [F04](../features/F04-focus.md) | End/completed session and history | [M14 · Sessions](M14-focus-history.png) · [Completion pending save](../../.mockups/screens/f04/completion-pending.html) · [F04 variant overview](../../.mockups/screens/f04/index.html) |
 | [F05](../features/F05-learning-catalog.md) | Choose topic and inspect seeded lessons | [M15 · Learning](M15-learning-choices.png) |
 | [F06](../features/F06-lesson-experience.md) | Learn format | [M16 · Context cancellation](M16-lesson-learn.png) |
 | [F06](../features/F06-lesson-experience.md) | Code format | [M17 · Table-driven tests](M17-lesson-code.png) |
