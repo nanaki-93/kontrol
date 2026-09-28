@@ -155,12 +155,37 @@ final class CatalogImportTests: XCTestCase {
         XCTAssertEqual(attempt.selfCheckAcknowledgedAt, timestamp)
         XCTAssertEqual(attempt.completedAt, timestamp)
         XCTAssertEqual(attempt.completedContentSnapshot, snapshot)
+        XCTAssertNil(attempt.pinnedContentData, "Completed V4 snapshots are immutable")
         let draft = try XCTUnwrap(allAttempts.first { $0.id == draftID })
         XCTAssertEqual(draft.lessonID, startedID)
         XCTAssertEqual(draft.contentVersion, original.value.lessons[1].contentVersion)
         XCTAssertEqual(draft.answerDraft, "unfinished private draft")
         XCTAssertNil(draft.completedAt)
         XCTAssertNil(draft.completedContentSnapshot)
+        let oldStudied = try PinnedLessonContent.decode(draft.pinnedContentData,
+            lessonID: startedID, contentVersion: draft.contentVersion)
+        XCTAssertEqual(oldStudied.definition, LessonDefinitionSnapshot(
+            id: original.value.lessons[1].id,
+            objectiveKey: original.value.lessons[1].objectiveKey,
+            objective: original.value.lessons[1].objective,
+            title: original.value.lessons[1].title,
+            topicID: original.value.lessons[1].topicID,
+            subtopicID: original.value.lessons[1].subtopicID,
+            conceptIDs: original.value.lessons[1].conceptIDs,
+            difficulty: original.value.lessons[1].difficulty,
+            format: original.value.lessons[1].format,
+            estimatedMinutes: original.value.lessons[1].estimatedMinutes,
+            prerequisiteConceptIDs: original.value.lessons[1].prerequisiteConceptIDs,
+            explanation: original.value.lessons[1].explanation,
+            workedExample: original.value.lessons[1].workedExample,
+            exercise: original.value.lessons[1].exercise,
+            referenceAnswer: original.value.lessons[1].referenceAnswer,
+            selfCheckCriteria: original.value.lessons[1].selfCheckCriteria,
+            contentVersion: original.value.lessons[1].contentVersion,
+            normalizedContentHash: original.value.lessons[1].normalizedContentHash,
+            source: original.value.lessons[1].source,
+            provenance: original.value.lessons[1].provenance))
+        XCTAssertEqual(draft.revision, 0)
         let started = try XCTUnwrap(allProgress.first { $0.lessonID == startedID })
         XCTAssertEqual(started.status, .started)
         XCTAssertEqual(started.firstShownAt, timestamp)
@@ -671,6 +696,125 @@ final class CatalogImportTests: XCTestCase {
                         .map(\.lastImportedVersion), upgradedStore ? [seed.value.version] : [])
                 }
             }
+        }
+    }
+
+    func testLegacyPinsAndUnavailableVersionsCommitAtomicallyWithUpgradeOnDisk() throws {
+        let seed = try catalog()
+        var changed = try revised(seed).value
+        // Upgrade the matching legacy exercise as well as the first lesson.
+        changed.lessons[1].contentVersion += 1
+        changed.lessons[1].exercise = "New exercise must not replace the studied one"
+        changed.lessons[1].normalizedContentHash = CatalogValidator.fingerprint(for: changed.lessons[1])
+        // The incoming version happens to match the unrecoverable attempt, but
+        // the installed version did not. Never pin the incoming definition.
+        changed.lessons[2].contentVersion += 1
+        changed.lessons[2].exercise = "Incoming exercise is not the studied one"
+        changed.lessons[2].normalizedContentHash = CatalogValidator.fingerprint(for: changed.lessons[2])
+        let upgrade = try CatalogValidator.validate(changed)
+        let matching = seed.value.lessons[1]
+        let mismatched = seed.value.lessons[2]
+        let completed = seed.value.lessons[0]
+        let matchID = UUID(), mismatchID = UUID(), completeID = UUID()
+        let oldSnapshot = KontrolSchemaV1.LessonContentSnapshot(
+            title: completed.title, objectiveKey: completed.objectiveKey,
+            conceptIDs: completed.conceptIDs, difficulty: completed.difficulty,
+            format: completed.format, explanation: completed.explanation,
+            workedExample: completed.workedExample, exercise: completed.exercise,
+            referenceAnswer: completed.referenceAnswer, selfCheckCriteria: completed.selfCheckCriteria)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "KontrolLegacyImport-\(UUID().uuidString)/Kontrol.store")
+        let baselineSlots: [LessonSlotSnapshot] = try autoreleasepool {
+            let container = try ModelContainerFactory().makeContainer(mode: .persistent(url))
+            let repository = SwiftDataCatalogRepository(container: container)
+            XCTAssertEqual(try repository.importIfNeeded(seed), .imported)
+            let context = ModelContext(container)
+            context.insert(LessonAttempt(id: matchID, lessonID: matching.id,
+                                         contentVersion: matching.contentVersion,
+                                         answerDraft: "  old draft 🧪\n    line\n"))
+            context.insert(LessonAttempt(id: mismatchID, lessonID: mismatched.id,
+                                         contentVersion: mismatched.contentVersion + 1,
+                                         answerDraft: "unrecoverable answer"))
+            context.insert(LessonAttempt(id: completeID, lessonID: completed.id,
+                                         contentVersion: completed.contentVersion,
+                                         answerDraft: "completed answer", completedAt: Date(timeIntervalSince1970: 10),
+                                         completedContentSnapshot: oldSnapshot))
+            context.insert(LessonProgress(lessonID: matching.id, status: .started))
+            try context.save()
+            return try repository.loadSnapshot().slots
+        }
+        for failure in ["beforeSave", "save"] {
+            try autoreleasepool {
+                let container = try ModelContainerFactory().makeContainer(mode: .persistent(url))
+                let failing = SwiftDataCatalogRepository(container: container,
+                    beforeSave: { if failure == "beforeSave" { throw Injected.failure } },
+                    save: { context in
+                        if failure == "save" { throw Injected.failure }
+                        try context.save()
+                    })
+                XCTAssertThrowsError(try failing.importIfNeeded(upgrade)) {
+                    XCTAssertTrue($0 is Injected)
+                }
+            }
+            try autoreleasepool {
+                let reopened = try ModelContainerFactory().makeContainer(mode: .persistent(url))
+                let attempts = try records(LessonAttempt.self, in: reopened)
+                XCTAssertEqual(attempts.count, 3)
+                XCTAssertTrue(attempts.allSatisfy { $0.pinnedContentData == nil && $0.revision == 0 })
+                XCTAssertEqual(attempts.first { $0.id == matchID }?.answerDraft, "  old draft 🧪\n    line\n")
+                XCTAssertEqual(attempts.first { $0.id == mismatchID }?.contentVersion,
+                               mismatched.contentVersion + 1)
+                XCTAssertEqual(attempts.first { $0.id == completeID }?.completedContentSnapshot, oldSnapshot)
+                XCTAssertEqual(try records(CatalogImportState.self, in: reopened).map(\.lastImportedVersion),
+                               [seed.value.version])
+                XCTAssertEqual(try records(LessonDefinition.self, in: reopened).first {
+                    $0.id == matching.id
+                }?.exercise, matching.exercise)
+                XCTAssertEqual(try SwiftDataCatalogRepository(container: reopened).loadSnapshot().slots,
+                               baselineSlots)
+            }
+        }
+        try autoreleasepool {
+            let container = try ModelContainerFactory().makeContainer(mode: .persistent(url))
+            XCTAssertEqual(try SwiftDataCatalogRepository(container: container).importIfNeeded(upgrade), .imported)
+        }
+        try autoreleasepool {
+            let reopened = try ModelContainerFactory().makeContainer(mode: .persistent(url))
+            let attempts = try records(LessonAttempt.self, in: reopened)
+            let match = try XCTUnwrap(attempts.first { $0.id == matchID })
+            let pin = try PinnedLessonContent.decode(match.pinnedContentData,
+                lessonID: matching.id, contentVersion: matching.contentVersion)
+            XCTAssertEqual(pin.definition.exercise, matching.exercise)
+            XCTAssertEqual(pin.definition.title, matching.title)
+            XCTAssertEqual(match.answerDraft, "  old draft 🧪\n    line\n")
+            XCTAssertEqual(match.revision, 0)
+            let mismatch = try XCTUnwrap(attempts.first { $0.id == mismatchID })
+            XCTAssertNil(mismatch.pinnedContentData)
+            XCTAssertEqual(mismatch.contentVersion, mismatched.contentVersion + 1)
+            XCTAssertEqual(mismatch.answerDraft, "unrecoverable answer")
+            let unavailable = LessonAttemptSnapshot(
+                id: mismatch.id, lessonID: mismatch.lessonID, contentVersion: mismatch.contentVersion,
+                answerDraft: mismatch.answerDraft, pinnedContentData: mismatch.pinnedContentData)
+            XCTAssertEqual(try LessonExperience.studiedContent(unavailable), .unavailable)
+            XCTAssertThrowsError(try LessonExperience.complete(unavailable,
+                progress: LessonProgressSnapshot(lessonID: mismatch.lessonID, status: .started,
+                                                 startedAt: Date(timeIntervalSince1970: 1)),
+                expectedRevision: 0, now: Date(timeIntervalSince1970: 2))) {
+                XCTAssertEqual($0 as? LessonExperienceError, .contentUnavailable)
+            }
+            XCTAssertThrowsError(try PinnedLessonContent.decode(mismatch.pinnedContentData,
+                lessonID: mismatch.lessonID, contentVersion: mismatch.contentVersion)) {
+                XCTAssertEqual($0 as? LessonExperienceError, .contentUnavailable)
+            }
+            let archive = try XCTUnwrap(attempts.first { $0.id == completeID })
+            XCTAssertNil(archive.pinnedContentData)
+            XCTAssertEqual(archive.completedContentSnapshot, oldSnapshot)
+            XCTAssertEqual(archive.answerDraft, "completed answer")
+            XCTAssertEqual(try records(CatalogImportState.self, in: reopened).map(\.lastImportedVersion),
+                           [upgrade.value.version])
+            XCTAssertEqual(try records(LessonDefinition.self, in: reopened).first {
+                $0.id == matching.id
+            }?.exercise, changed.lessons[1].exercise)
         }
     }
 

@@ -87,6 +87,18 @@ final class SwiftDataCatalogRepository: CatalogRepository {
             }
         }
 
+        // Capture the installed version before any definition is overwritten. A
+        // migrated V4 draft has no pin; a newer catalog is never evidence of
+        // what its author saw. Nil remains the explicit unavailable state for
+        // missing/mismatched content (the answer and version stay untouched).
+        for attempt in try context.fetch(FetchDescriptor<LessonAttempt>())
+            where attempt.completedAt == nil && attempt.pinnedContentData == nil {
+            guard let installed = lessons[attempt.lessonID],
+                  installed.contentVersion == attempt.contentVersion else { continue }
+            attempt.pinnedContentData = try PinnedLessonContent(
+                definition: Self.definitionSnapshot(installed)).encoded()
+        }
+
         for item in value.topics {
             if let existing = topics[item.id] {
                 existing.name = item.name
@@ -218,19 +230,8 @@ final class SwiftDataCatalogRepository: CatalogRepository {
             LearningConceptSnapshot(id: $0.id, subtopicID: $0.subtopicID, name: $0.name,
                                     prerequisiteConceptIDs: $0.prerequisiteConceptIDs)
         }.sorted { $0.id < $1.id }
-        let definitions = try context.fetch(FetchDescriptor<LessonDefinition>()).map { item in
-            LessonDefinitionSnapshot(id: item.id, objectiveKey: item.objectiveKey,
-                objective: item.objective, title: item.title, topicID: item.topicID,
-                subtopicID: item.subtopicID, conceptIDs: item.conceptIDs,
-                difficulty: item.difficulty, format: item.format,
-                estimatedMinutes: item.estimatedMinutes,
-                prerequisiteConceptIDs: item.prerequisiteConceptIDs,
-                explanation: item.explanation, workedExample: item.workedExample,
-                exercise: item.exercise, referenceAnswer: item.referenceAnswer,
-                selfCheckCriteria: item.selfCheckCriteria, contentVersion: item.contentVersion,
-                normalizedContentHash: item.normalizedContentHash, source: item.source,
-                provenance: item.provenance)
-        }.sorted { $0.id < $1.id }
+        let definitions = try context.fetch(FetchDescriptor<LessonDefinition>())
+            .map(Self.definitionSnapshot).sorted { $0.id < $1.id }
         let progress = try context.fetch(FetchDescriptor<LessonProgress>()).map { item in
             LessonProgressSnapshot(lessonID: item.lessonID,
                 status: LessonProgressStatus(rawValue: item.status.rawValue)!,
@@ -252,6 +253,20 @@ final class SwiftDataCatalogRepository: CatalogRepository {
         try LessonSelector.validateSlotIdentities(slots)
         return LearningCatalogSnapshot(topics: topics, subtopics: subtopics,
             concepts: concepts, definitions: definitions, progress: progress, slots: slots)
+    }
+
+    private static func definitionSnapshot(_ item: LessonDefinition) -> LessonDefinitionSnapshot {
+        LessonDefinitionSnapshot(id: item.id, objectiveKey: item.objectiveKey,
+            objective: item.objective, title: item.title, topicID: item.topicID,
+            subtopicID: item.subtopicID, conceptIDs: item.conceptIDs,
+            difficulty: item.difficulty, format: item.format,
+            estimatedMinutes: item.estimatedMinutes,
+            prerequisiteConceptIDs: item.prerequisiteConceptIDs,
+            explanation: item.explanation, workedExample: item.workedExample,
+            exercise: item.exercise, referenceAnswer: item.referenceAnswer,
+            selfCheckCriteria: item.selfCheckCriteria, contentVersion: item.contentVersion,
+            normalizedContentHash: item.normalizedContentHash, source: item.source,
+            provenance: item.provenance)
     }
 
     // The content fingerprint covers teaching sections only. Metadata, including

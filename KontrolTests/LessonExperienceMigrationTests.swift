@@ -141,6 +141,66 @@ final class LessonExperienceMigrationTests: XCTestCase {
         XCTAssertEqual(try context.fetch(FetchDescriptor<FocusSession>()).first?.linkedLessonID, "draft")
     }
 
+    func testMigratedV4DraftPinsInstalledExerciseBeforeCatalogOverwritesIt() throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("KontrolV4Pin-\(UUID())")
+        let writer = base.appendingPathComponent("writer/Kontrol.store")
+        let copy = base.appendingPathComponent("copy/Kontrol.store")
+        try FileManager.default.createDirectory(at: writer.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: copy.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        try seedV4(writer)
+        try backup(writer, to: copy)
+        var catalog = try BundledCatalogLoader.load(from: Bundle.main).value
+        catalog.catalogID = "starter"
+        catalog.version = 18
+        catalog.topics = [TopicDTO(id: "topic", name: "Revised topic")]
+        catalog.subtopics = [SubtopicDTO(id: "subtopic", topicID: "topic", name: "Subtopic")]
+        catalog.concepts = [ConceptDTO(id: "concept", subtopicID: "subtopic", name: "Concept",
+                                       prerequisiteConceptIDs: [])]
+        var revised = catalog.lessons[0]
+        revised.id = "draft"
+        revised.objectiveKey = "old-objective"
+        revised.objective = "Revised objective"
+        revised.title = "Revised title"
+        revised.topicID = "topic"
+        revised.subtopicID = "subtopic"
+        revised.conceptIDs = ["concept"]
+        revised.prerequisiteConceptIDs = []
+        revised.contentVersion = 10
+        revised.exercise = "Replacement exercise"
+        revised.normalizedContentHash = CatalogValidator.fingerprint(for: revised)
+        catalog.lessons = [revised]
+        let upgrade = try CatalogValidator.validate(catalog)
+        try autoreleasepool {
+            let container = try factory.makeContainer(mode: .persistent(copy))
+            try assertMigrated(container)
+            XCTAssertEqual(try SwiftDataCatalogRepository(container: container).importIfNeeded(upgrade), .imported)
+        }
+        try autoreleasepool {
+            let reopened = try factory.makeContainer(mode: .persistent(copy))
+            let context = ModelContext(reopened)
+            let attempts = try context.fetch(FetchDescriptor<LessonAttempt>())
+            let draft = try XCTUnwrap(attempts.first { $0.id == draftID })
+            let pin = try PinnedLessonContent.decode(draft.pinnedContentData,
+                lessonID: "draft", contentVersion: 9)
+            XCTAssertEqual(pin.definition.title, "Studied title")
+            XCTAssertEqual(pin.definition.exercise, "Old exercise")
+            XCTAssertEqual(pin.definition.objective, "Original objective")
+            XCTAssertEqual(pin.definition.normalizedContentHash, "hash-draft")
+            XCTAssertEqual(draft.answerDraft, "  Unicode 🧪\n    indented\n\n")
+            XCTAssertEqual(draft.revision, 0)
+            XCTAssertEqual(try context.fetch(FetchDescriptor<LessonDefinition>()).first {
+                $0.id == "draft"
+            }?.exercise, "Replacement exercise")
+            let archived = try XCTUnwrap(attempts.first { $0.id == completedID })
+            XCTAssertNil(archived.pinnedContentData)
+            XCTAssertEqual(archived.completedContentSnapshot, snapshot())
+            XCTAssertEqual(archived.contentVersion, 8)
+            XCTAssertEqual(try context.fetch(FetchDescriptor<CatalogImportState>()).first?.lastImportedVersion, 18)
+        }
+    }
+
     func testCopiedRichV4MigratesLightweightAndReopensWithoutModifyingSource() throws {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent("KontrolV5-\(UUID())")
         let writer = base.appendingPathComponent("writer", isDirectory: true)
