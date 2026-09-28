@@ -257,7 +257,9 @@ final class QuickCaptureTests: XCTestCase {
             host.layoutSubtreeIfNeeded()
             XCTAssertEqual(AXUIElementPerformAction(try waitForElement("today-add-task", in: window),
                                                      kAXPressAction as CFString), .success)
-            _ = try waitForElement("quick-capture-title", in: window)
+            let title = try waitForElement("quick-capture-title", in: window)
+            XCTAssertGreaterThan(try frame(of: title).height, 20,
+                                 "Title must render, not just exist in the AX tree")
             heights.append(try XCTUnwrap(window.attachedSheet).frame.height)
             try assertVisibleActions(in: window)
             XCTAssertEqual(focusedIdentifier(), "quick-capture-title")
@@ -302,6 +304,8 @@ final class QuickCaptureTests: XCTestCase {
             XCTAssertEqual(AXUIElementPerformAction(try waitForElement("today-add-task", in: window),
                                                      kAXPressAction as CFString), .success)
             let title = try waitForElement("quick-capture-title", in: window)
+            XCTAssertGreaterThan(try frame(of: title).height, 20,
+                                 "Title must remain visibly editable at enlarged text")
             XCTAssertEqual(focusedIdentifier(), "quick-capture-title")
             XCTAssertEqual(attribute(title, kAXRoleAttribute) as? String, kAXTextFieldRole)
             XCTAssertNotNil(try waitForElement("quick-capture-plan", in: window))

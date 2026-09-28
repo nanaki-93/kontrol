@@ -32,9 +32,15 @@ final class SettingsSceneTests: XCTestCase {
 
     private func axWindow(_ window: NSWindow) throws -> AXUIElement {
         let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
-        return try XCTUnwrap((axAttribute(app, kAXWindowsAttribute) as? [AXUIElement])?.first {
-            axAttribute($0, kAXTitleAttribute) as? String == window.title
-        })
+        var match: AXUIElement?
+        let deadline = Date().addingTimeInterval(2)
+        repeat {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            match = (axAttribute(app, kAXWindowsAttribute) as? [AXUIElement])?.first {
+                axAttribute($0, kAXTitleAttribute) as? String == window.title
+            }
+        } while match == nil && Date() < deadline
+        return try XCTUnwrap(match, "Hosted Settings window did not enter the AX tree")
     }
 
     private func axFrame(_ element: AXUIElement) throws -> CGRect {
@@ -54,6 +60,7 @@ final class SettingsSceneTests: XCTestCase {
         let host = NSHostingView(rootView: FoundationView(destination: .projects)
             .environment(\.appTextScaleOverride, 1.3))
         window.contentView = host
+        window.center()
         window.makeKeyAndOrderFront(nil)
         defer { window.orderOut(nil) }
         let appAX = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
@@ -70,12 +77,14 @@ final class SettingsSceneTests: XCTestCase {
             host.rootView = FoundationView(destination: destination)
                 .environment(\.appTextScaleOverride, 1.3)
             host.layoutSubtreeIfNeeded()
-            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
-            var windows: CFTypeRef?
-            XCTAssertEqual(AXUIElementCopyAttributeValue(appAX, kAXWindowsAttribute as CFString, &windows), .success)
-            let axWindow = try XCTUnwrap((windows as? [AXUIElement])?.first {
-                attribute($0, kAXTitleAttribute) as? String == window.title
-            })
+            var destinationWindow: AXUIElement?
+            let deadline = Date().addingTimeInterval(2)
+            repeat {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+                let windows = attribute(appAX, kAXWindowsAttribute) as? [AXUIElement] ?? []
+                destinationWindow = windows.first { attribute($0, kAXTitleAttribute) as? String == window.title }
+            } while destinationWindow == nil && Date() < deadline
+            let axWindow = try XCTUnwrap(destinationWindow)
             let surface = try XCTUnwrap(descendants(axWindow).first {
                 attribute($0, kAXIdentifierAttribute) as? String == "\(destination.rawValue)-content"
             })

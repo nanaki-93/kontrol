@@ -97,7 +97,11 @@ struct QuickCaptureView: View {
             }
             // Only the fields scroll; the header and native actions stay visible.
             .frame(height: min(fieldsHeight, 400))
-            .onPreferenceChange(CaptureContentHeightKey.self) { fieldsHeight = $0 }
+            .onPreferenceChange(CaptureContentHeightKey.self) { measured in
+                // SwiftUI may emit a transient zero when the native sheet first mounts.
+                // Never collapse the only editable field out of the visible scroll area.
+                if measured > 0, measured.isFinite { fieldsHeight = measured }
+            }
             HStack(spacing: AppMetrics.space3) {
                 ActionButton("Cancel", action: onCancel)
                     .keyboardShortcut(.cancelAction)

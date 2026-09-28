@@ -26,14 +26,20 @@ final class LearningPresentationTests: XCTestCase {
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.title = "Learning inspection \(UUID().uuidString)"
         window.contentView = host
+        window.center()
         window.makeKeyAndOrderFront(nil)
         defer { window.orderOut(nil) }
         host.layoutSubtreeIfNeeded()
-        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
         let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
-        let windows = attribute(app, kAXWindowsAttribute) as? [AXUIElement] ?? []
-        let learningWindow = try XCTUnwrap(windows.first { attribute($0, kAXTitleAttribute) as? String == window.title })
-        try check(window, descendants(of: learningWindow))
+        // Window-server AX registration can lag layout when the full hosted suite runs.
+        var learningWindow: AXUIElement?
+        let deadline = Date().addingTimeInterval(2)
+        repeat {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            let windows = attribute(app, kAXWindowsAttribute) as? [AXUIElement] ?? []
+            learningWindow = windows.first { attribute($0, kAXTitleAttribute) as? String == window.title }
+        } while learningWindow == nil && Date() < deadline
+        try check(window, descendants(of: try XCTUnwrap(learningWindow)))
     }
 
     private func frame(_ element: AXUIElement) throws -> CGRect {
@@ -69,20 +75,26 @@ final class LearningPresentationTests: XCTestCase {
         let navigation = NavigationStore(preferences: UserDefaultsDestinationPreferences(defaults: defaults))
         let dependencies = AppDependencies(container: container, catalogRepository: repository)
         XCTAssertEqual(AppShell.contentKind(for: .learning), .learning)
-        let host = NSHostingView(rootView: AppShell(navigation: navigation, dependencies: dependencies))
+        let host = NSHostingView(rootView: AppShell(navigation: navigation, dependencies: dependencies)
+            .environment(\.appTextScaleOverride, CGFloat(1)))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.title = "Learning starter inspection"
         window.contentView = host
+        window.center()
         window.makeKeyAndOrderFront(nil)
         defer { window.orderOut(nil) }
         navigation.select(.learning)
         host.layoutSubtreeIfNeeded()
-        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
         let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
-        let windows = attribute(app, kAXWindowsAttribute) as? [AXUIElement] ?? []
-        let learningWindow = try XCTUnwrap(windows.first { attribute($0, kAXTitleAttribute) as? String == window.title })
-        let elements = descendants(of: learningWindow)
+        var learningWindow: AXUIElement?
+        let deadline = Date().addingTimeInterval(2)
+        repeat {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            let windows = attribute(app, kAXWindowsAttribute) as? [AXUIElement] ?? []
+            learningWindow = windows.first { attribute($0, kAXTitleAttribute) as? String == window.title }
+        } while learningWindow == nil && Date() < deadline
+        let elements = descendants(of: try XCTUnwrap(learningWindow))
         let identifiers = elements.compactMap { attribute($0, kAXIdentifierAttribute) as? String }
         let renderedTopics = identifiers.filter { $0.hasPrefix("learning-topic-") }
         XCTAssertEqual(renderedTopics, summaries.map { "learning-topic-\($0.id)" })
@@ -111,6 +123,25 @@ final class LearningPresentationTests: XCTestCase {
         }
         XCTAssertEqual(elements.filter { attribute($0, kAXRoleAttribute) as? String == kAXButtonRole }.count,
                        AppDestination.allCases.count, "Learning must not offer nonfunctional lesson actions")
+        let captureDirectory = URL(fileURLWithPath: "/tmp/kontrol-f01-evidence/fixtures", isDirectory: true)
+        try FileManager.default.createDirectory(at: captureDirectory, withIntermediateDirectories: true)
+        for size in [CGSize(width: 1000, height: 700), CGSize(width: 1440, height: 940)] {
+            for scale: CGFloat in [1, 1.3] {
+                host.rootView = AppShell(navigation: navigation, dependencies: dependencies)
+                    .environment(\.appTextScaleOverride, scale)
+                window.setContentSize(size)
+                host.layoutSubtreeIfNeeded()
+                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+                let bitmap = try XCTUnwrap(NSBitmapImageRep(
+                    bitmapDataPlanes: nil, pixelsWide: Int(size.width), pixelsHigh: Int(size.height),
+                    bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                    colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+                host.cacheDisplay(in: host.bounds, to: bitmap)
+                let path = captureDirectory.appendingPathComponent(
+                    "learning-\(Int(size.width))x\(Int(size.height))-\(scale == 1 ? "standard" : "130pct").png")
+                try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: path)
+            }
+        }
         XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonProgress>()).isEmpty)
         XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).isEmpty)
     }

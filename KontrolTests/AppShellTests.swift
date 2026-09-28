@@ -157,6 +157,16 @@ final class AppShellTests: XCTestCase {
                 host.cacheDisplay(in: host.bounds, to: bitmap)
                 return try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
             }
+            if scale == 1 || scale == 1.3 {
+                navigation.select(.today)
+                settle()
+                let directory = URL(fileURLWithPath: "/tmp/kontrol-f01-evidence/fixtures", isDirectory: true)
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                try renderedPixels().write(to: directory.appendingPathComponent(
+                    "today-\(Int(size.width))x\(Int(size.height))-\(scale == 1 ? "standard" : "130pct").png"))
+                navigation.select(.settings) // No content action interrupts wraparound tab order.
+                settle()
+            }
             let unfocused = try renderedPixels()
             window.selectNextKeyView(nil)
             settle()
