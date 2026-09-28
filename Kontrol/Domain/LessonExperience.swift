@@ -32,7 +32,7 @@ struct PinnedLessonContent: Codable, Equatable {
     }
 
     static func decode(_ data: Data?, lessonID: String, contentVersion: Int) throws -> Self {
-        guard let data else { throw LessonExperienceError.contentUnavailable }
+        guard let data, !data.isEmpty else { throw LessonExperienceError.contentUnavailable }
         // Reject unknown fields as well as missing/wrongly typed fields: a future
         // envelope must not be silently interpreted as the current definition.
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -81,6 +81,9 @@ enum LessonExperience {
     static func studiedContent(_ attempt: LessonAttemptSnapshot) throws -> LessonStudiedContent {
         // Prefer the full studied definition for newly completed attempts. A
         // present but corrupt pin must fail rather than fall back to reduced data.
+        // An empty pin records an upgrade that could not recover the studied
+        // version. Nil still allows a legacy draft to match the installed version.
+        if let data = attempt.pinnedContentData, data.isEmpty { return .unavailable }
         if let data = attempt.pinnedContentData {
             return .pinned(try PinnedLessonContent.decode(data, lessonID: attempt.lessonID,
                                                           contentVersion: attempt.contentVersion).definition)

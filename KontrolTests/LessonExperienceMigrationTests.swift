@@ -11,6 +11,9 @@ final class LessonExperienceMigrationTests: XCTestCase {
     private let finished = Date(timeIntervalSince1970: 1_730_004_000)
     private let draftID = UUID(uuidString: "F0414550-B724-405A-9C0E-46DF30758637")!
     private let completedID = UUID(uuidString: "44EF5C0E-E759-4550-87DE-868EDBC2F839")!
+    private let taskID = UUID(uuidString: "0F828A93-677D-4169-A10B-02BE06E27C74")!
+    private let blockID = UUID(uuidString: "5FD09744-51C0-4E92-B737-828954030854")!
+    private let focusID = UUID(uuidString: "0336DB65-A5FB-4E7F-BB98-75BF15D0CE04")!
 
     private func snapshot() -> KontrolSchemaV1.LessonContentSnapshot {
         .init(title: "Studied title", objectiveKey: "old-objective", conceptIDs: ["concept"],
@@ -53,11 +56,10 @@ final class LessonExperienceMigrationTests: XCTestCase {
             completedContentSnapshot: snapshot()))
         context.insert(LessonSlot(topicID: "topic", slotIndex: 2, lessonID: "draft", assignedAt: started))
         context.insert(CatalogImportState(catalogID: "starter", lastImportedVersion: 17))
-        context.insert(try TaskItem(id: UUID(uuidString: "0F828A93-677D-4169-A10B-02BE06E27C74")!,
-                                    title: "Keep task", createdAt: started))
-        context.insert(ScheduleBlock(id: UUID(), title: "Keep block", startAt: started,
+        context.insert(try TaskItem(id: taskID, title: "Keep task", createdAt: started))
+        context.insert(ScheduleBlock(id: blockID, title: "Keep block", startAt: started,
                                      endAt: finished, lessonID: "draft", linkedTitleSnapshot: "Studied title"))
-        context.insert(FocusSession(id: UUID(), state: "ended", plannedSeconds: 900,
+        context.insert(FocusSession(id: focusID, state: "ended", plannedSeconds: 900,
                                     accumulatedActiveSeconds: 60, startedAt: started,
                                     endedAt: finished, checkpointAt: finished,
                                     linkedLessonID: "draft", linkedTitleSnapshot: "Studied title"))
@@ -135,10 +137,36 @@ final class LessonExperienceMigrationTests: XCTestCase {
         XCTAssertEqual(try context.fetch(FetchDescriptor<Topic>()).map(\.name), ["Original topic"])
         XCTAssertEqual(try context.fetch(FetchDescriptor<Subtopic>()).map(\.name), ["Subtopic"])
         XCTAssertEqual(try context.fetch(FetchDescriptor<Concept>()).map(\.name), ["Concept"])
-        XCTAssertEqual(try context.fetch(FetchDescriptor<CatalogImportState>()).first?.lastImportedVersion, 17)
-        XCTAssertEqual(try context.fetch(FetchDescriptor<TaskItem>()).first?.title, "Keep task")
-        XCTAssertEqual(try context.fetch(FetchDescriptor<ScheduleBlock>()).first?.linkedTitleSnapshot, "Studied title")
-        XCTAssertEqual(try context.fetch(FetchDescriptor<FocusSession>()).first?.linkedLessonID, "draft")
+        try assertUnrelatedData(in: container, catalogVersion: 17)
+    }
+
+    private func assertUnrelatedData(in container: ModelContainer, catalogVersion: Int) throws {
+        let context = ModelContext(container)
+        let marker = try XCTUnwrap(context.fetch(FetchDescriptor<CatalogImportState>()).first)
+        XCTAssertEqual(marker.catalogID, "starter")
+        XCTAssertEqual(marker.lastImportedVersion, catalogVersion)
+        let task = try XCTUnwrap(context.fetch(FetchDescriptor<TaskItem>()).first)
+        XCTAssertEqual(task.id, taskID)
+        XCTAssertEqual(task.title, "Keep task")
+        XCTAssertEqual(task.createdAt, started)
+        XCTAssertNil(task.completedAt)
+        let block = try XCTUnwrap(context.fetch(FetchDescriptor<ScheduleBlock>()).first)
+        XCTAssertEqual(block.id, blockID)
+        XCTAssertEqual(block.title, "Keep block")
+        XCTAssertEqual(block.startAt, started)
+        XCTAssertEqual(block.endAt, finished)
+        XCTAssertEqual(block.lessonID, "draft")
+        XCTAssertEqual(block.linkedTitleSnapshot, "Studied title")
+        let focus = try XCTUnwrap(context.fetch(FetchDescriptor<FocusSession>()).first)
+        XCTAssertEqual(focus.id, focusID)
+        XCTAssertEqual(focus.state, "ended")
+        XCTAssertEqual(focus.plannedSeconds, 900)
+        XCTAssertEqual(focus.accumulatedActiveSeconds, 60)
+        XCTAssertEqual(focus.startedAt, started)
+        XCTAssertEqual(focus.endedAt, finished)
+        XCTAssertEqual(focus.checkpointAt, finished)
+        XCTAssertEqual(focus.linkedLessonID, "draft")
+        XCTAssertEqual(focus.linkedTitleSnapshot, "Studied title")
     }
 
     func testMigratedV4DraftPinsInstalledExerciseBeforeCatalogOverwritesIt() throws {
@@ -197,7 +225,16 @@ final class LessonExperienceMigrationTests: XCTestCase {
             XCTAssertNil(archived.pinnedContentData)
             XCTAssertEqual(archived.completedContentSnapshot, snapshot())
             XCTAssertEqual(archived.contentVersion, 8)
-            XCTAssertEqual(try context.fetch(FetchDescriptor<CatalogImportState>()).first?.lastImportedVersion, 18)
+            try assertUnrelatedData(in: reopened, catalogVersion: 18)
+            let progress = try context.fetch(FetchDescriptor<LessonProgress>())
+            XCTAssertEqual(progress.first { $0.lessonID == "draft" }?.status, .started)
+            XCTAssertEqual(progress.first { $0.lessonID == "draft" }?.startedAt, started)
+            XCTAssertEqual(progress.first { $0.lessonID == "completed" }?.completedAt, finished)
+            let slot = try XCTUnwrap(context.fetch(FetchDescriptor<LessonSlot>()).first {
+                $0.lessonID == "draft"
+            })
+            XCTAssertEqual(slot.key, LessonSlot.canonicalKey(topicID: "topic", slotIndex: 2))
+            XCTAssertEqual(slot.assignedAt, started)
         }
     }
 

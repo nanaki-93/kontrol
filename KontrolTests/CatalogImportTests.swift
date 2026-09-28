@@ -734,12 +734,16 @@ final class CatalogImportTests: XCTestCase {
                                          answerDraft: "  old draft 🧪\n    line\n"))
             context.insert(LessonAttempt(id: mismatchID, lessonID: mismatched.id,
                                          contentVersion: mismatched.contentVersion + 1,
-                                         answerDraft: "unrecoverable answer"))
+                                         answerDraft: "unrecoverable answer",
+                                         solutionRevealedAt: Date(timeIntervalSince1970: 1),
+                                         selfCheckAcknowledgedAt: Date(timeIntervalSince1970: 2)))
             context.insert(LessonAttempt(id: completeID, lessonID: completed.id,
                                          contentVersion: completed.contentVersion,
                                          answerDraft: "completed answer", completedAt: Date(timeIntervalSince1970: 10),
                                          completedContentSnapshot: oldSnapshot))
             context.insert(LessonProgress(lessonID: matching.id, status: .started))
+            context.insert(LessonProgress(lessonID: mismatched.id, status: .started,
+                                          startedAt: Date(timeIntervalSince1970: 1)))
             try context.save()
             return try repository.loadSnapshot().slots
         }
@@ -789,8 +793,24 @@ final class CatalogImportTests: XCTestCase {
             XCTAssertEqual(match.answerDraft, "  old draft 🧪\n    line\n")
             XCTAssertEqual(match.revision, 0)
             let mismatch = try XCTUnwrap(attempts.first { $0.id == mismatchID })
-            XCTAssertNil(mismatch.pinnedContentData)
+            XCTAssertEqual(mismatch.pinnedContentData, Data(),
+                           "The failed historical lookup must not be retried against a later matching version")
             XCTAssertEqual(mismatch.contentVersion, mismatched.contentVersion + 1)
+            let repository = SwiftDataCatalogRepository(container: reopened)
+            let before = try repository.loadSnapshot()
+            XCTAssertEqual(try repository.loadLesson(lessonID: mismatched.id).content, .unavailable)
+            XCTAssertThrowsError(try repository.openLesson(lessonID: mismatched.id,
+                now: Date(timeIntervalSince1970: 3))) {
+                XCTAssertEqual($0 as? LessonExperienceError, .contentUnavailable)
+            }
+            XCTAssertThrowsError(try repository.complete(attemptID: mismatchID,
+                expectedRevision: 0, now: Date(timeIntervalSince1970: 3))) {
+                XCTAssertEqual($0 as? LessonExperienceError, .contentUnavailable)
+            }
+            XCTAssertEqual(try repository.loadSnapshot(), before)
+            XCTAssertEqual(try records(LessonAttempt.self, in: reopened).first {
+                $0.id == mismatchID
+            }?.answerDraft, "unrecoverable answer")
             XCTAssertEqual(mismatch.answerDraft, "unrecoverable answer")
             let unavailable = LessonAttemptSnapshot(
                 id: mismatch.id, lessonID: mismatch.lessonID, contentVersion: mismatch.contentVersion,

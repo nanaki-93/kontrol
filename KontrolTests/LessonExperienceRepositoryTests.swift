@@ -755,6 +755,54 @@ final class LessonExperienceRepositoryTests: XCTestCase {
         }
     }
 
+    func testFailedCompletionDoesNotSaveOrDiscardUnrelatedPendingTask() throws {
+        enum Injected: Error { case failure }
+        for failBefore in [true, false] {
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "KontrolCompleteIndependent-\(UUID().uuidString)/Kontrol.store")
+            let taskID = UUID()
+            var baseline: LearningCatalogSnapshot?
+            var detail: LessonDetailSnapshot?
+            try autoreleasepool {
+                let container = try ModelContainerFactory().makeContainer(mode: .persistent(url))
+                let writer = SwiftDataCatalogRepository(container: container)
+                _ = try writer.importIfNeeded(BundledCatalogLoader.load())
+                let id = try XCTUnwrap(writer.loadSnapshot().slots.first?.lessonID)
+                let prepared = try ready(writer, id: id)
+                let attempt = try XCTUnwrap(prepared.detail.attempt)
+                baseline = prepared.catalog
+                detail = prepared.detail
+                let independent = ModelContext(container)
+                independent.autosaveEnabled = false
+                independent.insert(try TaskItem(id: taskID, title: "Pending edit", createdAt: first))
+                let failing = SwiftDataCatalogRepository(container: container,
+                    beforeSave: { if failBefore { throw Injected.failure } },
+                    save: { _ in if !failBefore { throw Injected.failure } })
+                XCTAssertThrowsError(try failing.complete(attemptID: attempt.id,
+                    expectedRevision: attempt.revision, now: later)) { XCTAssertTrue($0 is Injected) }
+                XCTAssertTrue(independent.hasChanges)
+                XCTAssertTrue(try rows(TaskItem.self, in: container).isEmpty)
+                XCTAssertEqual(try writer.loadSnapshot(), baseline)
+                XCTAssertEqual(try writer.loadLesson(lessonID: id), detail)
+                try autoreleasepool {
+                    let reopened = try ModelContainerFactory().makeContainer(mode: .persistent(url))
+                    XCTAssertEqual(try SwiftDataCatalogRepository(container: reopened).loadSnapshot(), baseline)
+                    XCTAssertEqual(try SwiftDataCatalogRepository(container: reopened).loadLesson(lessonID: id), detail)
+                    XCTAssertTrue(try rows(TaskItem.self, in: reopened).isEmpty)
+                }
+                XCTAssertTrue(independent.hasChanges)
+                try independent.save()
+            }
+            try autoreleasepool {
+                let reopened = try ModelContainerFactory().makeContainer(mode: .persistent(url))
+                XCTAssertEqual(try SwiftDataCatalogRepository(container: reopened).loadSnapshot(), baseline)
+                XCTAssertEqual(try SwiftDataCatalogRepository(container: reopened).loadLesson(
+                    lessonID: XCTUnwrap(detail?.id)), detail)
+                XCTAssertEqual(try rows(TaskItem.self, in: reopened).map(\.id), [taskID])
+            }
+        }
+    }
+
     func testCompletionRejectsUngatedUnavailableAndCorruptReceipt() throws {
         let (container, writer, id) = try setup()
         let opened = try writer.openLesson(lessonID: id, now: first)

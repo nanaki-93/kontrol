@@ -99,14 +99,18 @@ final class SwiftDataCatalogRepository: CatalogRepository {
 
         // Capture the installed version before any definition is overwritten. A
         // migrated V4 draft has no pin; a newer catalog is never evidence of
-        // what its author saw. Nil remains the explicit unavailable state for
-        // missing/mismatched content (the answer and version stay untouched).
+        // what its author saw. Persist an empty pin for an unmatched version so
+        // a future catalog cannot accidentally make that old attempt recoverable.
+        // Nil remains reserved for drafts not yet checked against an upgrade.
         for attempt in try context.fetch(FetchDescriptor<LessonAttempt>())
             where attempt.completedAt == nil && attempt.pinnedContentData == nil {
-            guard let installed = lessons[attempt.lessonID],
-                  installed.contentVersion == attempt.contentVersion else { continue }
-            attempt.pinnedContentData = try PinnedLessonContent(
-                definition: Self.definitionSnapshot(installed)).encoded()
+            if let installed = lessons[attempt.lessonID],
+               installed.contentVersion == attempt.contentVersion {
+                attempt.pinnedContentData = try PinnedLessonContent(
+                    definition: Self.definitionSnapshot(installed)).encoded()
+            } else {
+                attempt.pinnedContentData = Data()
+            }
         }
 
         for item in value.topics {
