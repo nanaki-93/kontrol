@@ -19,7 +19,7 @@ struct LearningConceptSnapshot: Equatable, Identifiable {
     let prerequisiteConceptIDs: [String]
 }
 
-struct LessonDefinitionSnapshot: Equatable, Identifiable {
+struct LessonDefinitionSnapshot: Codable, Equatable, Identifiable {
     let id: String
     let objectiveKey: String
     let objective: String
@@ -125,6 +125,73 @@ struct LessonSlotSnapshot: Equatable, Identifiable {
         self.lessonID = lessonID
         self.assignedAt = assignedAt
     }
+}
+
+// These projections are detached values. In particular, a historical detail must
+// never silently fall back to the current catalog definition.
+enum LessonStudiedContent: Equatable {
+    case pinned(LessonDefinitionSnapshot)
+    case legacyCompleted(KontrolSchemaV1.LessonContentSnapshot)
+    case unavailable
+}
+
+struct LessonAttemptSnapshot: Equatable, Identifiable {
+    let id: UUID
+    let lessonID: String
+    let contentVersion: Int
+    let answerDraft: String
+    let solutionRevealedAt: Date?
+    let selfCheckAcknowledgedAt: Date?
+    let completedAt: Date?
+    let completedContentSnapshot: KontrolSchemaV1.LessonContentSnapshot?
+    let pinnedContentData: Data?
+    let revision: Int
+
+    init(id: UUID, lessonID: String, contentVersion: Int, answerDraft: String = "",
+         solutionRevealedAt: Date? = nil, selfCheckAcknowledgedAt: Date? = nil,
+         completedAt: Date? = nil,
+         completedContentSnapshot: KontrolSchemaV1.LessonContentSnapshot? = nil,
+         pinnedContentData: Data? = nil, revision: Int = 0) {
+        self.id = id
+        self.lessonID = lessonID
+        self.contentVersion = contentVersion
+        self.answerDraft = answerDraft
+        self.solutionRevealedAt = solutionRevealedAt
+        self.selfCheckAcknowledgedAt = selfCheckAcknowledgedAt
+        self.completedAt = completedAt
+        self.completedContentSnapshot = completedContentSnapshot
+        self.pinnedContentData = pinnedContentData
+        self.revision = revision
+    }
+}
+
+struct LessonDetailSnapshot: Equatable, Identifiable {
+    let id: String // stable lesson ID, not a choice index
+    let progress: LessonProgressSnapshot?
+    let attempt: LessonAttemptSnapshot?
+    let content: LessonStudiedContent
+}
+
+struct LessonHistorySnapshot: Equatable, Identifiable {
+    var id: String { lessonID }
+    let lessonID: String
+    let status: LessonProgressStatus // completed or dismissed
+    let date: Date
+    let content: LessonStudiedContent
+    let attempt: LessonAttemptSnapshot?
+}
+
+enum LessonMutationOutcome: Equatable {
+    case changed
+    case unchanged
+}
+
+struct LessonMutationResult: Equatable {
+    let outcome: LessonMutationOutcome
+    let catalog: LearningCatalogSnapshot
+    let detail: LessonDetailSnapshot
+    let history: [LessonHistorySnapshot]
+    let replacedSlot: LessonSlotSnapshot?
 }
 
 struct LearningCatalogSnapshot: Equatable {
