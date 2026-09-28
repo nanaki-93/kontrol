@@ -19,10 +19,20 @@ ls -la "$base/V1"
 # For initial capture only: cp "$base/V1/"* KontrolTests/Fixtures/V1/
 ```
 
-Do not silently regenerate this historical artifact when models or migration stages change. For a new schema, add a separate versioned fixture. To verify the frozen fixture, Xcode copies the entire `V1/` folder as a test resource; `V1FixtureTests` copies all its regular files to a unique temporary directory, opens that copy twice via `ModelContainerFactory`, checks the task fields/identity, and verifies the bundled source bytes are unchanged. Temporary copies are removed after the test. Run:
+Do not silently regenerate this historical artifact when models or migration stages change. For a new schema, add a separate versioned fixture. To verify the frozen fixture, Xcode copies the entire `V1/` folder as a test resource; `V1FixtureTests` copies all its regular files to a unique temporary directory, opens that copy twice via `ModelContainerFactory`, checks the task fields/identity, and verifies the bundled source bytes are unchanged. Run:
 
 ```sh
 xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -destination 'platform=macOS' \
   -derivedDataPath /tmp/kontrol-f00-derived CODE_SIGNING_ALLOWED=NO \
   -only-testing:KontrolTests/V1FixtureTests test
+```
+
+`ScheduleMigrationTests` copies every bundled V1 file (including both sidecars) before opening the copy with the production V2 factory, checks the historical task, writes a V2 manual block, releases app-owned containers, and reopens to check both records. It compares the bundled filenames and bytes afterward. A second, isolated V1-only disk store is built directly from `KontrolSchemaV1` with task, topic, subtopic, concept, lesson definition, import marker, progress, and completed attempt values. The complete closed store is copied before production migration; all fields are checked on migration and after a separate reopen and V2 write, and the V1 source is byte-compared. The launch-recovery test injects a failed first open on a separate copied V1 store, verifies every copy file is unchanged before explicit retry, and then checks that retry migrates the same location. These tests leave UUID-isolated opened temporary copies in place until the OS reclaims them: SwiftData can retain SQLite descriptors after Swift owners are released. They never open or remove the checked-in files in place.
+
+```sh
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug \
+  -destination 'platform=macOS' -derivedDataPath /tmp/kontrol-f03-derived \
+  CODE_SIGNING_ALLOWED=NO -only-testing:KontrolTests/ScheduleMigrationTests \
+  -only-testing:KontrolTests/V1FixtureTests \
+  -only-testing:KontrolTests/LaunchRecoveryTests test
 ```
