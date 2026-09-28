@@ -38,6 +38,38 @@ final class AppShellTests: XCTestCase {
         XCTAssertFalse((other.scheduleStore.repository as AnyObject) === (sharedSchedule.repository as AnyObject))
     }
 
+    func testWindowCloseGuardVetoesFailedFlushAndAllowsRetry() {
+        var canClose = false
+        let guardView = WindowCloseGuard(flush: { canClose })
+        let coordinator = guardView.makeCoordinator()
+        let window = NSWindow(contentRect: .zero, styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        coordinator.install(window)
+        XCTAssertFalse(coordinator.windowShouldClose(window))
+        XCTAssertTrue(window.delegate === coordinator)
+        canClose = true
+        coordinator.flush = { canClose }
+        XCTAssertTrue(coordinator.windowShouldClose(window))
+        coordinator.uninstall()
+    }
+
+    func testShellUsesAppOwnedDraftsAndStableIDRouteAcrossSlotRotation() throws {
+        let dependencies = try makeDependencies()
+        let repository = dependencies.catalogRepository
+        _ = try repository.importIfNeeded(BundledCatalogLoader.load())
+        dependencies.learningCatalogStore.loadIfNeeded()
+        let slot = try XCTUnwrap(dependencies.learningCatalogStore.state.snapshot?.slots.first)
+        let navigation = NavigationStore()
+        let shell = AppShell(navigation: navigation, dependencies: dependencies)
+        XCTAssertTrue(shell.dependencies.lessonDraftStore === dependencies.lessonDraftStore)
+        navigation.attachDrafts(shell.dependencies.lessonDraftStore)
+        navigation.showLesson(id: slot.lessonID)
+        _ = try dependencies.learningCatalogStore.dismiss(lessonID: slot.lessonID, expectedSlot: slot)
+        XCTAssertFalse(dependencies.learningCatalogStore.state.snapshot?.slots.contains { $0.lessonID == slot.lessonID } ?? true)
+        XCTAssertEqual(navigation.learningRoute, .detail(slot.lessonID))
+        navigation.backToChoices()
+        XCTAssertEqual(navigation.learningRoute, .choices)
+    }
+
     func testNavigationMetadataAndRouting() {
         let destinations = AppDestination.allCases
         XCTAssertEqual(destinations.map(\.title), ["Today", "Learning", "Projects", "Focus", "Tasks", "News", "Settings"])
@@ -91,11 +123,26 @@ final class AppShellTests: XCTestCase {
             return children.flatMap { [$0] + descendants(of: $0) }
         }
         func inspectedWindow() throws -> AXUIElement {
+            // AX can register a newly ordered hosting window asynchronously. Keep
+            // the bounded wait and report host trust on failure: an untrusted test
+            // host cannot supply the window tree, regardless of AppKit visibility.
+            let deadline = Date().addingTimeInterval(2)
+            repeat {
+                var windows: CFTypeRef?
+                if AXUIElementCopyAttributeValue(appAX, kAXWindowsAttribute as CFString, &windows) == .success,
+                   let match = (windows as? [AXUIElement])?.first(where: {
+                       attribute($0, kAXTitleAttribute) as? String == window.title
+                   }) {
+                    return match
+                }
+                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            } while Date() < deadline
             var windows: CFTypeRef?
-            XCTAssertEqual(AXUIElementCopyAttributeValue(appAX, kAXWindowsAttribute as CFString, &windows), .success)
-            return try XCTUnwrap((windows as? [AXUIElement])?.first {
-                attribute($0, kAXTitleAttribute) as? String == window.title
-            })
+            let status = AXUIElementCopyAttributeValue(appAX, kAXWindowsAttribute as CFString, &windows)
+            let titles = (windows as? [AXUIElement] ?? []).compactMap { attribute($0, kAXTitleAttribute) as? String }
+            throw NSError(domain: "AppShellAX", code: Int(status.rawValue), userInfo: [
+                NSLocalizedDescriptionKey: "AX window missing; AX titles=\(titles), AppKit titles=\(NSApp.windows.map(\.title)), active=\(NSApp.isActive), running=\(NSApp.isRunning), trusted=\(AXIsProcessTrusted()), key=\(window.isKeyWindow), visible=\(window.isVisible), frontPID=\(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1), hostPID=\(ProcessInfo.processInfo.processIdentifier)"
+            ])
         }
         func navButtons() throws -> [AXUIElement] {
             descendants(of: try inspectedWindow()).filter {

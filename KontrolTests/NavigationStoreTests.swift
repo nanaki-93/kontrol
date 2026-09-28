@@ -64,6 +64,58 @@ final class NavigationStoreTests: XCTestCase {
         XCTAssertEqual(preferences.savedDestination, AppDestination.focus.rawValue)
     }
 
+    func testStableLessonRouteAndFailureRetainsRoutePreferenceAndDraftForRetry() throws {
+        enum Injected: Error { case save }
+        var fail = false
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataCatalogRepository(container: container, beforeSave: {
+            if fail { throw Injected.save }
+        })
+        _ = try repository.importIfNeeded(BundledCatalogLoader.load())
+        let graph = AppDependencies(container: container, catalogRepository: repository)
+        graph.learningCatalogStore.loadIfNeeded()
+        let lessonID = try XCTUnwrap(graph.learningCatalogStore.state.snapshot?.slots.first?.lessonID)
+        let opened = try graph.learningCatalogStore.openLesson(lessonID: lessonID)
+        let attemptID = try XCTUnwrap(opened.detail.attempt?.id)
+        graph.lessonDraftStore.observe(opened.detail)
+        let preferences = CountingPreferences()
+        let navigation = NavigationStore(preferences: preferences)
+        navigation.attachDrafts(graph.lessonDraftStore)
+        navigation.showLesson(id: lessonID)
+        XCTAssertEqual(navigation.learningRoute, .detail(lessonID))
+        graph.lessonDraftStore.edit("  answer 🧪\n", attemptID: attemptID)
+        fail = true
+        navigation.showHistory()
+        XCTAssertEqual(navigation.learningRoute, .detail(lessonID))
+        XCTAssertEqual(navigation.pendingTransition, .learning(.history))
+        XCTAssertEqual(navigation.saveError, .persistenceFailure)
+        XCTAssertEqual(graph.lessonDraftStore.buffers[attemptID]?.text, "  answer 🧪\n")
+        XCTAssertTrue(try XCTUnwrap(graph.lessonDraftStore.buffers[attemptID]).isDirty)
+        navigation.selectTopic("java")
+        XCTAssertNil(navigation.selectedTopicID)
+        navigation.showLesson(id: "another-stable-id")
+        XCTAssertEqual(navigation.learningRoute, .detail(lessonID))
+        navigation.select(.focus)
+        XCTAssertEqual(navigation.selectedDestination, .today)
+        XCTAssertEqual(preferences.writes, 0)
+        navigation.cancelTransition()
+        XCTAssertEqual(navigation.learningRoute, .detail(lessonID))
+        navigation.backToChoices()
+        XCTAssertEqual(navigation.learningRoute, .detail(lessonID))
+        fail = false
+        navigation.retryTransition()
+        XCTAssertEqual(navigation.learningRoute, .choices)
+        XCTAssertEqual(try repository.loadLesson(lessonID: lessonID).attempt?.answerDraft, "  answer 🧪\n")
+        XCTAssertEqual(graph.lessonDraftStore.buffers[attemptID]?.status, .saved)
+        navigation.showLesson(id: lessonID)
+        navigation.selectTopic("java")
+        XCTAssertEqual(navigation.selectedTopicID, "java")
+        XCTAssertEqual(navigation.learningRoute, .choices)
+        navigation.select(.focus)
+        XCTAssertEqual(navigation.selectedDestination, .focus)
+        XCTAssertEqual(preferences.writes, 1)
+    }
+
     func testUnknownValueFallsBackWithoutChangingPreferencesOrSwiftDataStore() throws {
         let (defaults, suite) = isolatedDefaults()
         defer { defaults.removePersistentDomain(forName: suite) }

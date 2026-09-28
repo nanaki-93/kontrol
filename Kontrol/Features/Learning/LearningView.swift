@@ -4,6 +4,9 @@ import SwiftUI
 /// Reading or switching topics never reconciles slots or creates personal records.
 struct LearningView: View {
     @ObservedObject var store: LearningCatalogStore
+    /// Supplied by the shell for guarded topic/inspection navigation. Standalone
+    /// previews retain their own read-only selection.
+    var navigation: NavigationStore? = nil
     @State private var selectedTopicID: String?
     @State private var inspectedLessonID: String?
     @FocusState private var focusedTopicID: String?
@@ -41,6 +44,10 @@ struct LearningView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: AppMetrics.space4) {
             PageHeader("Learning")
+            if let navigation {
+                Button("History") { navigation.showHistory() }
+                    .accessibilityIdentifier("learning-history")
+            }
             switch store.state {
             case .notLoaded, .loading:
                 LoadingState("Loading learning choices")
@@ -75,7 +82,7 @@ struct LearningView: View {
 
     @ViewBuilder private func catalog(_ snapshot: LearningCatalogSnapshot, compact: Bool) -> some View {
         let topics = Self.orderedTopics(in: snapshot)
-        let selected = topics.first { $0.id == selectedTopicID } ?? topics[0]
+        let selected = topics.first { $0.id == (navigation?.selectedTopicID ?? selectedTopicID) } ?? topics[0]
         if compact {
             VStack(alignment: .leading, spacing: AppMetrics.space4) {
                 topicList(topics, selected: selected, compact: true)
@@ -100,7 +107,13 @@ struct LearningView: View {
                 ForEach(topics) { topic in
                     let isSelected = selected.id == topic.id
                     Button {
-                        selectedTopicID = topic.id
+                        if let navigation {
+                            guard navigation.flushForLifecycle() else { return }
+                            navigation.selectTopic(topic.id)
+                            guard navigation.selectedTopicID == topic.id else { return }
+                        } else {
+                            selectedTopicID = topic.id
+                        }
                         inspectedLessonID = nil
                     } label: {
                         Text(topic.name)
@@ -155,7 +168,10 @@ struct LearningView: View {
                             .accessibilityIdentifier("learning-lesson-\(lesson.id)")
                             DisclosureGroup(isExpanded: Binding(
                                 get: { Self.inspectedLesson(inspectedLessonID, for: selected.id, in: snapshot)?.id == lesson.id },
-                                set: { inspectedLessonID = $0 ? lesson.id : nil }
+                                set: { expanded in
+                                    guard navigation?.flushForLifecycle() != false else { return }
+                                    inspectedLessonID = expanded ? lesson.id : nil
+                                }
                             )) {
                                 inspection(lesson)
                             } label: {
@@ -174,6 +190,10 @@ struct LearningView: View {
                             }
                             .accessibilityLabel("Inspect \(lesson.title), read-only reference")
                             .accessibilityIdentifier("learning-inspect-\(lesson.id)")
+                            if let navigation {
+                                Button("View \(lesson.title)") { navigation.showLesson(id: lesson.id) }
+                                    .accessibilityIdentifier("learning-view-\(lesson.id)")
+                            }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(AppMetrics.space4)

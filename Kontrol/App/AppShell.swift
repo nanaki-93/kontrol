@@ -66,13 +66,32 @@ struct AppShell: View {
     var body: some View {
         VStack(spacing: 0) {
             navigationBar
+            if navigation.saveError != nil {
+                ErrorBanner(.saveFailed, recoveryTitle: "Retry save") {
+                    if navigation.pendingTransition != nil {
+                        navigation.retryTransition()
+                    } else {
+                        _ = navigation.flushForLifecycle()
+                    }
+                }
+                .padding(.horizontal, AppMetrics.contentInset)
+                Button("Stay here") { navigation.cancelTransition() }
+                    .padding(.horizontal, AppMetrics.contentInset)
+            }
             ScrollView {
                 Group {
                     switch Self.contentKind(for: navigation.selectedDestination) {
                     case .today:
                         TodayView(store: dependencies.taskStore, scheduleStore: dependencies.scheduleStore)
                     case .learning:
-                        LearningView(store: dependencies.learningCatalogStore)
+                        switch navigation.learningRoute {
+                        case .choices:
+                            LearningView(store: dependencies.learningCatalogStore, navigation: navigation)
+                        case .detail(let id):
+                            lessonRoute(id: id)
+                        case .history:
+                            historyRoute
+                        }
                     case .focus:
                         FocusView(service: dependencies.focusService, taskStore: dependencies.taskStore)
                     case .tasks:
@@ -89,6 +108,47 @@ struct AppShell: View {
         .background(AppColors.background)
         .foregroundStyle(AppColors.textPrimary)
         .preferredColorScheme(.dark)
+        .onAppear { navigation.attachDrafts(dependencies.lessonDraftStore) }
+        .background(WindowCloseGuard { navigation.flushForLifecycle() })
+    }
+
+    // Step 3.4 adds the exercise UI. Read by stable ID here, never by the
+    // rotating slot index or a possibly updated installed definition.
+    private func lessonRoute(id: String) -> some View {
+        VStack(alignment: .leading, spacing: AppMetrics.space4) {
+            Button("Back to choices") { navigation.backToChoices() }
+            switch dependencies.learningCatalogStore.detailState {
+            case .current(let detail) where detail.id == id:
+                Text(Self.title(for: detail.content)).appTypography(.body)
+                Text("Lesson practice is not available yet.").appTypography(.body)
+            case .failed(let lessonID, _) where lessonID == id:
+                ErrorBanner(.readFailed, recoveryTitle: "Retry lesson") {
+                    _ = try? dependencies.learningCatalogStore.loadDetail(lessonID: id)
+                }
+            default:
+                LoadingState("Opening lesson")
+            }
+        }
+        .padding(AppMetrics.horizontalInset)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .onAppear { _ = try? dependencies.learningCatalogStore.loadDetail(lessonID: id) }
+    }
+
+    private static func title(for content: LessonStudiedContent) -> String {
+        switch content {
+        case .current(let lesson), .pinned(let lesson): lesson.title
+        case .legacyCompleted(let lesson): lesson.title
+        case .unavailable: "Lesson content unavailable"
+        }
+    }
+
+    private var historyRoute: some View {
+        VStack(alignment: .leading, spacing: AppMetrics.space4) {
+            Button("Back to choices") { navigation.backToChoices() }
+            Text("History is not available yet.").appTypography(.body)
+        }
+        .padding(AppMetrics.horizontalInset)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var navigationBar: some View {

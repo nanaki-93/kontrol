@@ -160,6 +160,58 @@ final class LessonExperienceStoreTests: XCTestCase {
         XCTAssertEqual(drafts.buffers[id]?.status, .saved)
     }
 
+    func testRouteChangeCannotRedirectDelayedAnswerToAnotherLesson() throws {
+        let (repository, graph, drafts, scheduler, opened) = try draftFixture()
+        let firstID = try XCTUnwrap(opened.detail.attempt?.id)
+        let nextLessonID = try XCTUnwrap(graph.learningCatalogStore.state.snapshot?.slots.first {
+            $0.lessonID != opened.detail.id
+        }?.lessonID)
+        let next = try graph.learningCatalogStore.openLesson(lessonID: nextLessonID)
+        let nextID = try XCTUnwrap(next.detail.attempt?.id)
+        drafts.observe(next.detail)
+        let navigation = NavigationStore()
+        navigation.attachDrafts(drafts)
+        navigation.showLesson(id: opened.detail.id)
+        drafts.edit("first answer", attemptID: firstID)
+        let delayed = scheduler.jobs.last!.callback
+        navigation.showLesson(id: nextLessonID)
+        XCTAssertEqual(navigation.learningRoute, .detail(nextLessonID))
+        drafts.edit("second answer", attemptID: nextID)
+        delayed()
+        XCTAssertEqual(try repository.loadLesson(lessonID: opened.detail.id).attempt?.answerDraft, "first answer")
+        XCTAssertEqual(try repository.loadLesson(lessonID: nextLessonID).attempt?.answerDraft, "")
+        try drafts.flushAll()
+        XCTAssertEqual(try repository.loadLesson(lessonID: nextLessonID).attempt?.answerDraft, "second answer")
+    }
+
+    func testLifecycleBarrierRetainsDirtyTextOnFailureAndInvalidatesOldCallbackOnRetry() throws {
+        var fail = false
+        let (repository, graph, drafts, scheduler, opened) = try draftFixture(beforeSave: {
+            if fail { throw Injected.save }
+        })
+        let id = try XCTUnwrap(opened.detail.attempt?.id)
+        let navigation = NavigationStore()
+        navigation.attachDrafts(drafts)
+        let lifecycle = KontrolLifecycleDelegate()
+        lifecycle.navigation = navigation
+        navigation.showLesson(id: opened.detail.id)
+        drafts.edit("quit draft\n  exact", attemptID: id)
+        let delayed = scheduler.jobs.last!.callback
+        fail = true
+        XCTAssertFalse(lifecycle.flushBeforeTermination()) // quit must be cancelled
+        XCTAssertFalse(navigation.flushForLifecycle()) // window close / deactivation
+        XCTAssertEqual(navigation.learningRoute, .detail(opened.detail.id))
+        XCTAssertEqual(navigation.saveError, .persistenceFailure)
+        XCTAssertEqual(drafts.buffers[id]?.status, .notSaved(.persistenceFailure))
+        XCTAssertEqual(try repository.loadLesson(lessonID: opened.detail.id).attempt?.answerDraft, "")
+        fail = false
+        XCTAssertTrue(lifecycle.flushBeforeTermination())
+        delayed()
+        XCTAssertEqual(drafts.buffers[id]?.status, .saved)
+        XCTAssertEqual(try repository.loadLesson(lessonID: opened.detail.id).attempt?.answerDraft, "quit draft\n  exact")
+        XCTAssertTrue(graph.lessonDraftStore === drafts)
+    }
+
     func testTransitionFlushesAndFailurePreventsTransition() throws {
         var fail = false
         let (repository, _, drafts, _, opened) = try draftFixture(beforeSave: {

@@ -1,5 +1,93 @@
+import AppKit
 import SwiftData
 import SwiftUI
+
+/// Close is vetoed before SwiftUI tears down the window. The delegate is retained
+/// by the view coordinator and forwards other window delegate messages to SwiftUI.
+struct WindowCloseGuard: NSViewRepresentable {
+    let flush: () -> Bool
+
+    final class GuardView: NSView {
+        weak var coordinator: Coordinator?
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            coordinator?.install(window)
+        }
+    }
+
+    final class Coordinator: NSObject, NSWindowDelegate {
+        var flush: () -> Bool
+        weak var window: NSWindow?
+        weak var previous: (any NSWindowDelegate)?
+
+        init(flush: @escaping () -> Bool) { self.flush = flush }
+
+        func windowShouldClose(_ sender: NSWindow) -> Bool {
+            guard flush() else { return false }
+            return previous?.windowShouldClose?(sender) ?? true
+        }
+
+        override func responds(to selector: Selector!) -> Bool {
+            selector == #selector(NSWindowDelegate.windowShouldClose(_:)) ||
+                super.responds(to: selector) || previous?.responds(to: selector) == true
+        }
+
+        override func forwardingTarget(for selector: Selector!) -> Any? {
+            previous?.responds(to: selector) == true ? previous : super.forwardingTarget(for: selector)
+        }
+
+        func install(_ window: NSWindow?) {
+            guard let window, self.window !== window else { return }
+            uninstall()
+            previous = window.delegate
+            self.window = window
+            window.delegate = self
+        }
+
+        func uninstall() {
+            if window?.delegate === self { window?.delegate = previous }
+            window = nil
+            previous = nil
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(flush: flush) }
+    func makeNSView(context: Context) -> GuardView {
+        let view = GuardView()
+        view.coordinator = context.coordinator
+        return view
+    }
+    func updateNSView(_ view: GuardView, context: Context) {
+        context.coordinator.flush = flush
+        context.coordinator.install(view.window)
+    }
+    static func dismantleNSView(_ view: GuardView, coordinator: Coordinator) { coordinator.uninstall() }
+}
+
+@MainActor
+final class KontrolLifecycleDelegate: NSObject, NSApplicationDelegate {
+    weak var navigation: NavigationStore?
+
+    func applicationDidResignActive(_ notification: Notification) {
+        _ = navigation?.flushForLifecycle()
+    }
+
+    func flushBeforeTermination() -> Bool {
+        navigation?.flushForLifecycle() ?? true
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !flushBeforeTermination() else { return .terminateNow }
+        let alert = NSAlert()
+        alert.messageText = "Changes were not saved"
+        alert.informativeText = "Retry saving before quitting, or cancel quit to keep your answer. Forced termination cannot save pending edits."
+        alert.addButton(withTitle: "Retry Save")
+        alert.addButton(withTitle: "Cancel Quit")
+        guard alert.runModal() == .alertFirstButtonReturn else { return .terminateCancel }
+        return flushBeforeTermination() ? .terminateNow : .terminateCancel
+    }
+}
+
 
 /// Opt-in Debug smoke path for signed-app recovery checks. It never opens the
 /// production store: the first attempt fails before any IO and Retry opens a
@@ -33,10 +121,11 @@ struct KontrolApp: App {
     static let bootstrapTitle = "Kontrol"
     @StateObject private var launch = makeAppLaunchCoordinator()
     @StateObject private var navigation = NavigationStore()
+    @NSApplicationDelegateAdaptor(KontrolLifecycleDelegate.self) private var lifecycle
 
     var body: some Scene {
         WindowGroup {
-            MainWindowContent(launch: launch, navigation: navigation)
+            MainWindowContent(launch: launch, navigation: navigation, lifecycle: lifecycle)
                 .frame(minWidth: 1000, minHeight: 700)
         }
         Settings {
@@ -51,6 +140,7 @@ struct KontrolApp: App {
 struct MainWindowContent: View {
     @ObservedObject var launch: LaunchCoordinator
     @ObservedObject var navigation: NavigationStore
+    var lifecycle: KontrolLifecycleDelegate? = nil
     @State private var recoveryFailure: LaunchFailure?
 
     var body: some View {
@@ -58,6 +148,10 @@ struct MainWindowContent: View {
             if let dependencies = launch.dependencies, launch.state == .ready {
                 AppShell(navigation: navigation, dependencies: dependencies)
                     .modelContainer(dependencies.container)
+                    .onAppear {
+                        navigation.attachDrafts(dependencies.lessonDraftStore)
+                        lifecycle?.navigation = navigation
+                    }
             } else if case .failed(let failure) = launch.state {
                 RecoveryView(failure: failure, launch: launch, onRetry: {
                     recoveryFailure = failure
