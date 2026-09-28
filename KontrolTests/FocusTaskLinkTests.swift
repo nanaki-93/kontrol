@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import SwiftData
 import XCTest
@@ -119,6 +120,91 @@ final class FocusTaskLinkTests: XCTestCase {
         // A later unrelated commit cannot persist the discarded private edits.
         _ = try SwiftDataTaskRepository(container: container).setCompleted(id: otherID, completed: true)
         XCTAssertEqual(try sessions(container), before)
+    }
+
+    func testSharedGraphPublishesClearedActiveAndHistoricalLinksWithoutChangingClock() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let base = ContinuousClock().now
+        var seconds = 0.0
+        let graph = AppDependencies(container: container,
+            catalogRepository: SwiftDataCatalogRepository(container: container),
+            focusWallClock: { self.start.addingTimeInterval(seconds) },
+            focusMonotonicClock: { base.advanced(by: .milliseconds(Int64(seconds * 1000))) })
+        let first = AppShell(navigation: NavigationStore(), dependencies: graph)
+        let second = AppShell(navigation: NavigationStore(), dependencies: graph)
+        let task = try graph.taskStore.create(input: TaskInput(title: "Retained task title"))
+        try graph.focusService.start(configuration: FocusConfiguration(linkedTaskID: task.id))
+        let running = try XCTUnwrap(graph.focusService.activeSession)
+        XCTAssertEqual(running.linkedTitleSnapshot, "Retained task title")
+        // Add a committed historical row to exercise the same publication path.
+        let context = ModelContext(container)
+        context.autosaveEnabled = false
+        let historicalID = UUID()
+        context.insert(FocusSession(id: historicalID, state: "ended", plannedSeconds: 1500,
+            accumulatedActiveSeconds: 15, startedAt: start.addingTimeInterval(-60),
+            endedAt: start.addingTimeInterval(-40), checkpointAt: start.addingTimeInterval(-40),
+            linkedTaskID: task.id, linkedTitleSnapshot: "Retained task title"))
+        try context.save()
+        // Explicit read, not a second startup recovery; the running clock remains owned.
+        graph.focusService.retryRead()
+        let service = first.dependencies.focusService
+        XCTAssertTrue(service === second.dependencies.focusService)
+        var publications: [[FocusSessionSnapshot]] = []
+        let observation = service.$snapshots.dropFirst().sink { publications.append($0) }
+        defer { observation.cancel() }
+        seconds = 8.5
+        try graph.taskStore.delete(id: task.id)
+        XCTAssertEqual(publications.count, 1)
+        for owner in [first.dependencies.focusService, second.dependencies.focusService] {
+            XCTAssertNil(owner.activeSession?.linkedTaskID)
+            XCTAssertEqual(owner.activeSession?.linkedTitleSnapshot, "Retained task title")
+            XCTAssertEqual(owner.snapshots.count, 2)
+            XCTAssertTrue(owner.snapshots.allSatisfy { $0.linkedTaskID == nil })
+            XCTAssertTrue(owner.snapshots.allSatisfy { $0.linkedTitleSnapshot == "Retained task title" })
+        }
+        XCTAssertEqual(service.activeSession?.checkpointAt, running.checkpointAt)
+        XCTAssertEqual(service.activeSession?.accumulatedActiveSeconds, 0)
+        XCTAssertEqual(try SwiftDataFocusRepository(container: container).fetchAll().count, 2,
+                       "deletion must not write timing or history")
+        // Pause samples the original anchor, not the deletion instant (8.5 seconds).
+        seconds = 12.25
+        try service.pause()
+        XCTAssertEqual(service.activeSession?.accumulatedActiveSeconds, 12.25)
+        XCTAssertNil(service.activeSession?.linkedTaskID)
+        XCTAssertNil(try SwiftDataFocusRepository(container: container).fetchAll()
+            .first { $0.id == historicalID }?.linkedTaskID)
+    }
+
+    func testFailedGraphDeletionDoesNotPublishOrChangeFocusClock() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        var fail = false
+        let tasks = SwiftDataTaskRepository(container: container, save: { context in
+            if fail { throw Injected.saveFailed }
+            try context.save()
+        })
+        let base = ContinuousClock().now
+        var seconds = 0.0
+        let graph = AppDependencies(container: container,
+            catalogRepository: SwiftDataCatalogRepository(container: container),
+            taskRepository: tasks,
+            focusWallClock: { self.start.addingTimeInterval(seconds) },
+            focusMonotonicClock: { base.advanced(by: .milliseconds(Int64(seconds * 1000))) })
+        let task = try graph.taskStore.create(input: TaskInput(title: "Keep title"))
+        try graph.focusService.start(configuration: FocusConfiguration(linkedTaskID: task.id))
+        let original = try XCTUnwrap(graph.focusService.activeSession)
+        var publications = 0
+        let observation = graph.focusService.$snapshots.dropFirst().sink { _ in publications += 1 }
+        defer { observation.cancel() }
+        fail = true
+        seconds = 8.5
+        XCTAssertThrowsError(try graph.taskStore.delete(id: task.id))
+        XCTAssertEqual(publications, 0)
+        XCTAssertEqual(graph.focusService.activeSession, original)
+        XCTAssertEqual(try SwiftDataFocusRepository(container: container).fetchAll(), [original])
+        seconds = 12.25
+        try graph.focusService.pause()
+        XCTAssertEqual(graph.focusService.activeSession?.accumulatedActiveSeconds, 12.25)
+        XCTAssertEqual(graph.focusService.activeSession?.linkedTaskID, task.id)
     }
 
     func testCheckpointFromPreDeletionSnapshotCannotRestoreLink() throws {

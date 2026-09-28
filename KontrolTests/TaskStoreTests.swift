@@ -229,6 +229,28 @@ final class TaskStoreTests: XCTestCase {
         XCTAssertEqual(spy.fetchCount, 1, "writes do not silently retry failed reads")
     }
 
+    func testDeletionCallbackRunsOnceAfterCommitAndNeverOnFailureOrNotFound() throws {
+        let spy = try makeSpy()
+        let store = TaskStore(repository: spy)
+        let row = try store.create(input: TaskInput(title: "Linked"))
+        var notified: [UUID] = []
+        store.didDeleteTask = { id in
+            XCTAssertEqual(try? spy.storage.fetchAll().map(\.id), [],
+                           "callback must observe the committed deletion")
+            notified.append(id)
+        }
+        spy.failWrites = true
+        XCTAssertThrowsError(try store.delete(id: row.id))
+        XCTAssertTrue(notified.isEmpty)
+        spy.failWrites = false
+        XCTAssertThrowsError(try store.delete(id: secondID))
+        XCTAssertTrue(notified.isEmpty)
+        try store.delete(id: row.id)
+        XCTAssertEqual(notified, [row.id])
+        XCTAssertThrowsError(try store.delete(id: row.id))
+        XCTAssertEqual(notified, [row.id])
+    }
+
     func testFailedMutationsPublishNoSuccessAndExposeOnlySafeErrors() throws {
         let spy = try makeSpy()
         let store = TaskStore(repository: spy)

@@ -142,6 +142,29 @@ final class FocusService: ObservableObject {
         }
     }
 
+    /// The task repository cleared these links in the deletion transaction. Update
+    /// only affected cached metadata: a fetch or load here could replay startup
+    /// recovery, discard unsaved monotonic time, or reset a running tick owner.
+    func taskWasDeleted(id: UUID) {
+        guard snapshots.contains(where: { $0.linkedTaskID == id }) else { return }
+        let updated = snapshots.map { row -> FocusSessionSnapshot in
+            guard row.linkedTaskID == id else { return row }
+            // A valid row remains valid when its scalar task link is removed. Keep
+            // the captured title and every timing field exactly as committed.
+            return try! FocusSessionSnapshot(
+                id: row.id, state: row.state, plannedSeconds: row.plannedSeconds,
+                accumulatedActiveSeconds: row.accumulatedActiveSeconds,
+                activeSegmentStartedAt: row.activeSegmentStartedAt, deadline: row.deadline,
+                pausedAt: row.pausedAt, startedAt: row.startedAt, endedAt: row.endedAt,
+                checkpointAt: row.checkpointAt, recoveryRequired: row.recoveryRequired,
+                linkedLessonID: row.linkedLessonID, linkedTitleSnapshot: row.linkedTitleSnapshot)
+        }
+        snapshots = updated
+        if let activeSession, activeSession.linkedTaskID == id {
+            self.activeSession = updated.first { $0.id == activeSession.id }
+        }
+    }
+
     func start(configuration: FocusConfiguration) throws {
         try perform(.start(configuration))
     }

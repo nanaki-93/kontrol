@@ -47,6 +47,9 @@ enum TaskMutationError: Equatable {
 @MainActor
 final class TaskStore: ObservableObject {
     let repository: any TaskRepository
+    /// Invoked only after the repository has committed a deletion. The dependency
+    /// graph wires this to the focus owner; no notification bus or second read.
+    var didDeleteTask: (@MainActor (UUID) -> Void)?
     @Published private(set) var snapshots: [TaskSnapshot] = []
     @Published private(set) var readState: TaskReadState = .notLoaded
     @Published private(set) var mutationError: TaskMutationError?
@@ -186,6 +189,7 @@ final class TaskStore: ObservableObject {
             try repository.delete(id: id)
             snapshots.removeAll { $0.id == id }
             updateStaleFlag()
+            didDeleteTask?(id)
         }
     }
 

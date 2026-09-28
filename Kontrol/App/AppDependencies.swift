@@ -23,6 +23,9 @@ final class AppDependencies {
         scheduleStore = ScheduleStore(repository: scheduleRepository ?? SwiftDataScheduleRepository(container: container))
         focusService = FocusService(repository: focusRepository ?? SwiftDataFocusRepository(container: container),
                                     wallClock: focusWallClock, monotonicClock: focusMonotonicClock)
+        taskStore.didDeleteTask = { [weak focusService] id in
+            focusService?.taskWasDeleted(id: id)
+        }
         focusService.loadIfNeeded()
     }
 }

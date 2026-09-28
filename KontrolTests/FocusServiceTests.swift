@@ -131,6 +131,40 @@ final class FocusServiceTests: XCTestCase {
         XCTAssertNil(service.mutationFailure) // active-session precondition, not a write
     }
 
+    func testDeletionPublicationDoesNotReplayRecoveryOrResetReadFailure() throws {
+        let repo = FakeRepository()
+        let taskID = UUID()
+        let pending = try FocusSessionSnapshot(id: UUID(), state: .paused, plannedSeconds: 1500,
+            accumulatedActiveSeconds: 12.5, pausedAt: start.addingTimeInterval(20),
+            startedAt: start, checkpointAt: start.addingTimeInterval(20),
+            recoveryRequired: true, linkedTaskID: taskID, linkedTitleSnapshot: "Retained title")
+        let history = try FocusSessionSnapshot(id: UUID(), state: .ended, plannedSeconds: 1500,
+            accumulatedActiveSeconds: 8, startedAt: start,
+            endedAt: start.addingTimeInterval(10), checkpointAt: start.addingTimeInterval(10),
+            linkedTaskID: taskID, linkedTitleSnapshot: "Retained title")
+        repo.rows = [pending, history]
+        let service = FocusService(repository: repo, wallClock: { self.start.addingTimeInterval(500) },
+            notificationCenter: NotificationCenter(), workspaceNotificationCenter: NotificationCenter())
+        service.loadIfNeeded()
+        repo.readError = .persistenceFailure
+        service.retryRead()
+        let readState = service.readState
+        let reads = repo.reads
+        service.taskWasDeleted(id: taskID)
+        XCTAssertEqual(repo.reads, reads)
+        XCTAssertEqual(repo.transitions, 0)
+        XCTAssertEqual(service.readState, readState)
+        XCTAssertEqual(service.activeSession?.state, .paused)
+        XCTAssertEqual(service.activeSession?.recoveryRequired, true)
+        XCTAssertEqual(service.activeSession?.accumulatedActiveSeconds, 12.5)
+        XCTAssertEqual(service.countdownSeconds, 1488)
+        XCTAssertTrue(service.snapshots.allSatisfy { $0.linkedTaskID == nil })
+        XCTAssertTrue(service.snapshots.allSatisfy { $0.linkedTitleSnapshot == "Retained title" })
+        service.taskWasDeleted(id: taskID) // already cleared; no duplicate publication or load
+        XCTAssertEqual(repo.reads, reads)
+        XCTAssertEqual(repo.transitions, 0)
+    }
+
     func testFailedRefreshRetainsExplicitlyStaleCachedHistoryAndDoesNotPermitStart() throws {
         let repo = FakeRepository()
         let history = try ended()
