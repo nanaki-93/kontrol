@@ -1,6 +1,6 @@
 # Kontrol — F00 executable foundation
 
-Kontrol is a local-first macOS SwiftUI app. F00 provides seven destinations (Today, Learning, Projects, Focus, Tasks, News, Settings), a native Settings scene, a small offline starter catalog, persistent quick-captured tasks, and non-destructive startup recovery. The first launch contains no sample personal records. The mockups are visual references, not live data.
+Kontrol is a local-first macOS SwiftUI app. F00 provides seven destinations (Today, Learning, Projects, Focus, Tasks, News, Settings), a native Settings scene, a small offline starter catalog, and non-destructive startup recovery. F02 provides persistent task creation, editing, completion/reopening, confirmed deletion, Today/Upcoming/Completed filters, optional notes and due dates, and quick capture on Today. The first launch contains no sample personal records. The mockups are visual references, not live data.
 
 ## Requirements and build
 
@@ -71,7 +71,7 @@ There is no V0 fixture or claimed V0 migration; future schemas require separate 
 
 ## F00 boundaries and verification status
 
-Today offers a title-only quick-capture sheet (planned for the local current day, no due date). Today and Tasks show saved tasks, but **F02** editing, completion/reopening, deletion, filters, notes, and due dates are not implemented. Learning shows the five offline starter topics and summaries, not interactive lessons, four active slots per topic, rotation, or the **F05** 40-lesson catalog. Projects, Focus, and News are honest foundation states; **F13** preferences, export, credential management, and release packaging/notarization are not implemented. The Settings scene currently shares the same no-settings-yet content as its destination.
+At the F00 checkpoint, Today offered title-only quick capture (planned for the local current day, no due date) and Today and Tasks displayed saved tasks. F02 has since added editing, completion/reopening, confirmed deletion, filters, optional notes and due dates; quick capture still defaults to Today but can also set a plan and due date. The F00 evidence below describes that historical checkpoint, not the current F02 gate. Learning shows the five offline starter topics and summaries, not interactive lessons, four active slots per topic, rotation, or the **F05** 40-lesson catalog. Projects, Focus, and News are honest foundation states; **F13** preferences, export, credential management, and release packaging/notarization are not implemented. The Settings scene currently shares the same no-settings-yet content as its destination.
 
 ### F00 integration evidence (2026-09-27, Xcode 27.0)
 
@@ -112,3 +112,57 @@ Current F01 XCTest captures (content points = pixels in these 1:1 offscreen snap
 The rendered 1440×940 image pairs were *actually compared* by sampling RGB every 8 pixels (0.01-channel tolerance): F01 Today standard vs hosted shell Today **219/21,240** different samples; F01 Today 130% vs M00 **2,652/21,240**; F01 Learning standard vs M43 **2,515/21,240**; injected recovery vs M01 **4,534/21,240**. Differences reflect real empty content, text scaling, native chrome and non-pixel-identical reference layouts, not an equality gate. Matched standard-vs-130% captures differ at 1000×700 and 1440×940: Today **603/11,000** and **602/21,240** sampled pixels; Learning **661/11,000** and **728/21,240**, respectively (the hosted tests also assert enlarged rendered font metrics). `/tmp/kontrol-f01-evidence/before` and `/tmp/kontrol-f01-evidence/after` currently contain **only** matching production-store SHA-256 manifests (three database/sidecar files each, `diff -u` exit 0); no before/after task screenshot survives in this environment. No screenshot comparison or signed-app relaunch is inferred from missing files. XCTest separately verifies reopening temporary stores, destination preference restoration, failed-save draft preservation and store bytes on injected failure. A fresh locally signed Debug process launched with `KONTROL_F00_RECOVERY_TEST=1` stayed alive, then was terminated without touching the production store; this process smoke does not prove an interactive recovery sequence. The injected flag directs Retry to a unique sandbox `Data/tmp/KontrolF00Recovery-<UUID>/` store, never deliberately damaging user storage.
 
 The locally ad-hoc-signed Debug bundle passes `codesign --verify --deep --strict`, packages `starter-catalog.json`, has `LSMinimumSystemVersion=14.0`, ID `com.kontrol.app`, sandbox entitlement `true` and Debug `get-task-allow=true` (see `/tmp/kontrol-f01-integration-{signed,entitlements,verify,native}.log`). This is **not** distribution signing/notarization. The user personally attested for this task/HEAD in `.pi/workflows/2026-09-27T15-40-16-780Z-XLNveA/manual-attestation.json` that “manual checks passed, you can continue and close the feature”; offline, keyboard, spoken VoiceOver, reduced motion, live layout and signed-app relaunch observations are credited **only as user-verified**, not performed or photographed in this run. The exact GUI screenshots/measurements from the user's checks were not provided. A macOS 14 runtime/API/symbol smoke remains unavailable on this macOS 27 host; runtime symbol tests on macOS 27 and the 14.0 build minimum do not substitute for testing on 14. F13 release packaging/notarization remains deferred. No F00 human attestation is counted as F01 evidence.
+
+## F02 task lifecycle and non-GUI gate (2026-09-28)
+
+The current Today quick-capture sheet starts with Title and a relative Today plan; Tasks provides Today, Upcoming and Completed filters, create/edit (including optional notes, due date/time and plan date), completion/reopening and task-specific confirmed deletion. Both routes use one app-owned task store; successful mutations publish committed snapshots without a second fetch. Open overdue tasks remain discoverable. No F04 focus-session model exists yet, so linked-history deletion is **not** verified. See [F02](docs/features/F02-tasks.md), [M02–M05/M09](docs/mockups/INDEX.md), and the [QA gate](docs/qa.md). The earlier F00/F01 descriptions and observations above remain historical evidence, not assertions that the current sheet is title-only.
+
+Observed on `/Applications/Xcode.app/Contents/Developer`, Xcode **27.0 (27A266a)**, Apple Swift **6.4 (swiftlang-6.4.0.34.1)**, macOS **27.0 (26A428)**, arm64; both targets retain macOS 14.0 deployment and Swift 5 language mode. Run from the repository root:
+
+```sh
+xcode-select -p
+xcodebuild -version
+xcrun swift --version
+make build DERIVED_DATA=/tmp/kontrol-f02-derived
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug -destination 'platform=macOS' -derivedDataPath /tmp/kontrol-f02-derived CODE_SIGNING_ALLOWED=NO build-for-testing
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug -destination 'platform=macOS' -derivedDataPath /tmp/kontrol-f02-derived CODE_SIGNING_ALLOWED=NO \
+  -only-testing:KontrolTests/TaskRepositoryTests \
+  -only-testing:KontrolTests/TaskSelectionTests \
+  -only-testing:KontrolTests/TaskStoreTests \
+  -only-testing:KontrolTests/TaskEditorDraftTests \
+  -only-testing:KontrolTests/V1FixtureTests \
+  -only-testing:KontrolTests/SchemaTests \
+  -only-testing:KontrolTests/ContainerFactoryTests \
+  -only-testing:KontrolTests/CatalogValidatorTests \
+  -only-testing:KontrolTests/CatalogImportTests \
+  -only-testing:KontrolTests/BundledCatalogTests \
+  -only-testing:KontrolTests/LaunchCoordinatorTests \
+  -only-testing:KontrolTests/LaunchRecoveryTests \
+  -only-testing:KontrolTests/NavigationStoreTests \
+  -only-testing:KontrolTests/ProjectSmokeTests \
+  -only-testing:KontrolTests/AppShellTests/testOneStorePerDependencyGraphAcrossRoutesAndWindows \
+  -only-testing:KontrolTests/AppShellTests/testNavigationMetadataAndRouting \
+  -only-testing:KontrolTests/QuickCaptureTests/testBlankDraftNeverSaves \
+  -only-testing:KontrolTests/QuickCaptureTests/testFailureKeepsEditableTitleAndSheetUntilSingleSuccessfulRetry \
+  -only-testing:KontrolTests/QuickCaptureTests/testOvernightTodayIsResolvedAtSubmissionAndPublishesOneIdentity \
+  -only-testing:KontrolTests/QuickCaptureTests/testUnplannedAndClearedDuePersistAndFailureRetainsAllSelections \
+  -only-testing:KontrolTests/QuickCaptureTests/testExplicitDateAndDueAreSavedAsSelected \
+  -only-testing:KontrolTests/QuickCaptureTests/testExplicitPlanKeepsSelectedCalendarDayAndZoneAfterTravelAndFailedSave test
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug -destination 'platform=macOS' -derivedDataPath /tmp/kontrol-f02-derived CODE_SIGNING_ALLOWED=NO analyze
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug -destination 'platform=macOS' -derivedDataPath /tmp/kontrol-f02-sandbox CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= build
+codesign --verify --deep --strict /tmp/kontrol-f02-sandbox/Build/Products/Debug/Kontrol.app
+codesign --display --entitlements :- /tmp/kontrol-f02-sandbox/Build/Products/Debug/Kontrol.app
+git diff --check
+```
+
+Build, test-bundle compilation, **91 selected tests (0 failures, 0 skips)**, analyzer, ad-hoc-signed build, and strict signature verification succeeded. The selected tests include the complete UUID-isolated disk lifecycle across distinct opens and F02 mutations on a complete copied V1 fixture; the originals (database and sidecars) are checked byte-for-byte unchanged by `V1FixtureTests`. The selected-test result bundle is `/tmp/kontrol-f02-derived/Logs/Test/Test-Kontrol-2026.09.28_15-58-10-+0800.xcresult`; command output is `/tmp/kontrol-f02-{toolchain,build,build-for-testing,selected-tests,analyze,signed,verify,entitlements}.log`. The entitlement inspection succeeded and reported `com.apple.security.app-sandbox = true` and Debug `com.apple.security.get-task-allow = true`; this is **not** distribution signing or an offline app-open/relaunch test. `git diff --check` returned 0 after the README edit (no whitespace errors; `/tmp/kontrol-f02-diffcheck.log` is empty).
+
+Warnings investigated: `platform=macOS` matches both arm64 and x86_64 on this machine; xcodebuild chose arm64. Metadata extraction was skipped because there is no AppIntents.framework dependency. The `codesign --display --entitlements :-` syntax emits a deprecation warning about `:` despite returning the expected entitlement XML (the command is retained as specified). Test runtime emitted `com.apple.linkd.autoShortcut` connection messages and CoreData open errors from the intentional invalid-store recovery test; its assertions passed. No new Swift compiler or analyzer diagnostic was found.
+
+### F02 deferred/open F13 acceptance ledger (not passed by this gate)
+
+- Run **all** `TaskPresentationTests` and the **hosted portions** of `QuickCaptureTests` in a reserved, active, uncontended GUI session on a real Mac, then `make test DERIVED_DATA=/tmp/kontrol-f13-derived` per [QA](docs/qa.md). Previous hosted runs had intermittent missing AX controls/visibility and editor-sheet dismissal failures (including `testNativeTasksEditorCreatesEditsAndCancelsWithoutWriting` and `testQuickCapturePublishesAcrossTodayAndTasksWithoutPostSaveRead`); `TaskPresentationTests/testNativeDeleteAlertKeyboardNavigationAndConfirmation` previously **skipped** because there was no active key GUI window. These are unresolved, not reclassified as passes; compilation and the selected non-GUI tests do not exercise them.
+- In that session verify keyboard-only capture/edit/submit/cancel, filter and row actions, native destructive alert focus and confirmation, initial Title focus and focus restoration, independent AX row/actions and spoken VoiceOver names/roles/selected state, visible focus and ≥32-point targets, long-field scrolling, enlarged text and live reduced motion. Record failures as well as successes; no F02 manual attestation is available for these checks.
+- Capture and compare the **rendered F02 states** against `docs/mockups/M02-tasks.png`, `M03-task-editor.png`, `M04-task-complete-reopen.png`, `M05-task-delete.png` and `M09-quick-capture.png` at **1000×700 and 1440×940** points; record actual before/after screenshots and differences at F13. No F02 pair of both-size screenshots or comparison is claimed here. Earlier F00/F01 M09 and Today captures are historical, not substitutes for F02 captures.
+- Open the signed sandbox app on isolated test data **offline**, create/edit/complete/reopen/delete, quit and relaunch to check Today/Tasks state and unchanged unrelated records. Run the same journey on **macOS 14** when available; this macOS 27 build and ad-hoc signature do not establish either runtime check.
+- After **F04** introduces focus history, delete a linked task and assert the historical optional reference becomes nil, the title snapshot remains and no history cascades. No such model or integration check exists in F02.
