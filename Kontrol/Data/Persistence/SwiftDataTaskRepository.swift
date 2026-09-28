@@ -117,8 +117,15 @@ final class SwiftDataTaskRepository: TaskRepository {
         guard let task = try context.fetch(descriptor).first else {
             throw TaskRepositoryError.notFound(id)
         }
+        // Scalar focus links do not cascade. Clear every matching reference in
+        // this same private context before committing the task deletion, including
+        // terminal history and sessions awaiting recovery. Keep title snapshots
+        // and all timing/state fields untouched.
+        let linked = try context.fetch(FetchDescriptor<FocusSession>(
+            predicate: #Predicate { $0.linkedTaskID == id }))
+        for session in linked { session.linkedTaskID = nil }
         context.delete(task)
-        // A failed save discards only this private context's deletion.
+        // A failed save discards both the deletion and all link changes.
         try save(context)
     }
 
