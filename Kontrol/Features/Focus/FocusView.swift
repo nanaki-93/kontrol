@@ -17,6 +17,24 @@ struct FocusReadyDraft {
     }
 }
 
+/// Display values come from the committed row; only the running countdown comes
+/// from the service's monotonic clock. No view-local timer or optimistic state.
+struct FocusTimerPresentation {
+    let session: FocusSessionSnapshot
+    let countdownSeconds: Int
+
+    var stateText: String { session.state == .running ? "Running" : "Paused" }
+    var title: String { session.linkedTitleSnapshot ?? "Focus session" }
+    var countdown: String {
+        let seconds = max(0, countdownSeconds)
+        return String(format: "%02d:%02d", seconds / 60, seconds % 60)
+    }
+    var actualDuration: String {
+        let seconds = Int(min(session.actualSeconds.rounded(.down), Double(Int.max).nextDown))
+        return "\(seconds / 60) min \(seconds % 60) sec focused"
+    }
+}
+
 struct FocusView: View {
     @ObservedObject var service: FocusService
     @ObservedObject var taskStore: TaskStore
@@ -24,6 +42,7 @@ struct FocusView: View {
     @State private var customMinutes = ""
     @State private var showingSessions = false
     @State private var startError: FocusError?
+    @State private var actionError: (sessionID: UUID, state: FocusSessionState, message: String)?
 
     private var openTasks: [TaskSnapshot] {
         taskStore.snapshots.filter { !$0.isCompleted }
@@ -74,11 +93,13 @@ struct FocusView: View {
                 LoadingState("Loading Focus")
             } else if let active = service.activeSession {
                 // The committed session takes precedence over stale local drafts in every window.
-                StatusPill(active.recoveryRequired ? "Interrupted" : active.state == .running ? "Running" : "Paused",
-                           kind: active.recoveryRequired ? .warning : .success)
-                Text("A focus session is active. Configure a new one after this session ends.")
-                    .appTypography(.body)
-                    .foregroundStyle(AppColors.textSecondary)
+                if active.recoveryRequired {
+                    StatusPill("Interrupted", kind: .warning)
+                    Text("This session needs a recovery decision before starting another.")
+                        .appTypography(.body)
+                } else {
+                    timerContent(active)
+                }
             } else {
                 readyContent
             }
@@ -88,6 +109,105 @@ struct FocusView: View {
         .padding(.horizontal, AppMetrics.horizontalInset)
         .padding(.top, AppMetrics.space8)
         .onAppear { if taskStore.readState == .notLoaded { taskStore.refresh() } }
+    }
+
+    private func timerContent(_ session: FocusSessionSnapshot) -> some View {
+        let timer = FocusTimerPresentation(session: session,
+            countdownSeconds: service.countdownSeconds ?? session.plannedSeconds)
+        return VStack(alignment: .leading, spacing: AppMetrics.space6) {
+            StatusPill(timer.stateText, kind: session.state == .running ? .success : .warning)
+                .accessibilityIdentifier("focus-timer-state")
+            Text(timer.countdown)
+                .font(.system(size: 64, weight: .medium, design: .monospaced))
+                .foregroundStyle(AppColors.accent)
+                .accessibilityLabel("\(timer.stateText), \(timer.countdown) remaining")
+                .accessibilityIdentifier("focus-timer-countdown")
+            VStack(alignment: .leading, spacing: AppMetrics.space2) {
+                Text(timer.title).appTypography(.section)
+                Text("Started \(session.startedAt.formatted(date: .omitted, time: .shortened))")
+                    .appTypography(.metadata)
+                    .foregroundStyle(AppColors.textSecondary)
+                Text(session.state == .running ? "Saved \(timer.actualDuration)" : timer.actualDuration)
+                    .appTypography(.metadata)
+                    .foregroundStyle(AppColors.textSecondary)
+                if session.state == .paused, let pausedAt = session.pausedAt {
+                    Text("Paused at \(pausedAt.formatted(date: .omitted, time: .shortened)) · Paused time is excluded")
+                        .appTypography(.metadata)
+                        .foregroundStyle(AppColors.textSecondary)
+                }
+            }
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: AppMetrics.space3) { timerActions(session) }
+                VStack(alignment: .leading, spacing: AppMetrics.space3) { timerActions(session) }
+            }
+            if let failure = service.mutationFailure,
+               failure.action == (session.state == .running ? .pause : .resume) || failure.action == .end {
+                ErrorBanner(.saveFailed, recoveryTitle: "Retry action", recovery: { retryAction() })
+                    .accessibilityIdentifier("focus-action-error")
+                Text("\(timer.stateText) is still the saved state. Retry the action to save it.")
+                    .appTypography(.metadata)
+            } else if let actionError, actionError.sessionID == session.id, actionError.state == session.state {
+                Text(actionError.message).appTypography(.metadata).foregroundStyle(AppColors.error)
+            }
+            if service.checkpointError != nil {
+                ErrorBanner(.saveFailed, recoveryTitle: "Retry checkpoint", recovery: { service.retryCheckpoint() })
+                    .accessibilityIdentifier("focus-checkpoint-error")
+                Text("Time is still being counted; the latest checkpoint has not saved.")
+                    .appTypography(.metadata)
+            }
+            let today = service.history(.today)
+            VStack(alignment: .leading, spacing: AppMetrics.space2) {
+                SectionHeader("Today")
+                Text("\(today.groups.flatMap(\.sessions).count) sessions · \(today.todayWholeMinutes) min focused")
+                    .appTypography(.body)
+                    .accessibilityIdentifier("focus-today-total")
+                Text("Completed and ended sessions only; this session is not included.")
+                    .appTypography(.metadata)
+                    .foregroundStyle(AppColors.textSecondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func timerActions(_ session: FocusSessionSnapshot) -> some View {
+        ActionButton(session.state == .running ? "Pause" : "Resume",
+                     symbol: session.state == .running ? "pause.fill" : "play.fill", variant: .primary) {
+            performAction(session.state == .running ? .pause : .resume)
+        }
+        .accessibilityIdentifier("focus-timer-primary-action")
+        ActionButton("End session", symbol: "stop.fill") {
+            performAction(.end)
+        }
+        .accessibilityIdentifier("focus-timer-end")
+    }
+
+    private func performAction(_ action: FocusMutationAction) {
+        do {
+            switch action {
+            case .pause: try service.pause()
+            case .resume: try service.resume()
+            case .end: try service.end()
+            default: return
+            }
+            actionError = nil
+        } catch {
+            if let session = service.activeSession {
+                actionError = (session.id, session.state,
+                    "Action could not be saved. The session is still in its last saved state.")
+            }
+        }
+    }
+
+    private func retryAction() {
+        do {
+            try service.retryMutation()
+            actionError = nil
+        } catch {
+            if let session = service.activeSession {
+                actionError = (session.id, session.state,
+                    "Retry did not save. The session remains in its last saved state.")
+            }
+        }
     }
 
     private var readyContent: some View {

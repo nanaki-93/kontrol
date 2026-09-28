@@ -57,6 +57,62 @@ final class FocusPresentationTests: XCTestCase {
         XCTAssertEqual(try SwiftDataFocusRepository(container: graph.container).fetchAll().count, 1)
     }
 
+    func testTimerCopyUsesCommittedStateTitleAndFrozenPausedCountdown() throws {
+        let start = Date(timeIntervalSinceReferenceDate: 1_000)
+        let running = try FocusSessionSnapshot(id: UUID(), state: .running, plannedSeconds: 1500,
+            accumulatedActiveSeconds: 62.75, activeSegmentStartedAt: start.addingTimeInterval(63),
+            deadline: start.addingTimeInterval(1500.25), startedAt: start,
+            checkpointAt: start.addingTimeInterval(63), linkedTitleSnapshot: "Original task title")
+        let runningCopy = FocusTimerPresentation(session: running, countdownSeconds: 1438)
+        XCTAssertEqual(runningCopy.stateText, "Running")
+        XCTAssertEqual(runningCopy.title, "Original task title")
+        XCTAssertEqual(runningCopy.countdown, "23:58")
+        XCTAssertEqual(runningCopy.actualDuration, "1 min 2 sec focused")
+
+        let paused = try FocusSessionSnapshot(id: running.id, state: .paused, plannedSeconds: 1500,
+            accumulatedActiveSeconds: 62.75, pausedAt: start.addingTimeInterval(63),
+            startedAt: start, checkpointAt: start.addingTimeInterval(63))
+        let pausedCopy = FocusTimerPresentation(session: paused, countdownSeconds: 1438)
+        XCTAssertEqual(pausedCopy.stateText, "Paused")
+        XCTAssertEqual(pausedCopy.countdown, "23:58")
+        XCTAssertEqual(pausedCopy.title, "Focus session")
+        XCTAssertEqual(pausedCopy.actualDuration, runningCopy.actualDuration)
+    }
+
+    func testCommittedPauseResumeEndAndTaskRemainsOpen() throws {
+        let graph = try dependencies()
+        let task = try graph.taskStore.create(input: TaskInput(title: "Keep open"))
+        try graph.focusService.start(configuration: FocusConfiguration(linkedTaskID: task.id))
+        let started = try XCTUnwrap(graph.focusService.activeSession)
+        XCTAssertEqual(started.linkedTitleSnapshot, "Keep open")
+        try graph.focusService.pause()
+        let paused = try XCTUnwrap(graph.focusService.activeSession)
+        XCTAssertEqual(paused.state, .paused)
+        let frozen = graph.focusService.countdownSeconds
+        XCTAssertEqual(frozen, Int(ceil(Double(paused.plannedSeconds) - paused.actualSeconds)))
+        try graph.focusService.resume()
+        XCTAssertEqual(graph.focusService.activeSession?.state, .running)
+        try graph.focusService.end()
+        XCTAssertNil(graph.focusService.activeSession)
+        XCTAssertEqual(graph.focusService.history(.today).groups.flatMap(\.sessions).count, 1)
+        XCTAssertEqual(graph.taskStore.snapshots.first(where: { $0.id == task.id })?.isCompleted, false)
+    }
+
+    func testNaturalCompletionDoesNotCompleteLinkedTask() throws {
+        let graph = try dependencies()
+        let task = try graph.taskStore.create(input: TaskInput(title: "Still open"))
+        let repository = SwiftDataFocusRepository(container: graph.container)
+        let start = Date(timeIntervalSinceReferenceDate: 1_000)
+        let running = try repository.create(input: FocusStartInput(plannedSeconds: 60,
+            startedAt: start, linkedTaskID: task.id))
+        let change = try FocusTiming.checkpoint(running, at: start.addingTimeInterval(60), monotonicDelta: 60)
+        let completed = try repository.transition(id: running.id, command: change.transition,
+            effectiveEndedAt: change.snapshot.endedAt)
+        XCTAssertEqual(completed.state, .completed)
+        XCTAssertEqual(completed.linkedTitleSnapshot, "Still open")
+        XCTAssertEqual(graph.taskStore.snapshots.first(where: { $0.id == task.id })?.isCompleted, false)
+    }
+
     // Hosted presentation is compiled by build-for-testing, not executed in this step.
     func testHostedReadySurface() throws {
         let graph = try dependencies()
@@ -64,5 +120,17 @@ final class FocusPresentationTests: XCTestCase {
         host.frame = CGRect(x: 0, y: 0, width: 1000, height: 700)
         host.layoutSubtreeIfNeeded()
         XCTAssertEqual(host.frame.width, 1000)
+    }
+
+    func testHostedRunningAndPausedSurfaces() throws {
+        let graph = try dependencies()
+        try graph.focusService.start(configuration: FocusConfiguration())
+        let host = NSHostingView(rootView: FocusView(service: graph.focusService, taskStore: graph.taskStore))
+        host.frame = CGRect(x: 0, y: 0, width: 1000, height: 700)
+        host.layoutSubtreeIfNeeded()
+        XCTAssertNotNil(graph.focusService.countdownSeconds)
+        try graph.focusService.pause()
+        host.layoutSubtreeIfNeeded()
+        XCTAssertEqual(graph.focusService.activeSession?.state, .paused)
     }
 }
