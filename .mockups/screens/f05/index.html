@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>F05 · Learning references</title>
+<link rel="stylesheet" href="../../design-system/tokens.css">
+<link rel="stylesheet" href="../../design-system/components.css">
+<style>
+  body { margin: 0; background: var(--color-background); color: var(--color-text-primary); font: var(--type-body)/var(--leading-body) var(--font-mono); }
+  .mock-meta { padding: var(--space-4) var(--space-6); border-bottom: 1px solid var(--color-border); }
+  h1 { font-size: var(--type-page); margin: 0; } p { color: var(--color-text-secondary); margin: var(--space-2) 0 0; }
+  a { color: var(--color-text-primary); } a:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 3px; }
+  .grid { padding: var(--space-6); display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); }
+  .cell { min-width: 0; border: 1px solid var(--color-border); background: var(--color-surface); }
+  .cell h2 { font-size: var(--type-section); font-weight: var(--weight-regular); padding: var(--space-3); margin: 0; }
+  iframe { display: block; border: 0; width: 100%; height: 420px; background: var(--color-background); }
+  .normal { padding: var(--space-4); background: var(--color-background); height: 420px; overflow: auto; }
+  .normal h3 { margin: 0 0 var(--space-2); font-size: var(--type-section); }
+  .normal small { color: var(--color-text-secondary); }
+  .choices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); margin-top: var(--space-3); }
+  .choice { min-width: 0; padding: var(--space-3); background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-small); overflow-wrap: anywhere; }
+  .choice strong { font-weight: var(--weight-regular); } .choice p { font-size: var(--type-metadata); }
+  @media (max-width: 900px) { .grid, .choices { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header class="mock-meta"><h1>F05 · Learning state references</h1><p>M15 governs the normal topic/choice composition. These F05 references are static design targets, not live catalog actions. Open a state independently to review at full size.</p></header>
+<main class="grid">
+  <section class="cell" aria-labelledby="normal"><h2 id="normal"><a href="../../../docs/mockups/M15-learning-choices.png">Normal · M15 reference image ↗</a></h2><div class="normal"><h3>Learning / Go <small>· 4 available</small></h3><small>Topics: Go · Java · System Design · Performance · Security</small><div class="choices">
+    <div class="choice"><strong>Stop a worker when its caller leaves</strong><p>Learn · Intermediate · 12 min<br>Context cancellation</p><p>Stop a worker cooperatively when its caller no longer needs the result.</p></div>
+    <div class="choice"><strong>Design table-driven tests for boundary cases</strong><p>Code · Basic · 15 min<br>Case design</p><p>Express independent normal, boundary, and failure cases as a table with precise expected outcomes.</p></div>
+    <div class="choice"><strong>Specify the small contract at the consumer</strong><p>Design · Intermediate · 14 min<br>Consumer contracts</p><p>Design a consumer-owned Go interface containing only the methods needed by that consumer.</p></div>
+    <div class="choice"><strong>Compare benchmarks without fooling yourself</strong><p>Question · Intermediate · 13 min<br>Comparable benchmarks</p><p>Interpret Go benchmark comparisons using controlled work, allocation metrics, and repeated measurements.</p></div>
+  </div></div></section>
+  <section class="cell"><h2><a href="read-only-inspection.html">Read-only inspection ↗</a></h2><iframe title="Read-only inspection preview" src="read-only-inspection.html" loading="lazy"></iframe></section>
+  <section class="cell"><h2><a href="exhausted-empty.html">Exhausted / empty inventory ↗</a></h2><iframe title="Exhausted inventory preview" src="exhausted-empty.html" loading="lazy"></iframe></section>
+  <section class="cell"><h2><a href="loading-read-failure.html">Loading / read failure ↗</a></h2><iframe title="Loading and read failure preview" src="loading-read-failure.html" loading="lazy"></iframe></section>
+</main>
+</body>
+</html>

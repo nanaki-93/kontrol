@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>F05 · Loading and read failure</title>
+<link rel="stylesheet" href="../../design-system/tokens.css">
+<link rel="stylesheet" href="../../design-system/components.css">
+<style>
+  body { margin: 0; background: var(--color-background); color: var(--color-text-primary); font: var(--type-body)/var(--leading-body) var(--font-mono); }
+  .mock-meta { padding: var(--space-2) var(--space-6); border-bottom: 1px solid var(--color-border); color: var(--color-text-secondary); font-size: var(--type-metadata); }
+  main { max-width: 1100px; margin: auto; padding: var(--space-6); }
+  .page-header { margin-bottom: var(--space-6); }
+  .states { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-6); }
+  .state { min-width: 0; padding: var(--space-4); border: 1px solid var(--color-border); border-radius: var(--radius-small); }
+  .state h2 { margin: 0 0 var(--space-3); font-size: var(--type-section); font-weight: var(--weight-regular); }
+  .state p { margin: var(--space-2) 0; color: var(--color-text-secondary); overflow-wrap: anywhere; }
+  @media (max-width: 700px) { .states { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header class="mock-meta"><strong>F05 · M15 extension · Loading and read failure</strong> — two mutually exclusive views shown together for comparison, not concurrent app states.</header>
+<main>
+  <header class="page-header"><div class="page-header__content"><h3>Learning</h3><span class="page-header__meta">Go · Java · System Design · Performance · Security</span></div></header>
+  <div class="states">
+    <section class="state" aria-labelledby="loading-heading"><h2 id="loading-heading">Loading</h2><div class="loading-state" role="status"><span class="loading-state__indicator" aria-hidden="true"></span><span>Reading saved lesson choices…</span></div><p>No count or empty inventory is asserted until the read finishes.</p></section>
+    <section class="state" aria-labelledby="failure-heading"><h2 id="failure-heading">Read failed</h2><div class="error-banner" role="alert"><span class="error-banner__symbol" aria-hidden="true">!</span><span>Couldn't read saved lesson choices. Other areas remain available.</span></div><p>This is not an empty topic. Retry reads the persisted catalog; it does not create progress.</p><button type="button" class="btn" aria-label="Try reading Learning choices again">Try again</button></section>
+  </div>
+</main>
+</body>
+</html>

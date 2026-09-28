@@ -22,7 +22,7 @@ Each row links a function to an actual PNG mockup. SVG sources sit beside the PN
 | [F04](../features/F04-focus.md) | Pause or resume | [M12 · Focus](M12-focus-paused.png) |
 | [F04](../features/F04-focus.md) | Recover after relaunch | [M13 · Focus](M13-focus-recovery.png) |
 | [F04](../features/F04-focus.md) | End/completed session and history | [M14 · Sessions](M14-focus-history.png) · [Completion pending save](../../.mockups/screens/f04/completion-pending.html) · [F04 variant overview](../../.mockups/screens/f04/index.html) |
-| [F05](../features/F05-learning-catalog.md) | Choose topic and inspect seeded lessons | [M15 · Learning](M15-learning-choices.png) |
+| [F05](../features/F05-learning-catalog.md) | Choose topic and inspect seeded lessons | [M15 · Learning](M15-learning-choices.png) · [F05 state overview](../../.mockups/screens/f05/index.html) · [Reference-only inspection](../../.mockups/screens/f05/read-only-inspection.html) · [Exhausted inventory](../../.mockups/screens/f05/exhausted-empty.html) · [Loading / read failure](../../.mockups/screens/f05/loading-read-failure.html) |
 | [F06](../features/F06-lesson-experience.md) | Learn format | [M16 · Context cancellation](M16-lesson-learn.png) |
 | [F06](../features/F06-lesson-experience.md) | Code format | [M17 · Table-driven tests](M17-lesson-code.png) |
 | [F06](../features/F06-lesson-experience.md) | Question format | [M18 · Benchmarking Go](M18-lesson-question.png) |
@@ -54,6 +54,10 @@ Each row links a function to an actual PNG mockup. SVG sources sit beside the PN
 | [F13](../features/F13-settings-release.md) | Export local data | [M40 · Local data](M40-data-export.png) |
 | [F13](../features/F13-settings-release.md) | Disconnect project folder | [M41 · Project folders](M41-remove-project.png) |
 | [F13](../features/F13-settings-release.md) | Accessibility and release verification | [M42 · Appearance](M42-design-accessibility.png) |
+
+## F05 departures from M15
+
+[M15](M15-learning-choices.png) remains the normal-state composition reference: five topic choices in the sidebar and up to four stable lessons for the selected topic. The [F05 overview](../../.mockups/screens/f05/index.html) shows four representative Go choices with explicit objectives and concept labels, alongside the three states M15 does not depict. Its example content is illustrative, not a guarantee of slot ordering. [Inspection](../../.mockups/screens/f05/read-only-inspection.html) presents stored explanation, worked example, exercise prompt, reference response, and self-check as **read-only reference material**; opening it does not start work. [Exhaustion](../../.mockups/screens/f05/exhausted-empty.html) shows the real zero count rather than invented choices. [Loading / read failure](../../.mockups/screens/f05/loading-read-failure.html) distinguishes an in-progress read from a retryable error, neither of which means an empty catalog. M15's History/Coverage, replacement, and generation actions are not part of F05; no F06 attempt or completion workflow is depicted. Interactive behavior and rendered comparison remain deferred to F13.
 
 ## All 44 visual states
 
