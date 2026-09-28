@@ -108,6 +108,65 @@ enum LessonSelector {
         return remaining.sorted(by: slotOrder)
     }
 
+    /// Consider only the explicitly restored lesson for an empty slot in its
+    /// topic. Do not reconcile other vacancies or displace existing choices.
+    static func restoredVacancy(lessonID: String,
+                                definitions: [LessonDefinitionSnapshot],
+                                concepts: [LearningConceptSnapshot],
+                                progress: [LessonProgressSnapshot],
+                                slots: [LessonSlotSnapshot],
+                                terminalAttempts: [LessonAttemptSnapshot],
+                                now: Date) throws -> LessonSlotSnapshot? {
+        try validateInputs(definitions: definitions, concepts: concepts,
+                           progress: progress, slots: slots)
+        guard let candidate = definitions.first(where: { $0.id == lessonID }),
+              !slots.contains(where: { $0.lessonID == lessonID }),
+              supportedFormats.contains(candidate.format),
+              supportedDifficulties.contains(candidate.difficulty),
+              supportedSources.contains(candidate.source) else { return nil }
+        let byID = Dictionary(uniqueKeysWithValues: definitions.map { ($0.id, $0) })
+        let byConcept = Dictionary(uniqueKeysWithValues: concepts.map { ($0.id, $0) })
+        let status = Dictionary(uniqueKeysWithValues: progress.map { ($0.lessonID, $0.status) })
+        guard status[lessonID] == .started || status[lessonID] == .available else { return nil }
+        let finished = Set(progress.compactMap {
+            $0.status == .completed || $0.status == .dismissed ? $0.lessonID : nil
+        })
+        let practiced = practicedConcepts(finished: finished, status: status,
+                                          definitions: byID, concepts: byConcept)
+        guard candidate.prerequisiteConceptIDs.allSatisfy(practiced.contains) else { return nil }
+        var usedContent = Set(definitions.filter { finished.contains($0.id) }.map(content))
+        for attempt in terminalAttempts where finished.contains(attempt.lessonID) {
+            if let data = attempt.pinnedContentData {
+                let pin = try PinnedLessonContent.decode(data, lessonID: attempt.lessonID,
+                                                         contentVersion: attempt.contentVersion)
+                usedContent.insert(content(pin.definition))
+            } else if let snapshot = attempt.completedContentSnapshot {
+                usedContent.insert(content(explanation: snapshot.explanation,
+                    workedExample: snapshot.workedExample, exercise: snapshot.exercise,
+                    referenceAnswer: snapshot.referenceAnswer, criteria: snapshot.selfCheckCriteria))
+            }
+        }
+        for slot in slots {
+            if let active = byID[slot.lessonID] { usedContent.insert(content(active)) }
+        }
+        let studiedCandidate: LessonDefinitionSnapshot
+        if let attempt = terminalAttempts.first(where: { $0.lessonID == lessonID }),
+           let data = attempt.pinnedContentData {
+            studiedCandidate = try PinnedLessonContent.decode(data, lessonID: lessonID,
+                                                               contentVersion: attempt.contentVersion).definition
+        } else {
+            studiedCandidate = candidate
+        }
+        guard !usedContent.contains(content(studiedCandidate)) else { return nil }
+        for index in 0..<slotsPerTopic where !slots.contains(where: {
+            $0.topicID == candidate.topicID && $0.slotIndex == index
+        }) {
+            return LessonSlotSnapshot(topicID: candidate.topicID, slotIndex: index,
+                                      lessonID: lessonID, assignedAt: now)
+        }
+        return nil
+    }
+
     static func reconcile(definitions: [LessonDefinitionSnapshot],
                           concepts: [LearningConceptSnapshot],
                           progress: [LessonProgressSnapshot],

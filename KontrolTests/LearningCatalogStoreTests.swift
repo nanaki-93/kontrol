@@ -39,6 +39,16 @@ private final class ReadingCatalogRepository: CatalogRepository {
         throw ReadError.unavailable
     }
 
+    func loadHistory() throws -> [LessonHistorySnapshot] {
+        reads += 1
+        throw ReadError.unavailable
+    }
+
+    func restoreDismissed(lessonID: String, now: Date) throws -> LessonMutationResult {
+        writes += 1
+        throw ReadError.unavailable
+    }
+
     func saveAnswer(attemptID: UUID, expectedRevision: Int, answer: String) throws -> LessonMutationResult {
         writes += 1
         throw ReadError.unavailable

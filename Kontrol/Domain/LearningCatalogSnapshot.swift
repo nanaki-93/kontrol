@@ -178,6 +178,10 @@ struct LessonHistorySnapshot: Equatable, Identifiable {
     let lessonID: String
     let status: LessonProgressStatus // completed or dismissed
     let date: Date
+    // Historical pin/snapshot wins over the installed catalog. A missing
+    // definition has an honest stable-ID label and no invented topic.
+    let title: String
+    let topicID: String?
     let content: LessonStudiedContent
     let attempt: LessonAttemptSnapshot?
 }

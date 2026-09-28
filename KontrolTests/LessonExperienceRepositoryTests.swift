@@ -195,7 +195,7 @@ final class LessonExperienceRepositoryTests: XCTestCase {
             XCTAssertEqual(receipt.outcome, .unchanged)
             XCTAssertEqual(receipt.detail, detail)
             XCTAssertEqual(receipt.history.count, 1)
-            XCTAssertEqual(receipt.history.first?.content, .current(definition))
+            XCTAssertEqual(receipt.history.first?.content, .unavailable) // no retained studied version
             XCTAssertNil(receipt.history.first?.attempt)
         }
         XCTAssertEqual(try writer.loadLesson(lessonID: id), detail)

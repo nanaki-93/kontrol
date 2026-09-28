@@ -8,6 +8,8 @@ protocol CatalogRepository {
     func reconcileSlots(now: Date) throws -> LearningCatalogSnapshot
     func openLesson(lessonID: String, now: Date) throws -> LessonMutationResult
     func loadLesson(lessonID: String) throws -> LessonDetailSnapshot
+    func loadHistory() throws -> [LessonHistorySnapshot]
+    func restoreDismissed(lessonID: String, now: Date) throws -> LessonMutationResult
     func saveAnswer(attemptID: UUID, expectedRevision: Int, answer: String) throws -> LessonMutationResult
     func revealSolution(attemptID: UUID, expectedRevision: Int, now: Date) throws -> LessonMutationResult
     func setSelfCheckAcknowledged(attemptID: UUID, expectedRevision: Int,
@@ -201,6 +203,65 @@ final class SwiftDataCatalogRepository: CatalogRepository {
     // context. Reentrant consumers observe only the committed previous operation.
     func loadLesson(lessonID: String) throws -> LessonDetailSnapshot {
         try detail(lessonID: lessonID, in: ModelContext(container))
+    }
+
+    func loadHistory() throws -> [LessonHistorySnapshot] {
+        let context = ModelContext(container)
+        return try history(in: context)
+    }
+
+    func restoreDismissed(lessonID: String, now: Date) throws -> LessonMutationResult {
+        guard now.timeIntervalSinceReferenceDate.isFinite else {
+            throw LessonExperienceError.invalidTransition
+        }
+        let context = ModelContext(container)
+        context.autosaveEnabled = false
+        let current = try detail(lessonID: lessonID, in: context)
+        guard let progress = current.progress else { throw LessonExperienceError.invalidTransition }
+        if progress.status == .completed { throw LessonExperienceError.invalidTransition }
+        if progress.status != .dismissed {
+            guard progress.dismissedAt != nil else { throw LessonExperienceError.invalidTransition }
+            // A repeated Restore does not rewrite provenance or fill a slot
+            // later when inventory changes. It is an unchanged receipt.
+            return try result(.unchanged, detail: current, in: context)
+        }
+        let rows = try context.fetch(FetchDescriptor<LessonProgress>()).filter { $0.lessonID == lessonID }
+        guard rows.count == 1, let row = rows.first else { throw LessonExperienceError.invalidStoredData }
+        let catalog = try snapshot(in: context)
+        guard !catalog.slots.contains(where: { $0.lessonID == lessonID }) else {
+            throw LessonExperienceError.invalidStoredData
+        }
+        row.status = current.attempt == nil ? .available : .started
+        // dismissedAt and the entire attempt (including its original pin and
+        // revision) are provenance. Restore must never edit either one.
+        let updated = try snapshot(in: context)
+        let attempts = try context.fetch(FetchDescriptor<LessonAttempt>()).map { item in
+            LessonAttemptSnapshot(id: item.id, lessonID: item.lessonID,
+                contentVersion: item.contentVersion, answerDraft: item.answerDraft,
+                solutionRevealedAt: item.solutionRevealedAt,
+                selfCheckAcknowledgedAt: item.selfCheckAcknowledgedAt,
+                completedAt: item.completedAt, completedContentSnapshot: item.completedContentSnapshot,
+                pinnedContentData: item.pinnedContentData, revision: item.revision)
+        }
+        // Unrecoverable legacy work remains accessible in detail, but must not
+        // advertise an upgraded exercise as a usable active choice.
+        let canOfferChoice: Bool
+        switch current.content {
+        case .pinned, .current: canOfferChoice = true
+        case .legacyCompleted, .unavailable: canOfferChoice = false
+        }
+        if canOfferChoice, let choice = try LessonSelector.restoredVacancy(lessonID: lessonID,
+            definitions: updated.definitions, concepts: updated.concepts,
+            progress: updated.progress, slots: updated.slots,
+            terminalAttempts: attempts, now: now) {
+            context.insert(LessonSlot(topicID: choice.topicID, slotIndex: choice.slotIndex,
+                                      lessonID: choice.lessonID, assignedAt: choice.assignedAt))
+        }
+        let detail = try self.detail(lessonID: lessonID, in: context)
+        let receipt = try result(.changed, detail: detail, in: context)
+        try beforeSave()
+        try save(context)
+        return receipt
     }
 
     func openLesson(lessonID: String, now: Date) throws -> LessonMutationResult {
@@ -488,22 +549,47 @@ final class SwiftDataCatalogRepository: CatalogRepository {
     private func result(_ outcome: LessonMutationOutcome, detail: LessonDetailSnapshot,
                         in context: ModelContext, replacedSlot: LessonSlotSnapshot? = nil) throws -> LessonMutationResult {
         let catalog = try snapshot(in: context)
-        // History is projected from the same write context, never a fallible
-        // post-commit read. A future History command can reuse this projection.
-        var history: [LessonHistorySnapshot] = []
-        for progress in catalog.progress where progress.status == .completed || progress.status == .dismissed {
-            let item = try self.detail(lessonID: progress.lessonID, in: context)
-            let timestamp: Date? = progress.status == .completed ? progress.completedAt : progress.dismissedAt
-            guard let date = timestamp else { throw LessonExperienceError.invalidStoredData }
-            history.append(LessonHistorySnapshot(lessonID: progress.lessonID, status: progress.status,
-                                                 date: date, content: item.content, attempt: item.attempt))
-        }
-        history.sort { lhs, rhs in
-            if lhs.date == rhs.date { return lhs.lessonID < rhs.lessonID }
-            return lhs.date > rhs.date
-        }
+        // Project History before commit; never turn a committed save into a
+        // reported failure because of a fallible post-commit read.
+        let history = try self.history(in: context, catalog: catalog)
         return LessonMutationResult(outcome: outcome, catalog: catalog, detail: detail,
                                     history: history, replacedSlot: replacedSlot)
+    }
+
+    private func history(in context: ModelContext,
+                         catalog existing: LearningCatalogSnapshot? = nil) throws -> [LessonHistorySnapshot] {
+        let catalog = try existing ?? snapshot(in: context)
+        var entries: [LessonHistorySnapshot] = []
+        for progress in catalog.progress where progress.status == .completed || progress.status == .dismissed {
+            let item = try detail(lessonID: progress.lessonID, in: context)
+            let timestamp = progress.status == .completed ? progress.completedAt : progress.dismissedAt
+            guard let date = timestamp, date.timeIntervalSinceReferenceDate.isFinite else {
+                throw LessonExperienceError.invalidStoredData
+            }
+            // A dismissal without an attempt has no retained studied version.
+            // Never present a subsequently upgraded definition as its history.
+            let content: LessonStudiedContent = item.attempt == nil ? .unavailable : item.content
+            let installed = catalog.definitions.first { $0.id == progress.lessonID }
+            let title: String
+            let topicID: String?
+            switch content {
+            case .pinned(let studied), .current(let studied):
+                title = studied.title
+                topicID = studied.topicID
+            case .legacyCompleted(let studied):
+                title = studied.title
+                topicID = installed?.topicID
+            case .unavailable:
+                title = installed?.title ?? progress.lessonID
+                topicID = installed?.topicID
+            }
+            entries.append(LessonHistorySnapshot(lessonID: progress.lessonID, status: progress.status,
+                                                  date: date, title: title, topicID: topicID,
+                                                  content: content, attempt: item.attempt))
+        }
+        return entries.sorted { lhs, rhs in
+            lhs.date == rhs.date ? lhs.lessonID < rhs.lessonID : lhs.date > rhs.date
+        }
     }
 
     private func detail(lessonID: String, in context: ModelContext) throws -> LessonDetailSnapshot {
@@ -603,9 +689,15 @@ final class SwiftDataCatalogRepository: CatalogRepository {
         }.sorted { $0.id < $1.id }
         let definitions = try context.fetch(FetchDescriptor<LessonDefinition>())
             .map(Self.definitionSnapshot).sorted { $0.id < $1.id }
-        let progress = try context.fetch(FetchDescriptor<LessonProgress>()).map { item in
-            LessonProgressSnapshot(lessonID: item.lessonID,
-                status: LessonProgressStatus(rawValue: item.status.rawValue)!,
+        let progressRows = try context.fetch(FetchDescriptor<LessonProgress>())
+        guard Set(progressRows.map(\.lessonID)).count == progressRows.count else {
+            throw LessonExperienceError.invalidStoredData
+        }
+        let progress = try progressRows.map { item -> LessonProgressSnapshot in
+            guard let status = LessonProgressStatus(rawValue: item.status.rawValue) else {
+                throw LessonExperienceError.invalidStoredData
+            }
+            return LessonProgressSnapshot(lessonID: item.lessonID, status: status,
                 firstShownAt: item.firstShownAt, startedAt: item.startedAt,
                 completedAt: item.completedAt, dismissedAt: item.dismissedAt,
                 lastOpenedAt: item.lastOpenedAt)
