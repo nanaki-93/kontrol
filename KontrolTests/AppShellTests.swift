@@ -14,15 +14,28 @@ final class AppShellTests: XCTestCase {
     func testOneStorePerDependencyGraphAcrossRoutesAndWindows() throws {
         let dependencies = try makeDependencies()
         let shared = dependencies.taskStore
+        let sharedSchedule = dependencies.scheduleStore
         let first = AppShell(navigation: NavigationStore(), dependencies: dependencies)
         let second = AppShell(navigation: NavigationStore(), dependencies: dependencies)
         XCTAssertTrue(first.dependencies.taskStore === shared)
         XCTAssertTrue(second.dependencies.taskStore === shared)
+        XCTAssertTrue(first.dependencies.scheduleStore === sharedSchedule)
+        XCTAssertTrue(second.dependencies.scheduleStore === sharedSchedule)
+        XCTAssertTrue(first.dependencies.container === second.dependencies.container)
         XCTAssertTrue((shared.repository as AnyObject) === (dependencies.taskStore.repository as AnyObject))
+        XCTAssertTrue((sharedSchedule.repository as AnyObject) === (dependencies.scheduleStore.repository as AnyObject))
+        let start = Date(timeIntervalSince1970: 1_750_000_000)
+        let block = try first.dependencies.scheduleStore.create(input: ScheduleInput(
+            title: "Shared block", startAt: start, endAt: start.addingTimeInterval(3600)))
+        XCTAssertEqual(second.dependencies.scheduleStore.snapshots.map(\.id), [block.id])
+        XCTAssertEqual(try SwiftDataScheduleRepository(container: dependencies.container).fetchAll(), [block])
 
         let other = try makeDependencies()
         XCTAssertFalse(other.taskStore === shared)
+        XCTAssertFalse(other.scheduleStore === sharedSchedule)
+        XCTAssertFalse(other.container === dependencies.container)
         XCTAssertFalse((other.taskStore.repository as AnyObject) === (shared.repository as AnyObject))
+        XCTAssertFalse((other.scheduleStore.repository as AnyObject) === (sharedSchedule.repository as AnyObject))
     }
 
     func testNavigationMetadataAndRouting() {

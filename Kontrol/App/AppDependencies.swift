@@ -7,11 +7,14 @@ final class AppDependencies {
     let container: ModelContainer
     let catalogRepository: any CatalogRepository
     let taskStore: TaskStore
+    let scheduleStore: ScheduleStore
 
     init(container: ModelContainer, catalogRepository: any CatalogRepository,
-         taskRepository: (any TaskRepository)? = nil) {
+         taskRepository: (any TaskRepository)? = nil,
+         scheduleRepository: (any ScheduleRepository)? = nil) {
         self.container = container
         self.catalogRepository = catalogRepository
         taskStore = TaskStore(repository: taskRepository ?? SwiftDataTaskRepository(container: container))
+        scheduleStore = ScheduleStore(repository: scheduleRepository ?? SwiftDataScheduleRepository(container: container))
     }
 }
