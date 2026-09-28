@@ -8,6 +8,7 @@ final class AppDependencies {
     let container: ModelContainer
     let catalogRepository: any CatalogRepository
     let learningCatalogStore: LearningCatalogStore
+    let lessonDraftStore: LessonDraftStore
     let taskStore: TaskStore
     let scheduleStore: ScheduleStore
     let focusService: FocusService
@@ -17,10 +18,18 @@ final class AppDependencies {
          scheduleRepository: (any ScheduleRepository)? = nil,
          focusRepository: (any FocusRepository)? = nil,
          focusWallClock: @escaping () -> Date = Date.init,
-         focusMonotonicClock: @escaping () -> ContinuousClock.Instant = { ContinuousClock().now }) {
+         focusMonotonicClock: @escaping () -> ContinuousClock.Instant = { ContinuousClock().now },
+         draftClock: @escaping () -> Date = Date.init,
+         draftScheduler: LessonDraftStore.Scheduler? = nil) {
         self.container = container
         self.catalogRepository = catalogRepository
         learningCatalogStore = LearningCatalogStore(repository: catalogRepository)
+        if let draftScheduler {
+            lessonDraftStore = LessonDraftStore(learning: learningCatalogStore, clock: draftClock,
+                                                schedule: draftScheduler)
+        } else {
+            lessonDraftStore = LessonDraftStore(learning: learningCatalogStore, clock: draftClock)
+        }
         taskStore = TaskStore(repository: taskRepository ?? SwiftDataTaskRepository(container: container))
         scheduleStore = ScheduleStore(repository: scheduleRepository ?? SwiftDataScheduleRepository(container: container))
         focusService = FocusService(repository: focusRepository ?? SwiftDataFocusRepository(container: container),

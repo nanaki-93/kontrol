@@ -7,6 +7,177 @@ import XCTest
 final class LessonExperienceStoreTests: XCTestCase {
     private enum Injected: Error { case save }
 
+    private final class ManualScheduler {
+        var now = Date(timeIntervalSince1970: 1_000)
+        struct Job {
+            let deadline: Date
+            let callback: () -> Void
+            var cancelled = false
+        }
+        var jobs: [Job] = []
+        func schedule(_ deadline: Date, _ callback: @escaping () -> Void) -> () -> Void {
+            let index = jobs.count
+            jobs.append(Job(deadline: deadline, callback: callback))
+            return { [weak self] in self?.jobs[index].cancelled = true }
+        }
+        func advance(by seconds: TimeInterval) {
+            now.addTimeInterval(seconds)
+            let due = jobs.indices.filter { jobs[$0].deadline <= now && !jobs[$0].cancelled }
+            for index in due { jobs[index].callback() }
+        }
+    }
+
+    private func draftFixture(beforeSave: @escaping () throws -> Void = {}) throws ->
+        (SwiftDataCatalogRepository, AppDependencies, LessonDraftStore, ManualScheduler, LessonMutationResult) {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataCatalogRepository(container: container, beforeSave: beforeSave)
+        _ = try repository.importIfNeeded(BundledCatalogLoader.load())
+        let scheduler = ManualScheduler()
+        let graph = AppDependencies(container: container, catalogRepository: repository,
+                                    draftClock: { scheduler.now }, draftScheduler: scheduler.schedule)
+        graph.learningCatalogStore.loadIfNeeded()
+        let id = try XCTUnwrap(graph.learningCatalogStore.state.snapshot?.slots.first?.lessonID)
+        let opened = try graph.learningCatalogStore.openLesson(lessonID: id)
+        graph.lessonDraftStore.observe(opened.detail)
+        return (repository, graph, graph.lessonDraftStore, scheduler, opened)
+    }
+
+    func testDebounceLatestEditAtExactlyFiveHundredMillisecondsAndSharedWindows() throws {
+        let (repository, graph, drafts, scheduler, opened) = try draftFixture()
+        let id = try XCTUnwrap(opened.detail.attempt?.id)
+        let firstWindow = graph.lessonDraftStore
+        let secondWindow = graph.lessonDraftStore
+        XCTAssertTrue(firstWindow === secondWindow)
+        XCTAssertTrue(firstWindow === drafts)
+        firstWindow.edit("old", attemptID: id)
+        scheduler.advance(by: 0.4)
+        secondWindow.edit("  🧪\n  exact\n", attemptID: id)
+        scheduler.advance(by: 0.1)
+        XCTAssertEqual(try repository.loadLesson(lessonID: opened.detail.id).attempt?.revision, 0)
+        XCTAssertEqual(firstWindow.buffers[id]?.status, .saving)
+        scheduler.advance(by: 0.4)
+        XCTAssertEqual(try repository.loadLesson(lessonID: opened.detail.id).attempt?.answerDraft, "  🧪\n  exact\n")
+        XCTAssertEqual(firstWindow.buffers[id]?.status, .saved)
+        XCTAssertEqual(secondWindow.buffers[id]?.expectedRevision, 1)
+        XCTAssertFalse(try XCTUnwrap(secondWindow.buffers[id]).isDirty)
+        // A cancelled callback delivered late cannot overwrite the new edit.
+        secondWindow.edit("newer", attemptID: id)
+        scheduler.jobs[0].callback()
+        XCTAssertEqual(firstWindow.buffers[id]?.text, "newer")
+        XCTAssertEqual(firstWindow.buffers[id]?.status, .saving)
+        XCTAssertEqual(try repository.loadLesson(lessonID: opened.detail.id).attempt?.revision, 1)
+        scheduler.advance(by: 0.5)
+        XCTAssertEqual(try repository.loadLesson(lessonID: opened.detail.id).attempt?.answerDraft, "newer")
+        XCTAssertEqual(try repository.loadLesson(lessonID: opened.detail.id).attempt?.revision, 2)
+    }
+
+    func testFailedSaveRetryAndManualFlushInvalidateDelayedCallbacks() throws {
+        var fail = false
+        let (repository, _, drafts, scheduler, opened) = try draftFixture(beforeSave: {
+            if fail { throw Injected.save }
+        })
+        let id = try XCTUnwrap(opened.detail.attempt?.id)
+        drafts.edit("\n  exact 🍃\n", attemptID: id)
+        fail = true
+        scheduler.advance(by: 0.5)
+        XCTAssertEqual(drafts.buffers[id]?.status, .notSaved(.persistenceFailure))
+        XCTAssertTrue(try XCTUnwrap(drafts.buffers[id]).isDirty)
+        XCTAssertEqual(try repository.loadLesson(lessonID: opened.detail.id).attempt?.answerDraft, "")
+        fail = false
+        try drafts.retry(attemptID: id)
+        XCTAssertEqual(drafts.buffers[id]?.status, .saved)
+        XCTAssertEqual(try repository.loadLesson(lessonID: opened.detail.id).attempt?.answerDraft, "\n  exact 🍃\n")
+        drafts.edit("next", attemptID: id)
+        let late = scheduler.jobs.last!.callback
+        try drafts.flush(attemptID: id)
+        drafts.edit("latest", attemptID: id)
+        late()
+        XCTAssertEqual(drafts.buffers[id]?.status, .saving)
+        XCTAssertEqual(drafts.buffers[id]?.text, "latest")
+        scheduler.advance(by: 0.5)
+        XCTAssertEqual(try repository.loadLesson(lessonID: opened.detail.id).attempt?.answerDraft, "latest")
+    }
+
+    func testStaleRevisionRetainsLocalTextUntilExplicitReloadAndReconciliation() throws {
+        let (repository, graph, drafts, _, opened) = try draftFixture()
+        let id = try XCTUnwrap(opened.detail.attempt?.id)
+        drafts.edit("my local answer", attemptID: id)
+        _ = try graph.learningCatalogStore.saveAnswer(attemptID: id, expectedRevision: 0, answer: "other window")
+        XCTAssertThrowsError(try drafts.flush(attemptID: id)) { error in
+            XCTAssertEqual(error as? LessonExperienceError, .staleRevision)
+        }
+        XCTAssertEqual(drafts.buffers[id]?.status, .notSaved(.staleRevision))
+        XCTAssertThrowsError(try drafts.retry(attemptID: id))
+        let latest = try drafts.reload(attemptID: id)
+        XCTAssertEqual(latest.attempt?.answerDraft, "other window")
+        XCTAssertEqual(drafts.buffers[id]?.text, "my local answer")
+        XCTAssertEqual(drafts.buffers[id]?.expectedRevision, 0)
+        try drafts.reconcileForRetry(attemptID: id, with: latest)
+        try drafts.retry(attemptID: id)
+        XCTAssertEqual(try repository.loadLesson(lessonID: opened.detail.id).attempt?.answerDraft, "my local answer")
+        XCTAssertEqual(drafts.buffers[id]?.status, .saved)
+    }
+
+    func testIndependentAttemptBuffersAndFlushAllBarrier() throws {
+        let (repository, graph, drafts, scheduler, opened) = try draftFixture()
+        let firstID = try XCTUnwrap(opened.detail.attempt?.id)
+        let nextID = try XCTUnwrap(graph.learningCatalogStore.state.snapshot?.slots.first {
+            $0.lessonID != opened.detail.id
+        }?.lessonID)
+        let other = try graph.learningCatalogStore.openLesson(lessonID: nextID)
+        let secondID = try XCTUnwrap(other.detail.attempt?.id)
+        drafts.observe(other.detail)
+        drafts.edit("first", attemptID: firstID)
+        let stale = scheduler.jobs.last!.callback
+        drafts.edit("second", attemptID: secondID)
+        try drafts.flushAll()
+        drafts.edit("still local", attemptID: firstID)
+        stale()
+        XCTAssertEqual(drafts.buffers[firstID]?.text, "still local")
+        XCTAssertTrue(try XCTUnwrap(drafts.buffers[firstID]).isDirty)
+        XCTAssertEqual(try repository.loadLesson(lessonID: opened.detail.id).attempt?.answerDraft, "first")
+        XCTAssertEqual(try repository.loadLesson(lessonID: nextID).attempt?.answerDraft, "second")
+        scheduler.advance(by: 0.5)
+        XCTAssertEqual(try repository.loadLesson(lessonID: opened.detail.id).attempt?.answerDraft, "still local")
+        // A delayed old detail cannot roll a saved revision back.
+        drafts.observe(opened.detail)
+        XCTAssertEqual(drafts.buffers[firstID]?.expectedRevision, 2)
+    }
+
+    func testDismissFlushesDraftAndCancelledCallbackCannotReviveIt() throws {
+        let (repository, graph, drafts, scheduler, opened) = try draftFixture()
+        let id = try XCTUnwrap(opened.detail.attempt?.id)
+        let slot = try XCTUnwrap(graph.learningCatalogStore.state.snapshot?.slots.first {
+            $0.lessonID == opened.detail.id
+        })
+        drafts.edit("keep on dismissal", attemptID: id)
+        let late = scheduler.jobs.last!.callback
+        let dismissed = try drafts.dismiss(lessonID: opened.detail.id, expectedSlot: slot, attemptID: id)
+        XCTAssertEqual(dismissed.detail.progress?.status, .dismissed)
+        late()
+        XCTAssertEqual(try repository.loadLesson(lessonID: opened.detail.id).attempt?.answerDraft, "keep on dismissal")
+        XCTAssertEqual(try repository.loadLesson(lessonID: opened.detail.id).progress?.status, .dismissed)
+        XCTAssertEqual(drafts.buffers[id]?.status, .saved)
+    }
+
+    func testTransitionFlushesAndFailurePreventsTransition() throws {
+        var fail = false
+        let (repository, _, drafts, _, opened) = try draftFixture(beforeSave: {
+            if fail { throw Injected.save }
+        })
+        let id = try XCTUnwrap(opened.detail.attempt?.id)
+        drafts.edit("before reveal", attemptID: id)
+        fail = true
+        XCTAssertThrowsError(try drafts.revealSolution(attemptID: id))
+        XCTAssertNil(try repository.loadLesson(lessonID: opened.detail.id).attempt?.solutionRevealedAt)
+        XCTAssertTrue(try XCTUnwrap(drafts.buffers[id]).isDirty)
+        fail = false
+        let revealed = try drafts.revealSolution(attemptID: id)
+        XCTAssertEqual(revealed.detail.attempt?.answerDraft, "before reveal")
+        XCTAssertNotNil(revealed.detail.attempt?.solutionRevealedAt)
+        XCTAssertEqual(drafts.buffers[id]?.expectedRevision, revealed.detail.attempt?.revision)
+    }
+
     func testCommittedReceiptsPublishChoicesDetailAndHistoryTogetherToBothConsumers() throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         let repository = SwiftDataCatalogRepository(container: container)
