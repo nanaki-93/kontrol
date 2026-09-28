@@ -119,6 +119,41 @@ final class LearningCatalogStoreTests: XCTestCase {
         XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).isEmpty)
     }
 
+    func testExhaustedAndPartialTopicsUseOnlyPersistedSlotsWithoutWrites() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let committedRepository = SwiftDataCatalogRepository(container: container)
+        _ = try committedRepository.importIfNeeded(BundledCatalogLoader.load())
+        let committed = try committedRepository.loadSnapshot()
+        let goSlots = committed.slots.filter { $0.topicID == "go" }.sorted { $0.slotIndex < $1.slotIndex }
+        XCTAssertEqual(goSlots.count, 4)
+        let partial = LearningCatalogSnapshot(topics: committed.topics, subtopics: committed.subtopics,
+            concepts: committed.concepts, definitions: committed.definitions, progress: committed.progress,
+            slots: Array(goSlots.prefix(2)))
+        let repository = ReadingCatalogRepository(partial)
+        let store = LearningCatalogStore(repository: repository)
+        store.loadIfNeeded()
+        XCTAssertEqual(store.state, .current(partial))
+        XCTAssertEqual(LearningView.choices(for: "go", in: partial).map(\.id),
+                       Array(goSlots.prefix(2)).map(\.lessonID))
+        XCTAssertTrue(LearningView.choices(for: "java", in: partial).isEmpty)
+        XCTAssertEqual(repository.writes, 0)
+
+        let exhausted = LearningCatalogSnapshot(topics: committed.topics, subtopics: committed.subtopics,
+            concepts: committed.concepts, definitions: committed.definitions, progress: committed.progress,
+            slots: [])
+        repository.value = exhausted
+        store.refresh()
+        XCTAssertEqual(store.state, .empty(exhausted))
+        XCTAssertTrue(LearningView.choices(for: "go", in: exhausted).isEmpty)
+        repository.shouldFail = true
+        store.refresh()
+        XCTAssertEqual(store.state, .failed(stale: exhausted))
+        XCTAssertNotEqual(store.state, .empty(exhausted))
+        XCTAssertEqual(repository.writes, 0)
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonProgress>()).isEmpty)
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).isEmpty)
+    }
+
     func testInspectionProjectionNeverCallsRepositoryWrites() throws {
         let repository = ReadingCatalogRepository(snapshot())
         let store = LearningCatalogStore(repository: repository)

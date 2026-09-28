@@ -7,6 +7,7 @@ struct LearningView: View {
     @State private var selectedTopicID: String?
     @State private var inspectedLessonID: String?
     @FocusState private var focusedTopicID: String?
+    @FocusState private var focusedLessonID: String?
 
     private static let topicOrder = ["go", "java", "design", "perf", "security"]
 
@@ -43,17 +44,24 @@ struct LearningView: View {
             switch store.state {
             case .notLoaded, .loading:
                 LoadingState("Loading learning choices")
-            case .failed:
-                ErrorBanner(.readFailed)
-                Text("Learning choices could not be loaded.")
+            case .failed(let stale):
+                ErrorBanner(.readFailed, recoveryTitle: "Retry learning choices", recovery: store.retry)
+                Text(stale == nil ? "Learning choices could not be loaded." :
+                     "Previously loaded choices are unavailable until the read succeeds.")
                     .appTypography(.body)
                     .foregroundStyle(AppColors.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
             case .empty(let snapshot), .current(let snapshot):
                 if Self.orderedTopics(in: snapshot).isEmpty {
-                    EmptyState("No learning topics are installed.")
+                    EmptyState("No learning topics are installed.",
+                               guidance: "There are no choices to inspect.")
                 } else {
-                    ScrollView(.vertical) {
-                        catalog(snapshot)
+                    // The shell owns vertical scrolling. ViewThatFits sees its finite width
+                    // without requesting an unbounded-height GeometryReader inside it.
+                    ViewThatFits(in: .horizontal) {
+                        catalog(snapshot, compact: false)
+                            .frame(minWidth: 720)
+                        catalog(snapshot, compact: true)
                     }
                 }
             }
@@ -65,13 +73,30 @@ struct LearningView: View {
         .onAppear { store.loadIfNeeded() }
     }
 
-    private func catalog(_ snapshot: LearningCatalogSnapshot) -> some View {
+    @ViewBuilder private func catalog(_ snapshot: LearningCatalogSnapshot, compact: Bool) -> some View {
         let topics = Self.orderedTopics(in: snapshot)
         let selected = topics.first { $0.id == selectedTopicID } ?? topics[0]
-        let choices = Self.choices(for: selected.id, in: snapshot)
-        return HStack(alignment: .top, spacing: AppMetrics.space6) {
-            VStack(alignment: .leading, spacing: AppMetrics.space2) {
-                SectionHeader("Topics")
+        if compact {
+            VStack(alignment: .leading, spacing: AppMetrics.space4) {
+                topicList(topics, selected: selected, compact: true)
+                lessonList(selected, snapshot: snapshot)
+            }
+        } else {
+            HStack(alignment: .top, spacing: AppMetrics.space6) {
+                topicList(topics, selected: selected, compact: false)
+                    .frame(width: 190, alignment: .leading)
+                lessonList(selected, snapshot: snapshot)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    private func topicList(_ topics: [LearningTopicSnapshot], selected: LearningTopicSnapshot,
+                           compact: Bool) -> some View {
+        VStack(alignment: .leading, spacing: AppMetrics.space2) {
+            SectionHeader("Topics")
+            LazyVGrid(columns: compact ? [GridItem(.adaptive(minimum: 150), spacing: AppMetrics.space2)] :
+                        [GridItem(.flexible())], alignment: .leading, spacing: AppMetrics.space2) {
                 ForEach(topics) { topic in
                     let isSelected = selected.id == topic.id
                     Button {
@@ -80,6 +105,7 @@ struct LearningView: View {
                     } label: {
                         Text(topic.name)
                             .appTypography(.body)
+                            .fixedSize(horizontal: false, vertical: true)
                             .frame(maxWidth: .infinity, minHeight: AppMetrics.preferredTarget, alignment: .leading)
                             .foregroundStyle(isSelected ? AppColors.accent : AppColors.textPrimary)
                             .contentShape(Rectangle())
@@ -95,15 +121,21 @@ struct LearningView: View {
                         }
                     }
                     .accessibilityLabel(topic.name)
+                    .accessibilityValue(isSelected ? "Selected" : "Not selected")
                     .accessibilityAddTraits(isSelected ? .isSelected : [])
                     .accessibilityIdentifier("learning-topic-\(topic.id)")
                 }
             }
-            .frame(width: 190, alignment: .leading)
-            VStack(alignment: .leading, spacing: AppMetrics.space4) {
+        }
+    }
+
+    private func lessonList(_ selected: LearningTopicSnapshot, snapshot: LearningCatalogSnapshot) -> some View {
+        let choices = Self.choices(for: selected.id, in: snapshot)
+        return VStack(alignment: .leading, spacing: AppMetrics.space4) {
                 SectionHeader(selected.name, metadata: "\(choices.count) available")
                 if choices.isEmpty {
-                    EmptyState("No choices available in \(selected.name).")
+                    EmptyState("No choices available in \(selected.name).",
+                               guidance: "There are no eligible choices to inspect right now. Try another topic.")
                 } else {
                     ForEach(choices) { lesson in
                         VStack(alignment: .leading, spacing: AppMetrics.space2) {
@@ -131,6 +163,16 @@ struct LearningView: View {
                                     .appTypography(.body)
                                     .frame(maxWidth: .infinity, minHeight: AppMetrics.preferredTarget, alignment: .leading)
                             }
+                            .focusable()
+                            .focused($focusedLessonID, equals: lesson.id)
+                            .overlay {
+                                if focusedLessonID == lesson.id {
+                                    RoundedRectangle(cornerRadius: AppMetrics.smallRadius)
+                                        .strokeBorder(AppColors.focusRing, lineWidth: 2)
+                                        .allowsHitTesting(false)
+                                }
+                            }
+                            .accessibilityLabel("Inspect \(lesson.title), read-only reference")
                             .accessibilityIdentifier("learning-inspect-\(lesson.id)")
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -141,8 +183,6 @@ struct LearningView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func inspection(_ lesson: LessonDefinitionSnapshot) -> some View {
