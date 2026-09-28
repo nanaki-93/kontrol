@@ -191,4 +191,109 @@ final class LessonSelectorTests: XCTestCase {
             XCTAssertEqual($0 as? LessonSelectionError, .duplicateProgress)
         }
     }
+
+    private func replace(_ consumed: LessonSlotSnapshot,
+                         lessons: [LessonDefinitionSnapshot],
+                         concepts: [LearningConceptSnapshot] = [],
+                         progress: [LessonProgressSnapshot],
+                         slots: [LessonSlotSnapshot],
+                         attempts: [LessonAttemptSnapshot] = []) throws -> [LessonSlotSnapshot] {
+        try LessonSelector.replace(consumedSlot: consumed, definitions: lessons,
+                                   concepts: concepts, progress: progress, slots: slots,
+                                   terminalAttempts: attempts, now: later)
+    }
+
+    func testReplacementTouchesOnlyConsumedKeyAndUsesF05DiversityAndStableOrdering() throws {
+        let consumed = slot("done", 1, date: early)
+        let other = slot("held", 2, date: early)
+        let anotherTopic = slot("java-held", 0, topic: "java", date: early)
+        let slots = [consumed, other, anotherTopic] // index 0 is already vacant
+        let lessons = [lesson("done"), lesson("held"), lesson("java-held", topic: "java"),
+                       lesson("z", subtopic: "new", format: "code"),
+                       lesson("a", subtopic: "new", format: "code"),
+                       lesson("b", subtopic: "one", format: "design")]
+        let progress = [LessonProgressSnapshot(lessonID: "done", status: .completed)]
+        let result = try replace(consumed, lessons: lessons, progress: progress, slots: slots)
+        XCTAssertEqual(result, [slot("a", 1, date: later), other, anotherTopic])
+        XCTAssertFalse(result.contains { $0.topicID == "go" && $0.slotIndex == 0 })
+        XCTAssertEqual(try replace(consumed, lessons: lessons.reversed(), progress: progress,
+                                   slots: slots.reversed()), result)
+    }
+
+    func testReplacementPrioritizesEligibleStartedAndCompletedPrerequisites() throws {
+        let consumed = slot("done", 0)
+        let concepts = [LearningConceptSnapshot(id: "root", subtopicID: "s", name: "Root",
+                                                prerequisiteConceptIDs: []),
+                        LearningConceptSnapshot(id: "top", subtopicID: "s", name: "Top",
+                                                prerequisiteConceptIDs: ["root"])]
+        let lessons = [lesson("done", concepts: ["top"]), lesson("started", requires: ["root"]),
+                       lesson("available", requires: ["root"]), lesson("blocked", requires: ["missing"]),
+                       lesson("unsupported", format: "video")]
+        let progress = [LessonProgressSnapshot(lessonID: "done", status: .completed),
+                        LessonProgressSnapshot(lessonID: "started", status: .started)]
+        XCTAssertEqual(try replace(consumed, lessons: lessons, concepts: concepts,
+                                   progress: progress, slots: [consumed]),
+                       [slot("started", 0, date: later)])
+        XCTAssertEqual(try replace(consumed, lessons: lessons, concepts: concepts,
+                                   progress: [.init(lessonID: "done", status: .dismissed)],
+                                   slots: [consumed]), []) // dismissal unlocks nothing
+    }
+
+    func testTerminalPinsBlockStudiedContentAfterCatalogChanges() throws {
+        let consumed = slot("done", 0)
+        let studied = lesson("done", body: " Café ")
+        let changed = lesson("done", body: "New installed exercise")
+        let repeatStudied = lesson("repeat-studied", body: "Cafe\u{301}")
+        let repeatInstalled = lesson("repeat-installed", body: "New installed exercise")
+        let eligible = lesson("fresh")
+        let pin = try PinnedLessonContent(definition: studied).encoded()
+        let attempt = LessonAttemptSnapshot(id: UUID(), lessonID: "done", contentVersion: 1,
+                                            pinnedContentData: pin)
+        for status in [LessonProgressStatus.completed, .dismissed] {
+            let result = try replace(consumed,
+                lessons: [changed, repeatStudied, repeatInstalled, eligible],
+                progress: [.init(lessonID: "done", status: status)], slots: [consumed],
+                attempts: [attempt])
+            XCTAssertEqual(result, [slot("fresh", 0, date: later)])
+        }
+        XCTAssertThrowsError(try replace(consumed, lessons: [changed, repeatStudied],
+            progress: [.init(lessonID: "done", status: .completed)], slots: [consumed],
+            attempts: [.init(id: UUID(), lessonID: "done", contentVersion: 2,
+                             pinnedContentData: pin)])) {
+            XCTAssertEqual($0 as? LessonExperienceError, .invalidStoredData)
+        }
+    }
+
+    func testExhaustionPreservesOtherVacanciesAndActiveExactContentExclusion() throws {
+        let consumed = slot("done", 2)
+        let held = slot("held", 3, date: early)
+        let lessons = [lesson("done"), lesson("held"),
+                       lesson("repeat-held", body: " Explanation held "),
+                       lesson("repeat-done", body: " Explanation done "),
+                       lesson("dismissed", body: "different"),
+                       lesson("bad-difficulty", difficulty: "expert", body: "unique")]
+        let result = try replace(consumed, lessons: lessons,
+            progress: [.init(lessonID: "done", status: .completed),
+                       .init(lessonID: "dismissed", status: .dismissed)],
+            slots: [consumed, held])
+        XCTAssertEqual(result, [held])
+    }
+
+    func testStaleOrNonterminalConsumptionAndInvalidRowsAreRejected() throws {
+        let consumed = slot("done", 0, date: early)
+        let lessons = [lesson("done"), lesson("new")]
+        let progress = [LessonProgressSnapshot(lessonID: "done", status: .completed)]
+        XCTAssertThrowsError(try replace(consumed, lessons: lessons, progress: progress,
+                                         slots: [slot("done", 0, date: later)])) {
+            XCTAssertEqual($0 as? LessonSelectionError, .staleConsumedSlot)
+        }
+        XCTAssertThrowsError(try replace(consumed, lessons: lessons, progress: [],
+                                         slots: [consumed])) {
+            XCTAssertEqual($0 as? LessonSelectionError, .consumedLessonNotTerminal)
+        }
+        XCTAssertThrowsError(try replace(consumed, lessons: lessons, progress: progress,
+                                         slots: [consumed, slot("new", 0)])) {
+            XCTAssertEqual($0 as? LessonSelectionError, .duplicateSlotKey)
+        }
+    }
 }
