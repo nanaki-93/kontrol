@@ -12,6 +12,7 @@ protocol TaskRepository {
     /// Unlike legacy capture, a nil plan here means unplanned.
     func create(input: TaskInput) throws -> TaskSnapshot
     func update(id: UUID, input: TaskInput) throws -> TaskSnapshot
+    func setCompleted(id: UUID, completed: Bool) throws -> TaskSnapshot
     func fetchAll() throws -> [TaskItem]
 }
 
@@ -87,6 +88,22 @@ final class SwiftDataTaskRepository: TaskRepository {
         task.plannedDay = clean.plannedFor?.components
         task.plannedTimeZoneID = clean.plannedFor?.timeZoneID
         // A failed save discards this context; no other owner's changes are rolled back.
+        try save(context)
+        return TaskSnapshot(task)
+    }
+
+    func setCompleted(id: UUID, completed: Bool) throws -> TaskSnapshot {
+        let context = ModelContext(container)
+        context.autosaveEnabled = false
+        var descriptor = FetchDescriptor<TaskItem>(predicate: #Predicate { $0.id == id })
+        descriptor.fetchLimit = 1
+        guard let task = try context.fetch(descriptor).first else {
+            throw TaskRepositoryError.notFound(id)
+        }
+        // A no-op must not consume the clock or invoke the save hook. Return a
+        // value copy from this context, not a mutable object owned by a caller.
+        guard task.isCompleted != completed else { return TaskSnapshot(task) }
+        task.completedAt = completed ? now() : nil
         try save(context)
         return TaskSnapshot(task)
     }

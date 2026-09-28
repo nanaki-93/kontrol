@@ -35,6 +35,10 @@ final class QuickCaptureTests: XCTestCase {
             try storage.update(id: id, input: input)
         }
 
+        func setCompleted(id: UUID, completed: Bool) throws -> TaskSnapshot {
+            try storage.setCompleted(id: id, completed: completed)
+        }
+
         func fetchAll() throws -> [TaskItem] { try storage.fetchAll() }
     }
 

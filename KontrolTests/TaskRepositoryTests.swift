@@ -417,6 +417,112 @@ final class TaskRepositoryTests: XCTestCase {
         XCTAssertEqual(try secondEditor.fetchAll().map(TaskSnapshot.init), [lastSave])
     }
 
+    func testCompletionAndReopeningAreIdempotentAndSaveOnlyRealTransitions() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let original = try makeRepository(container, id: firstID).create(input: TaskInput(title: "Keep"))
+        let other = try makeRepository(container, id: secondID).create(input: TaskInput(title: "Other"))
+        var clock = instant.addingTimeInterval(60)
+        var clockCalls = 0
+        var saves = 0
+        var ids = 0
+        let repository = SwiftDataTaskRepository(container: container, now: {
+            clockCalls += 1
+            return clock
+        }, makeID: {
+            ids += 1
+            return UUID()
+        }, save: { context in
+            saves += 1
+            try context.save()
+        })
+
+        let completed = try repository.setCompleted(id: firstID, completed: true)
+        XCTAssertEqual(completed.completedAt, clock)
+        XCTAssertEqual(completed.id, original.id)
+        XCTAssertEqual(completed.createdAt, original.createdAt)
+        XCTAssertEqual(completed.title, original.title)
+        XCTAssertEqual(saves, 1)
+        XCTAssertEqual(clockCalls, 1)
+        clock = clock.addingTimeInterval(600)
+        XCTAssertEqual(try repository.setCompleted(id: firstID, completed: true), completed)
+        XCTAssertEqual(saves, 1)
+        XCTAssertEqual(clockCalls, 1)
+        XCTAssertEqual(try repository.fetchAll().first { $0.id == firstID }?.completedAt,
+                       completed.completedAt)
+
+        let reopened = try repository.setCompleted(id: firstID, completed: false)
+        XCTAssertNil(reopened.completedAt)
+        XCTAssertEqual(reopened.id, original.id)
+        XCTAssertEqual(reopened.createdAt, original.createdAt)
+        XCTAssertEqual(saves, 2)
+        XCTAssertEqual(clockCalls, 1)
+        XCTAssertEqual(try repository.setCompleted(id: firstID, completed: false), reopened)
+        XCTAssertEqual(saves, 2)
+        XCTAssertEqual(clockCalls, 1)
+        XCTAssertEqual(ids, 0)
+        XCTAssertEqual(try repository.fetchAll().map(TaskSnapshot.init), [other, reopened])
+
+        // A new open-to-completed transition gets a new instant, not the old one.
+        XCTAssertEqual(try repository.setCompleted(id: firstID, completed: true).completedAt, clock)
+        XCTAssertEqual(saves, 3)
+        XCTAssertEqual(clockCalls, 2)
+    }
+
+    func testMissingCompletionTargetNeverSavesOrConsumesClock() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let original = try makeRepository(container, id: firstID).create(input: TaskInput(title: "Saved"))
+        var saves = 0
+        var clockCalls = 0
+        let repository = SwiftDataTaskRepository(container: container, now: {
+            clockCalls += 1
+            return self.instant
+        }, save: { context in saves += 1; try context.save() })
+        for completed in [true, false] {
+            XCTAssertThrowsError(try repository.setCompleted(id: secondID, completed: completed)) {
+                XCTAssertEqual($0 as? TaskRepositoryError, .notFound(self.secondID))
+            }
+        }
+        XCTAssertEqual(saves, 0)
+        XCTAssertEqual(clockCalls, 0)
+        XCTAssertEqual(try repository.fetchAll().map(TaskSnapshot.init), [original])
+    }
+
+    func testFailedCompletionAndReopeningPreserveSavedStateAndOtherOwnersEdits() throws {
+        for initiallyCompleted in [false, true] {
+            let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+            let original = try makeRepository(container, id: firstID).create(input: TaskInput(title: "Saved"))
+            let saved: TaskSnapshot
+            if initiallyCompleted {
+                saved = try makeRepository(container, id: secondID).setCompleted(id: firstID, completed: true)
+            } else {
+                saved = original
+            }
+            let independent = ModelContext(container)
+            independent.autosaveEnabled = false
+            let pending = try XCTUnwrap(independent.fetch(FetchDescriptor<TaskItem>())
+                .first { $0.id == firstID })
+            pending.notes = "Another owner's draft"
+            var saves = 0
+            let failing = makeRepository(container, id: secondID, save: { _ in
+                saves += 1
+                throw Injected.saveFailed
+            })
+            XCTAssertThrowsError(try failing.setCompleted(id: firstID, completed: !initiallyCompleted)) {
+                XCTAssertTrue($0 is Injected)
+            }
+            XCTAssertEqual(saves, 1)
+            XCTAssertTrue(independent.hasChanges)
+            XCTAssertEqual(pending.notes, "Another owner's draft")
+            XCTAssertEqual(pending.completedAt, saved.completedAt)
+            XCTAssertEqual(try failing.fetchAll().map(TaskSnapshot.init), [saved])
+            try independent.save()
+            let persisted = try XCTUnwrap(failing.fetchAll().first)
+            XCTAssertEqual(persisted.notes, "Another owner's draft")
+            XCTAssertEqual(persisted.completedAt, saved.completedAt)
+            XCTAssertEqual(persisted.id, firstID)
+        }
+    }
+
     func testClosedTemporaryDiskStoreReopensWithSameIDAndValuesAndNoFailedInsert() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("KontrolTaskRepository-\(UUID().uuidString)", isDirectory: true)
