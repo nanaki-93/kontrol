@@ -377,9 +377,9 @@ final class FocusRepositoryTests: XCTestCase {
         XCTAssertEqual(saves, 1)
         XCTAssertEqual(checkpoint.actualSeconds, 8)
         XCTAssertGreaterThan(checkpoint.checkpointAt, resumed.checkpointAt)
-        XCTAssertEqual(checkpoint.activeSegmentStartedAt, checkpoint.checkpointAt)
+        XCTAssertEqual(checkpoint.activeSegmentStartedAt, rollback)
         XCTAssertEqual(checkpoint.deadline,
-                       checkpoint.checkpointAt.addingTimeInterval(1500 - 8))
+                       rollback.addingTimeInterval(1500 - 8))
         XCTAssertThrowsError(try guarded.transition(id: first, command: fresh.transition)) {
             XCTAssertEqual($0 as? FocusError, .staleBaseline)
         }
@@ -423,7 +423,14 @@ final class FocusRepositoryTests: XCTestCase {
             let updated = try writer.transition(id: first, command: fresh.transition)
             XCTAssertEqual(updated.actualSeconds, 2)
             XCTAssertGreaterThan(updated.checkpointAt, committed.checkpointAt)
+            XCTAssertEqual(updated.activeSegmentStartedAt, start.addingTimeInterval(-60))
+            XCTAssertEqual(updated.deadline, start.addingTimeInterval(1500 - 62))
         }
+        let reopened = SwiftDataFocusRepository(container:
+            try ModelContainerFactory().makeContainer(mode: .persistent(url)))
+        let durable = try XCTUnwrap(reopened.fetchAll().first)
+        XCTAssertEqual(durable.activeSegmentStartedAt, start.addingTimeInterval(-60))
+        XCTAssertEqual(durable.deadline, start.addingTimeInterval(1500 - 62))
     }
 
     func testFailedWritesLeaveStoredAnchorsUntouchedAndRetryOnce() throws {

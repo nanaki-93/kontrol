@@ -100,11 +100,23 @@ struct FocusTransitionPayload: Equatable {
     let expectedCheckpointAt: Date
     let sampledAt: Date
     let accumulatedActiveSeconds: Double
+    // Only checkpoints carry this separately from the ordered stale-write watermark.
+    // A wall-clock rollback can put the real segment anchor before startedAt.
+    let wallAnchorAt: Date?
+
+    init(expectedCheckpointAt: Date, sampledAt: Date, accumulatedActiveSeconds: Double,
+         wallAnchorAt: Date? = nil) {
+        self.expectedCheckpointAt = expectedCheckpointAt
+        self.sampledAt = sampledAt
+        self.accumulatedActiveSeconds = accumulatedActiveSeconds
+        self.wallAnchorAt = wallAnchorAt
+    }
 
     func validated(plannedSeconds: Int) throws -> FocusTransitionPayload {
         guard plannedSeconds > 0,
               expectedCheckpointAt.timeIntervalSinceReferenceDate.isFinite,
               sampledAt.timeIntervalSinceReferenceDate.isFinite,
+              wallAnchorAt.map({ $0.timeIntervalSinceReferenceDate.isFinite && $0 <= sampledAt }) ?? true,
               accumulatedActiveSeconds.isFinite,
               accumulatedActiveSeconds >= 0,
               accumulatedActiveSeconds <= Double(plannedSeconds) else {
@@ -165,7 +177,7 @@ struct FocusSessionSnapshot: Equatable, Identifiable {
         switch state {
         case .running:
             guard let anchor = activeSegmentStartedAt, let deadline,
-                  anchor >= startedAt, checkpointAt >= anchor,
+                  checkpointAt >= anchor,
                   deadline > anchor, pausedAt == nil, endedAt == nil,
                   !recoveryRequired, accumulatedActiveSeconds < Double(plannedSeconds),
                   // Compare Dates in the same representation used to write the deadline.

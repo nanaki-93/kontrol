@@ -276,8 +276,14 @@ final class FocusTimingTests: XCTestCase {
         let backward = try FocusTiming.checkpoint(forward.snapshot, at: start.addingTimeInterval(-500),
                                                   monotonicDelta: 4.25)
         XCTAssertEqual(backward.snapshot.actualSeconds, 6.75)
-        XCTAssertEqual(backward.snapshot.activeSegmentStartedAt, start.addingTimeInterval(3_600))
-        XCTAssertEqual(backward.snapshot.deadline, start.addingTimeInterval(3_653.25))
+        XCTAssertEqual(backward.snapshot.activeSegmentStartedAt, start.addingTimeInterval(-500))
+        XCTAssertEqual(backward.snapshot.deadline, start.addingTimeInterval(-446.75))
+        XCTAssertEqual(backward.snapshot.checkpointAt, forward.snapshot.checkpointAt)
+        guard case .checkpoint(let payload) = backward.transition else {
+            return XCTFail("Expected checkpoint")
+        }
+        XCTAssertEqual(payload.expectedCheckpointAt, forward.snapshot.checkpointAt)
+        XCTAssertEqual(payload.wallAnchorAt, start.addingTimeInterval(-500))
         let early = try FocusTiming.end(backward.snapshot, at: start.addingTimeInterval(-500),
                                         monotonicDelta: 1.125)
         XCTAssertEqual(early.snapshot.actualSeconds, 7.875)

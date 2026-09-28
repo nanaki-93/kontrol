@@ -138,6 +138,9 @@ final class SwiftDataFocusRepository: FocusRepository {
               payload.accumulatedActiveSeconds >= current.accumulatedActiveSeconds else {
             throw FocusError.invalidTransition
         }
+        if payload.wallAnchorAt != nil {
+            guard case .checkpoint = command else { throw FocusError.invalidTransition }
+        }
         // The repository verifies the calculation against the latest stored anchors;
         // a caller cannot manufacture a completion or count the closed interval twice.
         if case .reconcile = command {
@@ -167,7 +170,7 @@ final class SwiftDataFocusRepository: FocusRepository {
         var recoveryRequired = false
         switch command {
         case .pause:
-            guard current.state == .running, elapsed < plan else {
+            guard payload.wallAnchorAt == nil, current.state == .running, elapsed < plan else {
                 throw FocusError.invalidTransition
             }
             newState = .paused
@@ -185,8 +188,11 @@ final class SwiftDataFocusRepository: FocusRepository {
                 throw FocusError.invalidTransition
             }
             newState = .running
-            anchor = stamp
-            deadline = stamp.addingTimeInterval(plan - elapsed)
+            // `stamp` is a strictly increasing concurrency watermark. During a
+            // rollback the sampled wall anchor is earlier; never use the old
+            // watermark as the relaunch clock or restore a stale timing baseline.
+            anchor = payload.wallAnchorAt ?? stamp
+            deadline = anchor?.addingTimeInterval(plan - elapsed)
         case .end:
             guard !current.recoveryRequired, elapsed < plan,
                   current.state == .running ||

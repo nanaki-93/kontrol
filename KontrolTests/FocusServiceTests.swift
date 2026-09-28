@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SwiftData
 import XCTest
@@ -17,6 +18,7 @@ final class FocusServiceTests: XCTestCase {
         var writeError: FocusError?
         var lastInput: FocusStartInput?
         var lastTransition: FocusTransition?
+        var receipts: [FocusSessionSnapshot] = []
 
         func fetchAll() throws -> [FocusSessionSnapshot] {
             reads += 1
@@ -45,14 +47,33 @@ final class FocusServiceTests: XCTestCase {
             transitions += 1
             lastTransition = command
             if let writeError { throw writeError }
-            guard let index = rows.firstIndex(where: { $0.id == id }),
-                  case .reconcile(let payload) = command else { throw FocusError.invalidTransition }
-            let original = rows[index]
-            let result = try FocusTiming.reconcileOnRelaunch(original, at: payload.sampledAt)
-            guard case .changed(let change) = result, change.transition == command else {
-                throw FocusError.invalidTransition
+            guard let index = rows.firstIndex(where: { $0.id == id }) else {
+                throw FocusError.missingSession
             }
+            let original = rows[index]
+            let change: FocusTimingChange
+            switch command {
+            case .reconcile(let payload):
+                guard case .changed(let result) = try FocusTiming.reconcileOnRelaunch(
+                    original, at: payload.sampledAt) else { throw FocusError.invalidTransition }
+                change = result
+            case .checkpoint(let payload):
+                let delta = payload.accumulatedActiveSeconds - original.accumulatedActiveSeconds
+                change = try FocusTiming.checkpoint(original,
+                    at: payload.wallAnchorAt ?? payload.sampledAt, monotonicDelta: delta)
+            case .complete(let payload):
+                guard let effectiveEndedAt else { throw FocusError.invalidTransition }
+                let receipt = try FocusSessionSnapshot(id: original.id, state: .completed,
+                    plannedSeconds: original.plannedSeconds,
+                    accumulatedActiveSeconds: payload.accumulatedActiveSeconds,
+                    startedAt: original.startedAt, endedAt: effectiveEndedAt,
+                    checkpointAt: payload.sampledAt)
+                change = FocusTimingChange(transition: command, snapshot: receipt)
+            default: throw FocusError.invalidTransition
+            }
+            guard change.transition == command else { throw FocusError.invalidTransition }
             rows[index] = change.snapshot
+            receipts.append(change.snapshot)
             return change.snapshot
         }
     }
@@ -209,6 +230,305 @@ final class FocusServiceTests: XCTestCase {
         XCTAssertNil(service.activeSession)
         XCTAssertTrue(service.snapshots.isEmpty)
         XCTAssertEqual(service.readState, .loaded)
+    }
+
+    private final class FakeTicks {
+        var callbacks: [() -> Void] = []
+        var cancellations = 0
+        func schedule(_ callback: @escaping () -> Void) -> () -> Void {
+            callbacks.append(callback)
+            return { [weak self] in self?.cancellations += 1 }
+        }
+        func fire(_ index: Int? = nil) { callbacks[index ?? callbacks.count - 1]() }
+    }
+
+    func testTicksCheckpointWithMonotonicTimeAndRebaseWallClock() throws {
+        let repo = FakeRepository()
+        let ticks = FakeTicks()
+        let base = ContinuousClock().now
+        var seconds = 0.0
+        var wall = start
+        let notifications = NotificationCenter()
+        let sleep = NotificationCenter()
+        let service = FocusService(repository: repo, wallClock: { wall },
+            monotonicClock: { base.advanced(by: .milliseconds(Int64(seconds * 1000))) },
+            scheduleTick: ticks.schedule, notificationCenter: notifications,
+            workspaceNotificationCenter: sleep)
+        service.loadIfNeeded()
+        try service.start(configuration: FocusConfiguration(duration: .custom("1")))
+        XCTAssertEqual(ticks.callbacks.count, 1)
+        seconds = 4.25
+        wall = start.addingTimeInterval(4.25)
+        ticks.fire()
+        XCTAssertEqual(service.countdownSeconds, 56)
+        XCTAssertEqual(repo.transitions, 0)
+        seconds = 15.5
+        wall = start.addingTimeInterval(15.5)
+        ticks.fire()
+        XCTAssertEqual(repo.receipts.last?.accumulatedActiveSeconds, 15.5)
+        XCTAssertEqual(repo.receipts.last?.activeSegmentStartedAt, wall)
+        seconds = 18.5
+        wall = start.addingTimeInterval(-1000) // system clock correction
+        ticks.fire()
+        XCTAssertEqual(service.countdownSeconds, 42)
+        XCTAssertEqual(repo.receipts.last?.accumulatedActiveSeconds, 18.5)
+        XCTAssertEqual(repo.receipts.last?.activeSegmentStartedAt, wall)
+        XCTAssertEqual(repo.receipts.last?.deadline, wall.addingTimeInterval(41.5))
+        let writesAfterRebase = repo.transitions
+        seconds = 19.5
+        wall = start.addingTimeInterval(-999)
+        ticks.fire()
+        XCTAssertEqual(repo.transitions, writesAfterRebase) // no repeated drift writes
+        XCTAssertEqual(ticks.callbacks.count, 1)
+        XCTAssertEqual(ticks.cancellations, 0)
+        // Notifications do not install another timer. Sleep forces a best-effort checkpoint.
+        seconds = 19.5
+        wall = start.addingTimeInterval(19.5)
+        sleep.post(name: NSWorkspace.willSleepNotification, object: nil)
+        XCTAssertEqual(repo.receipts.last?.accumulatedActiveSeconds, 19.5)
+        notifications.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+        service.loadIfNeeded() // navigation or window reopen
+        XCTAssertEqual(ticks.callbacks.count, 1)
+    }
+
+    func testLateCallbackCompletesOnlyOnceAndCanceledOwnerCannotMutateNewSession() throws {
+        let repo = FakeRepository()
+        let ticks = FakeTicks()
+        let base = ContinuousClock().now
+        var seconds = 0.0
+        var wall = start
+        let service = FocusService(repository: repo, wallClock: { wall },
+            monotonicClock: { base.advanced(by: .milliseconds(Int64(seconds * 1000))) },
+            scheduleTick: ticks.schedule, notificationCenter: NotificationCenter(),
+            workspaceNotificationCenter: NotificationCenter())
+        service.loadIfNeeded()
+        try service.start(configuration: FocusConfiguration(duration: .custom("1")))
+        seconds = 120
+        wall = start.addingTimeInterval(120)
+        ticks.fire()
+        XCTAssertEqual(service.countdownSeconds, 0)
+        XCTAssertEqual(service.snapshots.first?.state, .completed)
+        XCTAssertEqual(service.snapshots.first?.endedAt, start.addingTimeInterval(60))
+        XCTAssertEqual(repo.transitions, 1)
+        XCTAssertEqual(ticks.cancellations, 1)
+        ticks.fire(0)
+        XCTAssertEqual(repo.transitions, 1)
+        try service.start(configuration: FocusConfiguration())
+        XCTAssertEqual(ticks.callbacks.count, 2)
+        ticks.fire(0)
+        XCTAssertEqual(repo.transitions, 1)
+        XCTAssertEqual(service.activeSession?.state, .running)
+        XCTAssertEqual(service.countdownSeconds, 1500)
+    }
+
+    func testCheckpointFailureRetainsAnchorAndSleepNotificationIsBestEffort() throws {
+        let repo = FakeRepository()
+        let ticks = FakeTicks()
+        let base = ContinuousClock().now
+        var seconds = 0.0
+        let sleep = NotificationCenter()
+        let service = FocusService(repository: repo, wallClock: { self.start.addingTimeInterval(seconds) },
+            monotonicClock: { base.advanced(by: .milliseconds(Int64(seconds * 1000))) },
+            scheduleTick: ticks.schedule, notificationCenter: NotificationCenter(),
+            workspaceNotificationCenter: sleep)
+        service.loadIfNeeded()
+        try service.start(configuration: FocusConfiguration(duration: .custom("1")))
+        repo.writeError = .persistenceFailure
+        seconds = 16
+        sleep.post(name: NSWorkspace.willSleepNotification, object: nil)
+        XCTAssertEqual(repo.rows.first?.accumulatedActiveSeconds, 0)
+        XCTAssertEqual(service.countdownSeconds, 44)
+        XCTAssertEqual(service.checkpointError, .persistenceFailure)
+        repo.writeError = nil
+        seconds = 21
+        ticks.fire()
+        XCTAssertEqual(repo.rows.first?.accumulatedActiveSeconds, 21)
+        XCTAssertNil(service.checkpointError)
+        XCTAssertEqual(service.countdownSeconds, 39)
+    }
+
+    func testPausedSessionStaysFrozenAndLifecycleObserversBelongToService() throws {
+        let repo = FakeRepository()
+        let paused = try FocusSessionSnapshot(id: UUID(), state: .paused, plannedSeconds: 60,
+            accumulatedActiveSeconds: 12.25, pausedAt: start.addingTimeInterval(13),
+            startedAt: start, checkpointAt: start.addingTimeInterval(13))
+        repo.rows = [paused]
+        let ticks = FakeTicks()
+        let notifications = NotificationCenter()
+        let sleep = NotificationCenter()
+        var service: FocusService? = FocusService(repository: repo,
+            wallClock: { self.start.addingTimeInterval(500) },
+            scheduleTick: ticks.schedule, notificationCenter: notifications,
+            workspaceNotificationCenter: sleep)
+        service?.loadIfNeeded()
+        XCTAssertEqual(service?.countdownSeconds, 48)
+        XCTAssertEqual(ticks.callbacks.count, 0)
+        notifications.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+        notifications.post(name: .NSSystemClockDidChange, object: nil)
+        notifications.post(name: NSApplication.willTerminateNotification, object: nil)
+        sleep.post(name: NSWorkspace.willSleepNotification, object: nil)
+        XCTAssertEqual(repo.transitions, 0)
+        XCTAssertEqual(service?.activeSession, paused)
+        weak var weakService = service
+        service = nil
+        XCTAssertNil(weakService)
+        notifications.post(name: .NSSystemClockDidChange, object: nil)
+        sleep.post(name: NSWorkspace.willSleepNotification, object: nil)
+        XCTAssertEqual(repo.transitions, 0)
+    }
+
+    func testScheduledCheckpointIsDurableAndCompletionIsOneStoredRow() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repo = SwiftDataFocusRepository(container: container)
+        let ticks = FakeTicks()
+        let base = ContinuousClock().now
+        var seconds = 0.0
+        let service = FocusService(repository: repo,
+            wallClock: { self.start.addingTimeInterval(seconds) },
+            monotonicClock: { base.advanced(by: .milliseconds(Int64(seconds * 1000))) },
+            scheduleTick: ticks.schedule, notificationCenter: NotificationCenter(),
+            workspaceNotificationCenter: NotificationCenter())
+        service.loadIfNeeded()
+        try service.start(configuration: FocusConfiguration(duration: .custom("1")))
+        let id = try XCTUnwrap(service.activeSession?.id)
+        seconds = 15.375
+        ticks.fire()
+        let checkpoint = try XCTUnwrap(repo.fetchAll().first)
+        XCTAssertEqual(checkpoint.id, id)
+        XCTAssertEqual(checkpoint.accumulatedActiveSeconds, 15.375)
+        XCTAssertEqual(checkpoint.activeSegmentStartedAt, checkpoint.checkpointAt)
+        XCTAssertEqual(checkpoint.deadline, checkpoint.checkpointAt.addingTimeInterval(44.625))
+        seconds = 90
+        ticks.fire()
+        let completed = try XCTUnwrap(repo.fetchAll().first)
+        XCTAssertEqual(completed.state, .completed)
+        XCTAssertEqual(completed.accumulatedActiveSeconds, 60)
+        XCTAssertEqual(completed.endedAt, start.addingTimeInterval(60))
+        XCTAssertEqual(completed.id, id)
+        ticks.fire() // a canceled callback cannot write twice
+        XCTAssertEqual(try repo.fetchAll(), [completed])
+    }
+
+    func testReadRetryDoesNotResetTheRunningMonotonicAnchor() throws {
+        let repo = FakeRepository()
+        let ticks = FakeTicks()
+        let base = ContinuousClock().now
+        var seconds = 0.0
+        let service = FocusService(repository: repo,
+            wallClock: { self.start.addingTimeInterval(seconds) },
+            monotonicClock: { base.advanced(by: .milliseconds(Int64(seconds * 1000))) },
+            scheduleTick: ticks.schedule, notificationCenter: NotificationCenter(),
+            workspaceNotificationCenter: NotificationCenter())
+        service.loadIfNeeded()
+        try service.start(configuration: FocusConfiguration(duration: .custom("1")))
+        seconds = 5
+        repo.readError = .persistenceFailure
+        service.retryRead()
+        XCTAssertTrue(service.readState.isStale)
+        seconds = 10
+        repo.readError = nil
+        service.retryRead()
+        XCTAssertEqual(ticks.callbacks.count, 1)
+        seconds = 16
+        ticks.fire()
+        XCTAssertEqual(repo.rows.first?.accumulatedActiveSeconds, 16)
+        XCTAssertEqual(service.countdownSeconds, 44)
+    }
+
+    func testFailedRetryKeepsRunningTickAndTerminationCheckpointButBlocksStart() throws {
+        let repo = FakeRepository()
+        let ticks = FakeTicks()
+        let notifications = NotificationCenter()
+        let base = ContinuousClock().now
+        var seconds = 0.0
+        let service = FocusService(repository: repo,
+            wallClock: { self.start.addingTimeInterval(seconds) },
+            monotonicClock: { base.advanced(by: .milliseconds(Int64(seconds * 1000))) },
+            scheduleTick: ticks.schedule, notificationCenter: notifications,
+            workspaceNotificationCenter: NotificationCenter())
+        service.loadIfNeeded()
+        try service.start(configuration: FocusConfiguration(duration: .custom("1")))
+        repo.readError = .persistenceFailure
+        service.retryRead()
+        XCTAssertEqual(service.readState, .failed(.persistenceFailure, hasStaleRows: true))
+        XCTAssertThrowsError(try service.start(configuration: FocusConfiguration())) {
+            XCTAssertEqual($0 as? FocusServiceError, .activeStatusUnknown)
+        }
+        seconds = 5.25
+        ticks.fire()
+        XCTAssertEqual(service.countdownSeconds, 55)
+        XCTAssertEqual(repo.transitions, 0)
+        seconds = 16.5
+        ticks.fire()
+        XCTAssertEqual(repo.rows.first?.accumulatedActiveSeconds, 16.5)
+        seconds = 19.75
+        notifications.post(name: NSApplication.willTerminateNotification, object: nil)
+        XCTAssertEqual(repo.rows.first?.accumulatedActiveSeconds, 19.75)
+        XCTAssertEqual(service.countdownSeconds, 41)
+        XCTAssertEqual(ticks.callbacks.count, 1)
+        XCTAssertEqual(repo.creates, 1)
+    }
+
+    func testPersistedBackwardRebaseKeepsWatermarkAndCorrectedRecoveryAnchor() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repo = SwiftDataFocusRepository(container: container)
+        let ticks = FakeTicks()
+        let base = ContinuousClock().now
+        var seconds = 0.0
+        var wall = start
+        let service = FocusService(repository: repo, wallClock: { wall },
+            monotonicClock: { base.advanced(by: .milliseconds(Int64(seconds * 1000))) },
+            scheduleTick: ticks.schedule, notificationCenter: NotificationCenter(),
+            workspaceNotificationCenter: NotificationCenter())
+        service.loadIfNeeded()
+        try service.start(configuration: FocusConfiguration(duration: .custom("1")))
+        seconds = 15
+        wall = start.addingTimeInterval(15)
+        ticks.fire()
+        let old = try XCTUnwrap(repo.fetchAll().first)
+        seconds = 18
+        wall = start.addingTimeInterval(-1000)
+        ticks.fire()
+        let rebased = try XCTUnwrap(repo.fetchAll().first)
+        XCTAssertEqual(rebased.accumulatedActiveSeconds, 18)
+        XCTAssertEqual(rebased.activeSegmentStartedAt, wall)
+        XCTAssertEqual(rebased.deadline, wall.addingTimeInterval(42))
+        XCTAssertGreaterThan(rebased.checkpointAt, old.checkpointAt)
+        XCTAssertThrowsError(try repo.transition(id: old.id, command:
+            .checkpoint(FocusTransitionPayload(expectedCheckpointAt: old.checkpointAt,
+                sampledAt: old.checkpointAt.addingTimeInterval(20), accumulatedActiveSeconds: 20)))) {
+            XCTAssertEqual($0 as? FocusError, .staleBaseline)
+        }
+        // A later tick in the corrected clock no longer causes another drift write.
+        seconds = 19
+        wall = start.addingTimeInterval(-999)
+        ticks.fire()
+        XCTAssertEqual(try repo.fetchAll().first, rebased)
+        // Relaunch treats the different watermark/anchor as ambiguous and offers
+        // recovery rather than completing from an obsolete wall interval.
+        guard case .changed(let recovery) = try FocusTiming.reconcileOnRelaunch(rebased,
+            at: wall.addingTimeInterval(5)) else { return XCTFail("Expected recovery") }
+        XCTAssertEqual(recovery.snapshot.state, .paused)
+        XCTAssertEqual(recovery.snapshot.accumulatedActiveSeconds, 18)
+    }
+
+    func testTerminationCheckpointsWithoutWaitingForAnotherTick() throws {
+        let repo = FakeRepository()
+        let ticks = FakeTicks()
+        let notifications = NotificationCenter()
+        let base = ContinuousClock().now
+        var seconds = 0.0
+        let service = FocusService(repository: repo,
+            wallClock: { self.start.addingTimeInterval(seconds) },
+            monotonicClock: { base.advanced(by: .milliseconds(Int64(seconds * 1000))) },
+            scheduleTick: ticks.schedule, notificationCenter: notifications,
+            workspaceNotificationCenter: NotificationCenter())
+        service.loadIfNeeded()
+        try service.start(configuration: FocusConfiguration(duration: .custom("1")))
+        seconds = 7.125
+        notifications.post(name: NSApplication.willTerminateNotification, object: nil)
+        XCTAssertEqual(repo.rows.first?.accumulatedActiveSeconds, 7.125)
+        XCTAssertEqual(ticks.callbacks.count, 1)
     }
 
     func testGraphRecoversOnConstructionNotOnWindowReopen() throws {

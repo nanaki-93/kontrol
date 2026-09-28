@@ -125,10 +125,15 @@ enum FocusTiming {
         }
         let stamp = try durableStamp(session, wall)
         let remaining = measured.remainingSeconds
-        let payload = payloadFor(session, at: stamp, elapsed: measured.elapsedSeconds)
+        // Keep the durable watermark ordered, but date the relaunch segment using
+        // the actual wall clock. Clamping this anchor to the old watermark would
+        // make every subsequent tick look like another clock correction.
+        let payload = FocusTransitionPayload(expectedCheckpointAt: session.checkpointAt,
+            sampledAt: stamp, accumulatedActiveSeconds: measured.elapsedSeconds,
+            wallAnchorAt: wall < stamp ? wall : nil)
         return FocusTimingChange(transition: .checkpoint(payload),
             snapshot: try copy(session, state: .running, elapsed: measured.elapsedSeconds,
-                               anchor: stamp, deadline: stamp.addingTimeInterval(remaining),
+                               anchor: wall, deadline: wall.addingTimeInterval(remaining),
                                checkpointAt: stamp))
     }
 
