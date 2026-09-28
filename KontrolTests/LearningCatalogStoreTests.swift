@@ -8,6 +8,9 @@ private final class ReadingCatalogRepository: CatalogRepository {
     enum ReadError: Error { case unavailable }
     var value: LearningCatalogSnapshot
     var shouldFail = false
+    var detailValue: LessonDetailSnapshot?
+    var historyValue: [LessonHistorySnapshot] = []
+    var mutationValue: LessonMutationResult?
     private(set) var reads = 0
     private(set) var writes = 0
 
@@ -31,17 +34,20 @@ private final class ReadingCatalogRepository: CatalogRepository {
 
     func openLesson(lessonID: String, now: Date) throws -> LessonMutationResult {
         writes += 1
-        throw ReadError.unavailable
+        if shouldFail { throw ReadError.unavailable }
+        return try XCTUnwrap(mutationValue)
     }
 
     func loadLesson(lessonID: String) throws -> LessonDetailSnapshot {
         reads += 1
-        throw ReadError.unavailable
+        if shouldFail { throw ReadError.unavailable }
+        return try XCTUnwrap(detailValue)
     }
 
     func loadHistory() throws -> [LessonHistorySnapshot] {
         reads += 1
-        throw ReadError.unavailable
+        if shouldFail { throw ReadError.unavailable }
+        return historyValue
     }
 
     func restoreDismissed(lessonID: String, now: Date) throws -> LessonMutationResult {
@@ -86,12 +92,41 @@ final class LearningCatalogStoreTests: XCTestCase {
                             lessonID: "go.example", assignedAt: Date(timeIntervalSince1970: 100))] : [])
     }
 
+    func testFailedDetailAndHistoryRetainLastCommittedValuesButBlockMutations() throws {
+        let repository = ReadingCatalogRepository(snapshot(withSlot: true))
+        let store = LearningCatalogStore(repository: repository)
+        store.loadIfNeeded()
+        let detail = LessonDetailSnapshot(id: "go.example", progress: nil, attempt: nil, content: .unavailable)
+        repository.detailValue = detail
+        XCTAssertEqual(try store.loadDetail(lessonID: detail.id), detail)
+        XCTAssertEqual(try store.loadHistory(), [])
+        repository.shouldFail = true
+        XCTAssertThrowsError(try store.loadDetail(lessonID: detail.id))
+        XCTAssertEqual(store.detailState, .failed(lessonID: detail.id, stale: detail))
+        XCTAssertEqual(store.error, .persistenceFailure)
+        XCTAssertThrowsError(try store.openLesson(lessonID: detail.id)) { error in
+            XCTAssertEqual(error as? LessonExperienceError, .invalidTransition)
+        }
+        XCTAssertEqual(repository.writes, 0)
+        XCTAssertEqual(store.error, .persistenceFailure)
+        repository.shouldFail = false
+        _ = try store.loadDetail(lessonID: detail.id)
+        XCTAssertThrowsError(try store.loadDetail(lessonID: "different"))
+        // A read error for a different identity must not surface the previous detail.
+        XCTAssertEqual(store.detailState, .failed(lessonID: "different", stale: nil))
+        repository.shouldFail = true
+        XCTAssertThrowsError(try store.loadHistory())
+        XCTAssertEqual(store.historyState, .failed(stale: []))
+        XCTAssertThrowsError(try store.openLesson(lessonID: detail.id))
+        XCTAssertEqual(repository.writes, 0)
+    }
+
     func testEmptyIsSuccessfulAndReadFailureIsRetryableNotEmpty() {
         let repository = ReadingCatalogRepository(snapshot())
         repository.shouldFail = true
         let store = LearningCatalogStore(repository: repository)
         var observed: [LearningCatalogReadState] = []
-        let subscription = store.$state.sink { observed.append($0) }
+        let subscription = store.$projection.map(\.catalog).removeDuplicates().sink { observed.append($0) }
         defer { subscription.cancel() }
         XCTAssertEqual(store.state, .notLoaded)
         store.loadIfNeeded()
@@ -124,6 +159,7 @@ final class LearningCatalogStoreTests: XCTestCase {
         repository.shouldFail = true
         store.refresh()
         XCTAssertEqual(store.state, .failed(stale: initial))
+        XCTAssertEqual(store.error, .persistenceFailure)
         XCTAssertEqual(store.state.snapshot?.slots, initial.slots)
         XCTAssertTrue(store.state.isStale)
         repository.shouldFail = false
