@@ -474,6 +474,109 @@ final class LessonExperienceStoreTests: XCTestCase {
         XCTAssertEqual(drafts.buffers[id]?.expectedRevision, revealed.detail.attempt?.revision)
     }
 
+    func testPracticeGatesAllowSavedBlankAndRequireNewAcknowledgementAfterEdit() throws {
+        let (repository, graph, drafts, _, opened) = try draftFixture()
+        let attemptID = try XCTUnwrap(opened.detail.attempt?.id)
+        let id = opened.detail.id
+        func eligible() -> Bool {
+            guard let detail = LessonExperienceView.matchedDetail(graph.learningCatalogStore.detailState, lessonID: id),
+                  let buffer = LessonExperienceView.response(detail, drafts: drafts, lessonID: id) else { return false }
+            return LessonExperienceView.canComplete(detail, buffer: buffer, lessonID: id)
+        }
+        XCTAssertFalse(eligible())
+        drafts.edit("", attemptID: attemptID) // Empty is still a valid saved answer.
+        XCTAssertFalse(eligible())
+        let revealed = try drafts.revealSolution(attemptID: attemptID) // flush before reveal
+        XCTAssertEqual(revealed.detail.attempt?.answerDraft, "")
+        XCTAssertEqual(drafts.buffers[attemptID]?.status, .saved)
+        XCTAssertFalse(eligible())
+        let acknowledged = try drafts.setSelfCheckAcknowledged(attemptID: attemptID, acknowledged: true)
+        XCTAssertNotNil(acknowledged.detail.attempt?.selfCheckAcknowledgedAt)
+        XCTAssertTrue(eligible())
+        let committed = try XCTUnwrap(LessonExperienceView.matchedDetail(graph.learningCatalogStore.detailState, lessonID: id))
+        let clean = try XCTUnwrap(drafts.buffers[attemptID])
+        XCTAssertFalse(LessonExperienceView.canComplete(committed, buffer: clean, lessonID: "wrong-id"))
+        var stale = clean
+        stale.expectedRevision -= 1
+        XCTAssertFalse(LessonExperienceView.canComplete(committed, buffer: stale, lessonID: id))
+        stale = clean
+        stale.text = "not the saved text"
+        XCTAssertFalse(LessonExperienceView.canComplete(committed, buffer: stale, lessonID: id))
+        drafts.edit("  🧪\n", attemptID: attemptID)
+        XCTAssertFalse(eligible())
+        let saved = try XCTUnwrap(drafts.flush(attemptID: attemptID))
+        XCTAssertNil(saved.detail.attempt?.selfCheckAcknowledgedAt)
+        XCTAssertFalse(eligible())
+        let checkedAgain = try drafts.setSelfCheckAcknowledged(attemptID: attemptID, acknowledged: true)
+        XCTAssertEqual(checkedAgain.detail.attempt?.answerDraft, "  🧪\n")
+        XCTAssertTrue(eligible())
+        let completed = try drafts.complete(attemptID: attemptID)
+        XCTAssertEqual(completed.detail.progress?.status, .completed)
+        XCTAssertEqual(completed.history.count, 1)
+        XCTAssertEqual(completed.history.first?.attempt?.answerDraft, "  🧪\n")
+        XCTAssertFalse(eligible())
+        let repeated = try drafts.complete(attemptID: attemptID)
+        XCTAssertEqual(repeated.outcome, .unchanged)
+        XCTAssertEqual(repeated.history, completed.history)
+        XCTAssertEqual(repeated.catalog.slots, completed.catalog.slots)
+        XCTAssertEqual(try repository.loadHistory(), completed.history)
+    }
+
+    func testPracticeGateFailuresKeepRouteAndLocalAnswerWithoutOptimisticReceipt() throws {
+        var fail = false
+        let (repository, graph, drafts, _, opened) = try draftFixture(beforeSave: {
+            if fail { throw Injected.save }
+        })
+        let attemptID = try XCTUnwrap(opened.detail.attempt?.id)
+        let id = opened.detail.id
+        let navigation = NavigationStore()
+        navigation.attachDrafts(drafts)
+        navigation.showLesson(id: id)
+        drafts.edit("  keep 🧪\n", attemptID: attemptID)
+        fail = true
+        XCTAssertThrowsError(try drafts.revealSolution(attemptID: attemptID))
+        XCTAssertEqual(navigation.learningRoute, .detail(id))
+        XCTAssertEqual(drafts.buffers[attemptID]?.text, "  keep 🧪\n")
+        XCTAssertEqual(drafts.buffers[attemptID]?.status, .notSaved(.persistenceFailure))
+        XCTAssertNil(try repository.loadLesson(lessonID: id).attempt?.solutionRevealedAt)
+        fail = false
+        _ = try drafts.revealSolution(attemptID: attemptID)
+        fail = true
+        XCTAssertThrowsError(try drafts.setSelfCheckAcknowledged(attemptID: attemptID, acknowledged: true))
+        XCTAssertNil(try repository.loadLesson(lessonID: id).attempt?.selfCheckAcknowledgedAt)
+        fail = false
+        _ = try drafts.setSelfCheckAcknowledged(attemptID: attemptID, acknowledged: true)
+        let before = graph.learningCatalogStore.projection
+        fail = true
+        XCTAssertThrowsError(try drafts.complete(attemptID: attemptID))
+        XCTAssertEqual(graph.learningCatalogStore.detailState, before.detail)
+        XCTAssertEqual(graph.learningCatalogStore.state, before.catalog)
+        XCTAssertEqual(graph.learningCatalogStore.historyState, before.history)
+        XCTAssertEqual(navigation.learningRoute, .detail(id))
+        XCTAssertEqual(drafts.buffers[attemptID]?.text, "  keep 🧪\n")
+        XCTAssertEqual(try repository.loadLesson(lessonID: id).progress?.status, .started)
+        fail = false
+        XCTAssertEqual(try drafts.complete(attemptID: attemptID).detail.progress?.status, .completed)
+    }
+
+    func testStaleGateCannotCompleteOrReplaceAnotherWindowsAnswer() throws {
+        let (repository, graph, drafts, _, opened) = try draftFixture()
+        let id = opened.detail.id
+        let attemptID = try XCTUnwrap(opened.detail.attempt?.id)
+        _ = try drafts.revealSolution(attemptID: attemptID)
+        _ = try drafts.setSelfCheckAcknowledged(attemptID: attemptID, acknowledged: true)
+        drafts.edit("local", attemptID: attemptID)
+        let revision = try XCTUnwrap(drafts.buffers[attemptID]?.expectedRevision)
+        _ = try graph.learningCatalogStore.saveAnswer(attemptID: attemptID, expectedRevision: revision, answer: "remote")
+        XCTAssertThrowsError(try drafts.complete(attemptID: attemptID)) {
+            XCTAssertEqual($0 as? LessonExperienceError, .staleRevision)
+        }
+        XCTAssertEqual(drafts.buffers[attemptID]?.text, "local")
+        XCTAssertTrue(try XCTUnwrap(drafts.buffers[attemptID]).isDirty)
+        XCTAssertEqual(try repository.loadLesson(lessonID: id).progress?.status, .started)
+        XCTAssertEqual(try repository.loadLesson(lessonID: id).attempt?.answerDraft, "remote")
+    }
+
     func testCommittedReceiptsPublishChoicesDetailAndHistoryTogetherToBothConsumers() throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         let repository = SwiftDataCatalogRepository(container: container)

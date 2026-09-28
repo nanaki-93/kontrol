@@ -38,6 +38,22 @@ struct LessonExperienceView: View {
     }
 
     @State private var conflict = ConflictComparisonState()
+    @State private var showingSolution = false
+    @State private var gateError: LessonExperienceError?
+    @State private var completion: LessonMutationResult?
+
+    /// A gate is offered only against the current committed detail and its exact saved buffer.
+    /// The repository rechecks the revision and all gates during the transaction.
+    static func canComplete(_ detail: LessonDetailSnapshot, buffer: LessonDraftStore.Buffer,
+                            lessonID: String) -> Bool {
+        guard detail.id == lessonID, detail.progress?.status == .started,
+              let attempt = detail.attempt, attempt.lessonID == lessonID,
+              attempt.id == buffer.attemptID, attempt.completedAt == nil,
+              case .pinned(let definition) = detail.content, definition.id == lessonID else { return false }
+        return !buffer.isDirty && buffer.status == .saved &&
+            buffer.expectedRevision == attempt.revision && buffer.text == attempt.answerDraft &&
+            attempt.solutionRevealedAt != nil && attempt.selfCheckAcknowledgedAt != nil
+    }
     @Environment(\.dynamicTypeSize) private var textSize
     @Environment(\.appTextScaleOverride) private var previewScale
 
@@ -89,6 +105,9 @@ struct LessonExperienceView: View {
         .onAppear { loadRequestedDetail() }
         .onChange(of: lessonID) { _, _ in
             conflict = ConflictComparisonState()
+            showingSolution = false
+            gateError = nil
+            completion = nil
             loadRequestedDetail()
         }
         .onChange(of: store.detailState) { _, state in
@@ -101,16 +120,81 @@ struct LessonExperienceView: View {
     }
 
     @ViewBuilder private func detailContent(_ detail: LessonDetailSnapshot) -> some View {
-        if let definition = Self.studiedDefinition(detail, lessonID: lessonID) {
+        if let receipt = completion, receipt.detail == detail,
+           detail.progress?.status == .completed, detail.attempt?.completedAt != nil {
+            PageHeader("Lesson completed")
+            Text("\(receipt.history.first(where: { $0.lessonID == lessonID })?.title ?? lessonID) completed. Your saved response and studied version are retained in History. No grade is assigned.")
+                .appTypography(.body)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("lesson-completion-receipt")
+            Button("Back to choices") { navigation.backToChoices() }
+        } else if let definition = Self.studiedDefinition(detail, lessonID: lessonID) {
             PageHeader(definition.title)
             Text("\(definition.format.capitalized) · \(definition.difficulty.capitalized) · \(definition.estimatedMinutes) min · Studied version \(definition.contentVersion)")
                 .appTypography(.metadata)
                 .foregroundStyle(AppColors.textSecondary)
-            section("Explanation", text: definition.explanation, code: definition.format == "code")
-            section("Worked example", text: definition.workedExample, code: definition.format == "code")
-            section("Exercise", text: definition.exercise, code: definition.format == "code")
             if let buffer = Self.response(detail, drafts: drafts, lessonID: lessonID) {
-                responseEditor(buffer, exercise: definition.exercise)
+                if showingSolution && detail.attempt?.solutionRevealedAt != nil {
+                    Button("Back to exercise") { showingSolution = false }
+                        .accessibilityIdentifier("lesson-back-to-exercise")
+                    SectionHeader(buffer.isDirty ? "Your response (not saved yet)" : "Your saved answer")
+                    Text(buffer.text.isEmpty ? "(Blank response)" : buffer.text)
+                        .appTypography(.body)
+                        .textSelection(.enabled)
+                    saveFeedback(buffer)
+                    section("Reference solution", text: definition.referenceAnswer, code: definition.format == "code")
+                    SectionHeader("Self-check · authored criteria")
+                    ForEach(Array(definition.selfCheckCriteria.enumerated()), id: \.offset) { _, criterion in
+                        Text("• \(criterion)")
+                            .appTypography(.body)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Text("Compare for yourself. There is no automated grade.")
+                        .appTypography(.body)
+                    if detail.attempt?.selfCheckAcknowledgedAt == nil {
+                        Button("Acknowledge self-check") {
+                            performGate { try drafts.setSelfCheckAcknowledged(attemptID: buffer.attemptID, acknowledged: true) }
+                        }
+                        .accessibilityIdentifier("lesson-acknowledge")
+                    } else {
+                        Text("Self-check acknowledged")
+                            .appTypography(.body)
+                            .accessibilityIdentifier("lesson-acknowledged")
+                    }
+                    Button("Complete") {
+                        performGate {
+                            let receipt = try drafts.complete(attemptID: buffer.attemptID)
+                            completion = receipt
+                            return receipt
+                        }
+                    }
+                    .disabled(!Self.canComplete(detail, buffer: buffer, lessonID: lessonID))
+                    .accessibilityIdentifier("lesson-complete")
+                } else {
+                    section("Explanation", text: definition.explanation, code: definition.format == "code")
+                    section("Worked example", text: definition.workedExample, code: definition.format == "code")
+                    section("Exercise", text: definition.exercise, code: definition.format == "code")
+                    responseEditor(buffer, exercise: definition.exercise)
+                    Button(detail.attempt?.solutionRevealedAt == nil ? "Show solution" : "View solution") {
+                        if detail.attempt?.solutionRevealedAt != nil {
+                            showingSolution = true
+                        } else {
+                            performGate {
+                                let receipt = try drafts.revealSolution(attemptID: buffer.attemptID)
+                                showingSolution = true
+                                return receipt
+                            }
+                        }
+                    }
+                    .accessibilityIdentifier("lesson-show-solution")
+                }
+                if let gateError {
+                    Text("Lesson action not saved (\(String(describing: gateError))). Your response and route are retained. Retry after resolving any unsaved answer or read error.")
+                        .appTypography(.body)
+                        .foregroundStyle(AppColors.error)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("lesson-gate-error")
+                }
             } else {
                 LoadingState("Opening response")
             }
@@ -129,6 +213,15 @@ struct LessonExperienceView: View {
                     .textSelection(.enabled)
                     .accessibilityIdentifier("lesson-retained-answer")
             }
+        }
+    }
+
+    private func performGate(_ action: () throws -> LessonMutationResult) {
+        do {
+            _ = try action()
+            gateError = nil
+        } catch {
+            gateError = (error as? LessonExperienceError) ?? .persistenceFailure
         }
     }
 
@@ -166,6 +259,16 @@ struct LessonExperienceView: View {
             .background(AppColors.raisedSurface)
             .accessibilityLabel("Response to \(exercise)")
             .accessibilityIdentifier("lesson-response-\(lessonID)")
+            saveFeedback(buffer)
+        }
+        .appTypography(.body)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// The same app-owned buffer can change from another window while this window shows
+    /// the solution. Keep its durable status and stale-revision recovery visible there too.
+    private func saveFeedback(_ buffer: LessonDraftStore.Buffer) -> some View {
+        VStack(alignment: .leading, spacing: AppMetrics.space2) {
             switch buffer.status {
             case .saving:
                 Text("Saving")
