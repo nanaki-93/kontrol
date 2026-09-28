@@ -8,6 +8,8 @@ final class ScheduleMigrationTests: XCTestCase {
     private let factory = ModelContainerFactory()
     private let historicalID = UUID(uuidString: "D07A6D98-65ED-4B59-92B2-DA3CED39F3E5")!
     private let blockID = UUID(uuidString: "7B64320A-734A-4FFB-B42E-5E2527DD834B")!
+    private let v2TaskID = UUID(uuidString: "6E9D469D-49F7-4D66-9084-2E1AA79E5FF2")!
+    private let v2BlockID = UUID(uuidString: "9BA7AB1F-6349-4CDD-AF43-08FE8BA9DB13")!
 
     private func files(at directory: URL) throws -> [String: Data] {
         let urls = try FileManager.default.contentsOfDirectory(
@@ -82,6 +84,51 @@ final class ScheduleMigrationTests: XCTestCase {
         XCTAssertNil(task.plannedDay)
         XCTAssertNil(task.plannedTimeZoneID)
         XCTAssertNil(task.completedAt)
+    }
+
+    func testFrozenV2CopyReopensTwiceWithoutChangingEitherFixtureVersion() throws {
+        let bundle = Bundle(for: Self.self)
+        let v1 = try XCTUnwrap(bundle.url(forResource: "V1", withExtension: nil))
+        let v2 = try XCTUnwrap(bundle.url(forResource: "V2", withExtension: nil))
+        let v1Original = try files(at: v1)
+        XCTAssertEqual(Set(v1Original.keys), ["Kontrol.store", "Kontrol.store-shm", "Kontrol.store-wal"])
+        let copy = uniqueDirectory("v2-frozen")
+        let v2Original = try copyClosedStore(from: v2, to: copy)
+        XCTAssertEqual(Set(v2Original.keys), ["Kontrol.store", "Kontrol.store-shm", "Kontrol.store-wal"])
+        let url = copy.appendingPathComponent("Kontrol.store")
+        func assertV2Values(_ container: ModelContainer) throws {
+            let tasks = try records(TaskItem.self, in: container)
+            XCTAssertEqual(tasks.count, 1)
+            let task = try XCTUnwrap(tasks.first)
+            XCTAssertEqual(task.id, v2TaskID)
+            XCTAssertEqual(task.title, "V2 fixture task")
+            XCTAssertEqual(task.createdAt, Date(timeIntervalSince1970: 1_710_000_000))
+            XCTAssertEqual(task.notes, "Keep for upgrade")
+            XCTAssertEqual(task.dueAt, Date(timeIntervalSince1970: 1_710_086_400))
+            XCTAssertNil(task.plannedDay)
+            XCTAssertNil(task.plannedTimeZoneID)
+            XCTAssertNil(task.completedAt)
+            let blocks = try records(ScheduleBlock.self, in: container)
+            XCTAssertEqual(blocks.count, 1)
+            let block = try XCTUnwrap(blocks.first)
+            XCTAssertEqual(block.id, v2BlockID)
+            XCTAssertEqual(block.title, "V2 fixture block")
+            XCTAssertEqual(block.startAt, Date(timeIntervalSince1970: 1_800_000_000))
+            XCTAssertEqual(block.endAt, Date(timeIntervalSince1970: 1_800_005_400))
+            XCTAssertEqual(block.note, "Manual plan")
+            XCTAssertNil(block.lessonID)
+            XCTAssertNil(block.linkedTitleSnapshot)
+        }
+        try autoreleasepool {
+            try assertV2Values(factory.makeContainer(mode: .persistent(url)))
+        }
+        try autoreleasepool {
+            try assertV2Values(factory.makeContainer(mode: .persistent(url)))
+        }
+        try assertUnchanged(v2Original, at: v2)
+        try assertUnchanged(v1Original, at: v1)
+        // Keep the opened UUID-isolated copy until the host exits; SwiftData can
+        // retain internal SQLite descriptors after these explicit owners release.
     }
 
     func testFrozenV1CopyMigratesAddsBlockAndReopensWithoutChangingBundle() throws {

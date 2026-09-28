@@ -1,4 +1,39 @@
-# Frozen V1 disk store
+# Versioned closed SwiftData disk fixtures
+
+## Frozen V2 disk store
+
+`V2/` is a separate **closed, V2-only** (schema 2.0.0) test store, created on macOS from `KontrolSchemaV2` directly, with no production factory and no V1 migration. It is not an app resource or user store. The complete captured file set is `Kontrol.store`, `Kontrol.store-shm`, and `Kontrol.store-wal` (the WAL was empty on exit). Do not open the originals in place, edit them, or regenerate them when a later schema ships. Add a separately versioned fixture for a subsequent upgrade.
+
+Persisted records (all times are UTC instants):
+
+| Entity | ID | Fields |
+| --- | --- | --- |
+| TaskItem | `6E9D469D-49F7-4D66-9084-2E1AA79E5FF2` | title `V2 fixture task`, createdAt Unix `1710000000`, notes `Keep for upgrade`, dueAt Unix `1710086400`; planned day, planned zone, completedAt nil |
+| ScheduleBlock | `9BA7AB1F-6349-4CDD-AF43-08FE8BA9DB13` | title `V2 fixture block`, startAt Unix `1800000000`, endAt Unix `1800005400`, note `Manual plan`; lessonID and linkedTitleSnapshot nil |
+
+For a new capture on a Mac with full Xcode selected, compile only the released V1 and V2 model definitions with the standalone V2 writer (not the current/latest factory). Run from the repository root; the writer requires a nonexistent directory under the system temp root and refuses to overwrite a store:
+
+```sh
+xcrun swiftc -o /tmp/kontrol-v2-writer \
+  Kontrol/Data/Persistence/KontrolSchemaV1.swift \
+  Kontrol/Data/Persistence/KontrolSchemaV2.swift \
+  KontrolTests/Fixtures/GenerateV2.swift
+base=$(mktemp -d)
+/tmp/kontrol-v2-writer "$base/V2"
+ls -la "$base/V2"
+# For initial capture only, after the writer has exited and the complete file set has been inspected:
+# mkdir KontrolTests/Fixtures/V2 && cp "$base/V2/"* KontrolTests/Fixtures/V2/
+```
+
+`ScheduleMigrationTests.testFrozenV2CopyReopensTwiceWithoutChangingEitherFixtureVersion` copies *all* bundled V2 files to a UUID-isolated temp directory, opens the copy twice via the production factory, verifies every field and identity, and compares both V1 and V2 bundled filename sets and bytes afterward. SwiftData can retain SQLite descriptors after owners release, so the opened copy is left for OS cleanup, never unlinked during the test. Generated SQLite bytes need not match across runs; the captured originals are frozen.
+
+```sh
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug \
+  -destination 'platform=macOS' -derivedDataPath /tmp/kontrol-f03-derived \
+  CODE_SIGNING_ALLOWED=NO -only-testing:KontrolTests/ScheduleMigrationTests test
+```
+
+## Frozen V1 disk store
 
 `V1/Kontrol.store` is a **closed** SwiftData disk fixture created with `KontrolSchemaV1` (schema version 1.0.0) on macOS using the then-current production `ModelContainerFactory` and `KontrolMigrationPlan` (V1 only, no stages). The standalone generator now opens V1 directly so it cannot silently emit a newer schema. `Kontrol.store-shm` and `Kontrol.store-wal` were present at process exit and are retained alongside the database. These files are test data, not an app resource or a user store. Do not edit or reopen the checked-in originals in place. Never claim a V0 → V1 migration: there is no V0 schema.
 
