@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>F03 · Multiple schedule conflicts</title>
+<link rel="stylesheet" href="../../design-system/tokens.css">
+<link rel="stylesheet" href="../../design-system/components.css">
+<style>
+body { margin:0; background:#0c0b0d; color:#eee; font:15px system-ui,sans-serif; }
+header { padding:16px 24px; border-bottom:1px solid #403639; }
+main { padding:32px 16px; display:flex; justify-content:center; }
+section { width:min(100%,600px); max-height:min(80vh,640px); box-sizing:border-box; display:flex; flex-direction:column; background:#191518; border:1px solid #403639; border-radius:8px; padding:24px; }
+h1 { font-size:24px; font-weight:500; margin:0 0 12px; }
+p { line-height:1.5; margin:0 0 14px; color:#bcb3b5; }
+.list { overflow-y:auto; min-height:0; border-top:1px solid #403639; }
+article { padding:14px 0; border-bottom:1px solid #403639; }
+article strong,article span { display:block; margin:4px 0; }
+article span { color:#bcb3b5; }
+footer { flex-shrink:0; display:flex; flex-wrap:wrap; gap:10px; padding-top:20px; }
+button { min-height:36px; padding:8px 16px; background:#251f22; border:1px solid #66565a; border-radius:4px; color:#eee; font:inherit; }
+button.primary { background:#d66872; border-color:#d66872; color:#110d0e; }
+</style>
+</head>
+<body>
+<header>F03 · M08 multiple-conflict extension — illustrative data; production shows current local times and actual intersections.</header>
+<main><section aria-label="Overlap decision">
+<h1>Overlapping blocks</h1>
+<p>“Afternoon planning” overlaps 3 blocks. Nothing has changed yet. Review all conflicts before choosing Keep both.</p>
+<div class="list">
+<article><strong>Team review</strong><span>Sep 27, 11:00 AM – Sep 27, 12:00 PM · overlap: 30 min</span></article>
+<article><strong>Write notes</strong><span>Sep 27, 11:45 AM – Sep 27, 1:15 PM · overlap: 45 min</span></article>
+<article><strong>Call family</strong><span>Sep 27, 12:30 PM – Sep 27, 1:00 PM · overlap: 30 min</span></article>
+</div>
+<footer><button>Edit time</button><button class="primary">Keep both</button><button>Cancel</button></footer>
+</section></main>
+</body>
+</html>

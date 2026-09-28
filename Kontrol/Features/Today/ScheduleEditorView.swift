@@ -40,6 +40,19 @@ struct ScheduleEditorView: View {
         return "\(formatter.string(from: date)) · \(timeZone.abbreviation(for: date) ?? timeZone.identifier) (\(offset))"
     }
 
+    static func overlapDurationLabel(_ duration: TimeInterval) -> String {
+        guard duration >= 1, duration < Double(Int.max), duration.rounded(.down) == duration else {
+            return "\(duration.formatted(.number.precision(.fractionLength(0...3)))) sec"
+        }
+        let seconds = Int(duration)
+        if seconds < 60 { return "\(seconds) sec" }
+        let hours = seconds / 3_600
+        let minutes = (seconds % 3_600) / 60
+        let remainder = seconds % 60
+        return ([hours > 0 ? "\(hours) hr" : nil, minutes > 0 ? "\(minutes) min" : nil,
+                 remainder > 0 ? "\(remainder) sec" : nil].compactMap { $0 }).joined(separator: " ")
+    }
+
     private func endpoint(_ date: Date) -> String {
         let context = temporalStore.temporalContext
         return Self.endpointLabel(date, calendar: context.calendar,
@@ -52,70 +65,58 @@ struct ScheduleEditorView: View {
             Text(draft.editingID == nil ? "New block" : "Edit block")
                 .appTypography(.dialog)
                 .accessibilityAddTraits(.isHeader)
-            ScrollView {
-                VStack(alignment: .leading, spacing: AppMetrics.space4) {
-                    VStack(alignment: .leading, spacing: AppMetrics.space2) {
-                        Text("Title")
-                        TextField("Title", text: $draft.title)
-                            .textFieldStyle(.roundedBorder)
-                            .focused($titleFocused)
-                            .accessibilityIdentifier("schedule-editor-title")
-                        if draft.invalidFields.contains(.title) {
-                            Text("Enter a title.")
-                                .foregroundStyle(AppColors.error)
-                                .accessibilityIdentifier("schedule-editor-title-error")
+            if let review = draft.overlapReview {
+                overlapDecision(review)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: AppMetrics.space4) {
+                        VStack(alignment: .leading, spacing: AppMetrics.space2) {
+                            Text("Title")
+                            TextField("Title", text: $draft.title)
+                                .textFieldStyle(.roundedBorder)
+                                .focused($titleFocused)
+                                .accessibilityIdentifier("schedule-editor-title")
+                            if draft.invalidFields.contains(.title) {
+                                Text("Enter a title.")
+                                    .foregroundStyle(AppColors.error)
+                                    .accessibilityIdentifier("schedule-editor-title-error")
+                            }
+                        }
+                        endpointField("Start date and time", selection: $draft.startAt,
+                                      invalid: draft.invalidFields.contains(.start),
+                                      guidance: "Choose a valid start date and time.", id: "start")
+                        endpointField("End date and time", selection: $draft.endAt,
+                                      invalid: draft.invalidFields.contains(.end),
+                                      guidance: "End must be after Start.", id: "end")
+                        VStack(alignment: .leading, spacing: AppMetrics.space2) {
+                            Text("Note (optional)")
+                            TextEditor(text: $draft.note)
+                                .frame(minHeight: 90)
+                                .accessibilityLabel("Note (optional)")
+                                .accessibilityIdentifier("schedule-editor-note")
+                        }
+                        if let error = draft.saveError {
+                            ErrorBanner(.saveFailed)
+                                .accessibilityIdentifier("schedule-editor-error")
+                            Text(error == .notFound
+                                 ? "This block is no longer available. Close the editor to see the refreshed list."
+                                 : "Your fields are still here; try saving again.")
+                                .appTypography(.metadata)
+                                .foregroundStyle(AppColors.textSecondary)
+                            if error == .notFound {
+                                ActionButton("Close editor", action: onMissingBlock)
+                                    .accessibilityIdentifier("schedule-editor-close-missing")
+                            }
                         }
                     }
-                    endpointField("Start date and time", selection: $draft.startAt,
-                                  invalid: draft.invalidFields.contains(.start),
-                                  guidance: "Choose a valid start date and time.", id: "start")
-                    endpointField("End date and time", selection: $draft.endAt,
-                                  invalid: draft.invalidFields.contains(.end),
-                                  guidance: "End must be after Start.", id: "end")
-                    VStack(alignment: .leading, spacing: AppMetrics.space2) {
-                        Text("Note (optional)")
-                        TextEditor(text: $draft.note)
-                            .frame(minHeight: 90)
-                            .accessibilityLabel("Note (optional)")
-                            .accessibilityIdentifier("schedule-editor-note")
-                    }
-                    if draft.overlapReview != nil {
-                        Text("This time overlaps another block. Adjust the times to save without an overlap.")
-                            .appTypography(.metadata)
-                            .foregroundStyle(AppColors.error)
-                            .accessibilityIdentifier("schedule-editor-overlap")
-                    }
-                    if let error = draft.saveError {
-                        ErrorBanner(.saveFailed)
-                            .accessibilityIdentifier("schedule-editor-error")
-                        Text(error == .notFound
-                             ? "This block is no longer available. Close the editor to see the refreshed list."
-                             : "Your fields are still here; try saving again.")
-                            .appTypography(.metadata)
-                            .foregroundStyle(AppColors.textSecondary)
-                        if error == .notFound {
-                            ActionButton("Close editor", action: onMissingBlock)
-                                .accessibilityIdentifier("schedule-editor-close-missing")
-                        }
-                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .appTypography(.body)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .appTypography(.body)
+                .frame(maxHeight: 440)
             }
-            .frame(maxHeight: 440)
-            HStack(spacing: AppMetrics.space3) {
-                ActionButton("Cancel") {
-                    draft.cancel()
-                    onCancel()
-                }
-                .keyboardShortcut(.cancelAction)
-                .accessibilityIdentifier("schedule-editor-cancel")
-                ActionButton("Save", variant: .primary,
-                             isEnabled: draft.canSubmit && draft.saveError != .notFound) {
-                    draft.submit { _ in onSaved() }
-                }
-                .keyboardShortcut(.defaultAction)
-                .accessibilityIdentifier("schedule-editor-submit")
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: AppMetrics.space3) { decisionActions }
+                VStack(alignment: .leading, spacing: AppMetrics.space2) { decisionActions }
             }
         }
         .padding(AppMetrics.contentInset)
@@ -125,6 +126,69 @@ struct ScheduleEditorView: View {
         .environment(\.calendar, pickerCalendar)
         .environment(\.timeZone, context.timeZone)
         .onAppear { titleFocused = true }
+    }
+
+    @ViewBuilder private var decisionActions: some View {
+        ActionButton("Cancel") {
+            draft.cancel()
+            onCancel()
+        }
+        .keyboardShortcut(.cancelAction)
+        .accessibilityIdentifier("schedule-editor-cancel")
+        if draft.overlapReview != nil {
+            ActionButton("Edit time") { draft.editTime() }
+                .accessibilityIdentifier("schedule-editor-edit-time")
+            ActionButton("Keep both", variant: .primary, isEnabled: draft.canKeepBoth) {
+                draft.keepBoth { _ in onSaved() }
+            }
+            .keyboardShortcut(.defaultAction)
+            .accessibilityIdentifier("schedule-editor-keep-both")
+        } else {
+            ActionButton("Save", variant: .primary,
+                         isEnabled: draft.canSubmit && draft.saveError != .notFound) {
+                draft.submit { _ in onSaved() }
+            }
+            .keyboardShortcut(.defaultAction)
+            .accessibilityIdentifier("schedule-editor-submit")
+        }
+    }
+
+    private func overlapDecision(_ review: ScheduleOverlapReview) -> some View {
+        VStack(alignment: .leading, spacing: AppMetrics.space3) {
+            Text("Overlapping blocks")
+                .appTypography(.dialog)
+                .accessibilityAddTraits(.isHeader)
+            Text("\(draft.title.trimmingCharacters(in: .whitespacesAndNewlines)) overlaps \(review.conflicts.count) block\(review.conflicts.count == 1 ? "" : "s"). Nothing has changed yet. Review each conflict before keeping both.")
+                .appTypography(.body)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("schedule-editor-overlap")
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: AppMetrics.space3) {
+                    ForEach(review.conflicts, id: \.block.id) { conflict in
+                        VStack(alignment: .leading, spacing: AppMetrics.space2) {
+                            Text(conflict.block.title).appTypography(.body)
+                            Text("\(endpoint(conflict.block.startAt)) – \(endpoint(conflict.block.endAt))")
+                                .appTypography(.metadata)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text("Overlap: \(Self.overlapDurationLabel(conflict.duration))")
+                                .appTypography(.metadata)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier("schedule-conflict-\(conflict.block.id.uuidString)")
+                        Divider()
+                    }
+                }
+            }
+            .accessibilityIdentifier("schedule-editor-conflicts")
+            if draft.saveError != nil {
+                ErrorBanner(.saveFailed)
+                Text("Nothing was saved. Review the conflicts and try Keep both again, or edit the time.")
+                    .appTypography(.metadata)
+                    .foregroundStyle(AppColors.textSecondary)
+            }
+        }
+        .frame(maxHeight: 440, alignment: .topLeading)
     }
 
     private var pickerCalendar: Calendar {

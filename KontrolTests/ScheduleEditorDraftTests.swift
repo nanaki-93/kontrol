@@ -267,6 +267,59 @@ final class ScheduleEditorDraftTests: XCTestCase {
         XCTAssertEqual(try storage.repository.fetchAll().count, 2)
     }
 
+    func testMultipleConflictDecisionListsEveryPeerAndStaleReviewReplacesItWithoutWriting() throws {
+        let storage = try store()
+        let early = try storage.create(input: ScheduleInput(title: "Early", startAt: date(2026, 5, 1, 9),
+                                                           endAt: date(2026, 5, 1, 11)))
+        let late = try storage.create(input: ScheduleInput(title: "Late", startAt: date(2026, 5, 1, 12),
+                                                          endAt: date(2026, 5, 1, 14)))
+        let draft = ScheduleEditorDraft(creatingOn: date(2026, 5, 1), calendar: calendar(), in: storage)
+        draft.title = "Crossing"
+        draft.startAt = date(2026, 5, 1, 10)
+        draft.endAt = date(2026, 5, 1, 13)
+        draft.submit { _ in XCTFail("Initial warning cannot write") }
+        XCTAssertEqual(draft.overlapReview?.conflicts, [ScheduleConflict(block: early, duration: 3_600),
+                                                        ScheduleConflict(block: late, duration: 3_600)])
+        XCTAssertEqual(try storage.repository.fetchAll(), [early, late])
+        let changed = try storage.update(id: late.id, input: ScheduleInput(title: "Renamed late",
+                                                     startAt: late.startAt, endAt: late.endAt))
+        draft.keepBoth { _ in XCTFail("Stale decision cannot write") }
+        XCTAssertEqual(draft.overlapReview?.conflicts, [ScheduleConflict(block: early, duration: 3_600),
+                                                        ScheduleConflict(block: changed, duration: 3_600)])
+        XCTAssertEqual(try storage.repository.fetchAll(), [early, changed])
+        draft.editTime()
+        XCTAssertNil(draft.overlapReview)
+        XCTAssertEqual(try storage.repository.fetchAll(), [early, changed])
+        draft.submit { _ in XCTFail("Fresh warning cannot write") }
+        draft.keepBoth { saved in XCTAssertEqual(saved.title, "Crossing") }
+        let crossing = try XCTUnwrap(storage.snapshots.first { $0.title == "Crossing" })
+        XCTAssertEqual(TodayView.overlaps(for: crossing, in: storage.snapshots).map(\.block.id),
+                       [early.id, changed.id])
+        XCTAssertEqual(TodayView.overlaps(for: early, in: storage.snapshots).map(\.block.id),
+                       [crossing.id])
+        XCTAssertEqual(try storage.repository.fetchAll().filter { $0.id == early.id }, [early])
+        XCTAssertEqual(try storage.repository.fetchAll().filter { $0.id == changed.id }, [changed])
+        XCTAssertEqual(try storage.repository.fetchAll().count, 3)
+    }
+
+    func testOverlapRowsIncludeCrossDayPeersAndElapsedDurationIsNotWallClockDuration() throws {
+        let storage = try store()
+        let zone = try XCTUnwrap(TimeZone(identifier: "America/New_York"))
+        let first = date(2026, 3, 7, 23, zone: zone)
+        let peer = try storage.create(input: ScheduleInput(title: "Overnight", startAt: first,
+                                                            endAt: date(2026, 3, 8, 4, zone: zone)))
+        let next = try storage.create(input: ScheduleInput(title: "Morning", startAt: date(2026, 3, 8, 4, zone: zone),
+                                                            endAt: date(2026, 3, 8, 5, zone: zone)))
+        let candidate = ScheduleSnapshot(id: UUID(), title: "Crossing", startAt: date(2026, 3, 8, 1, zone: zone),
+                                         endAt: date(2026, 3, 8, 4, zone: zone))
+        let conflicts = TodayView.overlaps(for: candidate, in: [peer, next, candidate])
+        XCTAssertEqual(conflicts, [ScheduleConflict(block: peer, duration: 7_200)])
+        XCTAssertEqual(ScheduleEditorView.overlapDurationLabel(conflicts[0].duration), "2 hr")
+        XCTAssertEqual(ScheduleEditorView.overlapDurationLabel(90), "1 min 30 sec")
+        XCTAssertEqual(ScheduleEditorView.overlapDurationLabel(0.5),
+                       "\(0.5.formatted(.number.precision(.fractionLength(0...3)))) sec")
+    }
+
     func testEndpointLabelsDisambiguateFallBackAndShowBothOvernightDates() throws {
         let zone = try XCTUnwrap(TimeZone(identifier: "America/New_York"))
         let localCalendar = calendar(zone)

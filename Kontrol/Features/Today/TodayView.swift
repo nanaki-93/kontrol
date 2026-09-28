@@ -91,6 +91,13 @@ struct TodayView: View {
 
     private var selectedDate: Date? { daySelection.selectedDate(in: store.temporalContext) }
 
+    /// Compare against the shared complete snapshot, not just rows starting on this day.
+    static func overlaps(for block: ScheduleSnapshot, in blocks: [ScheduleSnapshot]) -> [ScheduleConflict] {
+        ScheduleSelection.conflicts(for: ScheduleInput(title: block.title, startAt: block.startAt,
+                                                       endAt: block.endAt, note: block.note),
+                                    against: blocks, excluding: block.id)
+    }
+
     private func blockMetadata(_ block: ScheduleSnapshot) -> String {
         let duration = Int(block.endAt.timeIntervalSince(block.startAt) / 60)
         let elapsed: String
@@ -271,8 +278,18 @@ struct TodayView: View {
                 EmptyState("No blocks on this day.", guidance: "Use Add block to plan a time.")
             } else {
                 ForEach(blocks) { block in
+                    let conflicts = Self.overlaps(for: block, in: scheduleStore.snapshots)
                     HStack(spacing: AppMetrics.space3) {
-                        AppListRow(block.title, metadata: blockMetadata(block))
+                        VStack(alignment: .leading, spacing: AppMetrics.space2) {
+                            AppListRow(block.title, metadata: blockMetadata(block))
+                            if !conflicts.isEmpty {
+                                Label("Overlaps \(conflicts.count) block\(conflicts.count == 1 ? "" : "s")",
+                                      systemImage: "exclamationmark.triangle")
+                                    .appTypography(.metadata)
+                                    .foregroundStyle(AppColors.error)
+                                    .accessibilityIdentifier("schedule-overlap-\(block.id.uuidString)")
+                            }
+                        }
                             .accessibilityElement(children: .combine)
                             .accessibilityIdentifier("schedule-row-\(block.id.uuidString)")
                         ActionButton("Edit") { editBlock(block) }
