@@ -59,6 +59,45 @@ final class ContainerFactoryTests: XCTestCase {
         XCTAssertTrue(try taskIDs(in: memory).isEmpty)
     }
 
+    func testFreshFactoryStorePersistsV2BlockAndV1TaskAcrossReopen() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("Kontrol.store")
+        let blockID = UUID()
+        let taskID = UUID()
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let end = start.addingTimeInterval(3_600)
+
+        func writeAndClose() throws {
+            let container = try factory.makeContainer(mode: .persistent(url))
+            let context = ModelContext(container)
+            context.insert(ScheduleBlock(id: blockID, title: "Study", startAt: start,
+                                         endAt: end, note: "Bring notes",
+                                         lessonID: "missing-lesson",
+                                         linkedTitleSnapshot: "Old title"))
+            context.insert(try TaskItem(id: taskID, title: "Review", createdAt: start))
+            try context.save()
+        }
+        try writeAndClose()
+
+        func reopenAndCheck() throws {
+            let container = try factory.makeContainer(mode: .persistent(url))
+            let block = try XCTUnwrap(ModelContext(container)
+                .fetch(FetchDescriptor<ScheduleBlock>()).first)
+            XCTAssertEqual(block.id, blockID)
+            XCTAssertEqual(block.title, "Study")
+            XCTAssertEqual(block.startAt, start)
+            XCTAssertEqual(block.endAt, end)
+            XCTAssertEqual(block.note, "Bring notes")
+            XCTAssertEqual(block.lessonID, "missing-lesson")
+            XCTAssertEqual(block.linkedTitleSnapshot, "Old title")
+            XCTAssertEqual(try taskIDs(in: container), [taskID])
+        }
+        try reopenAndCheck()
+        let empty = try factory.makeContainer(mode: .inMemory)
+        XCTAssertTrue(try ModelContext(empty).fetch(FetchDescriptor<ScheduleBlock>()).isEmpty)
+    }
+
     func testOpenErrorPropagatesWithoutReplacingExistingFiles() throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

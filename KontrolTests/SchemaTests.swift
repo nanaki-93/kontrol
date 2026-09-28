@@ -5,22 +5,27 @@ import XCTest
 
 final class SchemaTests: XCTestCase {
     private func makeContainer() throws -> ModelContainer {
-        let schema = Schema(versionedSchema: KontrolSchemaV1.self)
-        let configuration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true,
-                                               cloudKitDatabase: .none)
-        return try ModelContainer(for: schema, migrationPlan: KontrolMigrationPlan.self,
-                                  configurations: [configuration])
+        try ModelContainerFactory().makeContainer(mode: .inMemory)
     }
 
-    func testV1ContainsOnlyFoundationModelsAndNoInventedMigration() {
+    func testV1IsUnchangedAndV2AddsOnlyScheduleBlock() {
         XCTAssertEqual(KontrolSchemaV1.versionIdentifier, Schema.Version(1, 0, 0))
-        XCTAssertEqual(KontrolMigrationPlan.schemas.count, 1)
+        XCTAssertEqual(KontrolSchemaV2.versionIdentifier, Schema.Version(2, 0, 0))
+        XCTAssertEqual(KontrolMigrationPlan.schemas.count, 2)
         XCTAssertTrue(KontrolMigrationPlan.schemas[0] == KontrolSchemaV1.self)
-        XCTAssertTrue(KontrolMigrationPlan.stages.isEmpty)
-        let names = Set(KontrolSchemaV1.models.map { String(describing: $0) })
-        XCTAssertEqual(names, Set(["TaskItem", "Topic", "Subtopic", "Concept",
-                                   "LessonDefinition", "LessonProgress", "LessonAttempt",
-                                   "CatalogImportState"]))
+        XCTAssertTrue(KontrolMigrationPlan.schemas[1] == KontrolSchemaV2.self)
+        XCTAssertEqual(KontrolMigrationPlan.stages.count, 1)
+        let v1 = KontrolSchemaV1.models
+        XCTAssertEqual(Set(v1.map { String(describing: $0) }),
+                       Set(["TaskItem", "Topic", "Subtopic", "Concept",
+                            "LessonDefinition", "LessonProgress", "LessonAttempt",
+                            "CatalogImportState"]))
+        let v2 = KontrolSchemaV2.models
+        XCTAssertEqual(v2.count, v1.count + 1)
+        for (original, retained) in zip(v1, v2) {
+            XCTAssertTrue(original == retained)
+        }
+        XCTAssertTrue(v2.last == ScheduleBlock.self)
     }
 
     func testTaskTrimsTitleRejectsBlankAndDerivesCompletionFromTimestamp() throws {

@@ -19,7 +19,11 @@ struct GenerateV1 {
         }
         let store = output.appendingPathComponent("Kontrol.store")
         func writeAndClose() throws {
-            let container = try ModelContainerFactory().makeContainer(mode: .persistent(store))
+            // Do not use the production factory: its latest schema advances over time.
+            let schema = Schema(versionedSchema: KontrolSchemaV1.self)
+            let configuration = ModelConfiguration(schema: schema, url: store,
+                                                   cloudKitDatabase: .none)
+            let container = try ModelContainer(for: schema, configurations: [configuration])
             let context = ModelContext(container)
             context.insert(try TaskItem(
                 id: UUID(uuidString: "D07A6D98-65ED-4B59-92B2-DA3CED39F3E5")!,
