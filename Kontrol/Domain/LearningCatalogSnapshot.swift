@@ -130,6 +130,7 @@ struct LessonSlotSnapshot: Equatable, Identifiable {
 // These projections are detached values. In particular, a historical detail must
 // never silently fall back to the current catalog definition.
 enum LessonStudiedContent: Equatable {
+    case current(LessonDefinitionSnapshot) // unstarted preview; not a persisted pin
     case pinned(LessonDefinitionSnapshot)
     case legacyCompleted(KontrolSchemaV1.LessonContentSnapshot)
     case unavailable

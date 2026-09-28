@@ -6,6 +6,8 @@ protocol CatalogRepository {
     func importIfNeeded(_ catalog: ValidatedCatalog) throws -> CatalogImportResult
     func loadSnapshot() throws -> LearningCatalogSnapshot
     func reconcileSlots(now: Date) throws -> LearningCatalogSnapshot
+    func openLesson(lessonID: String, now: Date) throws -> LessonMutationResult
+    func loadLesson(lessonID: String) throws -> LessonDetailSnapshot
 }
 
 enum CatalogImportResult: Equatable {
@@ -187,6 +189,166 @@ final class SwiftDataCatalogRepository: CatalogRepository {
         try reconcile(in: context, now: now)
         // Return committed values, never projections of an uncommitted context.
         return try loadSnapshot()
+    }
+
+    // These synchronous main-actor operations each use their own non-autosaving
+    // context. Reentrant consumers observe only the committed previous operation.
+    func loadLesson(lessonID: String) throws -> LessonDetailSnapshot {
+        try detail(lessonID: lessonID, in: ModelContext(container))
+    }
+
+    func openLesson(lessonID: String, now: Date) throws -> LessonMutationResult {
+        guard now.timeIntervalSinceReferenceDate.isFinite else {
+            throw LessonExperienceError.invalidTransition
+        }
+        let context = ModelContext(container)
+        context.autosaveEnabled = false
+        let definitions = try context.fetch(FetchDescriptor<LessonDefinition>()).filter { $0.id == lessonID }
+        let progressRows = try context.fetch(FetchDescriptor<LessonProgress>()).filter { $0.lessonID == lessonID }
+        let attempts = try context.fetch(FetchDescriptor<LessonAttempt>()).filter { $0.lessonID == lessonID }
+        guard definitions.count <= 1, progressRows.count <= 1 else {
+            throw LessonExperienceError.invalidStoredData
+        }
+        let progress = progressRows.first
+        let unfinished = attempts.filter { $0.completedAt == nil }
+        let completed = attempts.filter { $0.completedAt != nil }
+        guard unfinished.count <= 1, completed.count <= 1 else {
+            throw LessonExperienceError.invalidStoredData
+        }
+        let status = progress.map { LessonProgressStatus(rawValue: $0.status.rawValue) }
+        if progress != nil && status == nil { throw LessonExperienceError.invalidStoredData }
+        // A terminal row never implicitly starts work. It can be inspected even
+        // when the current definition has been removed or superseded.
+        if status == .completed || status == .dismissed {
+            let detail = try self.detail(lessonID: lessonID, in: context)
+            return try result(.unchanged, detail: detail, in: context)
+        }
+        let progressStatus = status ?? .available
+        guard completed.isEmpty, progressStatus == .started || unfinished.isEmpty else {
+            throw LessonExperienceError.invalidStoredData
+        }
+        var recoveredPin = false
+        if let attempt = unfinished.first {
+            if attempt.pinnedContentData == nil {
+                // Same-version imports do not enter the upgrade backfill path.
+                // Recover a migrated V4 draft only from the matching installed
+                // definition, in this same transaction as the resumed progress.
+                guard let definition = definitions.first,
+                      definition.contentVersion == attempt.contentVersion else {
+                    throw LessonExperienceError.contentUnavailable
+                }
+                attempt.pinnedContentData = try PinnedLessonContent(
+                    definition: Self.definitionSnapshot(definition)).encoded()
+                recoveredPin = true
+            }
+            _ = try PinnedLessonContent.decode(attempt.pinnedContentData,
+                lessonID: lessonID, contentVersion: attempt.contentVersion)
+        } else if definitions.first == nil {
+            throw LessonExperienceError.contentUnavailable
+        }
+        let record: LessonProgress
+        if let progress {
+            record = progress
+        } else {
+            record = LessonProgress(lessonID: lessonID)
+            context.insert(record)
+        }
+        let createdAttempt = unfinished.isEmpty
+        if createdAttempt {
+            let definition = try PinnedLessonContent(definition: Self.definitionSnapshot(definitions[0])).encoded()
+            context.insert(LessonAttempt(id: UUID(), lessonID: lessonID,
+                contentVersion: definitions[0].contentVersion, pinnedContentData: definition))
+        }
+        let changed = createdAttempt || recoveredPin || record.status != .started || record.startedAt == nil ||
+            record.firstShownAt == nil || record.lastOpenedAt == nil || record.lastOpenedAt! < now
+        if changed {
+            record.status = .started
+            if record.startedAt == nil { record.startedAt = now }
+            if record.firstShownAt == nil { record.firstShownAt = now }
+            // Do not move the clock backwards when a delayed caller opens a lesson.
+            if record.lastOpenedAt == nil || record.lastOpenedAt! < now { record.lastOpenedAt = now }
+        }
+        let detail = try self.detail(lessonID: lessonID, in: context)
+        let receipt = try result(changed ? .changed : .unchanged, detail: detail, in: context)
+        if !changed { return receipt }
+        try beforeSave()
+        try save(context)
+        return receipt
+    }
+
+    private func result(_ outcome: LessonMutationOutcome, detail: LessonDetailSnapshot,
+                        in context: ModelContext) throws -> LessonMutationResult {
+        let catalog = try snapshot(in: context)
+        // History is projected from the same write context, never a fallible
+        // post-commit read. A future History command can reuse this projection.
+        var history: [LessonHistorySnapshot] = []
+        for progress in catalog.progress where progress.status == .completed || progress.status == .dismissed {
+            let item = try self.detail(lessonID: progress.lessonID, in: context)
+            let timestamp: Date? = progress.status == .completed ? progress.completedAt : progress.dismissedAt
+            guard let date = timestamp else { throw LessonExperienceError.invalidStoredData }
+            history.append(LessonHistorySnapshot(lessonID: progress.lessonID, status: progress.status,
+                                                 date: date, content: item.content, attempt: item.attempt))
+        }
+        history.sort { lhs, rhs in
+            if lhs.date == rhs.date { return lhs.lessonID < rhs.lessonID }
+            return lhs.date > rhs.date
+        }
+        return LessonMutationResult(outcome: outcome, catalog: catalog, detail: detail,
+                                    history: history, replacedSlot: nil)
+    }
+
+    private func detail(lessonID: String, in context: ModelContext) throws -> LessonDetailSnapshot {
+        let definitions = try context.fetch(FetchDescriptor<LessonDefinition>()).filter { $0.id == lessonID }
+        let progressRows = try context.fetch(FetchDescriptor<LessonProgress>()).filter { $0.lessonID == lessonID }
+        let attempts = try context.fetch(FetchDescriptor<LessonAttempt>()).filter { $0.lessonID == lessonID }
+        guard definitions.count <= 1, progressRows.count <= 1,
+              attempts.filter({ $0.completedAt == nil }).count <= 1,
+              attempts.filter({ $0.completedAt != nil }).count <= 1 else {
+            throw LessonExperienceError.invalidStoredData
+        }
+        let row = progressRows.first
+        guard let status = row.map({ LessonProgressStatus(rawValue: $0.status.rawValue) }) ?? .available else {
+            throw LessonExperienceError.invalidStoredData
+        }
+        let completed = attempts.filter { $0.completedAt != nil }
+        let unfinished = attempts.filter { $0.completedAt == nil }
+        let selected: LessonAttempt?
+        switch status {
+        case .completed:
+            guard completed.count == 1, unfinished.isEmpty,
+                  row?.completedAt != nil else { throw LessonExperienceError.invalidStoredData }
+            selected = completed.first
+        case .started:
+            guard completed.isEmpty else { throw LessonExperienceError.invalidStoredData }
+            selected = unfinished.first // a recovered V4 progress row may predate attempts
+        case .dismissed:
+            guard completed.isEmpty else { throw LessonExperienceError.invalidStoredData }
+            selected = unfinished.first
+        case .available:
+            guard attempts.isEmpty else { throw LessonExperienceError.invalidStoredData }
+            selected = nil
+        }
+        guard definitions.first != nil || row != nil else { throw LessonExperienceError.lessonNotFound }
+        let progress = row.map { LessonProgressSnapshot(lessonID: $0.lessonID, status: status,
+            firstShownAt: $0.firstShownAt, startedAt: $0.startedAt, completedAt: $0.completedAt,
+            dismissedAt: $0.dismissedAt, lastOpenedAt: $0.lastOpenedAt) }
+        let attempt = selected.map { LessonAttemptSnapshot(id: $0.id, lessonID: $0.lessonID,
+            contentVersion: $0.contentVersion, answerDraft: $0.answerDraft,
+            solutionRevealedAt: $0.solutionRevealedAt,
+            selfCheckAcknowledgedAt: $0.selfCheckAcknowledgedAt, completedAt: $0.completedAt,
+            completedContentSnapshot: $0.completedContentSnapshot,
+            pinnedContentData: $0.pinnedContentData, revision: $0.revision) }
+        let content: LessonStudiedContent
+        if let attempt {
+            content = try LessonExperience.studiedContent(attempt)
+        } else if (status == .available || status == .dismissed), let definition = definitions.first {
+            // A choice can be dismissed before it is opened. With no studied
+            // attempt to pin, its installed definition remains read-only material.
+            content = .current(Self.definitionSnapshot(definition))
+        } else {
+            content = .unavailable
+        }
+        return LessonDetailSnapshot(id: lessonID, progress: progress, attempt: attempt, content: content)
     }
 
     private func reconcile(in context: ModelContext, now: Date, commit: Bool = true) throws {

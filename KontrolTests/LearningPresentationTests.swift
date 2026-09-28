@@ -388,5 +388,7 @@ private final class FailingCatalogReader: CatalogRepository {
         return value ?? empty
     }
     func reconcileSlots(now: Date) throws -> LearningCatalogSnapshot { throw ReadError.injected }
+    func openLesson(lessonID: String, now: Date) throws -> LessonMutationResult { throw ReadError.injected }
+    func loadLesson(lessonID: String) throws -> LessonDetailSnapshot { throw ReadError.injected }
     func importIfNeeded(_ catalog: ValidatedCatalog) throws -> CatalogImportResult { .unchanged }
 }

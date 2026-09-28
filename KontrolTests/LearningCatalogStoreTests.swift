@@ -28,6 +28,16 @@ private final class ReadingCatalogRepository: CatalogRepository {
         writes += 1
         return value
     }
+
+    func openLesson(lessonID: String, now: Date) throws -> LessonMutationResult {
+        writes += 1
+        throw ReadError.unavailable
+    }
+
+    func loadLesson(lessonID: String) throws -> LessonDetailSnapshot {
+        reads += 1
+        throw ReadError.unavailable
+    }
 }
 
 @MainActor
