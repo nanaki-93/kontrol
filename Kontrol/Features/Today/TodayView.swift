@@ -2,16 +2,19 @@ import SwiftUI
 
 struct TodayView: View {
     @ObservedObject var store: TaskStore
-    var now: () -> Date = Date.init
-    var calendar: () -> Calendar = { .current }
-    var timeZone: () -> TimeZone = { .current }
     @State private var showingCapture = false
     @FocusState private var addTaskFocused: Bool
-    @State private var displayedDate = Date.now
+
+    private var localDateStyle: Date.FormatStyle {
+        var style = Date.FormatStyle.dateTime.weekday(.wide).day().month(.wide)
+        style.calendar = store.temporalContext.calendar
+        style.timeZone = store.temporalContext.timeZone
+        return style
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppMetrics.space4) {
-            PageHeader("Today", metadata: displayedDate.formatted(.dateTime.weekday(.wide).day().month(.wide))) {
+            PageHeader("Today", metadata: store.temporalContext.now.formatted(localDateStyle)) {
                 ActionButton("Add task", symbol: "plus", variant: .primary) {
                     showingCapture = true
                 }
@@ -27,9 +30,7 @@ struct TodayView: View {
                     .appTypography(.metadata)
                     .foregroundStyle(AppColors.textSecondary)
             }
-            let today = TaskSelection.select(store.snapshots, filter: .today,
-                                             selectedDate: displayedDate, now: displayedDate,
-                                             calendar: calendar(), timeZone: timeZone())
+            let today = store.select(.today)
             if store.readState == .loaded && today.isEmpty {
                 EmptyState("No tasks planned or due today.", guidance: "Use Add task to capture one.")
             } else if !today.isEmpty {
@@ -43,10 +44,7 @@ struct TodayView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, AppMetrics.horizontalInset)
         .padding(.top, AppMetrics.space8)
-        .onAppear {
-            displayedDate = now()
-            store.refresh()
-        }
+        .onAppear { store.refresh() }
         .sheet(isPresented: $showingCapture, onDismiss: {
             // Wait for the native sheet to finish closing before returning keyboard focus.
             addTaskFocused = true

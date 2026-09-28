@@ -1,5 +1,13 @@
+import AppKit
 import Combine
 import Foundation
+
+/// Disposable clock and locale values used by selectors; never written to SwiftData.
+struct TaskTemporalContext {
+    let now: Date
+    let calendar: Calendar
+    let timeZone: TimeZone
+}
 
 /// A read failure is never equivalent to a successfully loaded empty collection.
 /// Cached values remain visible only while explicitly marked stale.
@@ -42,9 +50,92 @@ final class TaskStore: ObservableObject {
     @Published private(set) var snapshots: [TaskSnapshot] = []
     @Published private(set) var readState: TaskReadState = .notLoaded
     @Published private(set) var mutationError: TaskMutationError?
+    @Published private(set) var temporalContext: TaskTemporalContext
 
-    init(repository: any TaskRepository) {
+    // One timer and one set of system observers per app-owned store. The seams
+    // allow deterministic midnight, travel, and lifecycle tests without sleeping.
+    typealias TimerScheduler = @MainActor (Date, @escaping () -> Void) -> () -> Void
+    private let clock: () -> Date
+    private let currentCalendar: () -> Calendar
+    private let currentTimeZone: () -> TimeZone
+    private let notificationCenter: NotificationCenter
+    private let scheduleTimer: TimerScheduler
+    private var cancelTimer: (() -> Void)?
+    private var timerGeneration = 0
+    private var observers: [NSObjectProtocol] = []
+
+    init(repository: any TaskRepository,
+         notificationCenter: NotificationCenter = .default,
+         clock: @escaping () -> Date = Date.init,
+         calendar: @escaping () -> Calendar = { .current },
+         timeZone: @escaping () -> TimeZone = { .current },
+         scheduleTimer: @escaping TimerScheduler = TaskStore.makeMidnightTimer) {
         self.repository = repository
+        self.notificationCenter = notificationCenter
+        self.clock = clock
+        currentCalendar = calendar
+        currentTimeZone = timeZone
+        self.scheduleTimer = scheduleTimer
+        temporalContext = TaskTemporalContext(now: clock(), calendar: calendar(), timeZone: timeZone())
+        observeSystemChanges()
+        rescheduleMidnight()
+    }
+
+    deinit {
+        cancelTimer?()
+        for observer in observers { notificationCenter.removeObserver(observer) }
+    }
+
+    /// Membership is always derived from snapshots and the current local context.
+    /// An explicit selected date supports the Tasks day selection without shifting plans.
+    func select(_ filter: TaskFilter, selectedDate: Date? = nil) -> [TaskSnapshot] {
+        TaskSelection.select(snapshots, filter: filter,
+                             selectedDate: selectedDate ?? temporalContext.now,
+                             now: temporalContext.now, calendar: temporalContext.calendar,
+                             timeZone: temporalContext.timeZone)
+    }
+
+    private func observeSystemChanges() {
+        for name in [NSApplication.didBecomeActiveNotification,
+                     .NSCalendarDayChanged, .NSSystemClockDidChange,
+                     .NSSystemTimeZoneDidChange, NSLocale.currentLocaleDidChangeNotification] {
+            observers.append(notificationCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.updateTemporalContext()
+                    if name == NSApplication.didBecomeActiveNotification {
+                        self?.refresh() // External owners may have changed the store.
+                    }
+                }
+            })
+        }
+    }
+
+    private func updateTemporalContext() {
+        temporalContext = TaskTemporalContext(now: clock(), calendar: currentCalendar(),
+                                              timeZone: currentTimeZone())
+        rescheduleMidnight()
+    }
+
+    private func rescheduleMidnight() {
+        timerGeneration += 1
+        cancelTimer?()
+        cancelTimer = nil
+        var local = temporalContext.calendar
+        local.timeZone = temporalContext.timeZone
+        guard let boundary = local.dateInterval(of: .day, for: temporalContext.now)?.end else { return }
+        let generation = timerGeneration
+        cancelTimer = scheduleTimer(boundary) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.timerGeneration == generation else { return }
+                self.updateTemporalContext()
+            }
+        }
+    }
+
+    private static func makeMidnightTimer(at boundary: Date, fire: @escaping () -> Void) -> () -> Void {
+        let timer = Timer(fire: boundary, interval: 0, repeats: false) { _ in fire() }
+        RunLoop.main.add(timer, forMode: .common)
+        return { timer.invalidate() }
     }
 
     /// Called on appearance or by an explicit Retry action. No automatic retry

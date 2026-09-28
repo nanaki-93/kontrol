@@ -98,7 +98,8 @@ final class TaskPresentationTests: XCTestCase {
 
     private func inspectToday(_ repository: any TaskRepository, at instant: Date,
                               _ check: (NSWindow) throws -> Void) throws {
-        let host = NSHostingView(rootView: TodayView(store: TaskStore(repository: repository), now: { instant }))
+        let host = NSHostingView(rootView: TodayView(store: TaskStore(repository: repository,
+            clock: { instant })))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.title = "Today state inspection \(UUID().uuidString)"
@@ -130,6 +131,77 @@ final class TaskPresentationTests: XCTestCase {
             _ = try waitForElement("quick-capture-title", in: window)
             XCTAssertTrue(try repository.fetchAll().isEmpty, "opening capture must not save a task")
         }
+    }
+
+    func testHostedTodayRecomputesRowsAndLocalDateAtMidnightAndAfterTravelWithoutSaving() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        var saves = 0
+        let repository = SwiftDataTaskRepository(container: container, save: { context in
+            saves += 1
+            try context.save()
+        })
+        let center = NotificationCenter()
+        var now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2025-01-01T12:00:00Z"))
+        var zone = try XCTUnwrap(TimeZone(identifier: "UTC"))
+        let calendar = Calendar(identifier: .gregorian)
+        var midnight: (() -> Void)?
+        var boundaries: [Date] = []
+        let store = TaskStore(repository: repository, notificationCenter: center,
+                              clock: { now }, calendar: { calendar }, timeZone: { zone },
+                              scheduleTimer: { boundary, fire in
+            boundaries.append(boundary)
+            midnight = fire
+            return {}
+        })
+        let plan = PlannedDay.today(at: now, calendar: calendar, timeZone: zone)
+        let planned = try store.create(input: TaskInput(title: "Planned for January 1", plannedFor: plan))
+        let due = try store.create(input: TaskInput(title: "Due on January 2",
+                                                     dueAt: try XCTUnwrap(ISO8601DateFormatter().date(
+                                                        from: "2025-01-02T00:00:00Z"))))
+        let initialSaves = saves
+        func header(_ date: Date, in zone: TimeZone) -> String {
+            var style = Date.FormatStyle.dateTime.weekday(.wide).day().month(.wide)
+            style.calendar = calendar
+            style.timeZone = zone
+            return date.formatted(style)
+        }
+        let firstHeader = header(now, in: zone)
+        let host = NSHostingView(rootView: TodayView(store: store))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.title = "Temporal Today inspection \(UUID())"
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        host.layoutSubtreeIfNeeded()
+        settle()
+        let plannedRow = "task-row-\(planned.id.uuidString)"
+        let dueRow = "task-row-\(due.id.uuidString)"
+        XCTAssertEqual(elements(in: window, identifier: plannedRow).count, 1)
+        XCTAssertTrue(elements(in: window, identifier: dueRow).isEmpty)
+        XCTAssertTrue(visibleText(in: window).contains(firstHeader))
+
+        now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2025-01-02T00:00:00Z"))
+        XCTAssertEqual(boundaries, [now])
+        midnight?()
+        settle()
+        let nextHeader = header(now, in: zone)
+        XCTAssertNotEqual(firstHeader, nextHeader)
+        XCTAssertTrue(elements(in: window, identifier: plannedRow).isEmpty)
+        XCTAssertEqual(elements(in: window, identifier: dueRow).count, 1)
+        XCTAssertTrue(visibleText(in: window).contains(nextHeader))
+
+        zone = try XCTUnwrap(TimeZone(identifier: "Pacific/Honolulu"))
+        center.post(name: .NSSystemTimeZoneDidChange, object: nil)
+        settle()
+        XCTAssertEqual(elements(in: window, identifier: plannedRow).count, 1)
+        XCTAssertEqual(elements(in: window, identifier: dueRow).count, 1)
+        XCTAssertEqual(header(now, in: zone), firstHeader)
+        XCTAssertTrue(visibleText(in: window).contains(firstHeader))
+        XCTAssertEqual(store.snapshots.first { $0.id == planned.id }?.plannedDay, plan.components)
+        XCTAssertEqual(store.snapshots.first { $0.id == planned.id }?.plannedTimeZoneID, plan.timeZoneID)
+        XCTAssertEqual(saves, initialSaves, "Temporal changes must not rewrite tasks")
+        XCTAssertEqual(try repository.fetchAll().count, 2)
     }
 
     func testTodayShowsOnlyRealDueOrPlannedTasksAndNeverCallsFailureEmpty() throws {

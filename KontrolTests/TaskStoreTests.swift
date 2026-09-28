@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import Foundation
 import SwiftData
@@ -10,13 +11,21 @@ final class TaskStoreTests: XCTestCase {
     private let firstID = UUID(uuidString: "00000000-0000-0000-0000-000000000021")!
     private let secondID = UUID(uuidString: "00000000-0000-0000-0000-000000000022")!
 
+    private final class SaveProbe {
+        var count = 0
+    }
+
     private final class RepositorySpy: TaskRepository {
         let storage: SwiftDataTaskRepository
+        let saves: SaveProbe
         var fetchCount = 0
         var failReads = false
         var failWrites = false
 
-        init(storage: SwiftDataTaskRepository) { self.storage = storage }
+        init(storage: SwiftDataTaskRepository, saves: SaveProbe) {
+            self.storage = storage
+            self.saves = saves
+        }
         func fetchAll() throws -> [TaskItem] {
             fetchCount += 1
             if failReads { throw Injected.read }
@@ -44,11 +53,51 @@ final class TaskStoreTests: XCTestCase {
         }
     }
 
+    private final class TimerProbe {
+        struct Entry {
+            let boundary: Date
+            let fire: () -> Void
+            var canceled = false
+        }
+        var entries: [Entry] = []
+
+        func schedule(_ boundary: Date, _ fire: @escaping () -> Void) -> () -> Void {
+            let index = entries.count
+            entries.append(Entry(boundary: boundary, fire: fire))
+            return { [self] in entries[index].canceled = true }
+        }
+    }
+
+    private final class NotificationProbe: NotificationCenter, @unchecked Sendable {
+        var registered: [Notification.Name] = []
+        var removed = 0
+
+        override func addObserver(forName name: NSNotification.Name?, object obj: Any?,
+                                  queue: OperationQueue?, using block: @escaping @Sendable (Notification) -> Void) -> NSObjectProtocol {
+            if let name { registered.append(name) }
+            return super.addObserver(forName: name, object: obj, queue: queue, using: block)
+        }
+
+        override func removeObserver(_ observer: Any) {
+            removed += 1
+            super.removeObserver(observer)
+        }
+    }
+
+    private func instant(_ value: String) -> Date {
+        ISO8601DateFormatter().date(from: value)!
+    }
+
     private func makeSpy() throws -> RepositorySpy {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         var ids = [firstID, secondID].makeIterator()
-        let repository = SwiftDataTaskRepository(container: container, makeID: { ids.next()! })
-        return RepositorySpy(storage: repository)
+        let saves = SaveProbe()
+        let repository = SwiftDataTaskRepository(container: container, makeID: { ids.next()! },
+                                                  save: { context in
+            saves.count += 1
+            try context.save()
+        })
+        return RepositorySpy(storage: repository, saves: saves)
     }
 
     func testTwoObserversReceiveEveryCommittedMutationSynchronouslyWithoutRefetch() throws {
@@ -171,6 +220,110 @@ final class TaskStoreTests: XCTestCase {
         try store.delete(id: firstID)
         XCTAssertEqual(publications, [[]])
         XCTAssertNil(store.mutationError)
+    }
+
+    func testMidnightAndTravelRecomputeSelectionWithoutPersistenceWrites() throws {
+        let spy = try makeSpy()
+        let center = NotificationProbe()
+        let timers = TimerProbe()
+        var now = instant("2024-03-10T08:00:00Z") // Midnight in Los Angeles, before DST jump.
+        var zone = TimeZone(identifier: "America/Los_Angeles")!
+        let calendar = Calendar(identifier: .gregorian)
+        let store = TaskStore(repository: spy, notificationCenter: center,
+                              clock: { now }, calendar: { calendar }, timeZone: { zone },
+                              scheduleTimer: timers.schedule)
+        let plan = PlannedDay.today(at: now, calendar: calendar, timeZone: zone)
+        let planned = try store.create(input: TaskInput(title: "Planned", plannedFor: plan))
+        let due = try store.create(input: TaskInput(title: "Due at next midnight",
+                                                     dueAt: instant("2024-03-11T07:00:00Z")))
+        XCTAssertEqual(timers.entries.map(\.boundary), [instant("2024-03-11T07:00:00Z")],
+                       "DST spring-forward day is 23 hours, not 86,400 seconds")
+        XCTAssertEqual(Set(store.select(.today).map(\.id)), [planned.id])
+        XCTAssertEqual(store.select(.upcoming).map(\.id), [due.id])
+        var temporalPublications = 0
+        let observation = store.$temporalContext.dropFirst().sink { _ in temporalPublications += 1 }
+        defer { observation.cancel() }
+        now = instant("2024-03-11T07:00:00Z")
+        timers.entries[0].fire()
+        XCTAssertEqual(temporalPublications, 1)
+        XCTAssertTrue(timers.entries[0].canceled)
+        XCTAssertEqual(timers.entries[1].boundary, instant("2024-03-12T07:00:00Z"))
+        XCTAssertEqual(store.select(.today).map(\.id), [due.id])
+        XCTAssertEqual(store.select(.upcoming).map(\.id), [planned.id])
+        timers.entries[0].fire() // A queued callback from the canceled timer is harmless.
+        XCTAssertEqual(timers.entries.count, 2)
+
+        zone = TimeZone(identifier: "Pacific/Honolulu")!
+        center.post(name: .NSSystemTimeZoneDidChange, object: nil)
+        XCTAssertEqual(temporalPublications, 2)
+        XCTAssertTrue(timers.entries[1].canceled)
+        XCTAssertEqual(timers.entries[2].boundary, instant("2024-03-11T10:00:00Z"))
+        XCTAssertEqual(store.select(.today).map(\.id), [due.id, planned.id],
+                       "Travel changes the selected local day, not the stored plan")
+        XCTAssertEqual(store.select(.upcoming).count, 0)
+        XCTAssertEqual(store.snapshots.first { $0.id == planned.id }?.plannedDay, plan.components)
+        XCTAssertEqual(store.snapshots.first { $0.id == planned.id }?.plannedTimeZoneID, plan.timeZoneID)
+        XCTAssertEqual(try spy.storage.fetchAll().first { $0.id == planned.id }?.plannedDay, plan.components)
+        XCTAssertEqual(spy.fetchCount, 0, "Temporal changes select cached snapshots without repository reads")
+        XCTAssertEqual(spy.saves.count, 2, "Only the two explicit creations write records")
+    }
+
+    func testTemporalNotificationsRescheduleAndForegroundRefreshesExternalChanges() throws {
+        let spy = try makeSpy()
+        let center = NotificationProbe()
+        let timers = TimerProbe()
+        var now = instant("2025-01-01T12:00:00Z")
+        var calendar = Calendar(identifier: .gregorian)
+        let zone = TimeZone(secondsFromGMT: 0)!
+        let store = TaskStore(repository: spy, notificationCenter: center,
+                              clock: { now }, calendar: { calendar }, timeZone: { zone },
+                              scheduleTimer: timers.schedule)
+        XCTAssertEqual(center.registered, [NSApplication.didBecomeActiveNotification,
+                                           .NSCalendarDayChanged, .NSSystemClockDidChange,
+                                           .NSSystemTimeZoneDidChange, NSLocale.currentLocaleDidChangeNotification],
+                       "register once per store, not per row")
+        store.refresh()
+        let external = try spy.storage.create(input: TaskInput(title: "From another owner"))
+        XCTAssertTrue(store.snapshots.isEmpty)
+        now = instant("2025-01-02T12:00:00Z")
+        center.post(name: .NSSystemClockDidChange, object: nil)
+        XCTAssertTrue(timers.entries[0].canceled)
+        XCTAssertEqual(timers.entries[1].boundary, instant("2025-01-03T00:00:00Z"))
+        calendar.firstWeekday = 2
+        center.post(name: NSLocale.currentLocaleDidChangeNotification, object: nil)
+        XCTAssertTrue(timers.entries[1].canceled)
+        XCTAssertEqual(store.temporalContext.calendar.firstWeekday, 2)
+        XCTAssertEqual(timers.entries[2].boundary, instant("2025-01-03T00:00:00Z"))
+        center.post(name: .NSCalendarDayChanged, object: nil)
+        XCTAssertTrue(timers.entries[2].canceled)
+        XCTAssertEqual(spy.fetchCount, 1, "Temporal changes do not persist or refetch")
+        center.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+        XCTAssertTrue(timers.entries[3].canceled)
+        XCTAssertEqual(timers.entries.count, 5)
+        XCTAssertEqual(spy.fetchCount, 2)
+        XCTAssertEqual(store.snapshots, [external], "Activation discovers externally committed tasks")
+        XCTAssertEqual(spy.saves.count, 1, "Activation reads but never saves")
+    }
+
+    func testOwnerReleaseCancelsTimerAndRemovesAllObservers() throws {
+        let spy = try makeSpy()
+        let center = NotificationProbe()
+        let timers = TimerProbe()
+        weak var released: TaskStore?
+        do {
+            let store = TaskStore(repository: spy, notificationCenter: center,
+                                  scheduleTimer: timers.schedule)
+            released = store
+            XCTAssertEqual(center.registered.count, 5)
+            XCTAssertEqual(timers.entries.count, 1)
+        }
+        XCTAssertNil(released)
+        XCTAssertTrue(timers.entries[0].canceled)
+        XCTAssertEqual(center.removed, 5)
+        center.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+        timers.entries[0].fire()
+        XCTAssertEqual(spy.fetchCount, 0)
+        XCTAssertEqual(timers.entries.count, 1)
     }
 
     func testNotFoundRefreshesAndClassifiesSeparatelyEvenWhenRefreshFails() throws {
