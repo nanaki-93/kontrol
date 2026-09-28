@@ -34,6 +34,7 @@ protocol ScheduleRepository {
     func create(input: ScheduleInput, allowOverlap: Bool, review: ScheduleOverlapReview?) throws -> ScheduleSnapshot
     func update(id: UUID, input: ScheduleInput, allowOverlap: Bool,
                 review: ScheduleOverlapReview?) throws -> ScheduleSnapshot
+    func delete(id: UUID) throws
 }
 
 /// All reads used for a decision and its write take place in the same private context.
@@ -99,6 +100,17 @@ final class SwiftDataScheduleRepository: ScheduleRepository {
         try commit(context)
         approval?.approval.consumed = true
         return ScheduleSnapshot(target)
+    }
+
+    func delete(id: UUID) throws {
+        let context = privateContext()
+        // A failed fetch is not a missing block. Delete only the requested model
+        // from this operation's context; failure discards the uncommitted deletion.
+        guard let block = try persistedBlocks(in: context).first(where: { $0.id == id }) else {
+            throw ScheduleRepositoryError.notFound(id)
+        }
+        context.delete(block)
+        try commit(context)
     }
 
     private func privateContext() -> ModelContext {

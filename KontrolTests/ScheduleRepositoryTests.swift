@@ -383,6 +383,165 @@ final class ScheduleRepositoryTests: XCTestCase {
         XCTAssertEqual(try rows(container), [peer])
     }
 
+    func testDeleteIsSelectiveAndMissingOrFailedOperationsLeaveNoPartialWrite() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let kept = try repository(container, id: first).create(input: input("Keep", 0, 3600))
+        let target = try repository(container, id: second).create(input: input("Delete", 3600, 7200))
+        let independent = ModelContext(container)
+        independent.autosaveEnabled = false
+        let draft = try XCTUnwrap(independent.fetch(FetchDescriptor<ScheduleBlock>())
+            .first { $0.id == first })
+        draft.note = "Unsaved other owner"
+        var saves = 0
+        var reads = 0
+        let failing = SwiftDataScheduleRepository(container: container,
+            fetch: { context in
+                reads += 1
+                return try context.fetch(FetchDescriptor<ScheduleBlock>())
+            }, save: { _ in saves += 1; throw Injected.failed })
+        XCTAssertThrowsError(try failing.delete(id: third)) {
+            XCTAssertEqual($0 as? ScheduleRepositoryError, .notFound(self.third))
+        }
+        XCTAssertEqual(saves, 0)
+        XCTAssertEqual(reads, 1)
+        XCTAssertThrowsError(try failing.delete(id: second)) {
+            XCTAssertEqual($0 as? ScheduleRepositoryError, .persistence)
+        }
+        XCTAssertEqual(saves, 1)
+        XCTAssertEqual(try rows(container), [kept, target])
+        XCTAssertTrue(independent.hasChanges)
+        XCTAssertEqual(draft.note, "Unsaved other owner")
+        let unreadable = SwiftDataScheduleRepository(container: container,
+            fetch: { _ in throw Injected.failed }, save: { _ in saves += 1; throw Injected.failed })
+        XCTAssertThrowsError(try unreadable.delete(id: second)) {
+            XCTAssertEqual($0 as? ScheduleRepositoryError, .persistence)
+        }
+        XCTAssertEqual(saves, 1)
+        XCTAssertEqual(try rows(container), [kept, target])
+        try independent.save()
+        let updatedKept = try XCTUnwrap(rows(container).first { $0.id == first })
+        XCTAssertEqual(updatedKept.note, "Unsaved other owner")
+        try SwiftDataScheduleRepository(container: container).delete(id: second)
+        XCTAssertEqual(try rows(container), [updatedKept])
+        XCTAssertThrowsError(try SwiftDataScheduleRepository(container: container).delete(id: second)) {
+            XCTAssertEqual($0 as? ScheduleRepositoryError, .notFound(self.second))
+        }
+        XCTAssertEqual(try rows(container), [updatedKept])
+    }
+
+    func testDiskLifecycleSurvivesDistinctOpensAndFailuresPreserveTasksAndPeers() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "KontrolScheduleLifecycle-\(UUID().uuidString)", isDirectory: true)
+        let url = directory.appendingPathComponent("Kontrol.store")
+        // Keep the isolated store until the test host exits: SwiftData can retain
+        // SQLite descriptors after the explicit container owners leave scope.
+        let taskID = UUID(uuidString: "00000000-0000-0000-0000-000000000004")!
+        let due = base.addingTimeInterval(86_400)
+        let day = KontrolSchemaV1.PlannedDayComponents(calendarIdentifier: "gregorian",
+                                                        year: 2026, month: 1, day: 2)
+        let task = try TaskItem(id: taskID, title: "Unchanged task", createdAt: base,
+                                notes: "Task details", dueAt: due, plannedDay: day,
+                                plannedTimeZoneID: "UTC", completedAt: due)
+        let expectedTask = TaskSnapshot(task)
+        let peer = ScheduleSnapshot(id: second, title: "Linked peer", startAt: base.addingTimeInterval(7200),
+                                    endAt: base.addingTimeInterval(10_800), note: "Peer note",
+                                    lessonID: "missing-lesson", linkedTitleSnapshot: "Archived title")
+        let created = ScheduleSnapshot(id: first, title: "New", startAt: base,
+                                       endAt: base.addingTimeInterval(3600), note: "Original note")
+        let moved = ScheduleSnapshot(id: first, title: "Moved", startAt: base.addingTimeInterval(10_800),
+                                     endAt: base.addingTimeInterval(14_400), note: "Moved note")
+        let overlapping = ScheduleSnapshot(id: first, title: "Confirmed", startAt: base.addingTimeInterval(9000),
+                                           endAt: base.addingTimeInterval(12_600), note: "Final note")
+
+        func open(_ check: (ModelContainer) throws -> Void) throws {
+            try autoreleasepool {
+                let container = try ModelContainerFactory().makeContainer(mode: .persistent(url))
+                try check(container)
+            }
+        }
+        func assertDisk(_ container: ModelContainer, _ expected: [ScheduleSnapshot]) throws {
+            XCTAssertEqual(try rows(container), expected)
+            let tasks = try ModelContext(container).fetch(FetchDescriptor<TaskItem>())
+            XCTAssertEqual(tasks.count, 1)
+            XCTAssertEqual(try XCTUnwrap(tasks.first).id, taskID)
+            XCTAssertEqual(try XCTUnwrap(tasks.first).title, expectedTask.title)
+            XCTAssertEqual(try XCTUnwrap(tasks.first).notes, expectedTask.notes)
+            XCTAssertEqual(try XCTUnwrap(tasks.first).createdAt, expectedTask.createdAt)
+            XCTAssertEqual(try XCTUnwrap(tasks.first).dueAt, expectedTask.dueAt)
+            XCTAssertEqual(try XCTUnwrap(tasks.first).plannedDay, expectedTask.plannedDay)
+            XCTAssertEqual(try XCTUnwrap(tasks.first).plannedTimeZoneID, expectedTask.plannedTimeZoneID)
+            XCTAssertEqual(try XCTUnwrap(tasks.first).completedAt, expectedTask.completedAt)
+        }
+        try open { container in
+            let seed = ModelContext(container)
+            seed.autosaveEnabled = false
+            seed.insert(task)
+            seed.insert(ScheduleBlock(id: peer.id, title: peer.title, startAt: peer.startAt,
+                                      endAt: peer.endAt, note: peer.note, lessonID: peer.lessonID,
+                                      linkedTitleSnapshot: peer.linkedTitleSnapshot))
+            try seed.save()
+            let failing = SwiftDataScheduleRepository(container: container, makeID: { self.first },
+                save: { _ in throw Injected.failed })
+            XCTAssertThrowsError(try failing.create(input: input("Uncommitted", 0, 3600))) {
+                XCTAssertEqual($0 as? ScheduleRepositoryError, .persistence)
+            }
+            try assertDisk(container, [peer])
+        }
+        try open { container in
+            try assertDisk(container, [peer]) // failed create did not reach disk
+            let writer = repository(container, id: first)
+            XCTAssertEqual(try writer.create(input: input(" New ", 0, 3600,
+                                                          note: " Original note ")), created)
+            try assertDisk(container, [created, peer])
+        }
+        try open { container in
+            let failed = SwiftDataScheduleRepository(container: container,
+                save: { _ in throw Injected.failed })
+            XCTAssertThrowsError(try failed.update(id: first, input: input("Failed", 10_800, 14_400))) {
+                XCTAssertEqual($0 as? ScheduleRepositoryError, .persistence)
+            }
+            try assertDisk(container, [created, peer])
+            XCTAssertEqual(try repository(container, id: third).update(id: first,
+                input: input("Moved", 10_800, 14_400, note: "Moved note")), moved)
+            try assertDisk(container, [peer, moved])
+        }
+        try open { container in
+            try assertDisk(container, [peer, moved]) // failed edit did not reach disk
+            let writer = repository(container, id: third)
+            let draft = input("Confirmed", 9000, 12_600, note: "Final note")
+            let review = try warning { try writer.update(id: first, input: draft) }
+            XCTAssertEqual(review.conflicts, [ScheduleConflict(block: peer, duration: 1800)])
+            try assertDisk(container, [peer, moved])
+            XCTAssertEqual(try writer.update(id: first, input: draft, allowOverlap: true,
+                                             review: review), overlapping)
+            try assertDisk(container, [peer, overlapping])
+        }
+        try open { container in
+            let failing = SwiftDataScheduleRepository(container: container,
+                save: { _ in throw Injected.failed })
+            XCTAssertThrowsError(try failing.delete(id: first)) {
+                XCTAssertEqual($0 as? ScheduleRepositoryError, .persistence)
+            }
+            try assertDisk(container, [peer, overlapping])
+            XCTAssertThrowsError(try failing.delete(id: third)) {
+                XCTAssertEqual($0 as? ScheduleRepositoryError, .notFound(self.third))
+            }
+            try assertDisk(container, [peer, overlapping])
+        }
+        try open { container in
+            try assertDisk(container, [peer, overlapping])
+            try SwiftDataScheduleRepository(container: container).delete(id: first)
+            try assertDisk(container, [peer])
+        }
+        try open { container in
+            try assertDisk(container, [peer])
+            XCTAssertThrowsError(try SwiftDataScheduleRepository(container: container).delete(id: first)) {
+                XCTAssertEqual($0 as? ScheduleRepositoryError, .notFound(self.first))
+            }
+            try assertDisk(container, [peer])
+        }
+    }
+
     func testFailedCreateAndEditDiscardPrivateChangesWithoutTouchingOtherOwner() throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         let saved = try repository(container, id: first).create(input: input("Saved", 0, 3600))
