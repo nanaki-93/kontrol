@@ -17,6 +17,26 @@ enum LessonSelector {
     private static let supportedDifficulties: Set<String> = ["basic", "intermediate", "advanced"]
     private static let supportedSources: Set<String> = ["seed", "generated"]
 
+    // A read must reject contradictory stored identities too; only missing or
+    // wrong-topic assignments are ordinary vacancies for the write reconciler.
+    static func validateSlotIdentities(_ slots: [LessonSlotSnapshot]) throws {
+        var keys = Set<String>()
+        var lessonIDs = Set<String>()
+        for slot in slots {
+            guard slot.slotIndex >= 0, slot.slotIndex < slotsPerTopic,
+                  slot.key == LessonSlotSnapshot.canonicalKey(topicID: slot.topicID,
+                                                               slotIndex: slot.slotIndex),
+                  !slot.topicID.isEmpty, !slot.lessonID.isEmpty,
+                  slot.assignedAt.timeIntervalSinceReferenceDate.isFinite else {
+                throw LessonSelectionError.invalidSlotIdentity
+            }
+            guard keys.insert(slot.key).inserted else { throw LessonSelectionError.duplicateSlotKey }
+            guard lessonIDs.insert(slot.lessonID).inserted else {
+                throw LessonSelectionError.duplicateSlottedLesson
+            }
+        }
+    }
+
     static func reconcile(definitions: [LessonDefinitionSnapshot],
                           concepts: [LearningConceptSnapshot],
                           progress: [LessonProgressSnapshot],
@@ -34,23 +54,7 @@ enum LessonSelector {
         let byConcept = Dictionary(uniqueKeysWithValues: concepts.map { ($0.id, $0) })
         let status = Dictionary(uniqueKeysWithValues: progress.map { ($0.lessonID, $0.status) })
 
-        // Check ALL stored rows before vacating any of them. A duplicate or malformed
-        // identity is not a choice between two persisted winners, even if one is stale.
-        var keys = Set<String>()
-        var lessonIDs = Set<String>()
-        for slot in slots {
-            guard slot.slotIndex >= 0, slot.slotIndex < slotsPerTopic,
-                  slot.key == LessonSlotSnapshot.canonicalKey(topicID: slot.topicID,
-                                                               slotIndex: slot.slotIndex),
-                  !slot.topicID.isEmpty, !slot.lessonID.isEmpty,
-                  slot.assignedAt.timeIntervalSinceReferenceDate.isFinite else {
-                throw LessonSelectionError.invalidSlotIdentity
-            }
-            guard keys.insert(slot.key).inserted else { throw LessonSelectionError.duplicateSlotKey }
-            guard lessonIDs.insert(slot.lessonID).inserted else {
-                throw LessonSelectionError.duplicateSlottedLesson
-            }
-        }
+        try validateSlotIdentities(slots)
 
         let finished: Set<String> = Set(progress.compactMap {
             $0.status == .completed || $0.status == .dismissed ? $0.lessonID : nil

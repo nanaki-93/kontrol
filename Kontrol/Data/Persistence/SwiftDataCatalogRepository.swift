@@ -4,6 +4,8 @@ import SwiftData
 @MainActor
 protocol CatalogRepository {
     func importIfNeeded(_ catalog: ValidatedCatalog) throws -> CatalogImportResult
+    func loadSnapshot() throws -> LearningCatalogSnapshot
+    func reconcileSlots(now: Date) throws -> LearningCatalogSnapshot
 }
 
 enum CatalogImportResult: Equatable {
@@ -47,7 +49,12 @@ final class SwiftDataCatalogRepository: CatalogRepository {
             if value.version < installed {
                 throw CatalogImportError.downgrade(installed: installed, requested: value.version)
             }
-            if value.version == installed { return .unchanged }
+            if value.version == installed {
+                // An installed release can still need initial slots (e.g. a V3
+                // migration) or replacement after personal progress changes.
+                try reconcile(in: context, now: Date())
+                return .unchanged
+            }
         }
 
         // Load all definition identities before changing anything. The input has
@@ -149,11 +156,102 @@ final class SwiftDataCatalogRepository: CatalogRepository {
             context.insert(CatalogImportState(catalogID: value.catalogID,
                                               lastImportedVersion: value.version))
         }
-        // One SQLite commit for all definitions and the version marker. On any
-        // error the unsaved private context is discarded; no main-context rollback.
+        // Re-fetch within this private write context, including newly inserted
+        // definitions. One commit owns the definitions, slots, and version marker.
+        try reconcile(in: context, now: Date(), commit: false)
         try beforeSave()
         try save(context)
         return .imported
+    }
+
+    func loadSnapshot() throws -> LearningCatalogSnapshot {
+        let context = ModelContext(container)
+        return try snapshot(in: context)
+    }
+
+    func reconcileSlots(now: Date) throws -> LearningCatalogSnapshot {
+        let context = ModelContext(container)
+        context.autosaveEnabled = false
+        try reconcile(in: context, now: now)
+        // Return committed values, never projections of an uncommitted context.
+        return try loadSnapshot()
+    }
+
+    private func reconcile(in context: ModelContext, now: Date, commit: Bool = true) throws {
+        let current = try snapshot(in: context)
+        let desired = try LessonSelector.reconcile(definitions: current.definitions,
+            concepts: current.concepts, progress: current.progress, slots: current.slots, now: now)
+        guard desired != current.slots else { return }
+        let desiredByKey = Dictionary(uniqueKeysWithValues: desired.map { ($0.key, $0) })
+        let rows = try context.fetch(FetchDescriptor<LessonSlot>())
+        // All persisted identities were checked by the selector before mutation.
+        // Update a vacated key in place to avoid a delete/insert uniqueness race.
+        for row in rows {
+            if let replacement = desiredByKey[row.key] {
+                if row.lessonID != replacement.lessonID {
+                    row.lessonID = replacement.lessonID
+                    row.assignedAt = replacement.assignedAt
+                }
+            } else {
+                context.delete(row)
+            }
+        }
+        let existingKeys = Set(rows.map(\.key))
+        for slot in desired where !existingKeys.contains(slot.key) {
+            context.insert(LessonSlot(topicID: slot.topicID, slotIndex: slot.slotIndex,
+                                      lessonID: slot.lessonID, assignedAt: slot.assignedAt))
+        }
+        if commit {
+            try beforeSave()
+            try save(context)
+        }
+    }
+
+    private func snapshot(in context: ModelContext) throws -> LearningCatalogSnapshot {
+        let topics = try context.fetch(FetchDescriptor<Topic>()).map {
+            LearningTopicSnapshot(id: $0.id, name: $0.name)
+        }.sorted { $0.id < $1.id }
+        let subtopics = try context.fetch(FetchDescriptor<Subtopic>()).map {
+            LearningSubtopicSnapshot(id: $0.id, topicID: $0.topicID, name: $0.name)
+        }.sorted { $0.id < $1.id }
+        let concepts = try context.fetch(FetchDescriptor<Concept>()).map {
+            LearningConceptSnapshot(id: $0.id, subtopicID: $0.subtopicID, name: $0.name,
+                                    prerequisiteConceptIDs: $0.prerequisiteConceptIDs)
+        }.sorted { $0.id < $1.id }
+        let definitions = try context.fetch(FetchDescriptor<LessonDefinition>()).map { item in
+            LessonDefinitionSnapshot(id: item.id, objectiveKey: item.objectiveKey,
+                objective: item.objective, title: item.title, topicID: item.topicID,
+                subtopicID: item.subtopicID, conceptIDs: item.conceptIDs,
+                difficulty: item.difficulty, format: item.format,
+                estimatedMinutes: item.estimatedMinutes,
+                prerequisiteConceptIDs: item.prerequisiteConceptIDs,
+                explanation: item.explanation, workedExample: item.workedExample,
+                exercise: item.exercise, referenceAnswer: item.referenceAnswer,
+                selfCheckCriteria: item.selfCheckCriteria, contentVersion: item.contentVersion,
+                normalizedContentHash: item.normalizedContentHash, source: item.source,
+                provenance: item.provenance)
+        }.sorted { $0.id < $1.id }
+        let progress = try context.fetch(FetchDescriptor<LessonProgress>()).map { item in
+            LessonProgressSnapshot(lessonID: item.lessonID,
+                status: LessonProgressStatus(rawValue: item.status.rawValue)!,
+                firstShownAt: item.firstShownAt, startedAt: item.startedAt,
+                completedAt: item.completedAt, dismissedAt: item.dismissedAt,
+                lastOpenedAt: item.lastOpenedAt)
+        }.sorted { $0.lessonID < $1.lessonID }
+        let storedSlots: [LessonSlot] = try context.fetch(FetchDescriptor<LessonSlot>())
+        let slots: [LessonSlotSnapshot] = storedSlots.map { row in
+            LessonSlotSnapshot(key: row.key, topicID: row.topicID,
+                               slotIndex: row.slotIndex, lessonID: row.lessonID,
+                               assignedAt: row.assignedAt)
+        }.sorted { lhs, rhs in
+            if lhs.topicID == rhs.topicID { return lhs.slotIndex < rhs.slotIndex }
+            return lhs.topicID < rhs.topicID
+        }
+        // Snapshot reads are a publication boundary, not just a projection. Do
+        // not expose corrupt stored identities even when no write is requested.
+        try LessonSelector.validateSlotIdentities(slots)
+        return LearningCatalogSnapshot(topics: topics, subtopics: subtopics,
+            concepts: concepts, definitions: definitions, progress: progress, slots: slots)
     }
 
     // The content fingerprint covers teaching sections only. Metadata, including

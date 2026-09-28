@@ -58,7 +58,8 @@ final class LaunchCoordinatorTests: XCTestCase {
         XCTAssertEqual(opens, 1)
         XCTAssertEqual(imports, 1)
         XCTAssertEqual(try rows(CatalogImportState.self, in: container).count, 1)
-        XCTAssertEqual(try rows(LessonDefinition.self, in: container).count, 5)
+        XCTAssertEqual(try rows(LessonDefinition.self, in: container).count, 40)
+        XCTAssertEqual(try rows(LessonSlot.self, in: container).count, 20)
         XCTAssertTrue(try rows(LessonProgress.self, in: container).isEmpty)
         XCTAssertTrue(try rows(LessonAttempt.self, in: container).isEmpty)
         XCTAssertTrue(try rows(TaskItem.self, in: container).isEmpty)
@@ -104,8 +105,9 @@ final class LaunchCoordinatorTests: XCTestCase {
         await coordinator.start()
         XCTAssertEqual(coordinator.state, .ready)
         XCTAssertTrue(coordinator.dependencies?.container === container)
-        XCTAssertEqual(try rows(CatalogImportState.self, in: container).map(\.lastImportedVersion), [1])
-        XCTAssertEqual(try rows(LessonDefinition.self, in: container).count, 5)
+        XCTAssertEqual(try rows(CatalogImportState.self, in: container).map(\.lastImportedVersion), [2])
+        XCTAssertEqual(try rows(LessonDefinition.self, in: container).count, 40)
+        XCTAssertEqual(try rows(LessonSlot.self, in: container).count, 20)
     }
 
     func testFactoryErrorNeverPublishesDependenciesAndCanBeRetried() async throws {

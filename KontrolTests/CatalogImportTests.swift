@@ -65,6 +65,8 @@ final class CatalogImportTests: XCTestCase {
         let repository = SwiftDataCatalogRepository(container: container)
         let original = try catalog()
         XCTAssertEqual(try repository.importIfNeeded(original), .imported)
+        let originalSlots = try repository.loadSnapshot().slots
+        XCTAssertEqual(originalSlots.count, 20)
         let oldDefinition = try XCTUnwrap(records(LessonDefinition.self, in: container).first {
             $0.id == original.value.lessons[0].id
         })
@@ -113,6 +115,14 @@ final class CatalogImportTests: XCTestCase {
         if updated.lessons.count > 1 { updated.lessons.removeLast() }
         let upgrade = try CatalogValidator.validate(updated)
         XCTAssertEqual(try repository.importIfNeeded(upgrade), .imported)
+        let upgradedSlots = try repository.loadSnapshot().slots
+        let invalidatedKeys = Set(originalSlots.filter {
+            $0.lessonID == lessonID || $0.lessonID == dismissedID
+        }.map(\.key))
+        XCTAssertEqual(upgradedSlots.filter { !invalidatedKeys.contains($0.key) },
+                       originalSlots.filter { !invalidatedKeys.contains($0.key) })
+        XCTAssertFalse(upgradedSlots.map(\.lessonID).contains(lessonID))
+        XCTAssertFalse(upgradedSlots.map(\.lessonID).contains(dismissedID))
         let definitions = try records(LessonDefinition.self, in: container)
         XCTAssertEqual(definitions.count, original.value.lessons.count)
         let corrected = try XCTUnwrap(definitions.first { $0.id == lessonID })
@@ -501,6 +511,8 @@ final class CatalogImportTests: XCTestCase {
         }
         XCTAssertEqual(try records(LessonDefinition.self, in: container).count, seed.value.lessons.count)
         XCTAssertEqual(try records(CatalogImportState.self, in: container).map(\.lastImportedVersion), [seed.value.version])
+        let committedSlots = try repository.loadSnapshot().slots
+        XCTAssertEqual(committedSlots.count, 20)
         // There is no import API accepting an unvalidated DTO.
         for failing in [SwiftDataCatalogRepository(container: container,
                                                     beforeSave: { throw Injected.failure }),
@@ -516,6 +528,7 @@ final class CatalogImportTests: XCTestCase {
             XCTAssertEqual(try records(CatalogImportState.self, in: container).map(\.lastImportedVersion), [seed.value.version])
             XCTAssertEqual(try records(LessonDefinition.self, in: container).count, seed.value.lessons.count)
             XCTAssertFalse(try records(LessonDefinition.self, in: container).contains { $0.id == newLesson.id })
+            XCTAssertEqual(try repository.loadSnapshot().slots, committedSlots)
         }
         // A failed first import must not leave even a marker or a partial row.
         let empty = try ModelContainerFactory().makeContainer(mode: .inMemory)
@@ -523,7 +536,9 @@ final class CatalogImportTests: XCTestCase {
                          save: { _ in throw Injected.failure }).importIfNeeded(seed))
         XCTAssertTrue(try records(Topic.self, in: empty).isEmpty)
         XCTAssertTrue(try records(CatalogImportState.self, in: empty).isEmpty)
+        XCTAssertTrue(try records(LessonSlot.self, in: empty).isEmpty)
         XCTAssertEqual(try repository.importIfNeeded(upgraded), .imported)
+        XCTAssertEqual(try repository.loadSnapshot().slots, committedSlots)
     }
 
     func testFailedUpgradeRemainsAbsentAfterClosingAndReopeningDiskStore() throws {
@@ -542,11 +557,13 @@ final class CatalogImportTests: XCTestCase {
             XCTAssertEqual(try repository.importIfNeeded(seed), .imported)
             XCTAssertThrowsError(try SwiftDataCatalogRepository(container: container,
                              save: { _ in throw Injected.failure }).importIfNeeded(upgraded))
+            XCTAssertEqual(try repository.loadSnapshot().slots.count, 20)
         }
         func reopenAndCheck() throws {
             let container = try ModelContainerFactory().makeContainer(mode: .persistent(url))
             XCTAssertEqual(try records(CatalogImportState.self, in: container).map(\.lastImportedVersion),
                            [seed.value.version])
+            XCTAssertEqual(try SwiftDataCatalogRepository(container: container).loadSnapshot().slots.count, 20)
             XCTAssertEqual(try records(LessonDefinition.self, in: container).first {
                 $0.id == seed.value.lessons[0].id
             }?.title, seed.value.lessons[0].title)
