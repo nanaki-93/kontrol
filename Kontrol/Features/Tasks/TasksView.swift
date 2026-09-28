@@ -5,6 +5,8 @@ import SwiftUI
 struct TaskRows: View {
     let rows: [TaskSnapshot]
     let temporalContext: TaskTemporalContext
+    var onEdit: ((TaskSnapshot) -> Void)? = nil
+    var editFocus: FocusState<UUID?>.Binding? = nil
 
     private var dateStyle: Date.FormatStyle {
         var style = Date.FormatStyle.dateTime.month(.abbreviated).day().year()
@@ -65,13 +67,29 @@ struct TaskRows: View {
         return parts.joined(separator: " · ")
     }
 
+    private func editButton(for row: TaskSnapshot, action: @escaping (TaskSnapshot) -> Void) -> some View {
+        ActionButton("Edit", action: { action(row) })
+            .accessibilityLabel("Edit \(row.title)")
+            .accessibilityIdentifier("task-edit-\(row.id.uuidString)")
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             ForEach(rows) { row in
-                AppListRow(row.title, metadata: metadata(for: row),
-                           status: row.isCompleted ? StatusPill("Completed", kind: .success) : nil)
-                    .accessibilityElement(children: .combine)
-                    .accessibilityIdentifier("task-row-\(row.id.uuidString)")
+                HStack(alignment: .center, spacing: AppMetrics.space3) {
+                    AppListRow(row.title, metadata: metadata(for: row),
+                               status: row.isCompleted ? StatusPill("Completed", kind: .success) : nil)
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier("task-row-\(row.id.uuidString)")
+                    if let onEdit {
+                        if let editFocus {
+                            editButton(for: row, action: onEdit)
+                                .focused(editFocus, equals: row.id)
+                        } else {
+                            editButton(for: row, action: onEdit)
+                        }
+                    }
+                }
             }
         }
     }
@@ -81,6 +99,27 @@ struct TaskRows: View {
 struct TasksView: View {
     @ObservedObject var store: TaskStore
     @State private var filter: TaskFilter = .today
+    @State private var presentation: EditorPresentation?
+    @State private var editorOpenError = false
+    @State private var lastEditorTriggerID: UUID?
+    @FocusState private var addFocused: Bool
+    @FocusState private var editFocusedID: UUID?
+
+    /// Own the draft at the moment of opening, not during a subsequent body redraw.
+    private struct EditorPresentation: Identifiable {
+        let id = UUID()
+        let draft: TaskEditorDraft
+    }
+
+    private func edit(_ row: TaskSnapshot) {
+        do {
+            presentation = EditorPresentation(draft: try TaskEditorDraft(editing: row, in: store))
+            editorOpenError = false
+        } catch {
+            editorOpenError = true
+            store.refresh()
+        }
+    }
 
     private func title(_ filter: TaskFilter) -> String {
         switch filter {
@@ -93,9 +132,9 @@ struct TasksView: View {
     private var emptyGuidance: (String, String) {
         switch filter {
         case .today:
-            return ("Nothing planned or due today.", "Check Upcoming for other open tasks, or use Add task on Today.")
+            return ("Nothing planned or due today.", "Check Upcoming for other open tasks, or use Add task.")
         case .upcoming:
-            return ("No upcoming tasks.", "All other open tasks, including unscheduled tasks, appear here. Use Add task on Today to capture one.")
+            return ("No upcoming tasks.", "All other open tasks, including unscheduled tasks, appear here. Use Add task to capture one.")
         case .completed:
             return ("No completed tasks yet.", "Completed tasks will appear here after you finish one.")
         }
@@ -103,7 +142,14 @@ struct TasksView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppMetrics.space4) {
-            PageHeader("Tasks")
+            PageHeader("Tasks") {
+                ActionButton("Add task", symbol: "plus", variant: .primary) {
+                    presentation = EditorPresentation(draft: TaskEditorDraft(creatingIn: store))
+                    editorOpenError = false
+                }
+                .accessibilityIdentifier("tasks-add-task")
+                .focused($addFocused)
+            }
             HStack(spacing: AppMetrics.space2) {
                 ForEach([TaskFilter.today, .upcoming, .completed], id: \.self) { option in
                     let label = title(option)
@@ -114,6 +160,15 @@ struct TasksView: View {
                     .accessibilityLabel("\(label), \(store.select(option).count) tasks")
                     .accessibilityValue(filter == option ? "Selected" : "Not selected")
                 }
+            }
+            if editorOpenError {
+                ErrorBanner(.readFailed, recoveryTitle: "Retry", recovery: {
+                    editorOpenError = false
+                    store.retryRead()
+                })
+                Text("Could not open this task. Refresh the list and try again.")
+                    .appTypography(.metadata)
+                    .foregroundStyle(AppColors.textSecondary)
             }
             if let message = store.readState.message {
                 ErrorBanner(.readFailed, recoveryTitle: "Retry", recovery: store.retryRead)
@@ -127,7 +182,10 @@ struct TasksView: View {
                 EmptyState(emptyGuidance.0, guidance: emptyGuidance.1)
             } else if !selected.isEmpty {
                 ScrollView {
-                    TaskRows(rows: selected, temporalContext: store.temporalContext)
+                    TaskRows(rows: selected, temporalContext: store.temporalContext, onEdit: { row in
+                        lastEditorTriggerID = row.id
+                        edit(row)
+                    }, editFocus: $editFocusedID)
                 }
             }
             Spacer(minLength: 0)
@@ -136,5 +194,21 @@ struct TasksView: View {
         .padding(.horizontal, AppMetrics.horizontalInset)
         .padding(.top, AppMetrics.space8)
         .onAppear { store.refresh() }
+        .sheet(item: $presentation, onDismiss: {
+            if let id = lastEditorTriggerID, store.select(filter).contains(where: { $0.id == id }) {
+                editFocusedID = id
+            } else {
+                addFocused = true
+            }
+            lastEditorTriggerID = nil
+        }) { item in
+            TaskEditorView(draft: item.draft, onCancel: {
+                presentation = nil
+            }, onSaved: {
+                presentation = nil
+            }, onMissingTask: {
+                presentation = nil
+            })
+        }
     }
 }

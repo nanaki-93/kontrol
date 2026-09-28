@@ -239,7 +239,7 @@ final class TaskPresentationTests: XCTestCase {
             let text = visibleText(in: window)
             XCTAssertTrue(text.contains("Tasks"))
             XCTAssertTrue(text.contains("Nothing planned or due today."))
-            XCTAssertTrue(text.contains("Check Upcoming for other open tasks, or use Add task on Today."))
+            XCTAssertTrue(text.contains("Check Upcoming for other open tasks, or use Add task."))
             XCTAssertFalse(text.contains("Error: Content could not be loaded."))
             XCTAssertFalse(text.contains("Saved task"))
             XCTAssertEqual(AXUIElementPerformAction(try waitForElement("tasks-filter-upcoming", in: window),
@@ -257,6 +257,169 @@ final class TaskPresentationTests: XCTestCase {
             XCTAssertTrue(elements(in: window, identifier: "task-row-\(id.uuidString)").isEmpty)
         }
         XCTAssertEqual(try repository.fetchAll().map(\.id), [id], "failed rendering cannot change saved tasks")
+    }
+
+    func testNativeTasksEditorCreatesEditsAndCancelsWithoutWriting() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataTaskRepository(container: container)
+        let store = TaskStore(repository: repository)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.title = "Editor lifecycle \(UUID())"
+        window.contentView = NSHostingView(rootView: TasksView(store: store))
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        settle()
+        let add = try waitForElement("tasks-add-task", in: window)
+        XCTAssertEqual(AXUIElementPerformAction(add, kAXPressAction as CFString), .success)
+        _ = try waitForElement("task-editor-title", in: window)
+        XCTAssertNotNil(window.attachedSheet)
+        XCTAssertNotNil(try? waitForElement("task-editor-notes", in: window))
+        XCTAssertNotNil(try? waitForElement("task-editor-due", in: window))
+        XCTAssertNotNil(try? waitForElement("task-editor-plan", in: window))
+        XCTAssertFalse(elements(in: window, identifier: "task-editor-title-error").isEmpty)
+        XCTAssertTrue(elements(in: window, identifier: "task-editor-due-date").isEmpty)
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement("task-editor-cancel", in: window),
+                                                 kAXPressAction as CFString), .success)
+        settle()
+        XCTAssertNil(window.attachedSheet)
+        XCTAssertTrue(try repository.fetchAll().isEmpty)
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement("tasks-add-task", in: window),
+                                                 kAXPressAction as CFString), .success)
+        XCTAssertEqual(AXUIElementSetAttributeValue(try waitForElement("task-editor-title", in: window),
+                                                    kAXValueAttribute as CFString, "New task" as CFString), .success)
+        XCTAssertEqual(AXUIElementSetAttributeValue(try waitForElement("task-editor-notes", in: window),
+                                                    kAXValueAttribute as CFString, "First line\nSecond line" as CFString), .success)
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement("task-editor-due", in: window),
+                                                 kAXPressAction as CFString), .success)
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement("task-editor-plan", in: window),
+                                                 kAXPressAction as CFString), .success)
+        _ = try waitForElement("task-editor-due-date", in: window)
+        _ = try waitForElement("task-editor-plan-date", in: window)
+        settle()
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement("task-editor-submit", in: window),
+                                                 kAXPressAction as CFString), .success)
+        settle()
+        let saved = try XCTUnwrap(store.snapshots.first)
+        XCTAssertNil(window.attachedSheet)
+        XCTAssertEqual(saved.title, "New task")
+        XCTAssertEqual(saved.notes, "First line\nSecond line")
+        XCTAssertNotNil(saved.dueAt)
+        XCTAssertNotNil(saved.plannedDay)
+        let edit = try waitForElement("task-edit-\(saved.id.uuidString)", in: window)
+        XCTAssertEqual(AXUIElementPerformAction(edit, kAXPressAction as CFString), .success)
+        XCTAssertEqual(attribute(try waitForElement("task-editor-title", in: window),
+                                 kAXValueAttribute) as? String, "New task")
+        XCTAssertEqual(AXUIElementSetAttributeValue(try waitForElement("task-editor-title", in: window),
+                                                    kAXValueAttribute as CFString, "Discarded change" as CFString), .success)
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement("task-editor-cancel", in: window),
+                                                 kAXPressAction as CFString), .success)
+        settle()
+        XCTAssertNil(window.attachedSheet)
+        XCTAssertEqual(try repository.fetchAll().first?.title, "New task")
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement("task-edit-\(saved.id.uuidString)", in: window),
+                                                 kAXPressAction as CFString), .success)
+        XCTAssertEqual(attribute(try waitForElement("task-editor-title", in: window),
+                                 kAXValueAttribute) as? String, "New task")
+        XCTAssertEqual(AXUIElementSetAttributeValue(try waitForElement("task-editor-title", in: window),
+                                                    kAXValueAttribute as CFString, "Renamed task" as CFString), .success)
+        settle()
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement("task-editor-submit", in: window),
+                                                 kAXPressAction as CFString), .success)
+        settle()
+        XCTAssertNil(window.attachedSheet)
+        XCTAssertEqual(store.snapshots.first?.id, saved.id)
+        XCTAssertEqual(store.snapshots.first?.title, "Renamed task")
+        XCTAssertEqual(try repository.fetchAll().map(\.id), [saved.id])
+    }
+
+    func testEditorLongNotesKeepActionsReachableAndClearsBothDates() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataTaskRepository(container: container)
+        let store = TaskStore(repository: repository)
+        let plan = PlannedDay.today(at: .now)
+        let saved = try store.create(input: TaskInput(title: "With notes", notes: String(repeating: "Long note.\n", count: 150),
+                                                      dueAt: .now, plannedFor: plan))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.title = "Long note editor \(UUID())"
+        window.contentView = NSHostingView(rootView: TasksView(store: store))
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        settle()
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement("task-edit-\(saved.id.uuidString)", in: window),
+                                                 kAXPressAction as CFString), .success)
+        let action = try waitForElement("task-editor-submit", in: window)
+        let sheet = try XCTUnwrap(window.attachedSheet)
+        let bounds = sheet.frame
+        let actionBounds = try frame(action)
+        let screenTop = try XCTUnwrap(sheet.screen).frame.maxY
+        XCTAssertGreaterThanOrEqual(actionBounds.minY, screenTop - bounds.maxY)
+        XCTAssertLessThanOrEqual(actionBounds.maxY, screenTop - bounds.minY)
+        XCTAssertNotNil(try? waitForElement("task-editor-notes", in: window))
+        XCTAssertNotNil(try? waitForElement("task-editor-due-date", in: window))
+        XCTAssertNotNil(try? waitForElement("task-editor-plan-date", in: window))
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement("task-editor-due", in: window),
+                                                 kAXPressAction as CFString), .success)
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement("task-editor-plan", in: window),
+                                                 kAXPressAction as CFString), .success)
+        settle()
+        XCTAssertTrue(elements(in: window, identifier: "task-editor-due-date").isEmpty)
+        XCTAssertTrue(elements(in: window, identifier: "task-editor-plan-date").isEmpty)
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement("task-editor-submit", in: window),
+                                                 kAXPressAction as CFString), .success)
+        settle()
+        let persisted = try XCTUnwrap(repository.fetchAll().first)
+        XCTAssertEqual(persisted.id, saved.id)
+        XCTAssertNil(persisted.dueAt)
+        XCTAssertNil(persisted.plannedDay)
+        XCTAssertNil(persisted.plannedTimeZoneID)
+        XCTAssertEqual(persisted.notes, saved.notes)
+    }
+
+    func testEditorFailureAndMissingTaskKeepDraftAndOfferDistinctRecovery() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        var fail = false
+        let repository = SwiftDataTaskRepository(container: container, save: { context in
+            if fail { throw SaveError.injected }
+            try context.save()
+        })
+        let store = TaskStore(repository: repository)
+        let saved = try store.create(input: TaskInput(title: "Original"))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.title = "Editor failure \(UUID())"
+        window.contentView = NSHostingView(rootView: TasksView(store: store))
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        settle()
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement("tasks-filter-upcoming", in: window),
+                                                 kAXPressAction as CFString), .success)
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement("task-edit-\(saved.id.uuidString)", in: window),
+                                                 kAXPressAction as CFString), .success)
+        XCTAssertEqual(AXUIElementSetAttributeValue(try waitForElement("task-editor-title", in: window),
+                                                    kAXValueAttribute as CFString, "Retained" as CFString), .success)
+        fail = true
+        settle()
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement("task-editor-submit", in: window),
+                                                 kAXPressAction as CFString), .success)
+        XCTAssertNotNil(window.attachedSheet)
+        XCTAssertNotNil(try? waitForElement("task-editor-error", in: window))
+        XCTAssertEqual(attribute(try waitForElement("task-editor-title", in: window),
+                                 kAXValueAttribute) as? String, "Retained")
+        XCTAssertEqual(try repository.fetchAll().first?.title, "Original")
+        fail = false
+        try repository.delete(id: saved.id)
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement("task-editor-submit", in: window),
+                                                 kAXPressAction as CFString), .success)
+        XCTAssertNotNil(window.attachedSheet)
+        XCTAssertNotNil(try? waitForElement("task-editor-close-missing", in: window))
+        XCTAssertTrue(store.snapshots.isEmpty)
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement("task-editor-close-missing", in: window),
+                                                 kAXPressAction as CFString), .success)
+        settle()
+        XCTAssertNil(window.attachedSheet)
+        XCTAssertTrue(try repository.fetchAll().isEmpty)
     }
 
     func testTasksFiltersPartitionSavedRowsWithCountsMetadataAndNoWrites() throws {
