@@ -58,6 +58,7 @@ final class FocusTimingTests: XCTestCase {
         let snapshot = try row(planned: seconds, accrued: accrued, deadline: expected)
         XCTAssertEqual(snapshot.deadline, expected)
         XCTAssertEqual(snapshot.actualSeconds, accrued)
+        XCTAssertGreaterThan(try FocusTiming.sample(snapshot, monotonicDelta: 0).countdownSeconds, 0)
         invalid({ try row(planned: seconds, accrued: accrued,
                           deadline: expected.addingTimeInterval(4_096)) }, .invalidStoredData)
     }
@@ -198,5 +199,113 @@ final class FocusTimingTests: XCTestCase {
             expectedCheckpointAt: Date(timeIntervalSinceReferenceDate: .infinity),
             sampledAt: start, accumulatedActiveSeconds: 0)
             .validated(plannedSeconds: 60) }, .invalidTransition)
+    }
+
+    func testPauseFiveMinutesAndRepeatedSegmentsDoNotDoubleCount() throws {
+        let original = try row(planned: 60, task: UUID(), title: "Retained")
+        let first = try FocusTiming.pause(original, at: start.addingTimeInterval(10),
+                                          monotonicDelta: 10.375)
+        XCTAssertEqual(first.snapshot.actualSeconds, 10.375)
+        XCTAssertNil(first.snapshot.deadline)
+        XCTAssertNil(first.snapshot.activeSegmentStartedAt)
+        XCTAssertEqual(first.snapshot.linkedTaskID, original.linkedTaskID)
+        guard case .pause(let pausePayload) = first.transition else { return XCTFail("Expected pause") }
+        XCTAssertEqual(pausePayload.expectedCheckpointAt, start)
+        let resumed = try FocusTiming.resume(first.snapshot, at: start.addingTimeInterval(310))
+        XCTAssertEqual(resumed.snapshot.actualSeconds, 10.375)
+        XCTAssertEqual(resumed.snapshot.deadline, start.addingTimeInterval(359.625))
+        let checkpoint = try FocusTiming.checkpoint(resumed.snapshot,
+            at: start.addingTimeInterval(320), monotonicDelta: 9.125)
+        XCTAssertEqual(checkpoint.snapshot.actualSeconds, 19.5)
+        XCTAssertEqual(checkpoint.snapshot.activeSegmentStartedAt, start.addingTimeInterval(320))
+        XCTAssertEqual(checkpoint.snapshot.deadline, start.addingTimeInterval(360.5))
+        guard case .checkpoint(let payload) = checkpoint.transition else {
+            return XCTFail("Expected checkpoint")
+        }
+        XCTAssertEqual(payload.expectedCheckpointAt, start.addingTimeInterval(310))
+        XCTAssertEqual(payload.accumulatedActiveSeconds, 19.5)
+        let second = try FocusTiming.pause(checkpoint.snapshot,
+            at: start.addingTimeInterval(322), monotonicDelta: 1.25)
+        XCTAssertEqual(second.snapshot.actualSeconds, 20.75)
+        XCTAssertEqual(second.snapshot.id, original.id)
+        XCTAssertEqual(second.snapshot.linkedTitleSnapshot, "Retained")
+        let again = try FocusTiming.resume(second.snapshot, at: start.addingTimeInterval(622))
+        let ended = try FocusTiming.end(again.snapshot, at: start.addingTimeInterval(624),
+                                        monotonicDelta: 1.5)
+        XCTAssertEqual(ended.snapshot.state, .ended)
+        XCTAssertEqual(ended.snapshot.actualSeconds, 22.25)
+        XCTAssertEqual(ended.snapshot.endedAt, start.addingTimeInterval(624))
+        XCTAssertNil(ended.snapshot.activeSegmentStartedAt)
+    }
+
+    func testCountdownCapsAfterSleepAndCompletionWinsOverPauseAndEnd() throws {
+        let original = try row(planned: 15, accrued: 3.25,
+                               deadline: start.addingTimeInterval(11.75))
+        let before = try FocusTiming.sample(original, monotonicDelta: 0.125)
+        XCTAssertEqual(before.elapsedSeconds, 3.375)
+        XCTAssertEqual(before.remainingSeconds, 11.625)
+        XCTAssertEqual(before.countdownSeconds, 12)
+        let wall = start.addingTimeInterval(10_000)
+        let capped = try FocusTiming.sample(original, monotonicDelta: 100)
+        XCTAssertEqual(capped.elapsedSeconds, 15)
+        XCTAssertEqual(capped.remainingSeconds, 0)
+        XCTAssertEqual(capped.countdownSeconds, 0)
+        let paused = try FocusTiming.pause(original, at: wall, monotonicDelta: 100)
+        let ended = try FocusTiming.end(original, at: wall, monotonicDelta: 100)
+        let complete = try FocusTiming.complete(original, at: wall, monotonicDelta: 100)
+        for result in [paused, ended, complete] {
+            XCTAssertEqual(result.snapshot.state, .completed)
+            XCTAssertEqual(result.snapshot.actualSeconds, 15)
+            XCTAssertEqual(result.snapshot.endedAt, wall.addingTimeInterval(-88.25))
+            XCTAssertEqual(result.snapshot.checkpointAt, wall)
+            guard case .complete = result.transition else { return XCTFail("Expected completion") }
+        }
+        let atDeadline = try FocusTiming.checkpoint(original, at: start.addingTimeInterval(12),
+                                                     monotonicDelta: 11.75)
+        XCTAssertEqual(atDeadline.snapshot.endedAt, start.addingTimeInterval(12))
+        invalid({ try FocusTiming.complete(original, at: start, monotonicDelta: 1) },
+                .invalidTransition)
+    }
+
+    func testWallClockJumpsCannotAlterMonotonicDurationAndRebaseAnchors() throws {
+        let original = try row(planned: 60)
+        let forward = try FocusTiming.checkpoint(original, at: start.addingTimeInterval(3_600),
+                                                 monotonicDelta: 2.5)
+        XCTAssertEqual(forward.snapshot.actualSeconds, 2.5)
+        XCTAssertEqual(forward.snapshot.deadline, start.addingTimeInterval(3_657.5))
+        let backward = try FocusTiming.checkpoint(forward.snapshot, at: start.addingTimeInterval(-500),
+                                                  monotonicDelta: 4.25)
+        XCTAssertEqual(backward.snapshot.actualSeconds, 6.75)
+        XCTAssertEqual(backward.snapshot.activeSegmentStartedAt, start.addingTimeInterval(3_600))
+        XCTAssertEqual(backward.snapshot.deadline, start.addingTimeInterval(3_653.25))
+        let early = try FocusTiming.end(backward.snapshot, at: start.addingTimeInterval(-500),
+                                        monotonicDelta: 1.125)
+        XCTAssertEqual(early.snapshot.actualSeconds, 7.875)
+        XCTAssertEqual(early.snapshot.endedAt, start)
+        XCTAssertEqual(early.snapshot.checkpointAt, start.addingTimeInterval(3_600))
+        // A backwards wall timestamp must not invalidate a valid completed row.
+        let finished = try FocusTiming.complete(backward.snapshot,
+            at: start.addingTimeInterval(-500), monotonicDelta: 10_000)
+        XCTAssertEqual(finished.snapshot.endedAt, start)
+        XCTAssertEqual(finished.snapshot.actualSeconds, 60)
+    }
+
+    func testTimingRejectsInvalidSamplesAndStates() throws {
+        let running = try row()
+        let maximum = try row(planned: Int.max,
+                              deadline: start.addingTimeInterval(Double(Int.max)))
+        XCTAssertEqual(try FocusTiming.sample(maximum, monotonicDelta: 0).countdownSeconds,
+                       Int.max)
+        for delta in [Double.nan, .infinity, -.infinity, -0.1] {
+            invalid({ try FocusTiming.sample(running, monotonicDelta: delta) }, .invalidTransition)
+        }
+        let badWall = Date(timeIntervalSinceReferenceDate: .nan)
+        invalid({ try FocusTiming.checkpoint(running, at: badWall, monotonicDelta: 1) },
+                .invalidTransition)
+        invalid({ try FocusTiming.pause(running, at: badWall, monotonicDelta: 1) },
+                .invalidTransition)
+        let paused = try row(state: .paused, accrued: 2, paused: start, recovery: true)
+        invalid({ try FocusTiming.resume(paused, at: start) }, .invalidTransition)
+        invalid({ try FocusTiming.sample(paused, monotonicDelta: 5) }, .invalidTransition)
     }
 }
