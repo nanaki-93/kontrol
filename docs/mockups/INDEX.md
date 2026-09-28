@@ -30,7 +30,12 @@ Each row links a function to an actual PNG mockup. SVG sources sit beside the PN
 | [F06](../features/F06-lesson-experience.md) | Reveal solution | [M20 · Context cancellation](M20-lesson-solution.png) |
 | [F06](../features/F06-lesson-experience.md) | Complete and refill a slot | [M21 · Learning](M21-lesson-completion-rotation.png) |
 | [F06](../features/F06-lesson-experience.md) | Dismiss and replace | [M22 · Learning](M22-lesson-dismiss.png) |
-| [F06](../features/F06-lesson-experience.md) | Add lesson to Today | [M07 · Today](M07-schedule-editor.png) |
+| [F06](../features/F06-lesson-experience.md) | Add lesson to Today | [M07 · Today](M07-schedule-editor.png) · [Today suggestions, linked editor and Focus entry](../../.mockups/flows/f06-lesson-experience/08-today-focus.html) |
+| [F06](../features/F06-lesson-experience.md) | Choices / History hub and practice path | [F06 flow navigator](../../.mockups/flows/f06-lesson-experience/index.html) · [Exercise / saving / retry](../../.mockups/flows/f06-lesson-experience/01-exercise.html) · [Stale answer recovery](../../.mockups/flows/f06-lesson-experience/02-stale-answer.html) |
+| [F06](../features/F06-lesson-experience.md) | Persisted reveal, acknowledgement and completion gates | [Solution / self-check](../../.mockups/flows/f06-lesson-experience/03-solution.html) · [Completion / one-slot feedback](../../.mockups/flows/f06-lesson-experience/04-completion.html) |
+| [F06](../features/F06-lesson-experience.md) | Exhaustion and generation-unavailable notice | [Real zero inventory / F08 notice](../../.mockups/flows/f06-lesson-experience/05-exhaustion.html) |
+| [F06](../features/F06-lesson-experience.md) | Minimal History, explicit Restore, unslotted resume and unavailable historical content | [History / restored started work](../../.mockups/flows/f06-lesson-experience/06-history.html) · [Unavailable studied content](../../.mockups/flows/f06-lesson-experience/07-unavailable-content.html) |
+| [F06](../features/F06-lesson-experience.md) | Today Start now and Focus lesson selection | [Today / Focus entries](../../.mockups/flows/f06-lesson-experience/08-today-focus.html) · [M10 · Focus ready](M10-focus-ready.png) |
 | [F07](../features/F07-history-coverage.md) | Filter and open history | [M23 · History](M23-learning-history.png) |
 | [F07](../features/F07-history-coverage.md) | Restore a dismissed lesson | [M23 · History](M23-learning-history.png) |
 | [F07](../features/F07-history-coverage.md) | Inspect coverage and concepts | [M24 · Coverage](M24-concept-coverage.png) |
@@ -58,6 +63,10 @@ Each row links a function to an actual PNG mockup. SVG sources sit beside the PN
 ## F05 departures from M15
 
 [M15](M15-learning-choices.png) remains the normal-state composition reference: five topic choices in the sidebar and up to four stable lessons for the selected topic. The [F05 overview](../../.mockups/screens/f05/index.html) shows four representative Go choices with explicit objectives and concept labels, alongside the three states M15 does not depict. Its example content is illustrative, not a guarantee of slot ordering. [Inspection](../../.mockups/screens/f05/read-only-inspection.html) presents stored explanation, worked example, exercise prompt, reference response, and self-check as **read-only reference material**; opening it does not start work. [Exhaustion](../../.mockups/screens/f05/exhausted-empty.html) shows the real zero count rather than invented choices. [Loading / read failure](../../.mockups/screens/f05/loading-read-failure.html) distinguishes an in-progress read from a retryable error, neither of which means an empty catalog. M15's History/Coverage, replacement, and generation actions are not part of F05; no F06 attempt or completion workflow is depicted. Interactive behavior and rendered comparison remain deferred to F13.
+
+## F06 supplemental flow boundaries
+
+[Open the F06 navigator](../../.mockups/flows/f06-lesson-experience/index.html) for a choices/History hub, exercise → solution → completion path, and recovery / cross-feature branches. These static references supplement M16–M22, M07 and the *minimal* list/detail/Restore subset of M23; they do not replace the approved normal-state imagery. The F06 History has no F07 filters or coverage controls. Exhaustion shows real inventory and a Generate… **availability notice only**; provider setup, generation, validation, failures and any actual generated lesson are **F08-only** (M25–M26). The HTML links preview states, not working save/Restore/Focus actions. No interactive approval or rendered native acceptance is claimed for these new references.
 
 ## All 44 visual states
 
