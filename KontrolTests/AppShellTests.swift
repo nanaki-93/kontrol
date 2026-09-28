@@ -50,6 +50,8 @@ final class AppShellTests: XCTestCase {
                 XCTAssertEqual(AppShell.contentKind(for: destination), .today)
             } else if destination == .learning {
                 XCTAssertEqual(AppShell.contentKind(for: destination), .learning)
+            } else if destination == .focus {
+                XCTAssertEqual(AppShell.contentKind(for: destination), .focus)
             } else if destination == .tasks {
                 XCTAssertEqual(AppShell.contentKind(for: destination), .tasks)
             } else if destination == .settings {
