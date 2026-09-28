@@ -112,6 +112,92 @@ final class TaskRepositoryTests: XCTestCase {
         XCTAssertEqual(try later.fetchAll().map(\.id), [secondID, tied, firstID])
     }
 
+    func testSnapshotCopiesAllFieldsWithoutHoldingTheSourceModel() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let due = instant.addingTimeInterval(3_600)
+        let completed = instant.addingTimeInterval(7_200)
+        let plan = KontrolSchemaV1.PlannedDayComponents(calendarIdentifier: "gregorian",
+                                                         year: 2026, month: 2, day: 28)
+        let snapshot: TaskSnapshot
+        do {
+            let context = ModelContext(container)
+            context.autosaveEnabled = false
+            let task = try TaskItem(id: firstID, title: "Original", createdAt: instant,
+                                    notes: "First\nSecond", dueAt: due, plannedDay: plan,
+                                    plannedTimeZoneID: "Pacific/Auckland", completedAt: completed)
+            context.insert(task)
+            snapshot = TaskSnapshot(task)
+            task.title = "Changed"
+            task.notes = nil
+            task.dueAt = nil
+            task.plannedDay = nil
+            task.plannedTimeZoneID = nil
+            task.completedAt = nil
+        }
+        XCTAssertEqual(snapshot.id, firstID)
+        XCTAssertEqual(snapshot.title, "Original")
+        XCTAssertEqual(snapshot.notes, "First\nSecond")
+        XCTAssertEqual(snapshot.dueAt, due)
+        XCTAssertEqual(snapshot.plannedDay, plan)
+        XCTAssertEqual(snapshot.plannedTimeZoneID, "Pacific/Auckland")
+        XCTAssertEqual(snapshot.createdAt, instant)
+        XCTAssertEqual(snapshot.completedAt, completed)
+        XCTAssertTrue(snapshot.isCompleted)
+    }
+
+    func testInputNormalizesTitleAndNotesButKeepsDueInstantAndMultilineContent() throws {
+        let plan = PlannedDay(components: .init(calendarIdentifier: "gregorian", year: 2024,
+                                                 month: 2, day: 29), timeZoneID: "Pacific/Auckland")
+        let input = TaskInput(title: " \n  Write tests  \t", notes: " \n  Line one\nLine two  \n ",
+                              dueAt: instant, plannedFor: plan)
+        let clean = try input.validated()
+        XCTAssertEqual(clean.title, "Write tests")
+        XCTAssertEqual(clean.notes, "Line one\nLine two")
+        XCTAssertEqual(clean.dueAt, instant)
+        XCTAssertEqual(clean.plannedFor, plan)
+        XCTAssertEqual(input.title, " \n  Write tests  \t")
+        XCTAssertNil(try TaskInput(title: "Open", notes: " \n\t ", dueAt: nil,
+                                   plannedFor: nil).validated().notes)
+        XCTAssertNil(try TaskInput(title: "Unplanned", notes: nil, dueAt: nil,
+                                   plannedFor: nil).validated().plannedFor)
+        XCTAssertThrowsError(try TaskInput(title: " \t\n ", notes: "kept", dueAt: instant,
+                                           plannedFor: plan).validated()) {
+            XCTAssertTrue($0 is KontrolSchemaV1.TaskValidationError)
+        }
+    }
+
+    func testPlannedDayRejectsInvalidIdentifiersZonesDatesAndUnpairedFields() throws {
+        let valid = KontrolSchemaV1.PlannedDayComponents(calendarIdentifier: "gregorian",
+                                                         year: 2026, month: 3, day: 8)
+        XCTAssertEqual(try PlannedDay.validated(components: nil, timeZoneID: nil), nil)
+        XCTAssertThrowsError(try PlannedDay.validated(components: valid, timeZoneID: nil)) {
+            XCTAssertTrue($0 is KontrolSchemaV1.TaskValidationError)
+        }
+        XCTAssertThrowsError(try PlannedDay.validated(components: nil, timeZoneID: "UTC")) {
+            XCTAssertTrue($0 is KontrolSchemaV1.TaskValidationError)
+        }
+        func expectInvalid(_ components: KontrolSchemaV1.PlannedDayComponents,
+                           zone: String, error: PlannedDay.ValidationError) {
+            XCTAssertThrowsError(try TaskInput(title: "Test", notes: nil, dueAt: nil,
+                plannedFor: PlannedDay(components: components, timeZoneID: zone)).validated()) {
+                XCTAssertEqual($0 as? PlannedDay.ValidationError, error)
+            }
+        }
+        expectInvalid(.init(calendarIdentifier: "not-a-calendar", year: 2026, month: 3, day: 8),
+                      zone: "UTC", error: .invalidCalendarIdentifier)
+        expectInvalid(valid, zone: "Mars/Olympus", error: .invalidTimeZoneID)
+        expectInvalid(valid, zone: "", error: .invalidTimeZoneID)
+        for (year, month, day) in [(2025, 2, 29), (2026, 13, 1), (2026, 4, 31),
+                                   (0, 1, 1), (2026, 1, 0)] {
+            expectInvalid(.init(calendarIdentifier: "gregorian", year: year, month: month, day: day),
+                          zone: "UTC", error: .invalidDate)
+        }
+        XCTAssertEqual(try PlannedDay(components: valid, timeZoneID: "America/Los_Angeles")
+            .validated().components, valid)
+        XCTAssertEqual(try PlannedDay(components: .init(calendarIdentifier: "gregorian",
+            year: 2024, month: 2, day: 29), timeZoneID: "UTC").validated().timeZoneID, "UTC")
+    }
+
     func testClosedTemporaryDiskStoreReopensWithSameIDAndValuesAndNoFailedInsert() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("KontrolTaskRepository-\(UUID().uuidString)", isDirectory: true)
