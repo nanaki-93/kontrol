@@ -3,6 +3,8 @@ import SwiftUI
 struct TodayView: View {
     @ObservedObject var store: TaskStore
     @ObservedObject var scheduleStore: ScheduleStore
+    var learningStore: LearningCatalogStore? = nil
+    var navigation: NavigationStore? = nil
     @State private var daySelection = TodayDaySelection()
     @State private var showingCapture = false
     @State private var presentation: EditorPresentation?
@@ -24,6 +26,20 @@ struct TodayView: View {
     private struct BlockPresentation: Identifiable {
         let id = UUID()
         let draft: ScheduleEditorDraft
+    }
+
+    /// Recheck the displayed assignment against the latest committed projection.
+    /// Flush before opening so a failed save creates neither an attempt nor a route.
+    static func startNow(_ suggestion: TodayLessonSelection.Suggestion,
+                         learning: LearningCatalogStore, navigation: NavigationStore) throws {
+        guard let current = TodayLessonSelection.suggestions(from: learning.state),
+              current.contains(suggestion) else { throw LessonExperienceError.staleSlot }
+        guard navigation.flushForLifecycle() else {
+            throw navigation.saveError ?? LessonExperienceError.persistenceFailure
+        }
+        let receipt = try learning.openLesson(lessonID: suggestion.id)
+        guard receipt.detail.id == suggestion.id else { throw LessonExperienceError.invalidStoredData }
+        navigation.enterLesson(id: suggestion.id)
     }
 
     private func editBlock(_ block: ScheduleSnapshot) {
@@ -119,6 +135,9 @@ struct TodayView: View {
                 HStack(spacing: AppMetrics.space2) { dayActions; addActions }
                 VStack(alignment: .leading, spacing: AppMetrics.space2) { dayActions; addActions }
             }
+            if let learningStore, let navigation {
+                TodayLessonSection(learningStore: learningStore, navigation: navigation)
+            }
             ViewThatFits(in: .horizontal) {
                 HStack(alignment: .top, spacing: AppMetrics.space8) {
                     scheduleSection(rows?.blocks ?? []).frame(minWidth: 280, maxWidth: .infinity)
@@ -137,6 +156,7 @@ struct TodayView: View {
         .onAppear {
             store.refresh()
             scheduleStore.refresh()
+            learningStore?.loadIfNeeded()
         }
         .sheet(item: $blockPresentation, onDismiss: {
             if let id = lastBlockTriggerID,
@@ -301,6 +321,76 @@ struct TodayView: View {
                             .focused($editBlockFocusedID, equals: block.id)
                     }
                 }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// Only the shell's Today view observes the shared Learning publication. Standalone
+/// task/schedule previews can continue to render without a second catalog owner.
+private struct TodayLessonSection: View {
+    @ObservedObject var learningStore: LearningCatalogStore
+    let navigation: NavigationStore
+    @State private var lessonError: LessonExperienceError?
+
+    private var canStart: Bool {
+        guard learningStore.state.isAuthoritative else { return false }
+        if case .failed = learningStore.detailState { return false }
+        if case .failed = learningStore.historyState { return false }
+        return true // A failed write may be retried; only failed reads block entry.
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppMetrics.space4) {
+            SectionHeader("Learning", metadata: "Suggestions for any day")
+            if lessonError != nil {
+                ErrorBanner(.saveFailed)
+                Text("Could not start the lesson. Your work and location are retained. Retry Start now after resolving the error.")
+                    .appTypography(.metadata)
+                    .foregroundStyle(AppColors.textSecondary)
+            }
+            if case .failed = learningStore.state {
+                ErrorBanner(.readFailed, recoveryTitle: "Retry learning choices", recovery: learningStore.retry)
+                Text("Learning suggestions are unavailable until the catalog read succeeds.")
+                    .appTypography(.metadata)
+                    .foregroundStyle(AppColors.textSecondary)
+            }
+            if case .failed(let id, _) = learningStore.detailState {
+                ErrorBanner(.readFailed, recoveryTitle: "Retry lesson read") {
+                    _ = try? learningStore.retryDetail(lessonID: id)
+                }
+            }
+            if case .failed = learningStore.historyState {
+                ErrorBanner(.readFailed, recoveryTitle: "Retry History read") {
+                    _ = try? learningStore.retryHistory()
+                }
+            }
+            if let suggestions = TodayLessonSelection.suggestions(from: learningStore.state) {
+                if suggestions.isEmpty {
+                    EmptyState("No lessons to suggest right now.", guidance: "Browse Learning or History for more.")
+                }
+                ForEach(suggestions) { suggestion in
+                    HStack(spacing: AppMetrics.space4) {
+                        AppListRow(suggestion.lesson.title,
+                                   metadata: "\(suggestion.started ? "Started" : "Available") · \(suggestion.lesson.estimatedMinutes) min · \(suggestion.lesson.format.capitalized)")
+                        Spacer(minLength: 0)
+                        ActionButton("Start now", isEnabled: canStart) {
+                            do {
+                                try TodayView.startNow(suggestion, learning: learningStore, navigation: navigation)
+                                lessonError = nil
+                            } catch {
+                                lessonError = (error as? LessonExperienceError) ?? .persistenceFailure
+                            }
+                        }
+                        .accessibilityLabel("Start now: \(suggestion.lesson.title)")
+                        .accessibilityIdentifier("today-start-\(suggestion.id)")
+                    }
+                }
+            } else if case .notLoaded = learningStore.state {
+                LoadingState("Loading learning suggestions")
+            } else if case .loading = learningStore.state {
+                LoadingState("Loading learning suggestions")
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
