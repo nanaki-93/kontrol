@@ -26,6 +26,11 @@ final class QuickCaptureTests: XCTestCase {
             return try storage.create(title: title, plannedFor: plannedFor)
         }
 
+        func create(input: TaskInput) throws -> TaskSnapshot {
+            if fail { throw SaveFailure.injected }
+            return try storage.create(input: input)
+        }
+
         func fetchAll() throws -> [TaskItem] { try storage.fetchAll() }
     }
 

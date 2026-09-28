@@ -5,6 +5,8 @@ import SwiftData
 protocol TaskRepository {
     /// A nil plan captures today's local calendar day in this foundation slice.
     func create(title: String, plannedFor: PlannedDay?) throws -> UUID
+    /// Unlike legacy capture, a nil plan here means unplanned.
+    func create(input: TaskInput) throws -> TaskSnapshot
     func fetchAll() throws -> [TaskItem]
 }
 
@@ -34,22 +36,33 @@ final class SwiftDataTaskRepository: TaskRepository {
     }
 
     func create(title: String, plannedFor: PlannedDay? = nil) throws -> UUID {
-        // Validate before allocating a context, clock value or ID.
-        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { throw KontrolSchemaV1.TaskValidationError.emptyTitle }
+        try createValidated(TaskInput(title: title, plannedFor: plannedFor),
+                            defaultToToday: true).id
+    }
+
+    func create(input: TaskInput) throws -> TaskSnapshot {
+        try createValidated(input, defaultToToday: false)
+    }
+
+    private func createValidated(_ input: TaskInput, defaultToToday: Bool) throws -> TaskSnapshot {
+        // Reject invalid input before consuming an ID or opening a write context.
+        let clean = try input.validated()
         let createdAt = now()
-        let day = plannedFor ?? PlannedDay.today(at: createdAt, calendar: calendar(),
-                                                  timeZone: timeZone())
+        let day = try (defaultToToday && clean.plannedFor == nil
+            ? PlannedDay.today(at: createdAt, calendar: calendar(), timeZone: timeZone()).validated()
+            : clean.plannedFor)
         let id = makeID()
         let context = ModelContext(container)
         context.autosaveEnabled = false
-        let task = try TaskItem(id: id, title: trimmed, createdAt: createdAt,
-                                plannedDay: day.components, plannedTimeZoneID: day.timeZoneID)
+        let task = try TaskItem(id: id, title: clean.title, createdAt: createdAt,
+                                notes: clean.notes, dueAt: clean.dueAt,
+                                plannedDay: day?.components, plannedTimeZoneID: day?.timeZoneID)
         context.insert(task)
         // On error the unsaved private context is discarded. Never roll back the
         // shared main context, or save a partially failed operation later.
         try save(context)
-        return id
+        // No post-commit fetch: a read failure must not report a committed insert as failed.
+        return TaskSnapshot(task)
     }
 
     func fetchAll() throws -> [TaskItem] {

@@ -61,6 +61,81 @@ final class TaskRepositoryTests: XCTestCase {
         XCTAssertEqual(try repository.fetchAll().map(\.id), [firstID])
     }
 
+    func testExplicitCreationCommitsOneSnapshotWithAllFieldsAndUnplannedNil() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        var saves = 0
+        var ids = 0
+        let repository = SwiftDataTaskRepository(container: container, now: { self.instant },
+            makeID: { ids += 1; return ids == 1 ? self.firstID : self.secondID },
+            save: { context in saves += 1; try context.save() })
+        let due = instant.addingTimeInterval(2_345)
+        let plan = PlannedDay(components: .init(calendarIdentifier: "gregorian", year: 2026,
+                                                month: 6, day: 5), timeZoneID: "Pacific/Auckland")
+        let snapshot = try repository.create(input: TaskInput(title: "  Explicit  \n",
+            notes: " \n Line one\nLine two \n ", dueAt: due, plannedFor: plan))
+        XCTAssertEqual(snapshot.id, firstID)
+        XCTAssertEqual(snapshot.title, "Explicit")
+        XCTAssertEqual(snapshot.notes, "Line one\nLine two")
+        XCTAssertEqual(snapshot.dueAt, due)
+        XCTAssertEqual(snapshot.plannedDay, plan.components)
+        XCTAssertEqual(snapshot.plannedTimeZoneID, plan.timeZoneID)
+        XCTAssertEqual(snapshot.createdAt, instant)
+        XCTAssertNil(snapshot.completedAt)
+        XCTAssertEqual(saves, 1)
+        XCTAssertEqual(ids, 1)
+
+        // Explicit nil never silently becomes Today; the legacy nil path still does.
+        let unplanned = try repository.create(input: TaskInput(title: " Unplanned ", notes: " \n "))
+        XCTAssertEqual(unplanned.id, secondID)
+        XCTAssertNil(unplanned.plannedDay)
+        XCTAssertNil(unplanned.plannedTimeZoneID)
+        XCTAssertNil(unplanned.notes)
+        XCTAssertNil(unplanned.dueAt)
+        XCTAssertEqual(saves, 2)
+        XCTAssertEqual(try repository.fetchAll().map(\.id), [secondID, firstID],
+                       "fetchAll keeps creation-time then UUID tie ordering")
+        let persisted = try XCTUnwrap(repository.fetchAll().first { $0.id == firstID })
+        XCTAssertEqual(TaskSnapshot(persisted), snapshot)
+    }
+
+    func testExplicitValidationDoesNotAllocateIDOrSaveAndFailedSaveIsIsolated() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let independent = ModelContext(container)
+        independent.autosaveEnabled = false
+        let draft = try TaskItem(id: secondID, title: "Pending elsewhere", createdAt: instant)
+        independent.insert(draft)
+        var ids = 0
+        var saves = 0
+        let repository = SwiftDataTaskRepository(container: container, now: { self.instant },
+            makeID: { ids += 1; return self.firstID }, save: { _ in
+                saves += 1
+                throw Injected.saveFailed
+            })
+        XCTAssertThrowsError(try repository.create(input: TaskInput(title: "  \n  "))) {
+            XCTAssertTrue($0 is KontrolSchemaV1.TaskValidationError)
+        }
+        let invalid = PlannedDay(components: .init(calendarIdentifier: "gregorian", year: 2025,
+                                                    month: 2, day: 29), timeZoneID: "UTC")
+        XCTAssertThrowsError(try repository.create(input: TaskInput(title: "Valid title", plannedFor: invalid))) {
+            XCTAssertEqual($0 as? PlannedDay.ValidationError, .invalidDate)
+        }
+        XCTAssertEqual(ids, 0)
+        XCTAssertEqual(saves, 0)
+        XCTAssertThrowsError(try repository.create(input: TaskInput(title: "Will fail", dueAt: instant))) {
+            XCTAssertTrue($0 is Injected)
+        }
+        XCTAssertEqual(ids, 1)
+        XCTAssertEqual(saves, 1)
+        XCTAssertTrue(try repository.fetchAll().isEmpty)
+        XCTAssertTrue(independent.hasChanges)
+        XCTAssertEqual(draft.title, "Pending elsewhere")
+        try independent.save()
+        XCTAssertEqual(try repository.fetchAll().map(\.id), [secondID])
+        let retry = try makeRepository(container, id: firstID).create(input: TaskInput(title: "Retry"))
+        XCTAssertEqual(retry.id, firstID)
+        XCTAssertEqual(try repository.fetchAll().map(\.id), [secondID, firstID])
+    }
+
     func testExplicitPlannedDayKeepsSelectedZoneAndCalendarDate() throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         let selected = PlannedDay(components: .init(calendarIdentifier: "gregorian", year: 2026,
