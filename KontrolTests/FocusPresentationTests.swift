@@ -197,7 +197,61 @@ final class FocusPresentationTests: XCTestCase {
         XCTAssertThrowsError(try service.retryCompletion())
     }
 
+    func testHistoryPresentationUsesActualDurationOutcomesAndRetainedTitles() throws {
+        let finish = Date(timeIntervalSinceReferenceDate: 10_000)
+        let completed = try FocusSessionSnapshot(id: UUID(), state: .completed, plannedSeconds: 1500,
+            accumulatedActiveSeconds: 1500, startedAt: finish.addingTimeInterval(-1500),
+            endedAt: finish, checkpointAt: finish, linkedTitleSnapshot: "Retained task title")
+        let ended = try FocusSessionSnapshot(id: UUID(), state: .ended, plannedSeconds: 1500,
+            accumulatedActiveSeconds: 62.75, startedAt: finish.addingTimeInterval(-100),
+            endedAt: finish, checkpointAt: finish)
+        XCTAssertEqual(FocusHistoryPresentation.title(for: completed), "Retained task title")
+        XCTAssertEqual(FocusHistoryPresentation.title(for: ended), "Focus session")
+        XCTAssertEqual(FocusHistoryPresentation.detail(for: completed), "25 min 0 sec focused · Completed")
+        XCTAssertEqual(FocusHistoryPresentation.detail(for: ended), "1 min 2 sec focused · Ended early")
+
+        let result = FocusHistorySelection.select([ended, completed], filter: .recent,
+            now: finish, calendar: .current, timeZone: .current)
+        XCTAssertEqual(result.groups.flatMap(\.sessions).count, 2)
+        XCTAssertFalse(FocusHistoryPresentation(result: result, readState: .loaded).isEmpty)
+        let empty = FocusHistorySelection.select([], filter: .today,
+            now: finish, calendar: .current, timeZone: .current)
+        XCTAssertTrue(FocusHistoryPresentation(result: empty, readState: .loaded).isEmpty)
+        let failed = FocusHistoryPresentation(result: result,
+            readState: .failed(.persistenceFailure, hasStaleRows: true))
+        XCTAssertTrue(failed.isUnreadable)
+        XCTAssertTrue(failed.isStale)
+        XCTAssertFalse(failed.isEmpty)
+        let unavailable = FocusHistoryPresentation(result: empty,
+            readState: .failed(.persistenceFailure, hasStaleRows: false))
+        XCTAssertTrue(unavailable.isUnreadable)
+        XCTAssertFalse(unavailable.isEmpty)
+    }
+
+    func testHistoryProjectionDoesNotChangeSharedActiveSession() throws {
+        let graph = try dependencies()
+        try graph.focusService.start(configuration: FocusConfiguration())
+        let active = try XCTUnwrap(graph.focusService.activeSession)
+        for filter in [FocusHistoryFilter.recent, .today, .thisWeek] {
+            XCTAssertTrue(graph.focusService.history(filter).groups.isEmpty)
+        }
+        XCTAssertEqual(graph.focusService.activeSession, active)
+        XCTAssertNotNil(graph.focusService.countdownSeconds)
+        XCTAssertEqual(try SwiftDataFocusRepository(container: graph.container).fetchAll(), [active])
+    }
+
     // Hosted presentation is compiled by build-for-testing, not executed in this step.
+    func testHostedHistoryAtBothReferenceSizes() throws {
+        let graph = try dependencies()
+        let host = NSHostingView(rootView: FocusHistoryView(service: graph.focusService,
+                                                            filter: .constant(.recent)))
+        for size in [CGSize(width: 1000, height: 700), CGSize(width: 1440, height: 940)] {
+            host.frame = CGRect(origin: .zero, size: size)
+            host.layoutSubtreeIfNeeded()
+            XCTAssertEqual(host.frame.size, size)
+        }
+    }
+
     func testHostedReadySurface() throws {
         let graph = try dependencies()
         let host = NSHostingView(rootView: FocusView(service: graph.focusService, taskStore: graph.taskStore))

@@ -57,6 +57,12 @@ struct FocusView: View {
     @State private var draft = FocusReadyDraft()
     @State private var customMinutes = ""
     @State private var showingSessions = false
+    @State private var historyFilter: FocusHistoryFilter = .recent
+    @AccessibilityFocusState private var focusHistoryNavigation: Bool
+    @AccessibilityFocusState private var focusTimerNavigation: Bool
+    @FocusState private var focusSessionsButton: Bool
+    @FocusState private var focusBackButton: Bool
+    @ScaledMetric(relativeTo: .largeTitle) private var countdownFontSize: CGFloat = 64
     @State private var startError: FocusError?
     @State private var actionError: (sessionID: UUID, state: FocusSessionState, message: String)?
 
@@ -87,46 +93,59 @@ struct FocusView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppMetrics.space6) {
-            PageHeader("Focus", metadata: showingSessions ? "Sessions" :
-                       service.completionPendingError != nil ? "Completion pending" :
-                       service.activeSession?.recoveryRequired == true ? "Interrupted" :
-                       service.activeSession == nil ? "Ready" : "Session active") {
-                ActionButton(showingSessions ? "Back to timer" : "Sessions", symbol: "clock.arrow.circlepath") {
-                    showingSessions.toggle()
-                }
-                .accessibilityIdentifier("focus-sessions")
-            }
             if showingSessions {
-                // Navigation is local to this window; the service and its clock are never recreated.
-                Text("Recent sessions")
-                    .appTypography(.section)
-                Text("Session history and filters will appear here.")
-                    .appTypography(.body)
-                    .foregroundStyle(AppColors.textSecondary)
-            } else if case .failed = service.readState {
-                ErrorBanner(.readFailed, recoveryTitle: "Retry", recovery: { service.retryRead() })
-                    .accessibilityIdentifier("focus-read-error")
-                Text("Active session status is unknown. Starting is unavailable until Focus can load.")
-                    .appTypography(.body)
-            } else if service.readState == .notLoaded {
-                LoadingState("Loading Focus")
-            } else if let active = service.activeSession {
-                // The committed session takes precedence over stale local drafts in every window.
-                if service.completionPendingError != nil {
-                    completionPendingContent(active)
-                } else if active.recoveryRequired {
-                    recoveryContent(active)
-                } else {
-                    timerContent(active)
+                PageHeader("Sessions") {
+                    ActionButton("Back to timer", symbol: "arrow.left") {
+                        showingSessions = false
+                        focusSessionsButton = true
+                        focusTimerNavigation = true
+                    }
+                    .focused($focusBackButton)
+                    .keyboardShortcut(.cancelAction)
+                    .accessibilityFocused($focusHistoryNavigation)
+                    .accessibilityIdentifier("focus-back-to-timer")
                 }
+                // Navigation is local to this window; the service clock remains owned by the graph.
+                FocusHistoryView(service: service, filter: $historyFilter)
             } else {
-                readyContent
+                PageHeader("Focus", metadata: service.completionPendingError != nil ? "Completion pending" :
+                           service.activeSession?.recoveryRequired == true ? "Interrupted" :
+                           service.activeSession == nil ? "Ready" : "Session active") {
+                    ActionButton("Sessions", symbol: "clock.arrow.circlepath") {
+                        showingSessions = true
+                        focusBackButton = true
+                        focusHistoryNavigation = true
+                    }
+                    .focused($focusSessionsButton)
+                    .accessibilityFocused($focusTimerNavigation)
+                    .accessibilityIdentifier("focus-sessions")
+                }
+                if case .failed = service.readState {
+                    ErrorBanner(.readFailed, recoveryTitle: "Retry", recovery: { service.retryRead() })
+                        .accessibilityIdentifier("focus-read-error")
+                    Text("Active session status is unknown. Starting is unavailable until Focus can load.")
+                        .appTypography(.body)
+                } else if service.readState == .notLoaded {
+                    LoadingState("Loading Focus")
+                } else if let active = service.activeSession {
+                    // The committed session takes precedence over stale local drafts in every window.
+                    if service.completionPendingError != nil {
+                        completionPendingContent(active)
+                    } else if active.recoveryRequired {
+                        recoveryContent(active)
+                    } else {
+                        timerContent(active)
+                    }
+                } else {
+                    readyContent
+                }
             }
-            Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, AppMetrics.horizontalInset)
         .padding(.top, AppMetrics.space8)
+        .padding(.bottom, AppMetrics.space8)
+        .fixedSize(horizontal: false, vertical: true) // AppShell scrolls overflow at enlarged text sizes.
         .onAppear { if taskStore.readState == .notLoaded { taskStore.refresh() } }
     }
 
@@ -198,7 +217,9 @@ struct FocusView: View {
             StatusPill("Completion pending", kind: .error)
                 .accessibilityIdentifier("focus-completion-pending-state")
             Text("00:00")
-                .font(.system(size: 64, weight: .medium, design: .monospaced))
+                .font(.system(size: countdownFontSize, weight: .medium, design: .monospaced))
+                .lineLimit(1)
+                .minimumScaleFactor(0.5)
                 .foregroundStyle(AppColors.accent)
                 .accessibilityLabel("Time remaining: zero; completion not saved")
                 .accessibilityIdentifier("focus-completion-pending-countdown")
@@ -235,7 +256,9 @@ struct FocusView: View {
             StatusPill(timer.stateText, kind: session.state == .running ? .success : .warning)
                 .accessibilityIdentifier("focus-timer-state")
             Text(timer.countdown)
-                .font(.system(size: 64, weight: .medium, design: .monospaced))
+                .font(.system(size: countdownFontSize, weight: .medium, design: .monospaced))
+                .lineLimit(1)
+                .minimumScaleFactor(0.5)
                 .foregroundStyle(AppColors.accent)
                 .accessibilityLabel("\(timer.stateText), \(timer.countdown) remaining")
                 .accessibilityIdentifier("focus-timer-countdown")
@@ -330,18 +353,18 @@ struct FocusView: View {
     private var readyContent: some View {
         VStack(alignment: .leading, spacing: AppMetrics.space6) {
             Text((try? draft.duration.seconds()).map { String(format: "%02d:%02d", $0 / 60, $0 % 60) } ?? "--:--")
-                .font(.system(size: 64, weight: .medium, design: .monospaced))
+                .font(.system(size: countdownFontSize, weight: .medium, design: .monospaced))
+                .lineLimit(1)
+                .minimumScaleFactor(0.5)
                 .foregroundStyle(AppColors.accent)
                 .accessibilityLabel("Ready, \(durationLabel)")
                 .accessibilityIdentifier("focus-ready-countdown")
 
             VStack(alignment: .leading, spacing: AppMetrics.space3) {
                 SectionHeader("Duration")
-                HStack(spacing: AppMetrics.space2) {
-                    durationButton("15", .fifteen)
-                    durationButton("25", .twentyFive)
-                    durationButton("50", .fifty)
-                    durationButton("Custom", .custom(customMinutes))
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: AppMetrics.space2) { durationChoices }
+                    VStack(alignment: .leading, spacing: AppMetrics.space2) { durationChoices }
                 }
                 if case .custom = draft.duration {
                     TextField("Minutes", text: $customMinutes)
@@ -409,6 +432,13 @@ struct FocusView: View {
             }
             .accessibilityIdentifier("focus-cancel-configuration")
         }
+    }
+
+    @ViewBuilder private var durationChoices: some View {
+        durationButton("15", .fifteen)
+        durationButton("25", .twentyFive)
+        durationButton("50", .fifty)
+        durationButton("Custom", .custom(customMinutes))
     }
 
     private func durationButton(_ label: String, _ value: FocusDuration) -> some View {
