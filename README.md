@@ -1,6 +1,6 @@
 # Kontrol — F00 executable foundation
 
-Kontrol is a local-first macOS SwiftUI app. F00 provides seven destinations (Today, Learning, Projects, Focus, Tasks, News, Settings), a native Settings scene, a small offline starter catalog, and non-destructive startup recovery. F02 provides persistent task creation, editing, completion/reopening, confirmed deletion, Today/Upcoming/Completed filters, optional notes and due dates, and quick capture on Today. The first launch contains no sample personal records. The mockups are visual references, not live data.
+Kontrol is a local-first macOS SwiftUI app. F00 provides seven destinations (Today, Learning, Projects, Focus, Tasks, News, Settings), a native Settings scene, a small offline starter catalog, and non-destructive startup recovery. F02 provides persistent task creation, editing, completion/reopening, confirmed deletion, Today/Upcoming/Completed filters, optional notes and due dates, and quick capture on Today. F03 adds selected-day browsing and persistent manual schedule blocks with explicit overlap review. The first launch contains no sample personal records. The mockups are visual references, not live data.
 
 ## Requirements and build
 
@@ -58,16 +58,13 @@ The test copies **all** fixture files into a unique temporary directory, release
 ```sh
 xcrun swiftc -o /tmp/kontrol-v1-writer \
   Kontrol/Data/Persistence/KontrolSchemaV1.swift \
-  Kontrol/Data/Persistence/KontrolMigrationPlan.swift \
-  Kontrol/Data/Persistence/ModelContainerFactory.swift \
-  Kontrol/Data/Persistence/StoreLocation.swift \
   KontrolTests/Fixtures/GenerateV1.swift
 base=$(mktemp -d)
 /tmp/kontrol-v1-writer "$base/V1"  # new, nonexistent path; refuses overwrite
 ls -la "$base/V1"                 # inspect complete file set before any manual capture
 ```
 
-There is no V0 fixture or claimed V0 migration; future schemas require separate versioned fixtures and migration tests.
+There is no V0 fixture or claimed V0 migration. F03 added a separate frozen V2 fixture and V1→V2 migration tests; see [fixture documentation](KontrolTests/Fixtures/README.md). Future schemas require separate versioned fixtures and migration tests.
 
 ## F00 boundaries and verification status
 
@@ -166,3 +163,61 @@ Warnings investigated: `platform=macOS` matches both arm64 and x86_64 on this ma
 - Capture and compare the **rendered F02 states** against `docs/mockups/M02-tasks.png`, `M03-task-editor.png`, `M04-task-complete-reopen.png`, `M05-task-delete.png` and `M09-quick-capture.png` at **1000×700 and 1440×940** points; record actual before/after screenshots and differences at F13. No F02 pair of both-size screenshots or comparison is claimed here. Earlier F00/F01 M09 and Today captures are historical, not substitutes for F02 captures.
 - Open the signed sandbox app on isolated test data **offline**, create/edit/complete/reopen/delete, quit and relaunch to check Today/Tasks state and unchanged unrelated records. Run the same journey on **macOS 14** when available; this macOS 27 build and ad-hoc signature do not establish either runtime check.
 - After **F04** introduces focus history, delete a linked task and assert the historical optional reference becomes nil, the title snapshot remains and no history cascades. No such model or integration check exists in F02.
+
+## F03 manual schedule non-GUI gate ledger (2026-09-28)
+
+F03 adds a V2 SwiftData schedule model with copied-V1 migration and a separate frozen V2 fixture; one app-owned schedule store publishes committed snapshots alongside tasks. Today has window-local previous/next/relative-Today selection, selected-day tasks and half-open intersecting block rows, a native add/edit/move/delete sheet, and an explicit, fresh-review Keep both overlap decision. [F03 contract](docs/features/F03-today-schedule.md) · [architecture](docs/architecture.md) · [M06–M09 and F03 variants](docs/mockups/INDEX.md) · [QA / F13 ledger](docs/qa.md). The M06 lesson suggestions/Open lesson and M07 lesson selector are **not** present: F06 active lesson slots/actions do not exist. Lesson IDs and title snapshots are stored without a lesson dependency; after F06, integrate at most two stable-ID suggestions, Start now, shared editor prefilled from lesson title/duration, explicit save before creating a block, and completion-driven suggestion refresh without deleting scheduled blocks.
+
+Observed from the repository root on `/Applications/Xcode.app/Contents/Developer`, Xcode **27.0 (27A266a)**, Apple Swift **6.4 (swiftlang-6.4.0.34.1)**, macOS **27.0 (26A428)**, arm64. The app and test targets use Swift language mode 5 and macOS 14.0 as their deployment minimum; a macOS 14 runtime was **not** tested. The following commands exited 0 (command output: `/tmp/kontrol-f03-{toolchain,build,build-for-testing,selected-tests,analyze,signed,verify,entitlements,diffcheck}.log`):
+
+```sh
+xcode-select -p
+xcodebuild -version
+xcrun swift --version
+make build DERIVED_DATA=/tmp/kontrol-f03-derived
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug -destination 'platform=macOS' -derivedDataPath /tmp/kontrol-f03-derived CODE_SIGNING_ALLOWED=NO build-for-testing
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug -destination 'platform=macOS' -derivedDataPath /tmp/kontrol-f03-derived CODE_SIGNING_ALLOWED=NO \
+  -only-testing:KontrolTests/ScheduleSelectionTests \
+  -only-testing:KontrolTests/ScheduleRepositoryTests \
+  -only-testing:KontrolTests/ScheduleStoreTests \
+  -only-testing:KontrolTests/ScheduleEditorDraftTests \
+  -only-testing:KontrolTests/TodayDaySelectionTests \
+  -only-testing:KontrolTests/ScheduleMigrationTests \
+  -only-testing:KontrolTests/TaskRepositoryTests \
+  -only-testing:KontrolTests/TaskSelectionTests \
+  -only-testing:KontrolTests/TaskStoreTests \
+  -only-testing:KontrolTests/TaskEditorDraftTests \
+  -only-testing:KontrolTests/V1FixtureTests \
+  -only-testing:KontrolTests/SchemaTests \
+  -only-testing:KontrolTests/ContainerFactoryTests \
+  -only-testing:KontrolTests/CatalogValidatorTests \
+  -only-testing:KontrolTests/CatalogImportTests \
+  -only-testing:KontrolTests/BundledCatalogTests \
+  -only-testing:KontrolTests/LaunchCoordinatorTests \
+  -only-testing:KontrolTests/LaunchRecoveryTests \
+  -only-testing:KontrolTests/NavigationStoreTests \
+  -only-testing:KontrolTests/ProjectSmokeTests \
+  -only-testing:KontrolTests/AppShellTests/testOneStorePerDependencyGraphAcrossRoutesAndWindows \
+  -only-testing:KontrolTests/AppShellTests/testNavigationMetadataAndRouting \
+  -only-testing:KontrolTests/QuickCaptureTests/testBlankDraftNeverSaves \
+  -only-testing:KontrolTests/QuickCaptureTests/testFailureKeepsEditableTitleAndSheetUntilSingleSuccessfulRetry \
+  -only-testing:KontrolTests/QuickCaptureTests/testOvernightTodayIsResolvedAtSubmissionAndPublishesOneIdentity \
+  -only-testing:KontrolTests/QuickCaptureTests/testUnplannedAndClearedDuePersistAndFailureRetainsAllSelections \
+  -only-testing:KontrolTests/QuickCaptureTests/testExplicitDateAndDueAreSavedAsSelected \
+  -only-testing:KontrolTests/QuickCaptureTests/testExplicitPlanKeepsSelectedCalendarDayAndZoneAfterTravelAndFailedSave test
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug -destination 'platform=macOS' -derivedDataPath /tmp/kontrol-f03-derived CODE_SIGNING_ALLOWED=NO analyze
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug -destination 'platform=macOS' -derivedDataPath /tmp/kontrol-f03-sandbox CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= build
+codesign --verify --deep --strict /tmp/kontrol-f03-sandbox/Build/Products/Debug/Kontrol.app
+codesign --display --entitlements - /tmp/kontrol-f03-sandbox/Build/Products/Debug/Kontrol.app
+git diff --check
+```
+
+The explicit **non-GUI** selection ran **149 tests, 0 failures, 0 unexpected, 0 skipped**; result bundle: `/tmp/kontrol-f03-derived/Logs/Test/Test-Kontrol-2026.09.28_17-26-03-+0800.xcresult`. These suites cover calendar/DST/travel and relative/explicit day selection, interval boundaries and multiple conflicts, disk CRUD across opens, receipt invalidation and failure paths, store sharing/publication, copied V1 and V2 fixture integrity and non-destructive open recovery, and selected F02 task/capture/launch regressions. The app and test bundles compiled (`BUILD SUCCEEDED`, `TEST BUILD SUCCEEDED`); the analyzer returned `ANALYZE SUCCEEDED`; strict signature verification passed on `/tmp/kontrol-f03-sandbox/Build/Products/Debug/Kontrol.app`. Entitlement inspection reports `com.apple.security.app-sandbox = true` and Debug `com.apple.security.get-task-allow = true`. `git diff --check` had no output. This is an ad-hoc local signature, **not** distribution signing or an interactive sandbox relaunch. No full `make test` or hosted presentation suite was run at this gate.
+
+Warnings/diagnostics: `platform=macOS` matched arm64 and x86_64; xcodebuild used the first (arm64). AppIntents metadata extraction was skipped because this app has no AppIntents.framework dependency. The test process logged `com.apple.linkd.autoShortcut` connection errors and CoreData format errors during the deliberately invalid-store recovery test; its assertions passed. No Swift compiler or analyzer warning was observed in these logs. The entitlement command with `-` produced no deprecation warning. Do not confuse these runtime messages with failed tests.
+
+### F03 open F13 interactive/hosted ledger (not passed by compilation or signing)
+
+- Reserve an active, uncontended Mac GUI session to **execute** the hosted Today/schedule presentation tests (including any hosted `AppShellTests`, `QuickCaptureTests`, and F02 `TaskPresentationTests`) and the full `make test` suite. The inherited F02 intermittent AX visibility and sheet-dismissal failures (`testNativeTasksEditorCreatesEditsAndCancelsWithoutWriting`, `testQuickCapturePublishesAcrossTodayAndTasksWithoutPostSaveRead`) and **skipped** `TaskPresentationTests/testNativeDeleteAlertKeyboardNavigationAndConfirmation` remain unresolved. Selected non-GUI tests and `build-for-testing` do not resolve them.
+- On isolated data, run live day browsing, task capture/completion, schedule create/edit/move/overnight and multiple-conflict Keep both/Edit time/cancel, deletion confirmation/failure recovery, and relaunch persistence. Inspect empty/error/stale states, focus return and draft preservation. Launch the **signed sandbox app offline**, quit/relaunch, and check task/block identities and unchanged unrelated records; no signed F03 GUI journey or offline claim is made here.
+- Capture **rendered** M06 Today, M07 editor, M08 overlap and M09 quick capture, plus [overnight/validation](.mockups/screens/f03/schedule-editor-endpoints.html) and [multiple conflicts](.mockups/screens/f03/schedule-overlap-multiple.html), at **1000×700 and 1440×940 points**. Compare actual pairs and record differences; no F03 before/after image pair or visual equality is claimed. Check reflow/enlarged text, long-field/action scrolling, keyboard-only navigation/Escape/default/destructive confirmation, initial Title focus/restoration, accessible row/action names and target sizes, spoken VoiceOver, reduced motion and macOS 14 runtime/API/symbol behavior. These require F13 observation; neither compilation nor ad-hoc signing certifies them.
