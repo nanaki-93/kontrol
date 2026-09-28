@@ -448,15 +448,53 @@ final class QuickCaptureTests: XCTestCase {
         XCTAssertLessThan(heights[2], 700, "The scroll region must bound the sheet at extreme text sizes")
     }
 
+    func testQuickCaptureEscapeAndReturnKeyboardShortcuts() throws {
+        let repository = try RecordingRepository()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.title = "Capture keyboard \(UUID())"
+        window.contentView = NSHostingView(rootView: TodayView(store: TaskStore(repository: repository)))
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        func key(_ code: UInt16, character: String) {
+            let sheet = window.attachedSheet ?? window
+            let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+                                         timestamp: ProcessInfo.processInfo.systemUptime,
+                                         windowNumber: sheet.windowNumber, context: nil,
+                                         characters: character, charactersIgnoringModifiers: character,
+                                         isARepeat: false, keyCode: code)!
+            if !sheet.performKeyEquivalent(with: event) { sheet.sendEvent(event) }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        }
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement("today-add-task", in: window),
+                                                 kAXPressAction as CFString), .success)
+        _ = try waitForElement("quick-capture-title", in: window)
+        XCTAssertEqual(focusedIdentifier(), "quick-capture-title")
+        key(53, character: "\u{1b}")
+        XCTAssertNil(window.attachedSheet)
+        XCTAssertEqual(focusedIdentifier(), "today-add-task")
+        XCTAssertTrue(repository.calls.isEmpty)
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement("today-add-task", in: window),
+                                                 kAXPressAction as CFString), .success)
+        XCTAssertEqual(AXUIElementSetAttributeValue(try waitForElement("quick-capture-title", in: window),
+                                                    kAXValueAttribute as CFString, "Keyboard capture" as CFString), .success)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        key(36, character: "\r")
+        XCTAssertNil(window.attachedSheet)
+        XCTAssertEqual(try repository.fetchAll().map(\.title), ["Keyboard capture"])
+        XCTAssertEqual(focusedIdentifier(), "today-add-task")
+    }
+
     func testEnlargedCaptureKeepsFieldsAndActionsReachableOnCompactAndReferenceHosts() throws {
         for (width, height) in [(1000.0, 700.0), (1440.0, 940.0)] {
+            for scale in [1.0, 1.3] {
             let repository = try RecordingRepository()
             repository.fail = true
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: height),
                                   styleMask: [.titled], backing: .buffered, defer: false)
-            window.title = "Enlarged capture \(width)"
+            window.title = "Capture layout \(UUID())"
             let host = NSHostingView(rootView: TodayView(store: TaskStore(repository: repository))
-                .environment(\.appTextScaleOverride, 1.3))
+                .environment(\.appTextScaleOverride, scale))
             window.contentView = host
             window.makeKeyAndOrderFront(nil)
             defer { window.orderOut(nil) }
@@ -490,6 +528,7 @@ final class QuickCaptureTests: XCTestCase {
             XCTAssertEqual(focusedIdentifier(), "today-add-task")
             XCTAssertEqual(repository.calls.count, 1)
             XCTAssertTrue(try repository.fetchAll().isEmpty)
+            }
         }
     }
 }

@@ -60,6 +60,69 @@ final class TaskPresentationTests: XCTestCase {
 
     private func settle() { RunLoop.main.run(until: Date().addingTimeInterval(0.15)) }
 
+    private func waitUntil(_ description: String, timeout: TimeInterval = 4,
+                           file: StaticString = #filePath, line: UInt = #line,
+                           _ condition: () -> Bool) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        XCTAssertTrue(condition(), description, file: file, line: line)
+    }
+
+    private func key(_ code: UInt16, character: String, in window: NSWindow,
+                     modifiers: NSEvent.ModifierFlags = []) {
+        let receiver = window.attachedSheet ?? window
+        let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers,
+                                    timestamp: ProcessInfo.processInfo.systemUptime,
+                                    windowNumber: receiver.windowNumber, context: nil,
+                                    characters: character, charactersIgnoringModifiers: character,
+                                    isARepeat: false, keyCode: code)!
+        if !receiver.performKeyEquivalent(with: event) {
+            if receiver.isKeyWindow {
+                receiver.sendEvent(event)
+            } else {
+                // Hosted XCTest windows cannot always activate as key windows;
+                // deliver the keyboard event to their focused responder directly.
+                receiver.firstResponder?.keyDown(with: event)
+            }
+        }
+        settle()
+    }
+
+    private func focusedIdentifier() -> String? {
+        let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+        guard let focused = attribute(app, kAXFocusedUIElementAttribute) else { return nil }
+        return attribute(unsafeBitCast(focused, to: AXUIElement.self), kAXIdentifierAttribute) as? String
+    }
+
+    private func assertTarget(_ identifier: String, in window: NSWindow,
+                              file: StaticString = #filePath, line: UInt = #line) throws {
+        let rect = try frame(waitForElement(identifier, in: window))
+        XCTAssertGreaterThanOrEqual(rect.width, AppMetrics.minimumTarget, file: file, line: line)
+        XCTAssertGreaterThanOrEqual(rect.height, AppMetrics.minimumTarget, file: file, line: line)
+        let containingWindow = window.attachedSheet ?? window
+        let screen = try XCTUnwrap(containingWindow.screen, file: file, line: line)
+        let native = containingWindow.frame
+        let visibleAX = CGRect(x: native.minX, y: screen.frame.maxY - native.maxY,
+                               width: native.width, height: native.height)
+        XCTAssertTrue(visibleAX.insetBy(dx: -2, dy: -2).contains(rect),
+                      "\(identifier) \(rect) outside window/sheet \(visibleAX)", file: file, line: line)
+    }
+
+    private func assertInSheet(_ identifier: String, in window: NSWindow,
+                               file: StaticString = #filePath, line: UInt = #line) throws {
+        let sheet = try XCTUnwrap(window.attachedSheet, file: file, line: line)
+        let screen = try XCTUnwrap(sheet.screen, file: file, line: line)
+        let native = sheet.frame
+        let sheetAX = CGRect(x: native.minX, y: screen.frame.maxY - native.maxY,
+                             width: native.width, height: native.height)
+        let target = try frame(waitForElement(identifier, in: window))
+        XCTAssertTrue(sheetAX.insetBy(dx: -2, dy: -2).contains(target),
+                      "\(identifier) \(target) outside \(sheetAX)", file: file, line: line)
+        try assertTarget(identifier, in: window, file: file, line: line)
+    }
+
     private func visibleText(in window: NSWindow) -> [String] {
         let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
         let windows = attribute(app, kAXWindowsAttribute) as? [AXUIElement] ?? []
@@ -229,7 +292,36 @@ final class TaskPresentationTests: XCTestCase {
             if let found = elements(in: window, identifier: identifier).first { return found }
             RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         } while Date() < deadline
-        return try XCTUnwrap(elements(in: window, identifier: identifier).first)
+        return try XCTUnwrap(elements(in: window, identifier: identifier).first,
+                             "Missing AX control \(identifier) in \(window.title)")
+    }
+
+    /// Edit the native field editor rather than changing its AXValue (which can
+    /// change without notifying SwiftUI's TextField binding). Validation and the
+    /// committed snapshot are the oracles, not a fixed delay or the AX value.
+    private func replaceEditorTitle(_ newTitle: String, in window: NSWindow,
+                                    file: StaticString = #filePath, line: UInt = #line) throws {
+        let title = try waitForElement("task-editor-title", in: window)
+        XCTAssertEqual(AXUIElementSetAttributeValue(title, kAXFocusedAttribute as CFString,
+                                                    kCFBooleanTrue), .success, file: file, line: line)
+        let sheet = try XCTUnwrap(window.attachedSheet, file: file, line: line)
+        let editor = try XCTUnwrap(sheet.firstResponder as? NSTextView, file: file, line: line)
+        XCTAssertTrue(editor.isFieldEditor, file: file, line: line)
+        editor.insertText(" ", replacementRange: NSRange(location: 0, length: editor.string.utf16.count))
+        waitUntil("Blank title must disable Save", file: file, line: line) {
+            !elements(in: window, identifier: "task-editor-title-error").isEmpty &&
+            elements(in: window, identifier: "task-editor-submit").first.flatMap {
+                (attribute($0, kAXEnabledAttribute) as? NSNumber)?.boolValue
+            } == false
+        }
+        editor.insertText(newTitle, replacementRange: NSRange(location: 0, length: editor.string.utf16.count))
+        waitUntil("Edited title must enable Save", file: file, line: line) {
+            elements(in: window, identifier: "task-editor-submit").first.flatMap {
+                (attribute($0, kAXEnabledAttribute) as? NSNumber)?.boolValue
+            } == true && elements(in: window, identifier: "task-editor-title-error").isEmpty
+        }
+        XCTAssertEqual(attribute(try waitForElement("task-editor-title", in: window),
+                                 kAXValueAttribute) as? String, newTitle, file: file, line: line)
     }
 
     func testRowActionsPublishAcrossBothRoutesAndReopenRestoresToday() throws {
@@ -296,13 +388,12 @@ final class TaskPresentationTests: XCTestCase {
         XCTAssertNil(windows[0].attachedSheet)
         XCTAssertEqual(AXUIElementPerformAction(try waitForElement("task-edit-\(saved.id.uuidString)", in: windows[0]),
                                                  kAXPressAction as CFString), .success)
-        XCTAssertEqual(AXUIElementSetAttributeValue(try waitForElement("task-editor-title", in: windows[0]),
-                                                    kAXValueAttribute as CFString, "Edited from Today" as CFString), .success)
-        settle()
+        try replaceEditorTitle("Edited from Today", in: windows[0])
         XCTAssertEqual(AXUIElementPerformAction(try waitForElement("task-editor-submit", in: windows[0]),
                                                  kAXPressAction as CFString), .success)
-        settle()
-        XCTAssertNil(windows[0].attachedSheet)
+        waitUntil("Today editor dismisses after committed edit") {
+            windows[0].attachedSheet == nil && store.snapshots.first?.title == "Edited from Today"
+        }
         XCTAssertEqual(store.snapshots.first?.id, saved.id)
         XCTAssertEqual(store.snapshots.first?.title, "Edited from Today")
         XCTAssertEqual(try repository.fetchAll().map(\.id), [saved.id])
@@ -375,8 +466,10 @@ final class TaskPresentationTests: XCTestCase {
             repository.failRead = isToday
             XCTAssertEqual(AXUIElementPerformAction(try waitForElement(completeID, in: window),
                                                      kAXPressAction as CFString), .success)
-            settle()
-            XCTAssertEqual(store.mutationError, .notFound)
+            waitUntil("Missing-task action publishes recovery controls") {
+                store.mutationError == .notFound &&
+                elements(in: window, identifier: "\(prefix)-action-refresh").count == 1
+            }
             XCTAssertEqual(elements(in: window, identifier: "\(prefix)-action-error").count, 1)
             XCTAssertTrue(visibleText(in: window).contains(where: { $0.contains("This task is no longer available") }))
             XCTAssertFalse(visibleText(in: window).contains("Error: Changes could not be saved."))
@@ -460,6 +553,7 @@ final class TaskPresentationTests: XCTestCase {
         }, "confirmation must name the selected task")
         XCTAssertEqual(saves, before, "opening confirmation must not write")
         try pressAlert("Cancel")
+        XCTAssertEqual(focusedIdentifier(), deleteID)
         XCTAssertEqual(saves, before)
         XCTAssertEqual(Set(try repository.fetchAll().map(\.id)), Set([first.id, other.id]))
         XCTAssertEqual(AXUIElementPerformAction(try waitForElement(deleteID, in: window), kAXPressAction as CFString), .success)
@@ -475,6 +569,7 @@ final class TaskPresentationTests: XCTestCase {
         XCTAssertEqual(try repository.fetchAll().map(\.id), [other.id])
         XCTAssertTrue(elements(in: window, identifier: rowID).isEmpty)
         XCTAssertEqual(elements(in: window, identifier: otherID).count, 1)
+        XCTAssertEqual(focusedIdentifier(), otherID, "deleted control must hand focus to a surviving row")
         XCTAssertEqual(AXUIElementPerformAction(try waitForElement(otherID, in: window), kAXPressAction as CFString), .success)
         _ = try alertButton("Cancel")
         if let sheet = window.attachedSheet {
@@ -623,9 +718,10 @@ final class TaskPresentationTests: XCTestCase {
         settle()
         XCTAssertEqual(AXUIElementPerformAction(try waitForElement("task-editor-submit", in: window),
                                                  kAXPressAction as CFString), .success)
-        settle()
+        waitUntil("New task commits and editor closes") {
+            store.snapshots.count == 1 && window.attachedSheet == nil
+        }
         let saved = try XCTUnwrap(store.snapshots.first)
-        XCTAssertNil(window.attachedSheet)
         XCTAssertEqual(saved.title, "New task")
         XCTAssertEqual(saved.notes, "First line\nSecond line")
         XCTAssertNotNil(saved.dueAt)
@@ -645,13 +741,14 @@ final class TaskPresentationTests: XCTestCase {
                                                  kAXPressAction as CFString), .success)
         XCTAssertEqual(attribute(try waitForElement("task-editor-title", in: window),
                                  kAXValueAttribute) as? String, "New task")
-        XCTAssertEqual(AXUIElementSetAttributeValue(try waitForElement("task-editor-title", in: window),
-                                                    kAXValueAttribute as CFString, "Renamed task" as CFString), .success)
-        settle()
+        // AXValue can change before the SwiftUI draft does. Verify a draft-derived
+        // validation state, not elapsed time or the native field's AXValue alone.
+        try replaceEditorTitle("Renamed task", in: window)
         XCTAssertEqual(AXUIElementPerformAction(try waitForElement("task-editor-submit", in: window),
                                                  kAXPressAction as CFString), .success)
-        settle()
-        XCTAssertNil(window.attachedSheet)
+        waitUntil("Renamed task commits and editor closes") {
+            window.attachedSheet == nil && store.snapshots.first?.title == "Renamed task"
+        }
         XCTAssertEqual(store.snapshots.first?.id, saved.id)
         XCTAssertEqual(store.snapshots.first?.title, "Renamed task")
         XCTAssertEqual(try repository.fetchAll().map(\.id), [saved.id])
@@ -909,6 +1006,179 @@ final class TaskPresentationTests: XCTestCase {
                           (attribute(row, kAXValueAttribute) as? String ?? "").contains(title))
         }
         XCTAssertEqual(try repository.fetchAll().map(\.id), [id])
+    }
+
+    func testTaskControlsAndEditorAtBothSizesAndTextScales() throws {
+        for (width, height) in [(1000.0, 700.0), (1440.0, 940.0)] {
+            for scale in [1.0, 1.3] {
+                    let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+                    let repository = SwiftDataTaskRepository(container: container)
+                    let store = TaskStore(repository: repository)
+                    let saved = try store.create(input: TaskInput(title: "Keyboard target", plannedFor: .today(at: .now)))
+                    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: height),
+                                          styleMask: [.titled], backing: .buffered, defer: false)
+                    window.title = "Task layout \(UUID())"
+                    window.contentView = NSHostingView(rootView: TasksView(store: store)
+                        .environment(\.appTextScaleOverride, scale))
+                    window.makeKeyAndOrderFront(nil)
+                    defer { window.orderOut(nil) }
+                    settle()
+                    let rowID = "task-row-\(saved.id.uuidString)"
+                    let actions = ["task-complete-", "task-edit-", "task-delete-"].map { $0 + saved.id.uuidString }
+                    let row = try waitForElement(rowID, in: window)
+                    XCTAssertFalse(descendants(of: row).contains {
+                        attribute($0, kAXRoleAttribute) as? String == kAXButtonRole
+                    })
+                    for id in actions {
+                        let action = try waitForElement(id, in: window)
+                        XCTAssertEqual(attribute(action, kAXRoleAttribute) as? String, kAXButtonRole)
+                        XCTAssertTrue((attribute(action, kAXDescriptionAttribute) as? String ?? "").contains(saved.title))
+                        try assertTarget(id, in: window)
+                    }
+                    for name in ["today", "upcoming", "completed"] {
+                        try assertTarget("tasks-filter-\(name)", in: window)
+                        XCTAssertEqual(attribute(try waitForElement("tasks-filter-\(name)", in: window),
+                                                 kAXValueAttribute) as? String,
+                                       name == "today" ? "Selected" : "Not selected")
+                    }
+                    try assertTarget("tasks-add-task", in: window)
+                    // AppKit's Tab traversal works even when XCTest cannot make
+                    // its hosted window key for synthetic NSEvent delivery.
+                    XCTAssertEqual(AXUIElementSetAttributeValue(try waitForElement(actions[1], in: window),
+                                                                kAXFocusedAttribute as CFString, kCFBooleanTrue), .success)
+                    window.selectNextKeyView(nil)
+                    XCTAssertEqual(focusedIdentifier(), actions[2], "Delete follows Edit in keyboard focus order")
+                    XCTAssertEqual(AXUIElementPerformAction(try waitForElement(actions[1], in: window),
+                                                             kAXPressAction as CFString), .success)
+                    _ = try waitForElement("task-editor-title", in: window)
+                    XCTAssertEqual(focusedIdentifier(), "task-editor-title")
+                    for id in ["task-editor-cancel", "task-editor-submit"] {
+                        try assertInSheet(id, in: window)
+                    }
+                    XCTAssertEqual(AXUIElementPerformAction(try waitForElement("task-editor-cancel", in: window),
+                                                             kAXPressAction as CFString), .success)
+                    settle()
+                    XCTAssertNil(window.attachedSheet)
+                    XCTAssertEqual(focusedIdentifier(), actions[1])
+                    XCTAssertEqual(try repository.fetchAll().map(\.id), [saved.id])
+            }
+        }
+    }
+
+    func testTodayRowControlsAtBothSizesAndTextScales() throws {
+        for (width, height) in [(1000.0, 700.0), (1440.0, 940.0)] {
+            for scale in [1.0, 1.3] {
+                let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+                let repository = SwiftDataTaskRepository(container: container)
+                let store = TaskStore(repository: repository)
+                let task = try store.create(input: TaskInput(title: "Today keyboard target", plannedFor: .today(at: .now)))
+                let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: height),
+                                      styleMask: [.titled], backing: .buffered, defer: false)
+                window.title = "Today layout \(UUID())"
+                window.contentView = NSHostingView(rootView: TodayView(store: store)
+                    .environment(\.appTextScaleOverride, scale))
+                window.makeKeyAndOrderFront(nil)
+                defer { window.orderOut(nil) }
+                settle()
+                let row = try waitForElement("task-row-\(task.id.uuidString)", in: window)
+                XCTAssertFalse(descendants(of: row).contains {
+                    attribute($0, kAXRoleAttribute) as? String == kAXButtonRole
+                })
+                for (id, label) in [("task-complete-\(task.id.uuidString)", "Complete"),
+                                    ("task-edit-\(task.id.uuidString)", "Edit")] {
+                    let button = try waitForElement(id, in: window)
+                    XCTAssertEqual(attribute(button, kAXDescriptionAttribute) as? String,
+                                   "\(label) \(task.title)")
+                    try assertTarget(id, in: window)
+                }
+                try assertTarget("today-add-task", in: window)
+                XCTAssertEqual(AXUIElementPerformAction(try waitForElement("task-edit-\(task.id.uuidString)", in: window),
+                                                         kAXPressAction as CFString), .success)
+                _ = try waitForElement("task-editor-title", in: window)
+                XCTAssertEqual(focusedIdentifier(), "task-editor-title")
+                try assertInSheet("task-editor-cancel", in: window)
+                try assertInSheet("task-editor-submit", in: window)
+                XCTAssertEqual(AXUIElementPerformAction(try waitForElement("task-editor-cancel", in: window),
+                                                         kAXPressAction as CFString), .success)
+                settle()
+                XCTAssertEqual(focusedIdentifier(), "task-edit-\(task.id.uuidString)")
+                XCTAssertEqual(try repository.fetchAll().map(\.id), [task.id])
+            }
+        }
+    }
+
+    func testKeyboardShortcutsCancelAndSubmitEditorWithoutPointer() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataTaskRepository(container: container)
+        let store = TaskStore(repository: repository)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.title = "Keyboard editor \(UUID())"
+        window.contentView = NSHostingView(rootView: TasksView(store: store))
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        settle()
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement("tasks-add-task", in: window),
+                                                 kAXPressAction as CFString), .success)
+        _ = try waitForElement("task-editor-title", in: window)
+        XCTAssertEqual(focusedIdentifier(), "task-editor-title")
+        key(53, character: "\u{1b}", in: window) // Escape
+        XCTAssertNil(window.attachedSheet)
+        XCTAssertEqual(focusedIdentifier(), "tasks-add-task")
+        XCTAssertTrue(try repository.fetchAll().isEmpty)
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement("tasks-add-task", in: window),
+                                                 kAXPressAction as CFString), .success)
+        let title = try waitForElement("task-editor-title", in: window)
+        XCTAssertEqual(AXUIElementSetAttributeValue(title, kAXValueAttribute as CFString,
+                                                    "Keyboard save" as CFString), .success)
+        settle()
+        key(36, character: "\r", in: window) // Return / default action
+        XCTAssertNil(window.attachedSheet)
+        XCTAssertEqual(try repository.fetchAll().map(\.title), ["Keyboard save"])
+        XCTAssertEqual(store.snapshots.count, 1)
+    }
+
+    func testNativeDeleteAlertKeyboardNavigationAndConfirmation() throws {
+        // A native alert only receives synthetic keyboard events in an active GUI
+        // session. Never claim AXPress is keyboard confirmation in a headless run.
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataTaskRepository(container: container)
+        let store = TaskStore(repository: repository)
+        let saved = try store.create(input: TaskInput(title: "Keyboard deletion", plannedFor: .today(at: .now)))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.title = "Keyboard confirmation \(UUID())"
+        window.contentView = NSHostingView(rootView: TasksView(store: store))
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        settle()
+        try XCTSkipIf(!NSApp.isActive || !window.isKeyWindow,
+                      "Native alert keyboard confirmation requires an active GUI session and key window")
+        let deleteID = "task-delete-\(saved.id.uuidString)"
+        // Seed focus without activating the control; Tab and Space do the work.
+        XCTAssertEqual(AXUIElementSetAttributeValue(try waitForElement("task-edit-\(saved.id.uuidString)", in: window),
+                                                    kAXFocusedAttribute as CFString, kCFBooleanTrue), .success)
+        key(48, character: "\t", in: window)
+        XCTAssertEqual(focusedIdentifier(), deleteID)
+        key(49, character: " ", in: window)
+        _ = try alertButton("Delete task")
+        _ = try XCTUnwrap(window.attachedSheet)
+        func deleteHasKeyboardFocus() -> Bool {
+            let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+            guard let value = attribute(app, kAXFocusedUIElementAttribute) else { return false }
+            let focused = unsafeBitCast(value, to: AXUIElement.self)
+            return attribute(focused, kAXRoleAttribute) as? String == kAXButtonRole &&
+                attribute(focused, kAXDescriptionAttribute) as? String == "Delete task"
+        }
+        for _ in 0..<8 where !deleteHasKeyboardFocus() {
+            key(48, character: "\t", in: window)
+        }
+        XCTAssertTrue(deleteHasKeyboardFocus(), "Tab must focus the destructive alert button")
+        key(49, character: " ", in: window)
+        XCTAssertTrue(try repository.fetchAll().isEmpty)
+        waitUntil("Focus returns to Add task after keyboard deletion") {
+            focusedIdentifier() == "tasks-add-task"
+        }
     }
 
     func testLocalDayDueBoundaryCompletionAndRepositoryOrder() throws {

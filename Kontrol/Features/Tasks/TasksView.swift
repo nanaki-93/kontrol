@@ -9,6 +9,7 @@ struct TaskRows: View {
     var onSetCompleted: ((TaskSnapshot, Bool) -> Void)? = nil
     var onDelete: ((TaskSnapshot) -> Void)? = nil
     var editFocus: FocusState<UUID?>.Binding? = nil
+    var deleteFocus: FocusState<UUID?>.Binding? = nil
 
     private var dateStyle: Date.FormatStyle {
         var style = Date.FormatStyle.dateTime.month(.abbreviated).day().year()
@@ -75,6 +76,12 @@ struct TaskRows: View {
             .accessibilityIdentifier("task-edit-\(row.id.uuidString)")
     }
 
+    private func deleteButton(for row: TaskSnapshot, action: @escaping (TaskSnapshot) -> Void) -> some View {
+        ActionButton("Delete", action: { action(row) })
+            .accessibilityLabel("Delete \(row.title)")
+            .accessibilityIdentifier("task-delete-\(row.id.uuidString)")
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             ForEach(rows) { row in
@@ -102,9 +109,12 @@ struct TaskRows: View {
                             }
                         }
                         if let onDelete {
-                            ActionButton("Delete", action: { onDelete(row) })
-                                .accessibilityLabel("Delete \(row.title)")
-                                .accessibilityIdentifier("task-delete-\(row.id.uuidString)")
+                            if let deleteFocus {
+                                deleteButton(for: row, action: onDelete)
+                                    .focused(deleteFocus, equals: row.id)
+                            } else {
+                                deleteButton(for: row, action: onDelete)
+                            }
                         }
                     }
                 }
@@ -125,6 +135,8 @@ struct TasksView: View {
     @State private var isDeletePresented = false
     @FocusState private var addFocused: Bool
     @FocusState private var editFocusedID: UUID?
+    @FocusState private var deleteFocusedID: UUID?
+    @State private var lastDeletionTriggerID: UUID?
 
     /// Own the draft at the moment of opening, not during a subsequent body redraw.
     private struct EditorPresentation: Identifiable {
@@ -146,6 +158,22 @@ struct TasksView: View {
             actionError = nil
         } catch {
             actionError = store.mutationError ?? .writeFailed
+        }
+        // The deleted control cannot receive focus. Return to a surviving action,
+        // or Add task when the filter is empty. Wait until the native alert closes.
+        restoreDeletionFocus(preferred: selection.id)
+    }
+
+    private func restoreDeletionFocus(preferred id: UUID) {
+        DispatchQueue.main.async {
+            let visible = store.select(filter)
+            if visible.contains(where: { $0.id == id }) {
+                deleteFocusedID = id
+            } else if let survivor = visible.first {
+                deleteFocusedID = survivor.id
+            } else {
+                addFocused = true
+            }
         }
     }
 
@@ -255,8 +283,9 @@ struct TasksView: View {
                         edit(row)
                     }, onSetCompleted: setCompleted, onDelete: { row in
                         pendingDeletion = PendingDeletion(id: row.id, title: row.title)
+                        lastDeletionTriggerID = row.id
                         isDeletePresented = true
-                    }, editFocus: $editFocusedID)
+                    }, editFocus: $editFocusedID, deleteFocus: $deleteFocusedID)
                 }
             }
             Spacer(minLength: 0)
@@ -275,7 +304,11 @@ struct TasksView: View {
             if let selectedDeletion { confirmDelete(selectedDeletion) }
         })
         .onChange(of: isDeletePresented) { _, presented in
-            if !presented { pendingDeletion = nil }
+            if !presented {
+                pendingDeletion = nil
+                if let id = lastDeletionTriggerID { restoreDeletionFocus(preferred: id) }
+                lastDeletionTriggerID = nil
+            }
         }
         .sheet(item: $presentation, onDismiss: {
             if let id = lastEditorTriggerID, store.select(filter).contains(where: { $0.id == id }) {
