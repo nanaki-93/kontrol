@@ -588,39 +588,108 @@ final class TaskRepositoryTests: XCTestCase {
         XCTAssertEqual(persisted.first { $0.id == secondID }?.notes, "Pending elsewhere")
     }
 
-    func testClosedTemporaryDiskStoreReopensWithSameIDAndValuesAndNoFailedInsert() throws {
+    func testClosedTemporaryDiskStorePersistsEveryLifecycleTransitionAndIsolatesFailedInsert() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("KontrolTaskRepository-\(UUID().uuidString)", isDirectory: true)
         let url = directory.appendingPathComponent("Kontrol.store")
         // SwiftData may retain SQLite file descriptors after Swift owners leave
         // scope; keep this UUID-isolated test store until the test host exits.
-        weak var lastContainer: ModelContainer?
-        func writeAndClose() throws {
-            let container = try ModelContainerFactory().makeContainer(mode: .persistent(url))
-            let repository = makeRepository(container, id: firstID)
-            XCTAssertEqual(try repository.create(title: "  Durable task  ", plannedFor: nil), firstID)
-            XCTAssertThrowsError(try makeRepository(container, id: secondID,
+        func withDistinctOpen(_ body: (SwiftDataTaskRepository, ModelContainer) throws -> Void) throws {
+            // The closure and all explicit container/repository/model owners end
+            // before this function returns. SwiftData may cache internal owners,
+            // so a weak-container nil assertion would not prove disk closure.
+            try autoreleasepool {
+                let container = try ModelContainerFactory().makeContainer(mode: .persistent(url))
+                let repository = makeRepository(container, id: firstID)
+                try body(repository, container)
+            }
+        }
+
+        let originalDue = instant.addingTimeInterval(3_600)
+        let editedDue = instant.addingTimeInterval(7_200)
+        let completion = instant.addingTimeInterval(10_800)
+        let originalPlan = PlannedDay(components: .init(calendarIdentifier: "gregorian",
+            year: 2026, month: 1, day: 2), timeZoneID: "UTC")
+        let editedPlan = PlannedDay(components: .init(calendarIdentifier: "gregorian",
+            year: 2026, month: 6, day: 5), timeZoneID: "Pacific/Auckland")
+
+        // Inspect value snapshots inside each open; neither models, snapshots,
+        // contexts, nor repositories are held across the next factory open.
+        func assertStored(_ repository: SwiftDataTaskRepository, title: String?, notes: String? = nil,
+                          due: Date? = nil, plan: PlannedDay? = nil,
+                          completedAt: Date? = nil) throws {
+            let rows = try repository.fetchAll().map(TaskSnapshot.init)
+            XCTAssertEqual(Set(rows.map(\.id)), title == nil ? [secondID] : [firstID, secondID])
+            XCTAssertEqual(rows.count, title == nil ? 1 : 2)
+            if let title {
+                let task = try XCTUnwrap(rows.first { $0.id == firstID })
+                XCTAssertEqual(task.id, firstID)
+                XCTAssertEqual(task.title, title)
+                XCTAssertEqual(task.notes, notes)
+                XCTAssertEqual(task.dueAt, due)
+                XCTAssertEqual(task.plannedDay, plan?.components)
+                XCTAssertEqual(task.plannedTimeZoneID, plan?.timeZoneID)
+                XCTAssertEqual(task.createdAt, instant)
+                XCTAssertEqual(task.completedAt, completedAt)
+            } else {
+                XCTAssertFalse(rows.contains { $0.id == firstID })
+            }
+            let other = try XCTUnwrap(rows.first { $0.id == secondID })
+            XCTAssertEqual(other.id, secondID)
+            XCTAssertEqual(other.title, "Unrelated")
+            XCTAssertNil(other.notes)
+            XCTAssertNil(other.dueAt)
+            XCTAssertNil(other.plannedDay)
+            XCTAssertNil(other.plannedTimeZoneID)
+            XCTAssertEqual(other.createdAt, instant)
+            XCTAssertNil(other.completedAt)
+        }
+
+        try withDistinctOpen { repository, container in
+            let created = try repository.create(input: TaskInput(title: "  Durable task  ",
+                notes: "First notes", dueAt: originalDue, plannedFor: originalPlan))
+            XCTAssertEqual(created.id, firstID)
+            XCTAssertThrowsError(try makeRepository(container, id: UUID(),
                 save: { _ in throw Injected.saveFailed }).create(title: "Lost task", plannedFor: nil))
+            let unrelated = try makeRepository(container, id: secondID)
+                .create(input: TaskInput(title: "Unrelated"))
+            XCTAssertEqual(unrelated.id, secondID)
+            try assertStored(repository, title: "Durable task", notes: "First notes",
+                             due: originalDue, plan: originalPlan)
         }
-        func reopenAndCheck() throws {
-            let container = try ModelContainerFactory().makeContainer(mode: .persistent(url))
-            lastContainer = container
-            let rows = try makeRepository(container, id: secondID).fetchAll()
-            XCTAssertEqual(rows.count, 1)
-            let task = try XCTUnwrap(rows.first)
-            XCTAssertEqual(task.id, firstID)
-            XCTAssertEqual(task.title, "Durable task")
-            XCTAssertEqual(task.createdAt, instant)
-            XCTAssertEqual(task.plannedDay, .init(calendarIdentifier: "gregorian", year: 2025, month: 12, day: 31))
-            XCTAssertEqual(task.plannedTimeZoneID, "America/Los_Angeles")
-            XCTAssertNil(task.dueAt)
-            XCTAssertNil(task.completedAt)
-            XCTAssertNil(task.notes)
+        try withDistinctOpen { repository, _ in
+            try assertStored(repository, title: "Durable task", notes: "First notes",
+                             due: originalDue, plan: originalPlan)
+            let edited = try repository.update(id: firstID, input: TaskInput(title: "  Edited task  ",
+                notes: "Edited\nnotes", dueAt: editedDue, plannedFor: editedPlan))
+            XCTAssertEqual(edited.id, firstID)
+            XCTAssertEqual(edited.createdAt, instant)
+            XCTAssertNil(edited.completedAt)
         }
-        // All explicit repository/context/container owners leave scope before a
-        // distinct factory open. SwiftData may still cache internal store owners.
-        try autoreleasepool { try writeAndClose() }
-        try autoreleasepool { try reopenAndCheck() }
-        XCTAssertNil(lastContainer, "The reopened container must not remain owned by the test")
+        try withDistinctOpen { repository, container in
+            try assertStored(repository, title: "Edited task", notes: "Edited\nnotes",
+                             due: editedDue, plan: editedPlan)
+            let clocked = SwiftDataTaskRepository(container: container, now: { completion })
+            let completed = try clocked.setCompleted(id: firstID, completed: true)
+            XCTAssertEqual(completed.id, firstID)
+            XCTAssertEqual(completed.createdAt, instant)
+            XCTAssertEqual(completed.completedAt, completion)
+        }
+        try withDistinctOpen { repository, _ in
+            try assertStored(repository, title: "Edited task", notes: "Edited\nnotes",
+                             due: editedDue, plan: editedPlan, completedAt: completion)
+            let reopened = try repository.setCompleted(id: firstID, completed: false)
+            XCTAssertEqual(reopened.id, firstID)
+            XCTAssertEqual(reopened.createdAt, instant)
+            XCTAssertNil(reopened.completedAt)
+        }
+        try withDistinctOpen { repository, _ in
+            try assertStored(repository, title: "Edited task", notes: "Edited\nnotes",
+                             due: editedDue, plan: editedPlan)
+            try repository.delete(id: firstID)
+        }
+        try withDistinctOpen { repository, _ in
+            try assertStored(repository, title: nil)
+        }
     }
 }
