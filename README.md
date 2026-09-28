@@ -1,6 +1,6 @@
 # Kontrol — F00 executable foundation
 
-Kontrol is a local-first macOS SwiftUI app. F00 provides seven destinations (Today, Learning, Projects, Focus, Tasks, News, Settings), a native Settings scene, a small offline starter catalog, and non-destructive startup recovery. F02 provides persistent task creation, editing, completion/reopening, confirmed deletion, Today/Upcoming/Completed filters, optional notes and due dates, and quick capture on Today. F03 adds selected-day browsing and persistent manual schedule blocks with explicit overlap review. The first launch contains no sample personal records. The mockups are visual references, not live data.
+Kontrol is a local-first macOS SwiftUI app. F00 provides seven destinations (Today, Learning, Projects, Focus, Tasks, News, Settings), a native Settings scene, an offline starter catalog, and non-destructive startup recovery. F02 provides persistent task creation, editing, completion/reopening, confirmed deletion, Today/Upcoming/Completed filters, optional notes and due dates, and quick capture on Today. F03 adds selected-day browsing and persistent manual schedule blocks with explicit overlap review. The first launch contains no sample personal records. The mockups are visual references, not live data.
 
 ## Requirements and build
 
@@ -41,7 +41,7 @@ The `CODE_SIGNING_ALLOWED=NO` commands build/test without an app signature; use 
 
 ## Local data and catalog
 
-The app bundle includes `Kontrol/Resources/starter-catalog.json` (installed in `Kontrol.app/Contents/Resources/starter-catalog.json`): versioned, validated definitions with one complete offline starter lesson for each of Go, Java, System Design, Performance, and Security. Catalog definitions are imported by version without overwriting personal progress. This resource contains no personal tasks or lesson attempts.
+The app bundle includes `Kontrol/Resources/starter-catalog.json` (installed in `Kontrol.app/Contents/Resources/starter-catalog.json`): catalog version 2 with 40 validated offline lessons, eight each for Go, Java, System Design, Performance, and Security. V4 imports definitions and persists four initial slots per topic without overwriting personal progress. This resource contains no personal tasks, progress, slots, or lesson attempts.
 
 The production SwiftData store resolves to `Application Support/Kontrol/Kontrol.store` in the app's **user-domain sandbox container**; for the signed app with bundle ID `com.kontrol.app`, the usual path is `~/Library/Containers/com.kontrol.app/Data/Library/Application Support/Kontrol/Kontrol.store`. Keep the database and any `-wal`/`-shm` sidecars together. Do not delete or move them to troubleshoot launch: a failed open displays a blocking recovery screen with Try again or Quit, not an automatic reset. An unsigned local build may resolve Application Support outside a sandbox; do not use that location for tests. Automated tests use isolated in-memory or unique temporary stores. Only the selected destination is stored in `UserDefaults` (`com.kontrol.app.selectedDestination`), not the SwiftData database.
 
@@ -68,7 +68,7 @@ There is no V0 fixture or claimed V0 migration. F03 added a separate frozen V2 f
 
 ## F00 boundaries and verification status
 
-At the F00 checkpoint, Today offered title-only quick capture (planned for the local current day, no due date) and Today and Tasks displayed saved tasks. F02 has since added editing, completion/reopening, confirmed deletion, filters, optional notes and due dates; quick capture still defaults to Today but can also set a plan and due date. The F00 evidence below describes that historical checkpoint, not the current F02 gate. Learning shows the five offline starter topics and summaries, not interactive lessons, four active slots per topic, rotation, or the **F05** 40-lesson catalog. Projects, Focus, and News are honest foundation states; **F13** preferences, export, credential management, and release packaging/notarization are not implemented. The Settings scene currently shares the same no-settings-yet content as its destination.
+At the F00 checkpoint, Today offered title-only quick capture (planned for the local current day, no due date) and Today and Tasks displayed saved tasks. F02 has since added editing, completion/reopening, confirmed deletion, filters, optional notes and due dates; quick capture still defaults to Today but can also set a plan and due date. The F00 evidence below describes that historical checkpoint, not the current F02 gate. At the F00 checkpoint Learning showed five offline starter summaries, before F05 introduced the 40-lesson catalog and four persisted choices per topic. F05 still does not include interactive attempts or rotation. Projects, Focus, and News are honest foundation states; **F13** preferences, export, credential management, and release packaging/notarization are not implemented. The Settings scene currently shares the same no-settings-yet content as its destination.
 
 ### F00 integration evidence (2026-09-27, Xcode 27.0)
 
@@ -102,7 +102,7 @@ codesign --display --entitlements :- /tmp/kontrol-f01-sandbox/Build/Products/Deb
 git diff --check
 ```
 
-The full suite covers 100 tests including navigation keyboard/AX order and ≥32-point target bounds at both 1000×700 and 1440×940 content sizes at 100%, 130%, 160% and 240%; real imported Learning summaries; enlarged capture and Settings; reduced-motion loading; failed-save draft retention, serialized recovery, temporary-store reopening and copied fixture bytes. Test persistence uses isolated in-memory/temporary stores and defaults suites. `DesignSystemTokenTests` checks approved sRGB channels and actual pairings: primary text on background/surface/raised **14.48/13.70/12.47:1**, secondary **7.72/7.31/6.65:1**, accent/error text **5.63/5.33/4.85:1**, dark label on accent **5.63:1**; success/warning on background **10.02/11.08:1** and surface **9.49/10.49:1** (all ≥4.5:1). Focus ring **14.48/13.70/12.47:1** and essential boundary **7.72/7.31/6.65:1** exceed 3:1; the 1.39:1 decorative border is never an essential outline. Exact ratios and role mappings are in [palette.html](.mockups/design-system/palette.html).
+The full suite covers 100 tests including navigation keyboard/AX order and ≥32-point target bounds at both 1000×700 and 1440×940 content sizes at 100%, 130%, 160% and 240%; then-current imported Learning summaries; enlarged capture and Settings; reduced-motion loading; failed-save draft retention, serialized recovery, temporary-store reopening and copied fixture bytes. Test persistence uses isolated in-memory/temporary stores and defaults suites. `DesignSystemTokenTests` checks approved sRGB channels and actual pairings: primary text on background/surface/raised **14.48/13.70/12.47:1**, secondary **7.72/7.31/6.65:1**, accent/error text **5.63/5.33/4.85:1**, dark label on accent **5.63:1**; success/warning on background **10.02/11.08:1** and surface **9.49/10.49:1** (all ≥4.5:1). Focus ring **14.48/13.70/12.47:1** and essential boundary **7.72/7.31/6.65:1** exceed 3:1; the 1.39:1 decorative border is never an essential outline. Exact ratios and role mappings are in [palette.html](.mockups/design-system/palette.html).
 
 Current F01 XCTest captures (content points = pixels in these 1:1 offscreen snapshots): `/tmp/kontrol-f01-evidence/fixtures/{today,learning}-{1000x700,1440x940}-{standard,130pct}.png`, `/tmp/kontrol-recovery-captures/store-{1000x700,1440x940}.png`, `/tmp/kontrol-recovery-captures/catalog-520x340.png`; the hosted shell also writes `/tmp/kontrol-shell-captures/today-{1000x700,1440x940}.png`. Today and Learning are actual hosted views backed by isolated stores, not mockup sample schedules or M42's future F13 controls. Visual review against [M00](docs/mockups/M00-app-shell.png), [M42](docs/mockups/M42-design-accessibility.png), [M01](docs/mockups/M01-store-recovery.png), [M09](docs/mockups/M09-quick-capture.png), and [M43](docs/mockups/M43-learning-starter-summary.png): at 130% the seven labeled destinations reflow into two ordered rows; Today has a real empty state and Add task, Learning shows the five real offline lessons, recovery blocks a decorative shell and retains Quit/Try again. M42's redundant status and focus patterns are tested via shared components, not an Appearance screen. M09's sample title and extra editable fields are illustrative; the real native sheet is title-only. Hosted AX/frame tests verify Title, plan/due labels and Cancel/Add at both sizes (including 130%); the zero-height native Title discovered in the initial GUI run was fixed by ignoring a transient zero size preference, with rendered-frame assertions at 100%, 130% and extreme scaling. This run did not recapture the earlier signed-sheet screenshot.
 
@@ -282,3 +282,77 @@ Diagnostics: `platform=macOS` matched arm64 and x86_64 destinations and selected
 - Capture rendered [M10 ready](docs/mockups/M10-focus-ready.png), [M11 running](docs/mockups/M11-focus-running.png), [M12 paused](docs/mockups/M12-focus-paused.png), [M13 recovery](docs/mockups/M13-focus-recovery.png), [M14 history](docs/mockups/M14-focus-history.png) and the [custom duration](.mockups/screens/f04/custom-duration-validation.html), [no open tasks](.mockups/screens/f04/no-available-tasks.html), [persistence failure](.mockups/screens/f04/persistence-failure.html) and [completion pending](.mockups/screens/f04/completion-pending.html) variants at **1000×700 and 1440×940 points**; compare actual rendered pairs with references and record paths and differences. No F04 rendered before/after capture or screenshot comparison is claimed here.
 - In the GUI session check logical keyboard order, focus/restoration, readable labels and AX state/countdown (without per-second live announcements), spoken VoiceOver, visible focus and ≥32-point targets, scrolling/enlarged text and reduced motion at both sizes. Verify runtime behavior/API/symbols on **macOS 14**; this macOS 27 host and 14.0 deployment minimum do not substitute for that check.
 - **Future work, not F04 successes:** F06 lesson picker/link/navigation and progress integration; F13 persistent focus-default settings. F04 stores reserved lesson-link metadata but does not expose lesson selection.
+
+## F05 structured learning catalog implementation gate (2026-09-28)
+
+F05 ships the reviewed [40-lesson curriculum](docs/learning-curriculum.md) in catalog version 2, eight lessons in each ordered topic (Go, Java, System Design, Performance, Security). The per-lesson primary documentation, language/library assumptions, exercise/reference review outcomes and limitations are recorded in the five content-review tables there. The packaged-resource tests validate all 40 canonical objectives, five retained IDs, content sections, fingerprints, distinct reserves and absence of personal fields. The V4 definition/slot schema and one shared read-only Learning store are in place. This is an **implementation/non-GUI gate**, not hosted UI or release acceptance; M15 is the normal-state reference, with [F05-only references](.mockups/screens/f05/index.html) for read-only inspection, exhausted inventory and loading/read failure. No answer, Complete, Show another or Generate action is offered by F05.
+
+Observed from the repository root on `/Applications/Xcode.app/Contents/Developer`, Xcode **27.0 (27A266a)**, Apple Swift **6.4 (swiftlang-6.4.0.34.1)**, macOS **27.0 (26A428)**, arm64 (see `/tmp/kontrol-f05-gate-toolchain.log`). Both targets still use Swift 5 language mode and a macOS 14.0 minimum; macOS 14 runtime was **not** tested. These exact gate commands exited **0**; transcripts use `/tmp/kontrol-f05-gate-{build,build-for-testing,selected-tests,analyze,signed,verify,entitlements}.log`:
+
+```sh
+xcode-select -p
+xcodebuild -version
+xcrun swift --version
+make build DERIVED_DATA=/tmp/kontrol-f05-derived
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug \
+  -destination 'platform=macOS' -derivedDataPath /tmp/kontrol-f05-derived \
+  CODE_SIGNING_ALLOWED=NO build-for-testing
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug \
+  -destination 'platform=macOS' -derivedDataPath /tmp/kontrol-f05-derived \
+  CODE_SIGNING_ALLOWED=NO \
+  -only-testing:KontrolTests/BundledCatalogTests \
+  -only-testing:KontrolTests/CatalogValidatorTests \
+  -only-testing:KontrolTests/CatalogImportTests \
+  -only-testing:KontrolTests/LessonSelectorTests \
+  -only-testing:KontrolTests/LessonSlotRepositoryTests \
+  -only-testing:KontrolTests/LearningCatalogStoreTests \
+  -only-testing:KontrolTests/CatalogMigrationTests \
+  -only-testing:KontrolTests/SchemaTests \
+  -only-testing:KontrolTests/ContainerFactoryTests \
+  -only-testing:KontrolTests/V1FixtureTests \
+  -only-testing:KontrolTests/ScheduleMigrationTests \
+  -only-testing:KontrolTests/FocusMigrationTests \
+  -only-testing:KontrolTests/LaunchCoordinatorTests \
+  -only-testing:KontrolTests/LaunchRecoveryTests \
+  -only-testing:KontrolTests/TaskRepositoryTests \
+  -only-testing:KontrolTests/TaskSelectionTests \
+  -only-testing:KontrolTests/TaskStoreTests \
+  -only-testing:KontrolTests/TaskEditorDraftTests \
+  -only-testing:KontrolTests/ScheduleRepositoryTests \
+  -only-testing:KontrolTests/ScheduleSelectionTests \
+  -only-testing:KontrolTests/ScheduleStoreTests \
+  -only-testing:KontrolTests/ScheduleEditorDraftTests \
+  -only-testing:KontrolTests/TodayDaySelectionTests \
+  -only-testing:KontrolTests/FocusTimingTests \
+  -only-testing:KontrolTests/FocusRepositoryTests \
+  -only-testing:KontrolTests/FocusServiceTests \
+  -only-testing:KontrolTests/FocusHistorySelectionTests \
+  -only-testing:KontrolTests/FocusTaskLinkTests \
+  -only-testing:KontrolTests/NavigationStoreTests \
+  -only-testing:KontrolTests/ProjectSmokeTests \
+  -only-testing:KontrolTests/AppShellTests/testOneStorePerDependencyGraphAcrossRoutesAndWindows \
+  -only-testing:KontrolTests/AppShellTests/testNavigationMetadataAndRouting \
+  test
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug \
+  -destination 'platform=macOS' -derivedDataPath /tmp/kontrol-f05-derived \
+  CODE_SIGNING_ALLOWED=NO analyze
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug \
+  -destination 'platform=macOS' -derivedDataPath /tmp/kontrol-f05-sandbox \
+  CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual \
+  DEVELOPMENT_TEAM= build
+codesign --verify --deep --strict /tmp/kontrol-f05-sandbox/Build/Products/Debug/Kontrol.app
+codesign --display --entitlements - /tmp/kontrol-f05-sandbox/Build/Products/Debug/Kontrol.app
+git diff --check
+```
+
+`make build`: BUILD SUCCEEDED; `build-for-testing`: TEST BUILD SUCCEEDED (hosted `LearningPresentationTests` **compiled, not run**); selected non-GUI test: **266 passed, 0 failed, 0 skipped**, 32 explicit selectors, result `/tmp/kontrol-f05-derived/Logs/Test/Test-Kontrol-2026.09.28_22-48-29-+0800.xcresult` (`xcrun xcresulttool get test-results summary --path …` confirmed the counts). `analyze`: ANALYZE SUCCEEDED. Ad-hoc signed build: BUILD SUCCEEDED; strict signature verification returned 0; entitlement inspection returned 0 with `com.apple.security.app-sandbox = true` and Debug `com.apple.security.get-task-allow = true`. This is not distribution signing or an offline relaunch. Whitespace verification: `git diff --check` returned 0. No hosted presentation suite or full `make test` ran at this gate.
+
+The selected tests exercise fresh import of **40 definitions/20 unique slots** (four per topic, no fabricated progress/attempts), equal-version retry and cross-open `assignedAt` stability; completion/dismissal replacement, started recovery and exhaustion; validator rejection and upgrade/injected pre-save/save atomicity including independent unsaved edits and disk reopen. Migration tests copy complete closed V1/V2/V3/V4 fixture stores and sidecars, verify frozen originals byte-for-byte within the test, reopen copied stores, and separately verify a rich V3-only source with available/started/completed/dismissed progress, timestamps, draft answer, completed snapshot and attempt version, task, schedule and focus state intact; schema migration alone creates no slots/progress/catalog import. This is test evidence, not a live production-user-store migration. Navigation, task, schedule, focus, launch and smoke regressions are included in the selection.
+
+Diagnostics in the transcripts: `platform=macOS` matched arm64 and x86_64 and selected arm64; AppIntents metadata extraction was skipped because no AppIntents.framework dependency exists. The test process logged `com.apple.linkd.autoShortcut` connection errors and CoreData format errors for the deliberately invalid-store recovery fixture; all assertions passed. No Swift compiler or analyzer warning was observed. A preliminary shell extraction inadvertently ran `analyze` once before the selected run (exit 0); the explicit analyze command above was run again after the tests and its log is the recorded result. The test aggregate appears twice in XCTest output, not 532 executions.
+
+### F05 deferred F13 interactive/hosted acceptance (open)
+
+- Execute hosted `LearningPresentationTests` and full `make test` in a reserved, active, uncontended GUI session; compilation is not execution. Check each of the **five topic journeys** on isolated offline data: four initial choices, actual counts, read-only inspection of every structured section, empty/exhausted inventory and retryable read failure. Verify no attempt/progress/draft is created by opening or inspecting lessons. F06 interactive answering, completion and replacement actions remain separate future work.
+- Capture **rendered** M15 and [F05 inspection/empty/loading-error variants](.mockups/screens/f05/index.html) at **1000×700 and 1440×940 points**, compare screenshots to references and record actual paths/differences; none were captured or compared for this F05 gate. Check keyboard focus and topic/disclosure selection, spoken VoiceOver names/roles/state, ≥32-point targets, long text scrolling, enlarged text, reduced motion and macOS 14 runtime. No manual F05 attestation is available.
+- Launch the **signed sandbox app offline** on isolated data, inspect all topics, quit/relaunch and verify stable slots and unchanged personal records. Neither the ad-hoc signature nor non-GUI disk tests demonstrate that live journey. Keep F02 intermittent hosted AX visibility and editor-sheet-dismissal failures (`testNativeTasksEditorCreatesEditsAndCancelsWithoutWriting`, `testQuickCapturePublishesAcrossTodayAndTasksWithoutPostSaveRead`), skipped `TaskPresentationTests/testNativeDeleteAlertKeyboardNavigationAndConfirmation`, and F03/F04 hosted/signed GUI journeys **open** as detailed above and in [QA](docs/qa.md); this gate does not resolve them.
