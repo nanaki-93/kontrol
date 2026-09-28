@@ -13,6 +13,7 @@ protocol CatalogRepository {
     func setSelfCheckAcknowledged(attemptID: UUID, expectedRevision: Int,
                                   acknowledged: Bool, now: Date) throws -> LessonMutationResult
     func complete(attemptID: UUID, expectedRevision: Int, now: Date) throws -> LessonMutationResult
+    func dismiss(lessonID: String, expectedSlot: LessonSlotSnapshot, now: Date) throws -> LessonMutationResult
 }
 
 enum CatalogImportResult: Equatable {
@@ -378,6 +379,81 @@ final class SwiftDataCatalogRepository: CatalogRepository {
         // failed projection or save cannot publish a partially completed outcome.
         let detail = try self.detail(lessonID: row.lessonID, in: context)
         let receipt = try result(.changed, detail: detail, in: context, replacedSlot: consumed)
+        try beforeSave()
+        try save(context)
+        return receipt
+    }
+
+    func dismiss(lessonID: String, expectedSlot: LessonSlotSnapshot, now: Date) throws -> LessonMutationResult {
+        guard now.timeIntervalSinceReferenceDate.isFinite else {
+            throw LessonExperienceError.invalidTransition
+        }
+        // The confirmation carries the entire assignment, not merely its index.
+        // Compare the timestamp as well as the occupant to reject a slot reused
+        // since the confirmation was shown.
+        try LessonSelector.validateSlotIdentities([expectedSlot])
+        guard expectedSlot.lessonID == lessonID else { throw LessonExperienceError.staleSlot }
+        let context = ModelContext(container)
+        context.autosaveEnabled = false
+        let before = try snapshot(in: context)
+        let assigned = before.slots.first { $0.key == expectedSlot.key }
+        let current = try detail(lessonID: lessonID, in: context)
+        if current.progress?.status == .dismissed {
+            // A repeated confirmation for the already dismissed lesson is a no-op,
+            // even if its former slot now holds a replacement. A subsequently
+            // restored/reassigned lesson cannot be dismissed by that old dialog.
+            guard !before.slots.contains(where: { $0.lessonID == lessonID }) else {
+                throw LessonExperienceError.staleSlot
+            }
+            return try result(.unchanged, detail: current, in: context)
+        }
+        guard let definition = before.definitions.first(where: { $0.id == lessonID }),
+              definition.topicID == expectedSlot.topicID, assigned == expectedSlot else {
+            throw LessonExperienceError.staleSlot
+        }
+        guard current.progress?.status == nil || current.progress?.status == .available ||
+              current.progress?.status == .started else {
+            throw LessonExperienceError.invalidTransition
+        }
+        let progressRows = try context.fetch(FetchDescriptor<LessonProgress>()).filter { $0.lessonID == lessonID }
+        guard progressRows.count <= 1 else { throw LessonExperienceError.invalidStoredData }
+        let record: LessonProgress
+        if let existing = progressRows.first {
+            record = existing
+        } else {
+            record = LessonProgress(lessonID: lessonID)
+            context.insert(record)
+        }
+        record.status = .dismissed
+        record.dismissedAt = now
+        if record.firstShownAt == nil { record.firstShownAt = now }
+
+        let terminalAttempts = try context.fetch(FetchDescriptor<LessonAttempt>()).map { item in
+            LessonAttemptSnapshot(id: item.id, lessonID: item.lessonID,
+                contentVersion: item.contentVersion, answerDraft: item.answerDraft,
+                solutionRevealedAt: item.solutionRevealedAt,
+                selfCheckAcknowledgedAt: item.selfCheckAcknowledgedAt,
+                completedAt: item.completedAt, completedContentSnapshot: item.completedContentSnapshot,
+                pinnedContentData: item.pinnedContentData, revision: item.revision)
+        }
+        let updated = try snapshot(in: context)
+        let desired = try LessonSelector.replace(consumedSlot: expectedSlot,
+            definitions: updated.definitions, concepts: updated.concepts,
+            progress: updated.progress, slots: updated.slots,
+            terminalAttempts: terminalAttempts, now: now)
+        let slots = try context.fetch(FetchDescriptor<LessonSlot>()).filter { $0.key == expectedSlot.key }
+        guard slots.count == 1, let slot = slots.first,
+              slot.lessonID == expectedSlot.lessonID, slot.assignedAt == expectedSlot.assignedAt else {
+            throw LessonExperienceError.staleSlot
+        }
+        if let replacement = desired.first(where: { $0.key == expectedSlot.key }) {
+            slot.lessonID = replacement.lessonID
+            slot.assignedAt = replacement.assignedAt
+        } else {
+            context.delete(slot)
+        }
+        let detail = try self.detail(lessonID: lessonID, in: context)
+        let receipt = try result(.changed, detail: detail, in: context, replacedSlot: expectedSlot)
         try beforeSave()
         try save(context)
         return receipt

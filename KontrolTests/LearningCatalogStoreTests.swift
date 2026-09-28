@@ -59,6 +59,11 @@ private final class ReadingCatalogRepository: CatalogRepository {
         writes += 1
         throw ReadError.unavailable
     }
+
+    func dismiss(lessonID: String, expectedSlot: LessonSlotSnapshot, now: Date) throws -> LessonMutationResult {
+        writes += 1
+        throw ReadError.unavailable
+    }
 }
 
 @MainActor

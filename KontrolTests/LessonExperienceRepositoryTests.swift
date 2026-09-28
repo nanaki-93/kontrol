@@ -787,6 +787,164 @@ final class LessonExperienceRepositoryTests: XCTestCase {
         XCTAssertNil(try XCTUnwrap(rows(LessonAttempt.self, in: container).first { $0.id == attemptID }).completedAt)
     }
 
+    func testDismissalRotatesOnlyConfirmedAssignmentAndPreservesUnfinishedWork() throws {
+        let (container, writer, id) = try setup()
+        let other = SwiftDataCatalogRepository(container: container)
+        let before = try writer.loadSnapshot()
+        let slot = try XCTUnwrap(before.slots.first { $0.lessonID == id })
+        // Merely showing and cancelling confirmation makes no repository call.
+        XCTAssertEqual(try writer.loadSnapshot(), before)
+        XCTAssertTrue(try rows(LessonProgress.self, in: container).isEmpty)
+        let opened = try writer.openLesson(lessonID: id, now: first)
+        let attemptID = try XCTUnwrap(opened.detail.attempt?.id)
+        let saved = try writer.saveAnswer(attemptID: attemptID, expectedRevision: 0,
+                                          answer: "  🧪\n    keep\n")
+        let revealed = try writer.revealSolution(attemptID: attemptID, expectedRevision: 1, now: first)
+        let retained = try XCTUnwrap(revealed.detail.attempt)
+        XCTAssertEqual(retained.answerDraft, saved.detail.attempt?.answerDraft)
+        let boundary: any CatalogRepository = other
+        let dismissed = try boundary.dismiss(lessonID: id, expectedSlot: slot, now: later)
+        XCTAssertEqual(dismissed.outcome, .changed)
+        XCTAssertEqual(dismissed.replacedSlot, slot)
+        XCTAssertEqual(dismissed.detail.attempt, retained)
+        XCTAssertEqual(dismissed.detail.progress?.status, .dismissed)
+        XCTAssertEqual(dismissed.detail.progress?.startedAt, first)
+        XCTAssertEqual(dismissed.detail.progress?.dismissedAt, later)
+        XCTAssertNil(dismissed.detail.progress?.completedAt)
+        XCTAssertNil(dismissed.detail.attempt?.completedAt)
+        XCTAssertNil(dismissed.detail.attempt?.completedContentSnapshot)
+        XCTAssertEqual(dismissed.history.map(\.lessonID), [id])
+        XCTAssertEqual(dismissed.history.first?.status, .dismissed)
+        XCTAssertEqual(dismissed.history.first?.attempt, retained)
+        XCTAssertEqual(dismissed.catalog.slots.filter { $0.key != slot.key },
+                       before.slots.filter { $0.key != slot.key })
+        XCTAssertNotEqual(dismissed.catalog.slots.first { $0.key == slot.key }?.lessonID, id)
+        XCTAssertEqual(dismissed.catalog.progress.filter { $0.status == .completed }.count, 0)
+        XCTAssertEqual(try rows(LessonAttempt.self, in: container).count, 1)
+        XCTAssertEqual(try writer.loadLesson(lessonID: id), dismissed.detail)
+        enum Injected: Error { case unexpectedSave }
+        let noSave = SwiftDataCatalogRepository(container: container,
+            beforeSave: { throw Injected.unexpectedSave })
+        let repeated = try noSave.dismiss(lessonID: id, expectedSlot: slot, now: .distantFuture)
+        XCTAssertEqual(repeated.outcome, .unchanged)
+        XCTAssertNil(repeated.replacedSlot)
+        XCTAssertEqual(repeated.detail, dismissed.detail)
+        XCTAssertEqual(repeated.catalog, dismissed.catalog)
+        XCTAssertEqual(repeated.history, dismissed.history)
+        XCTAssertThrowsError(try writer.saveAnswer(attemptID: attemptID,
+            expectedRevision: retained.revision, answer: "late")) {
+            XCTAssertEqual($0 as? LessonExperienceError, .invalidTransition)
+        }
+    }
+
+    func testStaleDismissalCannotTargetReplacementOrReusedAssignment() throws {
+        let (container, writer, id) = try setup()
+        let before = try writer.loadSnapshot()
+        let slot = try XCTUnwrap(before.slots.first { $0.lessonID == id })
+        let wrongLesson = try XCTUnwrap(before.slots.first { $0.key != slot.key })
+        XCTAssertThrowsError(try writer.dismiss(lessonID: wrongLesson.lessonID,
+            expectedSlot: slot, now: first)) {
+            XCTAssertEqual($0 as? LessonExperienceError, .staleSlot)
+        }
+        let switched = ModelContext(container)
+        let row = try XCTUnwrap(switched.fetch(FetchDescriptor<LessonSlot>()).first { $0.key == slot.key })
+        row.assignedAt = later
+        try switched.save()
+        XCTAssertThrowsError(try writer.dismiss(lessonID: id, expectedSlot: slot, now: later)) {
+            XCTAssertEqual($0 as? LessonExperienceError, .staleSlot)
+        }
+        XCTAssertNil(try writer.loadLesson(lessonID: id).progress)
+        let updated = try XCTUnwrap(writer.loadSnapshot().slots.first { $0.key == slot.key })
+        let dismissed = try writer.dismiss(lessonID: id, expectedSlot: updated, now: later)
+        let replacement = try XCTUnwrap(dismissed.catalog.slots.first { $0.key == slot.key })
+        XCTAssertThrowsError(try writer.dismiss(lessonID: replacement.lessonID,
+            expectedSlot: updated, now: .distantFuture)) {
+            XCTAssertEqual($0 as? LessonExperienceError, .staleSlot)
+        }
+        XCTAssertEqual(try writer.loadSnapshot(), dismissed.catalog)
+        XCTAssertNil(try writer.loadLesson(lessonID: replacement.lessonID).progress)
+        // Simulate a later explicit Restore and reassignment of the old lesson.
+        // Its old dialog must not dismiss this new assignment.
+        let restored = ModelContext(container)
+        let progress = try XCTUnwrap(restored.fetch(FetchDescriptor<LessonProgress>()).first { $0.lessonID == id })
+        progress.status = .available
+        let replacementRow = try XCTUnwrap(restored.fetch(FetchDescriptor<LessonSlot>()).first { $0.key == slot.key })
+        replacementRow.lessonID = id
+        replacementRow.assignedAt = .distantFuture
+        try restored.save()
+        XCTAssertThrowsError(try writer.dismiss(lessonID: id, expectedSlot: updated, now: later)) {
+            XCTAssertEqual($0 as? LessonExperienceError, .staleSlot)
+        }
+        XCTAssertEqual(try writer.loadLesson(lessonID: id).progress?.status, .available)
+    }
+
+    func testDismissalExhaustionDoesNotFillUnrelatedVacancies() throws {
+        let (container, writer, id) = try setup()
+        let initial = try writer.loadSnapshot()
+        let consumed = try XCTUnwrap(initial.slots.first { $0.lessonID == id })
+        let context = ModelContext(container)
+        for definition in initial.definitions where definition.topicID == consumed.topicID && definition.id != id {
+            context.insert(LessonProgress(lessonID: definition.id, status: .dismissed, dismissedAt: first))
+        }
+        let vacant = try XCTUnwrap(context.fetch(FetchDescriptor<LessonSlot>()).first { $0.key != consumed.key })
+        context.delete(vacant)
+        try context.save()
+        let before = try writer.loadSnapshot()
+        let dismissed = try writer.dismiss(lessonID: id, expectedSlot: consumed, now: later)
+        XCTAssertNil(dismissed.catalog.slots.first { $0.key == consumed.key })
+        XCTAssertNil(dismissed.catalog.slots.first { $0.key == vacant.key })
+        XCTAssertEqual(dismissed.catalog.slots.filter { $0.key != consumed.key },
+                       before.slots.filter { $0.key != consumed.key })
+        XCTAssertNil(dismissed.detail.attempt)
+        XCTAssertEqual(dismissed.detail.progress?.status, .dismissed)
+        XCTAssertEqual(dismissed.history.first?.lessonID, id)
+        XCTAssertEqual(dismissed.catalog.progress.filter { $0.status == .completed }.count, 0)
+    }
+
+    func testDismissalFailuresAreAtomicAfterDiskReopen() throws {
+        enum Injected: Error { case failure }
+        for failBefore in [true, false] {
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "KontrolDismissFailure-\(UUID().uuidString)/Kontrol.store")
+            var slot: LessonSlotSnapshot?
+            var baseline: LearningCatalogSnapshot?
+            var detail: LessonDetailSnapshot?
+            try autoreleasepool {
+                let container = try ModelContainerFactory().makeContainer(mode: .persistent(url))
+                let writer = SwiftDataCatalogRepository(container: container)
+                _ = try writer.importIfNeeded(BundledCatalogLoader.load())
+                slot = try XCTUnwrap(writer.loadSnapshot().slots.first)
+                let id = try XCTUnwrap(slot?.lessonID)
+                let opened = try writer.openLesson(lessonID: id, now: first)
+                let attemptID = try XCTUnwrap(opened.detail.attempt?.id)
+                _ = try writer.saveAnswer(attemptID: attemptID, expectedRevision: 0, answer: "  durable\n")
+                _ = try writer.revealSolution(attemptID: attemptID, expectedRevision: 1, now: first)
+                baseline = try writer.loadSnapshot()
+                detail = try writer.loadLesson(lessonID: id)
+                let failing = SwiftDataCatalogRepository(container: container,
+                    beforeSave: { if failBefore { throw Injected.failure } },
+                    save: { _ in if !failBefore { throw Injected.failure } })
+                XCTAssertThrowsError(try failing.dismiss(lessonID: id,
+                    expectedSlot: XCTUnwrap(slot), now: later)) { XCTAssertTrue($0 is Injected) }
+                XCTAssertEqual(try writer.loadSnapshot(), baseline)
+                XCTAssertEqual(try writer.loadLesson(lessonID: id), detail)
+            }
+            try autoreleasepool {
+                let reopened = try ModelContainerFactory().makeContainer(mode: .persistent(url))
+                let writer = SwiftDataCatalogRepository(container: reopened)
+                let id = try XCTUnwrap(slot?.lessonID)
+                XCTAssertEqual(try writer.loadSnapshot(), baseline)
+                XCTAssertEqual(try writer.loadLesson(lessonID: id), detail)
+                XCTAssertNil(try XCTUnwrap(rows(LessonAttempt.self, in: reopened).first {
+                    $0.lessonID == id
+                }).completedContentSnapshot)
+                let retry = try writer.dismiss(lessonID: id, expectedSlot: XCTUnwrap(slot), now: later)
+                XCTAssertEqual(retry.outcome, .changed)
+                XCTAssertEqual(retry.detail.attempt, detail?.attempt)
+            }
+        }
+    }
+
     func testPreSaveAndSaveFailureLeaveNoAttemptProgressOrReceipt() throws {
         for failBefore in [true, false] {
             let (container, writer, id) = try setup()
