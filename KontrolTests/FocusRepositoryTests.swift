@@ -133,10 +133,13 @@ final class FocusRepositoryTests: XCTestCase {
             makeID: { ids += 1; return self.first },
             fetchSessions: { _ in reads += 1; throw Injected.failed },
             save: { _ in saves += 1; throw Injected.failed })
-        for draft in [input(seconds: 0),
-                      FocusStartInput(plannedSeconds: 10, startedAt: start,
-                                      linkedTaskID: taskID, linkedLessonID: "lesson")] {
-            XCTAssertThrowsError(try writer.create(input: draft))
+        XCTAssertThrowsError(try writer.create(input: input(seconds: 0))) {
+            XCTAssertEqual($0 as? FocusError, .invalidDuration)
+        }
+        XCTAssertThrowsError(try writer.create(input: FocusStartInput(
+            plannedSeconds: 10, startedAt: start,
+            linkedTaskID: taskID, linkedLessonID: "lesson"))) {
+            XCTAssertEqual($0 as? FocusError, .invalidLinks)
         }
         XCTAssertEqual(reads, 0)
         XCTAssertThrowsError(try writer.create(input: input())) {

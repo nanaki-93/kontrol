@@ -17,6 +17,8 @@ final class SwiftDataFocusRepository: FocusRepository {
     private let makeID: () -> UUID
     private let fetchSessions: (ModelContext) throws -> [FocusSession]
     private let fetchTasks: (ModelContext, UUID) throws -> [TaskItem]
+    private let fetchLessons: (ModelContext) throws -> [LessonDefinition]
+    private let fetchProgress: (ModelContext) throws -> [LessonProgress]
     // A hook must fail before committing, never after a successful save.
     private let save: (ModelContext) throws -> Void
 
@@ -25,11 +27,17 @@ final class SwiftDataFocusRepository: FocusRepository {
              try $0.fetch(FetchDescriptor<FocusSession>())
          }, fetchTasks: @escaping (ModelContext, UUID) throws -> [TaskItem] = { context, id in
              try context.fetch(FetchDescriptor<TaskItem>(predicate: #Predicate { $0.id == id }))
+         }, fetchLessons: @escaping (ModelContext) throws -> [LessonDefinition] = {
+             try $0.fetch(FetchDescriptor<LessonDefinition>())
+         }, fetchProgress: @escaping (ModelContext) throws -> [LessonProgress] = {
+             try $0.fetch(FetchDescriptor<LessonProgress>())
          }, save: @escaping (ModelContext) throws -> Void = { try $0.save() }) {
         self.container = container
         self.makeID = makeID
         self.fetchSessions = fetchSessions
         self.fetchTasks = fetchTasks
+        self.fetchLessons = fetchLessons
+        self.fetchProgress = fetchProgress
         self.save = save
     }
 
@@ -61,6 +69,8 @@ final class SwiftDataFocusRepository: FocusRepository {
                 throw FocusError.unavailableTask
             }
             title = matches[0].title
+        } else if let lessonID = clean.linkedLessonID {
+            title = try resolveLessonTitle(lessonID, in: context)
         } else {
             title = nil
         }
@@ -270,6 +280,75 @@ final class SwiftDataFocusRepository: FocusRepository {
         do { try save(context) }
         catch { throw FocusError.persistenceFailure }
         return receipt
+    }
+
+    /// Re-read both sides of the selection in the same non-autosaving creation context.
+    /// A failed read is not absence, and contradictory rows are not eligibility.
+    private func resolveLessonTitle(_ lessonID: String, in context: ModelContext) throws -> String {
+        let definitions: [LessonDefinition]
+        let progress: [LessonProgress]
+        do {
+            definitions = try fetchLessons(context).filter { $0.id == lessonID }
+            progress = try fetchProgress(context).filter { $0.lessonID == lessonID }
+        } catch { throw FocusError.persistenceFailure }
+        guard definitions.count <= 1, progress.count <= 1 else {
+            throw FocusError.invalidStoredData
+        }
+        guard let definition = definitions.first else { throw FocusError.unavailableLesson }
+        guard let row = progress.first else { return try validatedLessonTitle(definition) }
+        switch row.status {
+        case .available, .started:
+            guard row.completedAt == nil else { throw FocusError.invalidStoredData }
+            return try validatedLessonTitle(definition)
+        case .completed, .dismissed: throw FocusError.unavailableLesson
+        }
+    }
+
+    private func validatedLessonTitle(_ definition: LessonDefinition) throws -> String {
+        func nonblank(_ text: String) -> Bool {
+            !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        let concepts = definition.conceptIDs
+        let prerequisites = definition.prerequisiteConceptIDs
+        // A link must point to a usable lesson, not merely a row with an ID/title.
+        // Check the same required fields and teaching-content fingerprint as catalog import;
+        // do not let a damaged installed definition authorize a new session.
+        guard nonblank(definition.id), nonblank(definition.objectiveKey),
+              nonblank(definition.objective), nonblank(definition.title),
+              nonblank(definition.topicID), nonblank(definition.subtopicID),
+              !concepts.isEmpty, concepts.allSatisfy(nonblank),
+              Set(concepts).count == concepts.count,
+              prerequisites.allSatisfy(nonblank),
+              Set(prerequisites).count == prerequisites.count,
+              ["basic", "intermediate", "advanced"].contains(definition.difficulty),
+              ["learn", "code", "question", "design"].contains(definition.format),
+              definition.estimatedMinutes > 0,
+              nonblank(definition.explanation), nonblank(definition.workedExample),
+              nonblank(definition.exercise), nonblank(definition.referenceAnswer),
+              !definition.selfCheckCriteria.isEmpty,
+              definition.selfCheckCriteria.allSatisfy(nonblank),
+              definition.contentVersion > 0, nonblank(definition.normalizedContentHash),
+              ["seed", "generated"].contains(definition.source),
+              nonblank(definition.provenance) else {
+            throw FocusError.invalidStoredData
+        }
+        let content = LessonDTO(
+            id: definition.id, objectiveKey: definition.objectiveKey,
+            objective: definition.objective, title: definition.title,
+            topicID: definition.topicID, subtopicID: definition.subtopicID,
+            conceptIDs: concepts, difficulty: definition.difficulty,
+            format: definition.format, estimatedMinutes: definition.estimatedMinutes,
+            prerequisiteConceptIDs: prerequisites, explanation: definition.explanation,
+            workedExample: definition.workedExample, exercise: definition.exercise,
+            referenceAnswer: definition.referenceAnswer,
+            selfCheckCriteria: definition.selfCheckCriteria,
+            contentVersion: definition.contentVersion,
+            normalizedContentHash: definition.normalizedContentHash,
+            source: definition.source, provenance: definition.provenance)
+        guard definition.normalizedContentHash == CatalogValidator.fingerprint(for: content) else {
+            throw FocusError.invalidStoredData
+        }
+        return definition.title
     }
 
     private func checkedSnapshots(_ rows: [FocusSession]) throws -> [FocusSessionSnapshot] {

@@ -16,6 +16,7 @@ enum FocusError: Error, Equatable {
     case invalidStoredData
     case missingSession
     case unavailableTask
+    case unavailableLesson
     case invalidTransition
     case staleBaseline
     case activeSessionConflict
@@ -53,16 +54,24 @@ enum FocusDuration: Equatable {
 struct FocusConfiguration: Equatable {
     let duration: FocusDuration
     let linkedTaskID: UUID?
+    let linkedLessonID: String?
 
-    init(duration: FocusDuration = .default, linkedTaskID: UUID? = nil) {
+    init(duration: FocusDuration = .default, linkedTaskID: UUID? = nil,
+         linkedLessonID: String? = nil) {
         self.duration = duration
         self.linkedTaskID = linkedTaskID
+        self.linkedLessonID = linkedLessonID
     }
 
-    func plannedSeconds() throws -> Int { try duration.seconds() }
+    func plannedSeconds() throws -> Int {
+        guard linkedTaskID == nil || linkedLessonID == nil,
+              linkedLessonID.map({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) ?? true
+        else { throw FocusError.invalidLinks }
+        return try duration.seconds()
+    }
 }
 
-/// Unsaved input; the repository resolves a selected task and captures its title at Start.
+/// Unsaved input; the repository resolves a selected link and captures its title at Start.
 struct FocusStartInput: Equatable {
     let plannedSeconds: Int
     let startedAt: Date
