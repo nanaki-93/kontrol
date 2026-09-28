@@ -113,6 +113,7 @@ final class FocusServiceTests: XCTestCase {
             XCTAssertEqual($0 as? FocusServiceError, .activeStatusUnknown)
         }
         XCTAssertEqual(repo.creates, 0)
+        XCTAssertNil(service.mutationFailure) // read error, not a failed Start write
         service.loadIfNeeded() // a new view cannot silently retry
         XCTAssertEqual(repo.reads, 1)
         repo.readError = nil
@@ -127,6 +128,7 @@ final class FocusServiceTests: XCTestCase {
             XCTAssertEqual($0 as? FocusError, .activeSessionConflict)
         }
         XCTAssertEqual(repo.creates, 1)
+        XCTAssertNil(service.mutationFailure) // active-session precondition, not a write
     }
 
     func testFailedRefreshRetainsExplicitlyStaleCachedHistoryAndDoesNotPermitStart() throws {
@@ -342,9 +344,43 @@ final class FocusServiceTests: XCTestCase {
         repo.writeError = nil
         seconds = 21
         ticks.fire()
-        XCTAssertEqual(repo.rows.first?.accumulatedActiveSeconds, 21)
-        XCTAssertNil(service.checkpointError)
+        XCTAssertEqual(repo.transitions, 1) // retry is bounded, not every callback
         XCTAssertEqual(service.countdownSeconds, 39)
+        seconds = 31
+        ticks.fire()
+        XCTAssertEqual(repo.rows.first?.accumulatedActiveSeconds, 31)
+        XCTAssertNil(service.checkpointError)
+        XCTAssertEqual(service.countdownSeconds, 29)
+    }
+
+    func testExplicitCheckpointRetryDoesNotAccrueUnsavedSegmentTwice() throws {
+        let repo = FakeRepository()
+        let ticks = FakeTicks()
+        let base = ContinuousClock().now
+        var seconds = 0.0
+        let service = FocusService(repository: repo,
+            wallClock: { self.start.addingTimeInterval(seconds) },
+            monotonicClock: { base.advanced(by: .milliseconds(Int64(seconds * 1000))) },
+            scheduleTick: ticks.schedule, notificationCenter: NotificationCenter(),
+            workspaceNotificationCenter: NotificationCenter())
+        service.loadIfNeeded()
+        try service.start(configuration: FocusConfiguration(duration: .custom("1")))
+        seconds = 16
+        repo.writeError = .persistenceFailure
+        ticks.fire()
+        XCTAssertEqual(service.checkpointError, .persistenceFailure)
+        seconds = 19.25
+        repo.writeError = nil
+        service.retryCheckpoint()
+        XCTAssertEqual(repo.rows.first?.accumulatedActiveSeconds, 19.25)
+        XCTAssertNil(service.checkpointError)
+        let count = repo.transitions
+        service.retryCheckpoint()
+        XCTAssertEqual(repo.transitions, count)
+        seconds = 20
+        ticks.fire()
+        XCTAssertEqual(service.countdownSeconds, 40)
+        XCTAssertEqual(repo.transitions, count)
     }
 
     func testPausedSessionStaysFrozenAndLifecycleObserversBelongToService() throws {
@@ -529,6 +565,299 @@ final class FocusServiceTests: XCTestCase {
         notifications.post(name: NSApplication.willTerminateNotification, object: nil)
         XCTAssertEqual(repo.rows.first?.accumulatedActiveSeconds, 7.125)
         XCTAssertEqual(ticks.callbacks.count, 1)
+    }
+
+    func testStartFailureKeepsSelectionAndRetryCreatesExactlyOneRow() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        var fail = true
+        let repo = SwiftDataFocusRepository(container: container, save: { context in
+            if fail { throw FocusError.persistenceFailure }
+            try context.save()
+        })
+        let ticks = FakeTicks()
+        let service = FocusService(repository: repo, wallClock: { self.start },
+            scheduleTick: ticks.schedule, notificationCenter: NotificationCenter(),
+            workspaceNotificationCenter: NotificationCenter())
+        service.loadIfNeeded()
+        let configuration = FocusConfiguration(duration: .fifty)
+        XCTAssertThrowsError(try service.start(configuration: configuration))
+        XCTAssertEqual(service.mutationFailure,
+                       FocusMutationFailure(action: .start(configuration), error: .persistenceFailure))
+        XCTAssertTrue(service.snapshots.isEmpty)
+        XCTAssertEqual(ticks.callbacks.count, 0)
+        fail = false
+        try service.retryMutation()
+        XCTAssertNil(service.mutationFailure)
+        XCTAssertEqual(try repo.fetchAll().count, 1)
+        XCTAssertEqual(service.activeSession?.plannedSeconds, 3000)
+        XCTAssertEqual(ticks.callbacks.count, 1)
+        XCTAssertThrowsError(try service.retryMutation()) {
+            XCTAssertEqual($0 as? FocusServiceError, .noRetryPending)
+        }
+        XCTAssertEqual(try repo.fetchAll().count, 1)
+    }
+
+    func testPreflightFailuresDoNotReplacePendingStartOrIssueAnotherWrite() throws {
+        let repo = FakeRepository()
+        let service = FocusService(repository: repo, wallClock: { self.start },
+            notificationCenter: NotificationCenter(), workspaceNotificationCenter: NotificationCenter())
+        service.loadIfNeeded()
+        let selection = FocusConfiguration(duration: .fifty, linkedTaskID: UUID())
+        repo.writeError = .persistenceFailure
+        XCTAssertThrowsError(try service.start(configuration: selection))
+        let pending = FocusMutationFailure(action: .start(selection), error: .persistenceFailure)
+        XCTAssertEqual(service.mutationFailure, pending)
+        let attemptedCreates = repo.creates
+        XCTAssertThrowsError(try service.pause()) {
+            XCTAssertEqual($0 as? FocusError, .invalidTransition)
+        }
+        XCTAssertThrowsError(try service.start(configuration: FocusConfiguration(duration: .custom("0")))) {
+            XCTAssertEqual($0 as? FocusError, .invalidCustomMinutes)
+        }
+        XCTAssertEqual(repo.creates, attemptedCreates)
+        XCTAssertEqual(service.mutationFailure, pending)
+        repo.readError = .persistenceFailure
+        service.retryRead()
+        XCTAssertThrowsError(try service.start(configuration: selection)) {
+            XCTAssertEqual($0 as? FocusServiceError, .activeStatusUnknown)
+        }
+        XCTAssertEqual(service.mutationFailure, pending)
+        XCTAssertEqual(repo.creates, attemptedCreates)
+        repo.readError = nil
+        service.retryRead()
+        repo.writeError = nil
+        try service.retryMutation()
+        XCTAssertEqual(repo.creates, attemptedCreates + 1)
+        XCTAssertEqual(repo.rows.count, 1)
+        XCTAssertEqual(repo.lastInput?.linkedTaskID, selection.linkedTaskID)
+        XCTAssertEqual(repo.lastInput?.plannedSeconds, 3000)
+        XCTAssertNil(service.mutationFailure)
+        XCTAssertThrowsError(try service.start(configuration: FocusConfiguration())) {
+            XCTAssertEqual($0 as? FocusError, .activeSessionConflict)
+        }
+        XCTAssertEqual(repo.creates, attemptedCreates + 1)
+        XCTAssertNil(service.mutationFailure)
+    }
+
+    func testRepositoryConflictDoesNotMasqueradeAsRetryableSaveFailure() throws {
+        let repo = FakeRepository()
+        let service = FocusService(repository: repo, wallClock: { self.start },
+            notificationCenter: NotificationCenter(), workspaceNotificationCenter: NotificationCenter())
+        service.loadIfNeeded()
+        // Another writer won after our successful empty read.
+        repo.rows = [try running()]
+        XCTAssertThrowsError(try service.start(configuration: FocusConfiguration())) {
+            XCTAssertEqual($0 as? FocusError, .activeSessionConflict)
+        }
+        XCTAssertEqual(repo.creates, 1)
+        XCTAssertNil(service.mutationFailure)
+        XCTAssertNil(service.activeSession)
+        XCTAssertTrue(service.snapshots.isEmpty)
+        XCTAssertThrowsError(try service.retryMutation()) {
+            XCTAssertEqual($0 as? FocusServiceError, .noRetryPending)
+        }
+    }
+
+    func testFailedPauseResumeAndEndRetainCommittedRowUntilExplicitRetry() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        var fail = false
+        var saves = 0
+        let repo = SwiftDataFocusRepository(container: container, save: { context in
+            saves += 1
+            if fail { throw FocusError.persistenceFailure }
+            try context.save()
+        })
+        let ticks = FakeTicks()
+        let base = ContinuousClock().now
+        var seconds = 0.0
+        let service = FocusService(repository: repo,
+            wallClock: { self.start.addingTimeInterval(seconds) },
+            monotonicClock: { base.advanced(by: .milliseconds(Int64(seconds * 1000))) },
+            scheduleTick: ticks.schedule, notificationCenter: NotificationCenter(),
+            workspaceNotificationCenter: NotificationCenter())
+        service.loadIfNeeded()
+        try service.start(configuration: FocusConfiguration(duration: .custom("1")))
+        let original = try XCTUnwrap(service.activeSession)
+        seconds = 4.25
+        fail = true
+        XCTAssertThrowsError(try service.pause())
+        XCTAssertEqual(service.mutationFailure?.action, .pause)
+        XCTAssertEqual(service.activeSession, original)
+        XCTAssertEqual(try repo.fetchAll().first, original)
+        seconds = 6.5 // failed pause did not discard the original monotonic anchor
+        fail = false
+        try service.retryMutation()
+        let paused = try XCTUnwrap(service.activeSession)
+        XCTAssertEqual(paused.state, .paused)
+        XCTAssertEqual(paused.accumulatedActiveSeconds, 6.5)
+        seconds = 100
+        fail = true
+        XCTAssertThrowsError(try service.resume())
+        XCTAssertEqual(service.mutationFailure?.action, .resume)
+        XCTAssertEqual(service.activeSession, paused)
+        XCTAssertEqual(try repo.fetchAll().first, paused)
+        fail = false
+        try service.retryMutation()
+        let resumed = try XCTUnwrap(service.activeSession)
+        XCTAssertEqual(resumed.state, .running)
+        seconds = 105
+        fail = true
+        XCTAssertThrowsError(try service.end())
+        XCTAssertEqual(service.mutationFailure?.action, .end)
+        XCTAssertEqual(service.activeSession, resumed)
+        XCTAssertEqual(try repo.fetchAll().first, resumed)
+        fail = false
+        try service.retryMutation()
+        XCTAssertEqual(service.snapshots.count, 1)
+        XCTAssertEqual(service.snapshots.first?.state, .ended)
+        XCTAssertEqual(service.snapshots.first?.accumulatedActiveSeconds, 11.5)
+        XCTAssertNil(service.activeSession)
+        let committedSaves = saves
+        XCTAssertThrowsError(try service.retryMutation())
+        XCTAssertEqual(saves, committedSaves)
+    }
+
+    func testRecoveryFailureKeepsDecisionPendingUntilSingleRetry() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        var fail = false
+        let repo = SwiftDataFocusRepository(container: container, save: { context in
+            if fail { throw FocusError.persistenceFailure }
+            try context.save()
+        })
+        _ = try repo.create(input: FocusStartInput(plannedSeconds: 60, startedAt: start))
+        let service = FocusService(repository: repo,
+            wallClock: { self.start.addingTimeInterval(10) },
+            notificationCenter: NotificationCenter(), workspaceNotificationCenter: NotificationCenter())
+        service.loadIfNeeded()
+        let pending = try XCTUnwrap(service.activeSession)
+        XCTAssertTrue(pending.recoveryRequired)
+        fail = true
+        XCTAssertThrowsError(try service.resolveRecovery(.end))
+        XCTAssertEqual(service.mutationFailure,
+                       FocusMutationFailure(action: .recover(.end), error: .persistenceFailure))
+        XCTAssertEqual(service.activeSession, pending)
+        XCTAssertEqual(try repo.fetchAll().first, pending)
+        fail = false
+        try service.retryMutation()
+        XCTAssertEqual(service.snapshots.first?.state, .ended)
+        XCTAssertEqual(service.snapshots.first?.id, pending.id)
+        XCTAssertNil(service.activeSession)
+    }
+
+    func testFailedPausedEndAndRecoveryResumeDoNotAcknowledgeUntilSaved() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        var fail = false
+        let repo = SwiftDataFocusRepository(container: container, save: { context in
+            if fail { throw FocusError.persistenceFailure }
+            try context.save()
+        })
+        _ = try repo.create(input: FocusStartInput(plannedSeconds: 60, startedAt: start))
+        let service = FocusService(repository: repo,
+            wallClock: { self.start.addingTimeInterval(10) },
+            notificationCenter: NotificationCenter(), workspaceNotificationCenter: NotificationCenter())
+        service.loadIfNeeded()
+        let pending = try XCTUnwrap(service.activeSession)
+        fail = true
+        XCTAssertThrowsError(try service.resolveRecovery(.resume))
+        XCTAssertEqual(service.mutationFailure?.action, .recover(.resume))
+        XCTAssertEqual(service.activeSession, pending)
+        fail = false
+        try service.retryMutation()
+        XCTAssertEqual(service.activeSession?.state, .running)
+        try service.pause()
+        let paused = try XCTUnwrap(service.activeSession)
+        fail = true
+        XCTAssertThrowsError(try service.end())
+        XCTAssertEqual(service.mutationFailure?.action, .end)
+        XCTAssertEqual(service.activeSession, paused)
+        fail = false
+        try service.retryMutation()
+        XCTAssertEqual(service.snapshots.first?.state, .ended)
+        XCTAssertNil(service.activeSession)
+        XCTAssertEqual(try repo.fetchAll(), service.snapshots)
+    }
+
+    func testEndAtZeroFailureRequiresCompletionResolutionNotEarlyEndRetry() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        var fail = false
+        let repo = SwiftDataFocusRepository(container: container, save: { context in
+            if fail { throw FocusError.persistenceFailure }
+            try context.save()
+        })
+        let base = ContinuousClock().now
+        var seconds = 0.0
+        let service = FocusService(repository: repo,
+            wallClock: { self.start.addingTimeInterval(seconds) },
+            monotonicClock: { base.advanced(by: .milliseconds(Int64(seconds * 1000))) },
+            notificationCenter: NotificationCenter(), workspaceNotificationCenter: NotificationCenter())
+        service.loadIfNeeded()
+        try service.start(configuration: FocusConfiguration(duration: .custom("1")))
+        let running = try XCTUnwrap(service.activeSession)
+        seconds = 75
+        fail = true
+        XCTAssertThrowsError(try service.end())
+        XCTAssertEqual(service.snapshots, [running])
+        XCTAssertEqual(service.countdownSeconds, 0)
+        XCTAssertEqual(service.completionPendingError, .persistenceFailure)
+        XCTAssertNil(service.mutationFailure)
+        XCTAssertThrowsError(try service.retryMutation()) {
+            XCTAssertEqual($0 as? FocusServiceError, .noRetryPending)
+        }
+        seconds = 95
+        fail = false
+        try service.retryCompletion()
+        XCTAssertEqual(service.snapshots.first?.state, .completed)
+        XCTAssertEqual(service.snapshots.first?.endedAt, start.addingTimeInterval(60))
+        XCTAssertEqual(try repo.fetchAll(), service.snapshots)
+    }
+
+    func testCompletionFailureHoldsZeroAndRetryUsesSameEffectiveFinish() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        var fail = false
+        var saves = 0
+        let repo = SwiftDataFocusRepository(container: container, save: { context in
+            saves += 1
+            if fail { throw FocusError.persistenceFailure }
+            try context.save()
+        })
+        let ticks = FakeTicks()
+        let base = ContinuousClock().now
+        var seconds = 0.0
+        let service = FocusService(repository: repo,
+            wallClock: { self.start.addingTimeInterval(seconds) },
+            monotonicClock: { base.advanced(by: .milliseconds(Int64(seconds * 1000))) },
+            scheduleTick: ticks.schedule, notificationCenter: NotificationCenter(),
+            workspaceNotificationCenter: NotificationCenter())
+        service.loadIfNeeded()
+        try service.start(configuration: FocusConfiguration(duration: .custom("1")))
+        let running = try XCTUnwrap(service.activeSession)
+        fail = true
+        seconds = 90
+        ticks.fire()
+        XCTAssertEqual(service.countdownSeconds, 0)
+        XCTAssertEqual(service.completionPendingError, .persistenceFailure)
+        XCTAssertEqual(service.snapshots, [running]) // no uncommitted history
+        XCTAssertEqual(try repo.fetchAll(), [running])
+        XCTAssertEqual(ticks.cancellations, 1)
+        let failedSaves = saves
+        ticks.fire() // even a canceled callback cannot retry completion
+        XCTAssertEqual(saves, failedSaves)
+        XCTAssertThrowsError(try service.start(configuration: FocusConfiguration())) {
+            XCTAssertEqual($0 as? FocusServiceError, .completionPending)
+        }
+        XCTAssertThrowsError(try service.retryCompletion())
+        XCTAssertEqual(saves, failedSaves + 1)
+        seconds = 150
+        fail = false
+        try service.retryCompletion()
+        XCTAssertNil(service.completionPendingError)
+        XCTAssertEqual(service.snapshots.count, 1)
+        XCTAssertEqual(service.snapshots.first?.state, .completed)
+        XCTAssertEqual(service.snapshots.first?.endedAt, start.addingTimeInterval(60))
+        XCTAssertEqual(try repo.fetchAll(), service.snapshots)
+        XCTAssertThrowsError(try service.retryCompletion()) {
+            XCTAssertEqual($0 as? FocusServiceError, .noRetryPending)
+        }
     }
 
     func testGraphRecoversOnConstructionNotOnWindowReopen() throws {

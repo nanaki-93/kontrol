@@ -18,6 +18,20 @@ enum FocusReadState: Equatable {
 
 enum FocusServiceError: Error, Equatable {
     case activeStatusUnknown
+    case noRetryPending
+    case completionPending
+}
+
+/// Only a classification and action are published; no task or store data is logged.
+enum FocusMutationAction: Equatable {
+    case start(FocusConfiguration)
+    case pause, resume, end
+    case recover(FocusRecoveryChoice)
+}
+
+struct FocusMutationFailure: Equatable {
+    let action: FocusMutationAction
+    let error: FocusError
 }
 
 /// One publication point per app dependency graph. View appearance never invokes
@@ -30,6 +44,8 @@ final class FocusService: ObservableObject {
     @Published private(set) var readState: FocusReadState = .notLoaded
     @Published private(set) var countdownSeconds: Int?
     @Published private(set) var checkpointError: FocusError?
+    @Published private(set) var mutationFailure: FocusMutationFailure?
+    @Published private(set) var completionPendingError: FocusError?
 
     private let wallClock: () -> Date
     private let monotonicClock: () -> ContinuousClock.Instant
@@ -43,6 +59,8 @@ final class FocusService: ObservableObject {
     private var clockSessionID: UUID?
     private var didCompleteInitialLoad = false
     private let checkpointInterval: TimeInterval = 15
+    private var nextCheckpointRetry: ContinuousClock.Instant?
+    private var pendingCompletion: FocusTimingChange?
 
     init(repository: any FocusRepository,
          wallClock: @escaping () -> Date = Date.init,
@@ -110,7 +128,8 @@ final class FocusService: ObservableObject {
             publish(rows)
             didCompleteInitialLoad = true
             readState = .loaded
-            if let activeSession, activeSession.state == .running {
+            if pendingCompletion != nil { stopClock() }
+            else if let activeSession, activeSession.state == .running {
                 // A read retry must not discard time since the last committed
                 // anchor when it finds the same running row again.
                 if clockSessionID != activeSession.id { startClock() }
@@ -124,14 +143,137 @@ final class FocusService: ObservableObject {
     }
 
     func start(configuration: FocusConfiguration) throws {
-        guard readState.canStart else { throw FocusServiceError.activeStatusUnknown }
-        guard activeSession == nil else { throw FocusError.activeSessionConflict }
-        let input = FocusStartInput(plannedSeconds: try configuration.plannedSeconds(),
-                                    startedAt: wallClock(), linkedTaskID: configuration.linkedTaskID)
-        let receipt = try repository.create(input: input)
-        // Save succeeds before any observable state or timing anchor changes.
-        publish([receipt] + snapshots)
-        startClock()
+        try perform(.start(configuration))
+    }
+
+    func pause() throws { try perform(.pause) }
+    func resume() throws { try perform(.resume) }
+    func end() throws { try perform(.end) }
+    func resolveRecovery(_ choice: FocusRecoveryChoice) throws { try perform(.recover(choice)) }
+
+    /// Explicit user retry, not an automatic second submission. Calculations for a
+    /// running session sample the *original* monotonic anchor at retry time.
+    func retryMutation() throws {
+        guard let failure = mutationFailure else { throw FocusServiceError.noRetryPending }
+        try perform(failure.action)
+    }
+
+    func retryCheckpoint() {
+        guard checkpointError != nil, pendingCompletion == nil else { return }
+        sampleTick(forceCheckpoint: true, bypassRetryDelay: true)
+    }
+
+    func retryCompletion() throws {
+        guard let change = pendingCompletion, let session = activeSession else {
+            throw FocusServiceError.noRetryPending
+        }
+        do {
+            let receipt = try repository.transition(id: session.id, command: change.transition,
+                                                     effectiveEndedAt: change.snapshot.endedAt)
+            pendingCompletion = nil
+            completionPendingError = nil
+            checkpointError = nil
+            mutationFailure = nil
+            publish(snapshots.map { $0.id == receipt.id ? receipt : $0 })
+        } catch {
+            completionPendingError = classify(error)
+            throw error
+        }
+    }
+
+    private func perform(_ action: FocusMutationAction) throws {
+        // Preflight failures never replace a pending write retry. In particular a
+        // failed Start must remain retryable after an unrelated Pause is rejected.
+        if pendingCompletion != nil { throw FocusServiceError.completionPending }
+        let receipt: FocusSessionSnapshot
+        switch action {
+        case .start(let configuration):
+            guard readState.canStart else { throw FocusServiceError.activeStatusUnknown }
+            guard activeSession == nil else { throw FocusError.activeSessionConflict }
+            let input = FocusStartInput(plannedSeconds: try configuration.plannedSeconds(),
+                startedAt: wallClock(), linkedTaskID: configuration.linkedTaskID)
+            do { receipt = try repository.create(input: input) }
+            catch {
+                recordMutationFailure(error, for: action)
+                throw error
+            }
+            publish([receipt] + snapshots)
+            startClock()
+        case .pause, .resume, .end, .recover:
+            guard let session = activeSession else { throw FocusError.invalidTransition }
+            let wall = wallClock()
+            let change: FocusTimingChange
+            switch action {
+            case .pause:
+                change = try FocusTiming.pause(session, at: wall, monotonicDelta: runningDelta())
+            case .resume:
+                change = try FocusTiming.resume(session, at: wall)
+            case .end:
+                if session.state == .running {
+                    change = try FocusTiming.end(session, at: wall, monotonicDelta: runningDelta())
+                } else {
+                    guard session.state == .paused, !session.recoveryRequired else {
+                        throw FocusError.invalidTransition
+                    }
+                    let stamp = max(wall, session.checkpointAt)
+                    let payload = FocusTransitionPayload(expectedCheckpointAt: session.checkpointAt,
+                        sampledAt: stamp, accumulatedActiveSeconds: session.accumulatedActiveSeconds)
+                    change = FocusTimingChange(transition: .end(payload), snapshot: session)
+                }
+            case .recover(let choice):
+                guard session.state == .paused, session.recoveryRequired else {
+                    throw FocusError.invalidTransition
+                }
+                let stamp = max(wall, session.checkpointAt)
+                let payload = FocusTransitionPayload(expectedCheckpointAt: session.checkpointAt,
+                    sampledAt: stamp, accumulatedActiveSeconds: session.accumulatedActiveSeconds)
+                change = FocusTimingChange(transition: .recover(choice, payload), snapshot: session)
+            case .start: fatalError("Handled above")
+            }
+            do {
+                let finish: Date?
+                if case .complete = change.transition { finish = change.snapshot.endedAt }
+                else { finish = nil }
+                receipt = try repository.transition(id: session.id, command: change.transition,
+                                                    effectiveEndedAt: finish)
+            } catch {
+                if case .complete = change.transition {
+                    // Completion supersedes any earlier retry: only its frozen finish
+                    // may now resolve this active session.
+                    mutationFailure = nil
+                    pendingCompletion = change
+                    completionPendingError = classify(error)
+                    stopClock()
+                    countdownSeconds = 0
+                } else {
+                    recordMutationFailure(error, for: action)
+                }
+                throw error
+            }
+            publish(snapshots.map { $0.id == receipt.id ? receipt : $0 })
+            if receipt.state == .running { startClock() } else { stopClock() }
+        }
+        mutationFailure = nil
+        checkpointError = nil
+    }
+
+    private func recordMutationFailure(_ error: Error, for action: FocusMutationAction) {
+        // Repository preconditions (conflict, stale baseline, missing task, etc.)
+        // are returned to the caller, not advertised as failed persistence writes.
+        guard case .persistenceFailure = error as? FocusError else { return }
+        if mutationFailure == nil || mutationFailure?.action == action {
+            mutationFailure = FocusMutationFailure(action: action, error: .persistenceFailure)
+        }
+    }
+
+    private func classify(_ error: Error) -> FocusError {
+        error as? FocusError ?? .persistenceFailure
+    }
+
+    private func runningDelta() -> TimeInterval {
+        guard let monotonicAnchor else { return 0 }
+        let parts = monotonicAnchor.duration(to: monotonicClock()).components
+        return max(0, Double(parts.seconds) + Double(parts.attoseconds) / 1e18)
     }
 
     private func startClock() {
@@ -155,11 +297,12 @@ final class FocusService: ObservableObject {
         cancelTick = nil
         monotonicAnchor = nil
         clockSessionID = nil
+        nextCheckpointRetry = nil
     }
 
     /// The callback is only an opportunity to sample ContinuousClock. Persisted
     /// checkpoints replace both the wall and monotonic anchors after the save.
-    private func sampleTick(forceCheckpoint: Bool = false) {
+    private func sampleTick(forceCheckpoint: Bool = false, bypassRetryDelay: Bool = false) {
         // A failed refresh blocks a *new* Start, not the clock already owned by
         // this process. Its committed row and monotonic anchor remain usable for
         // ticks, sleep and termination checkpoints while the read is retried.
@@ -178,10 +321,28 @@ final class FocusService: ObservableObject {
                 abs(wall.timeIntervalSince($0) - delta)
             } ?? 0
             guard sample.isComplete || forceCheckpoint || delta >= checkpointInterval || wallDrift > 2 else { return }
+            if let nextCheckpointRetry, now < nextCheckpointRetry,
+               !sample.isComplete, !bypassRetryDelay { return }
             let change = try FocusTiming.checkpoint(session, at: wall, monotonicDelta: delta)
-            let receipt = try repository.transition(id: session.id, command: change.transition,
-                                                     effectiveEndedAt: change.snapshot.endedAt)
+            let receipt: FocusSessionSnapshot
+            do {
+                receipt = try repository.transition(id: session.id, command: change.transition,
+                                                    effectiveEndedAt: change.snapshot.endedAt)
+            } catch {
+                if sample.isComplete {
+                    mutationFailure = nil // completion supersedes an earlier transition retry
+                    pendingCompletion = change
+                    completionPendingError = classify(error)
+                    stopClock() // no automatic duplicate terminal write
+                } else {
+                    nextCheckpointRetry = now.advanced(by: .seconds(checkpointInterval))
+                    checkpointError = classify(error)
+                }
+                return
+            }
+            nextCheckpointRetry = nil
             checkpointError = nil
+            if receipt.state == .completed { mutationFailure = nil }
             publish(snapshots.map { $0.id == receipt.id ? receipt : $0 })
             if receipt.state == .running {
                 // Do not reschedule the same repeating callback; it retains its owner.
@@ -194,7 +355,7 @@ final class FocusService: ObservableObject {
             // Keep the old anchor after a failed save: a later sample measures the
             // entire unsaved segment, never a second addition to the durable value.
             checkpointError = error as? FocusError ?? .persistenceFailure
-            if countdownSeconds == 0 { stopClock() } // unresolved completion; no duplicate write
+            if countdownSeconds == 0 { stopClock() } // invalid calculation; never claim success
         }
     }
 
