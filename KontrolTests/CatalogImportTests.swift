@@ -20,7 +20,7 @@ final class CatalogImportTests: XCTestCase {
         value.lessons[0].title = "Corrected lesson"
         value.lessons[0].contentVersion += 1
         value.lessons[0].explanation = "Updated explanation"
-        value.lessons[0].normalizedContentHash = "sha256:corrected"
+        value.lessons[0].normalizedContentHash = CatalogValidator.fingerprint(for: value.lessons[0])
         return try CatalogValidator.validate(value)
     }
 
@@ -97,7 +97,7 @@ final class CatalogImportTests: XCTestCase {
         XCTAssertEqual(corrected.title, "Corrected lesson")
         XCTAssertEqual(corrected.explanation, "Updated explanation")
         XCTAssertEqual(corrected.contentVersion, original.value.lessons[0].contentVersion + 1)
-        XCTAssertEqual(corrected.normalizedContentHash, "sha256:corrected")
+        XCTAssertEqual(corrected.normalizedContentHash, CatalogValidator.fingerprint(for: updated.lessons[0]))
         XCTAssertEqual(try records(Topic.self, in: container).first { $0.id == oldTopic.id }?.persistentModelID, topicIdentity)
         XCTAssertEqual(try records(Topic.self, in: container).first { $0.id == oldTopic.id }?.name, "Corrected topic")
         XCTAssertEqual(try records(Subtopic.self, in: container).first { $0.id == updated.subtopics[0].id }?.name, "Corrected subtopic")
@@ -140,7 +140,16 @@ final class CatalogImportTests: XCTestCase {
         XCTAssertEqual(try repository.importIfNeeded(seed), .imported)
         var malformed = upgraded.value
         malformed.lessons[0].referenceAnswer = "  "
-        XCTAssertThrowsError(try CatalogValidator.validate(malformed))
+        XCTAssertThrowsError(try CatalogValidator.validate(malformed)) {
+            XCTAssertEqual($0 as? CatalogValidationError, .invalid(.missingAnswer))
+        }
+        var altered = upgraded.value
+        altered.lessons[1].exercise += " Unhashed revision."
+        XCTAssertThrowsError(try CatalogValidator.validate(altered)) {
+            XCTAssertEqual($0 as? CatalogValidationError, .invalid(.invalidFingerprint))
+        }
+        XCTAssertEqual(try records(LessonDefinition.self, in: container).count, seed.value.lessons.count)
+        XCTAssertEqual(try records(CatalogImportState.self, in: container).map(\.lastImportedVersion), [seed.value.version])
         // There is no import API accepting an unvalidated DTO.
         for failing in [SwiftDataCatalogRepository(container: container,
                                                     beforeSave: { throw Injected.failure }),

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 // Construction is restricted to successful whole-catalog validation. DTOs remain
@@ -22,6 +23,7 @@ enum CatalogValidationError: Error, Equatable {
         case emptyConceptSet, unsupportedDifficulty, unsupportedFormat, unsupportedSource
         case invalidEstimate, invalidContentVersion, missingMetadata
         case missingExplanation, missingExample, missingExercise, missingAnswer, missingSelfCheck
+        case invalidFingerprint
     }
     case invalid(Issue)
 }
@@ -49,6 +51,18 @@ enum CatalogValidator {
 
     static func validate(_ value: CatalogDTO) throws -> ValidatedCatalog {
         try ValidatedCatalog.validating(value)
+    }
+
+    // The teaching-content fingerprint excludes metadata (including the objective).
+    // Trim, normalize to NFC, and separate sections with U+001F in authored order.
+    static func fingerprint(for lesson: LessonDTO) -> String {
+        let sections = [lesson.explanation, lesson.workedExample, lesson.exercise,
+                        lesson.referenceAnswer] + lesson.selfCheckCriteria
+        let normalized = sections.map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines).precomposedStringWithCanonicalMapping
+        }.joined(separator: "\u{001F}")
+        let digest = SHA256.hash(data: Data(normalized.utf8))
+        return "sha256:" + digest.map { String(format: "%02x", $0) }.joined()
     }
 
     fileprivate static func check(_ catalog: CatalogDTO) throws {
@@ -90,7 +104,8 @@ enum CatalogValidator {
         try require(acyclic(edges), .cyclicPrerequisites)
 
         for lesson in catalog.lessons {
-            try require(nonblank(lesson.objectiveKey) && nonblank(lesson.title) &&
+            try require(nonblank(lesson.objectiveKey) && nonblank(lesson.objective) &&
+                        nonblank(lesson.title) &&
                         nonblank(lesson.normalizedContentHash) && nonblank(lesson.provenance), .missingMetadata)
             try require(topics.contains(lesson.topicID) &&
                         subtopics[lesson.subtopicID] == lesson.topicID, .invalidParent)
@@ -110,6 +125,7 @@ enum CatalogValidator {
             try require(nonblank(lesson.referenceAnswer), .missingAnswer)
             try require(!lesson.selfCheckCriteria.isEmpty &&
                         lesson.selfCheckCriteria.allSatisfy(nonblank), .missingSelfCheck)
+            try require(lesson.normalizedContentHash == fingerprint(for: lesson), .invalidFingerprint)
         }
     }
 

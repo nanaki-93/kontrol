@@ -31,6 +31,7 @@ struct ConceptDTO: Decodable {
 struct LessonDTO: Decodable {
     var id: String
     var objectiveKey: String
+    var objective: String
     var title: String
     var topicID: String
     var subtopicID: String

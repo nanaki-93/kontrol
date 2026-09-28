@@ -86,6 +86,7 @@
     {
       "id": "go.concurrency.cancel-work.v1",
       "objectiveKey": "go.concurrency.cancel-work",
+      "objective": "Stop a worker cooperatively when its caller no longer needs the result.",
       "title": "Stop a worker when its caller leaves",
       "topicID": "go",
       "subtopicID": "go.concurrency",
@@ -113,6 +114,7 @@
     {
       "id": "java.io.resource-ownership.v1",
       "objectiveKey": "java.io.resource-ownership",
+      "objective": "Close resources you open on normal and exceptional exits without closing caller-owned streams.",
       "title": "Own the stream you open",
       "topicID": "java",
       "subtopicID": "java.io",
@@ -140,6 +142,7 @@
     {
       "id": "design.api.deduplicate-writes.v1",
       "objectiveKey": "design.api.deduplicate-writes",
+      "objective": "Make retries of the same payment safe using a durable account-scoped idempotency key.",
       "title": "Make a retried payment safe",
       "topicID": "design",
       "subtopicID": "design.api",
@@ -167,6 +170,7 @@
     {
       "id": "perf.database.query-count.v1",
       "objectiveKey": "perf.database.query-count",
+      "objective": "Diagnose an N+1 query pattern and batch related reads while measuring the tradeoffs.",
       "title": "Spot the query hidden in a loop",
       "topicID": "perf",
       "subtopicID": "perf.database",
@@ -194,6 +198,7 @@
     {
       "id": "security.api.object-access.v1",
       "objectiveKey": "security.api.object-access",
+      "objective": "Authorize access to each object at the read or mutation boundary, not just at login.",
       "title": "Check the object, not just the login",
       "topicID": "security",
       "subtopicID": "security.api",

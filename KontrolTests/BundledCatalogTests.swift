@@ -21,6 +21,7 @@ final class BundledCatalogTests: XCTestCase {
                 XCTAssertEqual(lesson.contentVersion, 1)
                 XCTAssertEqual(lesson.normalizedContentHash, BundledCatalogLoader.fingerprint(for: lesson))
                 XCTAssertEqual(lesson.objectiveKey, lesson.conceptIDs.first)
+                XCTAssertFalse(lesson.objective.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 XCTAssertFalse(lesson.provenance.isEmpty)
                 XCTAssertGreaterThan(lesson.explanation.count, 150)
                 XCTAssertGreaterThan(lesson.workedExample.count, 150)
@@ -48,9 +49,26 @@ final class BundledCatalogTests: XCTestCase {
         XCTAssertNotEqual(lesson.normalizedContentHash, BundledCatalogLoader.fingerprint(for: lesson))
         var modified = catalog.value
         modified.lessons[0] = lesson
-        let validStructure = try CatalogValidator.validate(modified)
-        XCTAssertThrowsError(try BundledCatalogLoader.verifyFingerprints(in: validStructure)) {
-            XCTAssertEqual($0 as? BundledCatalogError, .invalidFingerprint)
+        XCTAssertThrowsError(try CatalogValidator.validate(modified)) {
+            XCTAssertEqual($0 as? CatalogValidationError, .invalid(.invalidFingerprint))
+        }
+        // The resource loader uses the same whole-input boundary; it cannot
+        // accept an altered teaching section with the old fingerprint either.
+        let bundleURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("KontrolCatalog-\(UUID().uuidString).bundle", isDirectory: true)
+        try FileManager.default.createDirectory(at: bundleURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: bundleURL) }
+        let resources = bundleURL.appendingPathComponent("Contents/Resources", isDirectory: true)
+        try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
+        let resource = resources.appendingPathComponent("starter-catalog.json")
+        let originalData = try Data(contentsOf: XCTUnwrap(Bundle.main.url(forResource: "starter-catalog", withExtension: "json")))
+        let alteredData = try XCTUnwrap(String(data: originalData, encoding: .utf8))
+            .replacingOccurrences(of: lesson.exercise.replacingOccurrences(of: " Change after publishing.", with: ""),
+                                  with: lesson.exercise)
+        try Data(alteredData.utf8).write(to: resource)
+        let bundle = try XCTUnwrap(Bundle(url: bundleURL))
+        XCTAssertThrowsError(try BundledCatalogLoader.load(from: bundle)) {
+            XCTAssertEqual($0 as? CatalogValidationError, .invalid(.invalidFingerprint))
         }
     }
 }

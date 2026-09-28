@@ -37,8 +37,21 @@ final class CatalogValidatorTests: XCTestCase {
         XCTAssertThrowsError(try CatalogValidator.decodeAndValidate(JSONSerialization.data(withJSONObject: object))) {
             XCTAssertEqual($0 as? CatalogValidationError, .invalid(.malformedJSON))
         }
+        object = try XCTUnwrap(JSONSerialization.jsonObject(with: fixture("valid")) as? [String: Any])
+        var lessons = try XCTUnwrap(object["lessons"] as? [[String: Any]])
+        lessons[0].removeValue(forKey: "objective")
+        object["lessons"] = lessons
+        XCTAssertThrowsError(try CatalogValidator.decodeAndValidate(JSONSerialization.data(withJSONObject: object))) {
+            XCTAssertEqual($0 as? CatalogValidationError, .invalid(.malformedJSON))
+        }
         XCTAssertThrowsError(try CatalogValidator.decodeAndValidate(Data(repeating: 0, count: CatalogValidator.maximumBytes + 1))) {
             XCTAssertEqual($0 as? CatalogValidationError, .invalid(.oversizedCatalog))
+        }
+    }
+
+    func testEntryBoundPrecedesGraphAndFingerprintWalks() throws {
+        try rejects(.oversizedCatalog) { value in
+            value.lessons = Array(repeating: value.lessons[0], count: 10_000)
         }
     }
 
@@ -82,6 +95,38 @@ final class CatalogValidatorTests: XCTestCase {
             second.referenceAnswer = "  "
             $0.lessons.append(second)
         }
+        try rejects(.invalidFingerprint) {
+            var second = $0.lessons[0]
+            second.id = "go.cancel.2"
+            second.exercise += " Altered after signing."
+            $0.lessons.append(second)
+        }
+    }
+
+    func testDirectAndDecodedValidationRejectUnchangedHashAfterContentEdit() throws {
+        var value = try valid()
+        value.lessons[0].workedExample += " Changed."
+        XCTAssertThrowsError(try CatalogValidator.validate(value)) {
+            XCTAssertEqual($0 as? CatalogValidationError, .invalid(.invalidFingerprint))
+        }
+        var raw = try XCTUnwrap(JSONSerialization.jsonObject(with: fixture("valid")) as? [String: Any])
+        var lessons = try XCTUnwrap(raw["lessons"] as? [[String: Any]])
+        lessons[0]["workedExample"] = value.lessons[0].workedExample
+        raw["lessons"] = lessons
+        XCTAssertThrowsError(try CatalogValidator.decodeAndValidate(JSONSerialization.data(withJSONObject: raw))) {
+            XCTAssertEqual($0 as? CatalogValidationError, .invalid(.invalidFingerprint))
+        }
+    }
+
+    func testNormalizationAndMetadataDoNotChangeTeachingFingerprint() throws {
+        var value = try valid()
+        let original = value.lessons[0].normalizedContentHash
+        value.lessons[0].objective = "An edited learning objective"
+        value.lessons[0].title = "Edited title"
+        value.lessons[0].explanation = "  \n" + value.lessons[0].explanation + "\t"
+        XCTAssertEqual(CatalogValidator.fingerprint(for: value.lessons[0]), original)
+        XCTAssertNoThrow(try CatalogValidator.validate(value))
+        try rejects(.invalidFingerprint) { $0.lessons[0].normalizedContentHash = original.uppercased() }
     }
 
     func testLessonMetadataAndEveryRequiredSection() throws {
@@ -91,6 +136,7 @@ final class CatalogValidatorTests: XCTestCase {
         try rejects(.invalidEstimate) { $0.lessons[0].estimatedMinutes = 0 }
         try rejects(.invalidContentVersion) { $0.lessons[0].contentVersion = 0 }
         try rejects(.missingMetadata) { $0.lessons[0].objectiveKey = " " }
+        try rejects(.missingMetadata) { $0.lessons[0].objective = " \n" }
         try rejects(.missingMetadata) { $0.lessons[0].normalizedContentHash = "\n" }
         try rejects(.missingMetadata) { $0.lessons[0].provenance = " " }
         try rejects(.missingExplanation) { $0.lessons[0].explanation = " \n" }
