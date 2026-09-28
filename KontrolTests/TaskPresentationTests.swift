@@ -396,6 +396,166 @@ final class TaskPresentationTests: XCTestCase {
         }
     }
 
+    private func alertNodes() -> [AXUIElement] {
+        let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+        let windows = attribute(app, kAXWindowsAttribute) as? [AXUIElement] ?? []
+        return windows.flatMap { descendants(of: $0) }
+    }
+
+    private func alertButton(_ name: String) throws -> AXUIElement {
+        let deadline = Date().addingTimeInterval(4)
+        repeat {
+            if let button = alertNodes().first(where: {
+                attribute($0, kAXRoleAttribute) as? String == kAXButtonRole &&
+                attribute($0, kAXDescriptionAttribute) as? String == name
+            }) { return button }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        } while Date() < deadline
+        return try XCTUnwrap(alertNodes().first(where: {
+            attribute($0, kAXRoleAttribute) as? String == kAXButtonRole &&
+            attribute($0, kAXDescriptionAttribute) as? String == name
+        }), "Missing \(name); visible buttons: \(alertNodes().filter { attribute($0, kAXRoleAttribute) as? String == kAXButtonRole }.compactMap { attribute($0, kAXDescriptionAttribute) as? String })")
+    }
+
+    private func pressAlert(_ name: String) throws {
+        // Native alert AX buttons may invalidate while AXPress returns; assert
+        // the resulting persisted state rather than the transient AX error code.
+        _ = AXUIElementPerformAction(try alertButton(name), kAXPressAction as CFString)
+        settle()
+    }
+
+    func testDeleteRequiresNamedConfirmationAndOnlyRemovesSelectedUUID() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        var saves = 0
+        let repository = SwiftDataTaskRepository(container: container, save: { context in
+            saves += 1
+            try context.save()
+        })
+        let store = TaskStore(repository: repository)
+        let first = try store.create(input: TaskInput(title: "Delete this", plannedFor: .today(at: .now)))
+        let other = try store.create(input: TaskInput(title: "Keep this", plannedFor: .today(at: .now)))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.title = "Delete confirmation \(UUID())"
+        window.contentView = NSHostingView(rootView: TasksView(store: store))
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        settle()
+        let deleteID = "task-delete-\(first.id.uuidString)"
+        let otherID = "task-delete-\(other.id.uuidString)"
+        let rowID = "task-row-\(first.id.uuidString)"
+        let delete = try waitForElement(deleteID, in: window)
+        XCTAssertEqual(attribute(delete, kAXRoleAttribute) as? String, kAXButtonRole)
+        XCTAssertEqual(attribute(delete, kAXDescriptionAttribute) as? String, "Delete Delete this")
+        XCTAssertFalse(descendants(of: try waitForElement(rowID, in: window)).contains {
+            attribute($0, kAXRoleAttribute) as? String == kAXButtonRole
+        })
+        let before = saves
+        XCTAssertEqual(AXUIElementPerformAction(delete, kAXPressAction as CFString), .success)
+        _ = try alertButton("Delete task")
+        XCTAssertTrue(alertNodes().contains { node in
+            [kAXDescriptionAttribute, kAXValueAttribute, kAXTitleAttribute].contains { key in
+                (attribute(node, key) as? String)?.contains("Delete \"Delete this\"?") == true
+            }
+        }, "confirmation must name the selected task")
+        XCTAssertEqual(saves, before, "opening confirmation must not write")
+        try pressAlert("Cancel")
+        XCTAssertEqual(saves, before)
+        XCTAssertEqual(Set(try repository.fetchAll().map(\.id)), Set([first.id, other.id]))
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement(deleteID, in: window), kAXPressAction as CFString), .success)
+        _ = try alertButton("Cancel")
+        window.attachedSheet?.cancelOperation(nil) // Escape / native cancel path
+        settle()
+        XCTAssertNil(window.attachedSheet)
+        XCTAssertEqual(saves, before)
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement(deleteID, in: window), kAXPressAction as CFString), .success)
+        try pressAlert("Delete task")
+        XCTAssertEqual(saves, before + 1)
+        XCTAssertEqual(store.snapshots.map(\.id), [other.id])
+        XCTAssertEqual(try repository.fetchAll().map(\.id), [other.id])
+        XCTAssertTrue(elements(in: window, identifier: rowID).isEmpty)
+        XCTAssertEqual(elements(in: window, identifier: otherID).count, 1)
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement(otherID, in: window), kAXPressAction as CFString), .success)
+        _ = try alertButton("Cancel")
+        if let sheet = window.attachedSheet {
+            window.endSheet(sheet, returnCode: .cancel) // external alert closure is not confirmation
+        }
+        settle()
+        XCTAssertEqual(saves, before + 1)
+        XCTAssertEqual(try repository.fetchAll().map(\.id), [other.id])
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement(otherID, in: window), kAXPressAction as CFString), .success)
+        try pressAlert("Cancel")
+        XCTAssertEqual(try repository.fetchAll().map(\.id), [other.id])
+    }
+
+    func testFailedAndMissingDeleteNeverRetryOrDeleteAnotherTask() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        var fail = false
+        var deleteAttempts = 0
+        let storage = SwiftDataTaskRepository(container: container, save: { context in
+            if fail { throw SaveError.injected }
+            try context.save()
+        })
+        let repository = FailingReadRepository(storage: storage)
+        repository.failRead = false
+        let store = TaskStore(repository: repository)
+        let selected = try store.create(input: TaskInput(title: "Selected", plannedFor: .today(at: .now)))
+        let other = try store.create(input: TaskInput(title: "Untouched", plannedFor: .today(at: .now)))
+        // Count calls at the IO boundary, including unsuccessful attempts.
+        let counting = CountingDeleteRepository(base: repository) { deleteAttempts += 1 }
+        let shared = TaskStore(repository: counting)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.title = "Delete failure \(UUID())"
+        window.contentView = NSHostingView(rootView: TasksView(store: shared))
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        settle()
+        let deleteID = "task-delete-\(selected.id.uuidString)"
+        fail = true
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement(deleteID, in: window), kAXPressAction as CFString), .success)
+        try pressAlert("Delete task")
+        XCTAssertEqual(deleteAttempts, 1)
+        XCTAssertEqual(shared.mutationError, .writeFailed)
+        XCTAssertEqual(elements(in: window, identifier: "tasks-action-error").count, 1)
+        XCTAssertEqual(elements(in: window, identifier: "task-row-\(selected.id.uuidString)").count, 1)
+        XCTAssertEqual(Set(try storage.fetchAll().map(\.id)), Set([selected.id, other.id]))
+        fail = false
+        settle()
+        XCTAssertEqual(deleteAttempts, 1, "no automatic retry after a failure")
+        try storage.delete(id: selected.id) // external owner removed the pending UUID
+        repository.failRead = true // failed refresh keeps stale rows visible
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement(deleteID, in: window), kAXPressAction as CFString), .success)
+        try pressAlert("Delete task")
+        XCTAssertEqual(deleteAttempts, 2)
+        XCTAssertEqual(shared.mutationError, .notFound)
+        XCTAssertEqual(shared.readState, .failed(hasStaleRows: true))
+        XCTAssertEqual(elements(in: window, identifier: "tasks-action-error").count, 1)
+        XCTAssertEqual(elements(in: window, identifier: "task-row-\(selected.id.uuidString)").count, 1)
+        XCTAssertEqual(try storage.fetchAll().map(\.id), [other.id])
+        repository.failRead = false
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement("tasks-action-refresh", in: window), kAXPressAction as CFString), .success)
+        settle()
+        XCTAssertTrue(elements(in: window, identifier: deleteID).isEmpty)
+        XCTAssertEqual(elements(in: window, identifier: "task-row-\(other.id.uuidString)").count, 1)
+        XCTAssertEqual(deleteAttempts, 2)
+    }
+
+    private final class CountingDeleteRepository: TaskRepository {
+        let base: any TaskRepository
+        let onDelete: () -> Void
+        init(base: any TaskRepository, onDelete: @escaping () -> Void) {
+            self.base = base
+            self.onDelete = onDelete
+        }
+        func fetchAll() throws -> [TaskItem] { try base.fetchAll() }
+        func create(title: String, plannedFor: PlannedDay?) throws -> UUID { try base.create(title: title, plannedFor: plannedFor) }
+        func create(input: TaskInput) throws -> TaskSnapshot { try base.create(input: input) }
+        func update(id: UUID, input: TaskInput) throws -> TaskSnapshot { try base.update(id: id, input: input) }
+        func setCompleted(id: UUID, completed: Bool) throws -> TaskSnapshot { try base.setCompleted(id: id, completed: completed) }
+        func delete(id: UUID) throws { onDelete(); try base.delete(id: id) }
+    }
+
     func testTasksEmptyAndFailedReadRemainDistinctWithoutMutatingSavedRows() throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         let repository = SwiftDataTaskRepository(container: container)

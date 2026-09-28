@@ -7,6 +7,7 @@ struct TaskRows: View {
     let temporalContext: TaskTemporalContext
     var onEdit: ((TaskSnapshot) -> Void)? = nil
     var onSetCompleted: ((TaskSnapshot, Bool) -> Void)? = nil
+    var onDelete: ((TaskSnapshot) -> Void)? = nil
     var editFocus: FocusState<UUID?>.Binding? = nil
 
     private var dateStyle: Date.FormatStyle {
@@ -100,6 +101,11 @@ struct TaskRows: View {
                                 editButton(for: row, action: onEdit)
                             }
                         }
+                        if let onDelete {
+                            ActionButton("Delete", action: { onDelete(row) })
+                                .accessibilityLabel("Delete \(row.title)")
+                                .accessibilityIdentifier("task-delete-\(row.id.uuidString)")
+                        }
                     }
                 }
             }
@@ -115,6 +121,8 @@ struct TasksView: View {
     @State private var editorOpenError = false
     @State private var actionError: TaskMutationError?
     @State private var lastEditorTriggerID: UUID?
+    @State private var pendingDeletion: PendingDeletion?
+    @State private var isDeletePresented = false
     @FocusState private var addFocused: Bool
     @FocusState private var editFocusedID: UUID?
 
@@ -122,6 +130,23 @@ struct TasksView: View {
     private struct EditorPresentation: Identifiable {
         let id = UUID()
         let draft: TaskEditorDraft
+    }
+
+    /// A frozen identity/copy of the displayed name, independent of filter changes
+    /// and subsequent store refreshes. Never look up a different visible row to delete.
+    private struct PendingDeletion {
+        let id: UUID
+        let title: String
+    }
+
+    private func confirmDelete(_ selection: PendingDeletion) {
+        pendingDeletion = nil
+        do {
+            try store.delete(id: selection.id)
+            actionError = nil
+        } catch {
+            actionError = store.mutationError ?? .writeFailed
+        }
     }
 
     private func edit(_ row: TaskSnapshot) {
@@ -163,6 +188,7 @@ struct TasksView: View {
     }
 
     var body: some View {
+        let selectedDeletion = pendingDeletion
         VStack(alignment: .leading, spacing: AppMetrics.space4) {
             PageHeader("Tasks") {
                 ActionButton("Add task", symbol: "plus", variant: .primary) {
@@ -227,7 +253,10 @@ struct TasksView: View {
                     TaskRows(rows: selected, temporalContext: store.temporalContext, onEdit: { row in
                         lastEditorTriggerID = row.id
                         edit(row)
-                    }, onSetCompleted: setCompleted, editFocus: $editFocusedID)
+                    }, onSetCompleted: setCompleted, onDelete: { row in
+                        pendingDeletion = PendingDeletion(id: row.id, title: row.title)
+                        isDeletePresented = true
+                    }, editFocus: $editFocusedID)
                 }
             }
             Spacer(minLength: 0)
@@ -236,6 +265,18 @@ struct TasksView: View {
         .padding(.horizontal, AppMetrics.horizontalInset)
         .padding(.top, AppMetrics.space8)
         .onAppear { store.refresh() }
+        .confirmationAffordance(isPresented: $isDeletePresented,
+                               title: "Delete \"\(pendingDeletion?.title ?? "task")\"?",
+                               message: "This task will be permanently deleted.",
+                               confirmTitle: "Delete task", cancelTitle: "Cancel", isDestructive: true,
+                               onConfirm: {
+            // The alert is modal; its only destructive path is this explicit action.
+            // A dismissed or superseded selection must never target another row.
+            if let selectedDeletion { confirmDelete(selectedDeletion) }
+        })
+        .onChange(of: isDeletePresented) { _, presented in
+            if !presented { pendingDeletion = nil }
+        }
         .sheet(item: $presentation, onDismiss: {
             if let id = lastEditorTriggerID, store.select(filter).contains(where: { $0.id == id }) {
                 editFocusedID = id
