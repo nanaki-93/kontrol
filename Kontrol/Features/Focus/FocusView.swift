@@ -35,6 +35,22 @@ struct FocusTimerPresentation {
     }
 }
 
+/// Recovery values are frozen in the committed row, not sampled from a new clock.
+struct FocusRecoveryPresentation {
+    let session: FocusSessionSnapshot
+
+    var title: String { session.linkedTitleSnapshot ?? "Focus session" }
+    private var wholeRecordedSeconds: Int {
+        Int(min(session.actualSeconds.rounded(.down), Double(Int.max).nextDown))
+    }
+    var recorded: String { Self.duration(wholeRecordedSeconds) }
+    var remaining: String { Self.duration(session.plannedSeconds - wholeRecordedSeconds) }
+
+    private static func duration(_ seconds: Int) -> String {
+        "\(seconds / 60) min \(seconds % 60) sec"
+    }
+}
+
 struct FocusView: View {
     @ObservedObject var service: FocusService
     @ObservedObject var taskStore: TaskStore
@@ -71,7 +87,10 @@ struct FocusView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppMetrics.space6) {
-            PageHeader("Focus", metadata: showingSessions ? "Sessions" : service.activeSession == nil ? "Ready" : "Session active") {
+            PageHeader("Focus", metadata: showingSessions ? "Sessions" :
+                       service.completionPendingError != nil ? "Completion pending" :
+                       service.activeSession?.recoveryRequired == true ? "Interrupted" :
+                       service.activeSession == nil ? "Ready" : "Session active") {
                 ActionButton(showingSessions ? "Back to timer" : "Sessions", symbol: "clock.arrow.circlepath") {
                     showingSessions.toggle()
                 }
@@ -93,10 +112,10 @@ struct FocusView: View {
                 LoadingState("Loading Focus")
             } else if let active = service.activeSession {
                 // The committed session takes precedence over stale local drafts in every window.
-                if active.recoveryRequired {
-                    StatusPill("Interrupted", kind: .warning)
-                    Text("This session needs a recovery decision before starting another.")
-                        .appTypography(.body)
+                if service.completionPendingError != nil {
+                    completionPendingContent(active)
+                } else if active.recoveryRequired {
+                    recoveryContent(active)
                 } else {
                     timerContent(active)
                 }
@@ -109,6 +128,104 @@ struct FocusView: View {
         .padding(.horizontal, AppMetrics.horizontalInset)
         .padding(.top, AppMetrics.space8)
         .onAppear { if taskStore.readState == .notLoaded { taskStore.refresh() } }
+    }
+
+    private func recoveryContent(_ session: FocusSessionSnapshot) -> some View {
+        let recovery = FocusRecoveryPresentation(session: session)
+        let failedChoice: FocusRecoveryChoice? = {
+            if case .recover(let choice) = service.mutationFailure?.action { return choice }
+            return nil
+        }()
+        return VStack(alignment: .leading, spacing: AppMetrics.space6) {
+            StatusPill("Interrupted", kind: .warning)
+                .accessibilityIdentifier("focus-recovery-state")
+            Text("Resume session?").appTypography(.section)
+            Text(recovery.title).appTypography(.body)
+            VStack(alignment: .leading, spacing: AppMetrics.space2) {
+                Text("\(recovery.recorded) recorded")
+                    .accessibilityIdentifier("focus-recovery-recorded")
+                Text("\(recovery.remaining) remaining · Paused while you decide")
+                    .accessibilityIdentifier("focus-recovery-remaining")
+            }
+            .appTypography(.body)
+            Text("Resuming or ending this session does not complete a linked task.")
+                .appTypography(.metadata)
+                .foregroundStyle(AppColors.textSecondary)
+            if let failedChoice {
+                ErrorBanner(.saveFailed, recoveryTitle: "Retry \(failedChoice == .resume ? "Resume" : "End session")",
+                            recovery: { retryAction() })
+                    .accessibilityIdentifier("focus-recovery-error")
+                Text("The decision was not saved. This session is still interrupted; retry before starting another.")
+                    .appTypography(.metadata)
+            } else if let actionError, actionError.sessionID == session.id, actionError.state == session.state {
+                Text(actionError.message).appTypography(.metadata).foregroundStyle(AppColors.error)
+            }
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: AppMetrics.space3) { recoveryActions(enabled: failedChoice == nil) }
+                VStack(alignment: .leading, spacing: AppMetrics.space3) { recoveryActions(enabled: failedChoice == nil) }
+            }
+            ActionButton("Start new session (decision pending)", isEnabled: false) {}
+                .accessibilityIdentifier("focus-recovery-start-disabled")
+        }
+    }
+
+    @ViewBuilder
+    private func recoveryActions(enabled: Bool) -> some View {
+        ActionButton("End session", symbol: "stop.fill", isEnabled: enabled) {
+            resolveRecovery(.end)
+        }
+        .accessibilityIdentifier("focus-recovery-end")
+        ActionButton("Resume", symbol: "play.fill", variant: .primary, isEnabled: enabled) {
+            resolveRecovery(.resume)
+        }
+        .accessibilityIdentifier("focus-recovery-resume")
+    }
+
+    private func resolveRecovery(_ choice: FocusRecoveryChoice) {
+        do {
+            try service.resolveRecovery(choice)
+            actionError = nil
+        } catch {
+            if let session = service.activeSession {
+                actionError = (session.id, session.state,
+                    "The decision could not be saved. The session is still interrupted; try again.")
+            }
+        }
+    }
+
+    private func completionPendingContent(_ session: FocusSessionSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: AppMetrics.space6) {
+            StatusPill("Completion pending", kind: .error)
+                .accessibilityIdentifier("focus-completion-pending-state")
+            Text("00:00")
+                .font(.system(size: 64, weight: .medium, design: .monospaced))
+                .foregroundStyle(AppColors.accent)
+                .accessibilityLabel("Time remaining: zero; completion not saved")
+                .accessibilityIdentifier("focus-completion-pending-countdown")
+            Text(session.linkedTitleSnapshot ?? "Focus session").appTypography(.section)
+            Text("Planned time reached. This session is not yet recorded as Completed. Today's committed total and Sessions remain unchanged until saving succeeds.")
+                .appTypography(.body)
+            Text("Focus never marks a linked task complete.")
+                .appTypography(.metadata)
+                .foregroundStyle(AppColors.textSecondary)
+            ErrorBanner(.saveFailed, recoveryTitle: "Retry saving completion", recovery: {
+                do {
+                    try service.retryCompletion()
+                    actionError = nil
+                } catch {
+                    actionError = (session.id, session.state, "Completion still could not be saved. Retry saving to resolve it.")
+                }
+            })
+            .accessibilityIdentifier("focus-completion-pending-error")
+            if let actionError, actionError.sessionID == session.id, actionError.state == session.state {
+                Text(actionError.message).appTypography(.metadata).foregroundStyle(AppColors.error)
+            }
+            Text("No extra focused time is being added.")
+                .appTypography(.metadata)
+                .foregroundStyle(AppColors.textSecondary)
+            ActionButton("Start new session (save pending)", isEnabled: false) {}
+                .accessibilityIdentifier("focus-completion-start-disabled")
+        }
     }
 
     private func timerContent(_ session: FocusSessionSnapshot) -> some View {

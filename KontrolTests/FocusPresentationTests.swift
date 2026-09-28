@@ -113,6 +113,90 @@ final class FocusPresentationTests: XCTestCase {
         XCTAssertEqual(graph.taskStore.snapshots.first(where: { $0.id == task.id })?.isCompleted, false)
     }
 
+    func testRecoveryCopyStaysFrozenAcrossReopenAndFailedEndRetry() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        var fail = false
+        let repository = SwiftDataFocusRepository(container: container, save: { context in
+            if fail { throw FocusError.persistenceFailure }
+            try context.save()
+        })
+        let start = Date(timeIntervalSinceReferenceDate: 1_000)
+        let original = try repository.create(input: FocusStartInput(plannedSeconds: 1500, startedAt: start))
+        let clock = { start.addingTimeInterval(62.75) }
+        let first = FocusService(repository: repository, wallClock: clock,
+            notificationCenter: NotificationCenter(), workspaceNotificationCenter: NotificationCenter())
+        first.loadIfNeeded()
+        let pending = try XCTUnwrap(first.activeSession)
+        XCTAssertEqual(pending.id, original.id)
+        XCTAssertTrue(pending.recoveryRequired)
+        let copy = FocusRecoveryPresentation(session: pending)
+        XCTAssertEqual(copy.title, "Focus session")
+        XCTAssertEqual(copy.recorded, "1 min 2 sec")
+        XCTAssertEqual(copy.remaining, "23 min 58 sec")
+        let reopened = FocusService(repository: repository, wallClock: { start.addingTimeInterval(300) },
+            notificationCenter: NotificationCenter(), workspaceNotificationCenter: NotificationCenter())
+        reopened.loadIfNeeded()
+        XCTAssertEqual(reopened.activeSession, pending)
+        XCTAssertEqual(FocusRecoveryPresentation(session: try XCTUnwrap(reopened.activeSession)).remaining, copy.remaining)
+        fail = true
+        XCTAssertThrowsError(try reopened.resolveRecovery(.end))
+        XCTAssertEqual(reopened.activeSession, pending)
+        XCTAssertEqual(reopened.mutationFailure?.action, .recover(.end))
+        XCTAssertEqual(try repository.fetchAll(), [pending])
+        fail = false
+        try reopened.retryMutation()
+        XCTAssertNil(reopened.activeSession)
+        let terminal = try XCTUnwrap(reopened.snapshots.first)
+        XCTAssertEqual(terminal.id, original.id)
+        XCTAssertEqual(terminal.state, .ended)
+        XCTAssertEqual(terminal.actualSeconds, pending.actualSeconds)
+        XCTAssertEqual(try repository.fetchAll(), [terminal])
+        XCTAssertThrowsError(try reopened.retryMutation())
+        XCTAssertEqual(try repository.fetchAll().count, 1)
+    }
+
+    func testCompletionPendingIsNotHistoryUntilExplicitRetry() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        var fail = false
+        let repository = SwiftDataFocusRepository(container: container, save: { context in
+            if fail { throw FocusError.persistenceFailure }
+            try context.save()
+        })
+        let start = Date(timeIntervalSinceReferenceDate: 1_000)
+        let base = ContinuousClock().now
+        var elapsed: Int64 = 0
+        var tick: (() -> Void)?
+        let service = FocusService(repository: repository,
+            wallClock: { start.addingTimeInterval(Double(elapsed)) },
+            monotonicClock: { base.advanced(by: .seconds(elapsed)) },
+            scheduleTick: { callback in tick = callback; return {} },
+            notificationCenter: NotificationCenter(), workspaceNotificationCenter: NotificationCenter())
+        service.loadIfNeeded()
+        try service.start(configuration: FocusConfiguration(duration: .custom("1")))
+        let saved = try XCTUnwrap(service.activeSession)
+        fail = true
+        elapsed = 90
+        tick?()
+        XCTAssertEqual(service.countdownSeconds, 0)
+        XCTAssertEqual(service.completionPendingError, .persistenceFailure)
+        XCTAssertEqual(service.activeSession, saved)
+        XCTAssertEqual(service.history(.today).groups.flatMap(\.sessions).count, 0)
+        XCTAssertEqual(try repository.fetchAll(), [saved])
+        XCTAssertThrowsError(try service.start(configuration: FocusConfiguration())) {
+            XCTAssertEqual($0 as? FocusServiceError, .completionPending)
+        }
+        XCTAssertThrowsError(try service.retryCompletion())
+        XCTAssertEqual(service.activeSession, saved)
+        fail = false
+        try service.retryCompletion()
+        XCTAssertNil(service.completionPendingError)
+        XCTAssertNil(service.activeSession)
+        XCTAssertEqual(service.snapshots.first?.state, .completed)
+        XCTAssertEqual(service.snapshots.first?.id, saved.id)
+        XCTAssertEqual(try repository.fetchAll(), service.snapshots)
+        XCTAssertThrowsError(try service.retryCompletion())
+    }
+
     // Hosted presentation is compiled by build-for-testing, not executed in this step.
     func testHostedReadySurface() throws {
         let graph = try dependencies()
@@ -120,6 +204,35 @@ final class FocusPresentationTests: XCTestCase {
         host.frame = CGRect(x: 0, y: 0, width: 1000, height: 700)
         host.layoutSubtreeIfNeeded()
         XCTAssertEqual(host.frame.width, 1000)
+    }
+
+    func testHostedRecoveryAndCompletionPendingSurfaces() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        var fail = false
+        let repository = SwiftDataFocusRepository(container: container, save: { context in
+            if fail { throw FocusError.persistenceFailure }
+            try context.save()
+        })
+        let start = Date(timeIntervalSinceReferenceDate: 1_000)
+        let base = ContinuousClock().now
+        var elapsed: Int64 = 10
+        _ = try repository.create(input: FocusStartInput(plannedSeconds: 60, startedAt: start))
+        let graph = AppDependencies(container: container,
+            catalogRepository: SwiftDataCatalogRepository(container: container),
+            focusRepository: repository,
+            focusWallClock: { start.addingTimeInterval(Double(elapsed)) },
+            focusMonotonicClock: { base.advanced(by: .seconds(elapsed)) })
+        let host = NSHostingView(rootView: FocusView(service: graph.focusService, taskStore: graph.taskStore))
+        host.frame = CGRect(x: 0, y: 0, width: 1000, height: 700)
+        host.layoutSubtreeIfNeeded()
+        XCTAssertEqual(graph.focusService.activeSession?.recoveryRequired, true)
+        try graph.focusService.resolveRecovery(.resume)
+        elapsed = 80
+        fail = true
+        XCTAssertThrowsError(try graph.focusService.end())
+        host.layoutSubtreeIfNeeded()
+        XCTAssertEqual(graph.focusService.completionPendingError, .persistenceFailure)
+        XCTAssertEqual(graph.focusService.countdownSeconds, 0)
     }
 
     func testHostedRunningAndPausedSurfaces() throws {
