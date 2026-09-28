@@ -24,6 +24,8 @@ final class LearningHistoryTests: XCTestCase {
             let (container, writer) = try setup(url)
             ids = Array(try writer.loadSnapshot().slots.prefix(3).map(\.lessonID)).sorted()
             let baseline = try writer.loadSnapshot()
+            let studiedCriteria = try XCTUnwrap(baseline.definitions.first { $0.id == ids[0] }).selfCheckCriteria
+            XCTAssertFalse(studiedCriteria.isEmpty)
             XCTAssertTrue(try writer.loadHistory().isEmpty)
             XCTAssertEqual(try writer.loadSnapshot(), baseline)
             for id in ids.prefix(2) {
@@ -52,10 +54,20 @@ final class LearningHistoryTests: XCTestCase {
             for row in try edit.fetch(FetchDescriptor<LessonDefinition>()) where ids.contains(row.id) {
                 row.title = "Upgraded"
                 row.exercise = "New exercise"
+                row.selfCheckCriteria = ["New installed criterion"]
                 row.contentVersion += 1
             }
             try edit.save()
             XCTAssertEqual(try writer.loadHistory(), archived)
+            guard case .pinned(let dismissedStudy) = try XCTUnwrap(archived.first).content else {
+                return XCTFail("Dismissed study must retain its pin")
+            }
+            XCTAssertEqual(dismissedStudy.selfCheckCriteria, studiedCriteria)
+            guard case .pinned(let completedStudy) = try XCTUnwrap(archived.last).content else {
+                return XCTFail("Completed study must retain its pin")
+            }
+            XCTAssertEqual(completedStudy.selfCheckCriteria,
+                           baseline.definitions.first { $0.id == last }?.selfCheckCriteria)
             XCTAssertEqual(try writer.loadLesson(lessonID: ids[0]).progress?.status, .dismissed)
         }
         try autoreleasepool {
@@ -236,6 +248,103 @@ final class LearningHistoryTests: XCTestCase {
         }
     }
 
+    func testHistorySelectionIsReadOnlyIDMatchedAndRestoreIsExplicit() throws {
+        let (container, repository) = try setup()
+        let store = LearningCatalogStore(repository: repository)
+        store.loadIfNeeded()
+        let original = try XCTUnwrap(store.state.snapshot)
+        let firstSlot = try XCTUnwrap(original.slots.first)
+        let secondSlot = try XCTUnwrap(original.slots.first { $0.lessonID != firstSlot.lessonID })
+        XCTAssertEqual(try store.loadHistory(), [])
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).isEmpty)
+        XCTAssertEqual(store.state.snapshot, original)
+        let opened = try store.openLesson(lessonID: firstSlot.lessonID, now: first)
+        let attempt = try XCTUnwrap(opened.detail.attempt)
+        _ = try store.saveAnswer(attemptID: attempt.id, expectedRevision: 0, answer: "  archived 🧪\n")
+        _ = try store.dismiss(lessonID: firstSlot.lessonID, expectedSlot: firstSlot, now: later)
+        _ = try store.dismiss(lessonID: secondSlot.lessonID, expectedSlot: secondSlot, now: later)
+        let history = try store.loadHistory()
+        XCTAssertEqual(history.count, 2)
+        let entry = try XCTUnwrap(LearningHistoryView.entry(firstSlot.lessonID, in: store.historyState))
+        XCTAssertEqual(entry.attempt?.answerDraft, "  archived 🧪\n")
+        XCTAssertNil(LearningHistoryView.matchedDetail(entry, state: .current(
+            try repository.loadLesson(lessonID: secondSlot.lessonID))))
+        let detail = try store.loadDetail(lessonID: firstSlot.lessonID)
+        XCTAssertEqual(LearningHistoryView.matchedDetail(entry, state: store.detailState), detail)
+        XCTAssertTrue(LearningHistoryView.canRestore(entry, detail: detail))
+        XCTAssertEqual(try repository.loadHistory(), history) // selection and detail reads do not restore
+        XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).count, 1)
+        let beforeStudy = try XCTUnwrap(LearningHistoryView.entry(secondSlot.lessonID, in: store.historyState))
+        XCTAssertEqual(beforeStudy.content, .unavailable)
+        let unstudied = try store.loadDetail(lessonID: secondSlot.lessonID)
+        XCTAssertNotNil(LearningHistoryView.matchedDetail(beforeStudy, state: .current(unstudied)))
+        XCTAssertNil(unstudied.attempt)
+        XCTAssertNil(LearningHistoryView.entry(firstSlot.lessonID, in: .failed(stale: history)))
+        XCTAssertNil(LearningHistoryView.matchedDetail(entry, state: .failed(lessonID: firstSlot.lessonID, stale: detail)))
+        XCTAssertFalse(LearningHistoryView.canRestore(nil, detail: detail))
+        let slotsBeforeRestore = try repository.loadSnapshot().slots
+        let restored = try store.restoreDismissed(lessonID: firstSlot.lessonID, now: later)
+        XCTAssertEqual(restored.detail.attempt?.answerDraft, "  archived 🧪\n")
+        XCTAssertNil(LearningHistoryView.entry(firstSlot.lessonID, in: store.historyState))
+        XCTAssertEqual(restored.catalog.slots.filter { $0.key != firstSlot.key },
+                       slotsBeforeRestore.filter { $0.key != firstSlot.key })
+    }
+
+    func testHistoryAndDetailFailuresRequireTheirOwnRetriesBeforeRestore() throws {
+        let (container, repository) = try setup()
+        let store = LearningCatalogStore(repository: repository)
+        store.loadIfNeeded()
+        let slot = try XCTUnwrap(store.state.snapshot?.slots.first)
+        let opened = try store.openLesson(lessonID: slot.lessonID, now: first)
+        let attemptID = try XCTUnwrap(opened.detail.attempt?.id)
+        _ = try store.dismiss(lessonID: slot.lessonID, expectedSlot: slot, now: later)
+        let baseline = try store.loadHistory()
+        let context = ModelContext(container)
+        context.autosaveEnabled = false
+        let attempt = try XCTUnwrap(context.fetch(FetchDescriptor<LessonAttempt>()).first { $0.id == attemptID })
+        let savedPin = attempt.pinnedContentData
+        attempt.pinnedContentData = Data("corrupt".utf8)
+        try context.save()
+        XCTAssertThrowsError(try store.loadHistory())
+        XCTAssertNil(LearningHistoryView.entry(slot.lessonID, in: store.historyState))
+        XCTAssertThrowsError(try store.restoreDismissed(lessonID: slot.lessonID))
+        XCTAssertEqual(try repository.loadSnapshot().progress.first { $0.lessonID == slot.lessonID }?.status, .dismissed)
+        attempt.pinnedContentData = savedPin
+        try context.save()
+        XCTAssertEqual(try store.retryHistory(), baseline)
+        XCTAssertEqual(LearningHistoryView.entry(slot.lessonID, in: store.historyState)?.lessonID, slot.lessonID)
+        attempt.pinnedContentData = Data("corrupt".utf8)
+        try context.save()
+        XCTAssertThrowsError(try store.loadDetail(lessonID: slot.lessonID))
+        let entry = try XCTUnwrap(LearningHistoryView.entry(slot.lessonID, in: store.historyState))
+        XCTAssertNil(LearningHistoryView.matchedDetail(entry, state: store.detailState))
+        XCTAssertThrowsError(try store.restoreDismissed(lessonID: slot.lessonID))
+        attempt.pinnedContentData = savedPin
+        try context.save()
+        let detail = try store.retryDetail(lessonID: slot.lessonID)
+        XCTAssertEqual(LearningHistoryView.matchedDetail(entry, state: store.detailState), detail)
+        XCTAssertTrue(LearningHistoryView.canRestore(entry, detail: detail))
+        XCTAssertEqual(try store.restoreDismissed(lessonID: slot.lessonID).detail.attempt?.id, attemptID)
+    }
+
+    func testRestoredStartedFullChoicesOffersSeparateResumeEntry() throws {
+        let (_, repository) = try setup()
+        let initial = try repository.loadSnapshot()
+        let slot = try XCTUnwrap(initial.slots.first)
+        let attempt = try XCTUnwrap(repository.openLesson(lessonID: slot.lessonID, now: first).detail.attempt)
+        _ = try repository.saveAnswer(attemptID: attempt.id, expectedRevision: 0, answer: "  keep\n")
+        let dismissed = try repository.dismiss(lessonID: slot.lessonID, expectedSlot: slot, now: later)
+        let restored = try repository.restoreDismissed(lessonID: slot.lessonID, now: later)
+        XCTAssertEqual(restored.catalog.slots, dismissed.catalog.slots)
+        XCTAssertEqual(LearningView.choices(for: slot.topicID, in: restored.catalog).count, 4)
+        XCTAssertEqual(LearningView.restoredUnslotted(for: slot.topicID, in: restored.catalog).map(\.lessonID),
+                       [slot.lessonID])
+        XCTAssertTrue(LearningView.restoredUnslotted(for: "other", in: restored.catalog).isEmpty)
+        XCTAssertEqual(try repository.openLesson(lessonID: slot.lessonID, now: later).detail.attempt?.answerDraft,
+                       "  keep\n")
+        XCTAssertEqual(try repository.loadSnapshot().slots, dismissed.catalog.slots)
+    }
+
     func testCompletedCannotRestoreAndMissingHistoryContentIsNotSubstituted() throws {
         let (container, writer) = try setup()
         let slot = try XCTUnwrap(writer.loadSnapshot().slots.first)
@@ -243,12 +352,17 @@ final class LearningHistoryTests: XCTestCase {
         context.insert(LessonProgress(lessonID: slot.lessonID, status: .completed, completedAt: first))
         let studied = KontrolSchemaV1.LessonContentSnapshot(title: "Old title", objectiveKey: "old",
             conceptIDs: [], difficulty: "basic", format: "learn", explanation: "old",
-            workedExample: "old", exercise: "old", referenceAnswer: "old", selfCheckCriteria: [])
+            workedExample: "old", exercise: "old", referenceAnswer: "old",
+            selfCheckCriteria: ["Archived design rubric", "Saved second criterion"])
         context.insert(LessonAttempt(id: UUID(), lessonID: slot.lessonID, contentVersion: 1,
             completedAt: first, completedContentSnapshot: studied))
         try context.save()
         XCTAssertEqual(try writer.loadHistory().first?.content, .legacyCompleted(studied))
         XCTAssertEqual(try writer.loadHistory().first?.title, "Old title")
+        guard case .legacyCompleted(let archived) = try XCTUnwrap(writer.loadHistory().first).content else {
+            return XCTFail("Expected legacy completed snapshot")
+        }
+        XCTAssertEqual(archived.selfCheckCriteria, ["Archived design rubric", "Saved second criterion"])
         XCTAssertThrowsError(try writer.restoreDismissed(lessonID: slot.lessonID, now: later)) {
             XCTAssertEqual($0 as? LessonExperienceError, .invalidTransition)
         }

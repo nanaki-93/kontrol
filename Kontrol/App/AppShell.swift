@@ -97,7 +97,7 @@ struct AppShell: View {
                             LessonExperienceView(lessonID: id, store: dependencies.learningCatalogStore,
                                                  drafts: dependencies.lessonDraftStore, navigation: navigation)
                         case .history:
-                            historyRoute
+                            LearningHistoryView(store: dependencies.learningCatalogStore, navigation: navigation)
                         }
                     case .focus:
                         FocusView(service: dependencies.focusService, taskStore: dependencies.taskStore)
@@ -117,15 +117,6 @@ struct AppShell: View {
         .preferredColorScheme(.dark)
         .onAppear { navigation.attachDrafts(dependencies.lessonDraftStore) }
         .background(WindowCloseGuard { navigation.flushForLifecycle() })
-    }
-
-    private var historyRoute: some View {
-        VStack(alignment: .leading, spacing: AppMetrics.space4) {
-            Button("Back to choices") { navigation.backToChoices() }
-            Text("History is not available yet.").appTypography(.body)
-        }
-        .padding(AppMetrics.horizontalInset)
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var navigationBar: some View {

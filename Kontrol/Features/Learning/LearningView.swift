@@ -55,6 +55,14 @@ struct LearningView: View {
             .compactMap { definitions[$0.lessonID] }
     }
 
+    static func restoredUnslotted(for topicID: String, in snapshot: LearningCatalogSnapshot) -> [LessonProgressSnapshot] {
+        snapshot.progress.filter { progress in
+            progress.status == .started && progress.dismissedAt != nil &&
+            !snapshot.slots.contains(where: { $0.lessonID == progress.lessonID }) &&
+            snapshot.definitions.contains(where: { $0.id == progress.lessonID && $0.topicID == topicID })
+        }.sorted { $0.lessonID < $1.lessonID }
+    }
+
     /// Resolve a slot identity from committed choices (never from a stale index).
     /// Retained for non-UI catalog projections; the choices UI does not disclose content.
     static func inspectedLesson(_ id: String?, for topicID: String,
@@ -285,6 +293,17 @@ struct LearningView: View {
                         .clipShape(RoundedRectangle(cornerRadius: AppMetrics.smallRadius))
                     }
                 }
+                // Restored work can be started but unslotted when all four assignments
+                // remain valid. Keep it reachable without counting it as a fifth choice.
+                let unslotted = Self.restoredUnslotted(for: selected.id, in: snapshot)
+                if !unslotted.isEmpty, let navigation {
+                    SectionHeader("Restored work")
+                    ForEach(unslotted) { progress in
+                        let title = snapshot.definitions.first { $0.id == progress.lessonID }?.title ?? progress.lessonID
+                        Button("Resume \(title)") { open(progress.lessonID, using: navigation) }
+                            .accessibilityIdentifier("learning-restored-resume-\(progress.lessonID)")
+                    }
+                }
                 if choices.count < 4 {
                     Button("Generate…") {
                         generationChoiceCount = choices.count
@@ -326,7 +345,8 @@ struct LearningView: View {
     private func open(_ id: String, using navigation: NavigationStore) {
         // Recheck the current committed slot before mutating a choice rendered earlier.
         guard let snapshot = store.state.snapshot, store.state.isAuthoritative,
-              snapshot.slots.contains(where: { $0.lessonID == id }) else {
+              (snapshot.slots.contains(where: { $0.lessonID == id }) ||
+               snapshot.progress.contains(where: { $0.lessonID == id && $0.status == .started && $0.dismissedAt != nil })) else {
             entryError = .staleSlot
             return
         }
