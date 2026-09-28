@@ -10,7 +10,7 @@ final class QuickCaptureTests: XCTestCase {
     private enum SaveFailure: Error { case injected }
 
     private final class RecordingRepository: TaskRepository {
-        var calls: [(String, PlannedDay?)] = []
+        var calls: [TaskInput] = []
         var fail = false
         let container: ModelContainer
         let storage: SwiftDataTaskRepository
@@ -21,12 +21,12 @@ final class QuickCaptureTests: XCTestCase {
         }
 
         func create(title: String, plannedFor: PlannedDay?) throws -> UUID {
-            calls.append((title, plannedFor))
             if fail { throw SaveFailure.injected }
             return try storage.create(title: title, plannedFor: plannedFor)
         }
 
         func create(input: TaskInput) throws -> TaskSnapshot {
+            calls.append(input)
             if fail { throw SaveFailure.injected }
             return try storage.create(input: input)
         }
@@ -126,7 +126,7 @@ final class QuickCaptureTests: XCTestCase {
 
     func testBlankDraftNeverSaves() throws {
         let repository = try RecordingRepository()
-        let draft = QuickCaptureDraft(repository: repository)
+        let draft = QuickCaptureDraft(store: TaskStore(repository: repository))
         var dismissed = false
         draft.title = "  \n  "
         XCTAssertFalse(draft.canAdd)
@@ -139,7 +139,7 @@ final class QuickCaptureTests: XCTestCase {
     func testFailureKeepsEditableTitleAndSheetUntilSingleSuccessfulRetry() throws {
         let repository = try RecordingRepository()
         repository.fail = true
-        let draft = QuickCaptureDraft(repository: repository)
+        let draft = QuickCaptureDraft(store: TaskStore(repository: repository))
         draft.title = "  Keep my draft  "
         var dismissals = 0
         draft.add { dismissals += 1 }
@@ -147,7 +147,8 @@ final class QuickCaptureTests: XCTestCase {
         XCTAssertEqual(draft.title, "  Keep my draft  ")
         XCTAssertNotNil(draft.errorMessage)
         XCTAssertEqual(repository.calls.count, 1)
-        XCTAssertNil(repository.calls.first?.1) // Current local day, not a due timestamp.
+        XCTAssertNotNil(repository.calls.first?.plannedFor)
+        XCTAssertNil(repository.calls.first?.dueAt)
         XCTAssertTrue(try repository.fetchAll().isEmpty)
 
         draft.title = "  Edited after error  "
@@ -162,6 +163,141 @@ final class QuickCaptureTests: XCTestCase {
         XCTAssertNotNil(saved.plannedDay)
         XCTAssertEqual(saved.plannedTimeZoneID, TimeZone.current.identifier)
         XCTAssertNil(saved.dueAt)
+    }
+
+    func testOvernightTodayIsResolvedAtSubmissionAndPublishesOneIdentity() throws {
+        let repository = try RecordingRepository()
+        let store = TaskStore(repository: repository)
+        let zone = try XCTUnwrap(TimeZone(identifier: "Pacific/Kiritimati"))
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = zone
+        var now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-01-01T09:59:00Z"))
+        let opened = PlannedDay.today(at: now, calendar: calendar, timeZone: zone)
+        let draft = QuickCaptureDraft(store: store, clock: { now }, calendar: { calendar },
+                                      timeZone: { zone })
+        draft.title = "Overnight"
+        now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-01-01T10:01:00Z"))
+        var dismissals = 0
+        draft.add { dismissals += 1 }
+        draft.add { dismissals += 1 }
+        XCTAssertEqual(dismissals, 1)
+        XCTAssertEqual(repository.calls.count, 1)
+        let saved = try XCTUnwrap(store.snapshots.first)
+        XCTAssertEqual(store.snapshots.count, 1)
+        XCTAssertEqual(try repository.fetchAll().map(\.id), [saved.id])
+        XCTAssertNotEqual(saved.plannedDay, opened.components)
+        XCTAssertEqual(saved.plannedDay, PlannedDay.today(at: now, calendar: calendar,
+                                                           timeZone: zone).components)
+        XCTAssertEqual(saved.plannedTimeZoneID, zone.identifier)
+        XCTAssertNil(saved.dueAt)
+        XCTAssertNil(saved.notes)
+    }
+
+    func testUnplannedAndClearedDuePersistAndFailureRetainsAllSelections() throws {
+        let repository = try RecordingRepository()
+        let store = TaskStore(repository: repository)
+        let draft = QuickCaptureDraft(store: store)
+        draft.title = "  Keep all fields  "
+        draft.planChoice = .date
+        let selectedDay = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-02-17T12:00:00Z"))
+        let due = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-02-19T12:30:00Z"))
+        draft.plannedDate = selectedDay
+        draft.hasDueDate = true
+        draft.dueDate = due
+        repository.fail = true
+        var dismissals = 0
+        draft.add { dismissals += 1 }
+        XCTAssertEqual(dismissals, 0)
+        XCTAssertEqual(draft.title, "  Keep all fields  ")
+        XCTAssertEqual(draft.planChoice, .date)
+        XCTAssertEqual(draft.plannedDate, selectedDay)
+        XCTAssertTrue(draft.hasDueDate)
+        XCTAssertEqual(draft.dueDate, due)
+        XCTAssertNotNil(draft.errorMessage)
+        XCTAssertTrue(store.snapshots.isEmpty)
+        XCTAssertTrue(try repository.fetchAll().isEmpty)
+        repository.fail = false
+        draft.planChoice = .unplanned
+        draft.hasDueDate = false
+        draft.add { dismissals += 1 }
+        XCTAssertEqual(dismissals, 1)
+        XCTAssertEqual(repository.calls.count, 2)
+        XCTAssertNil(repository.calls.last?.plannedFor)
+        XCTAssertNil(repository.calls.last?.dueAt)
+        XCTAssertNil(store.snapshots.first?.plannedDay)
+        XCTAssertNil(store.snapshots.first?.dueAt)
+        XCTAssertEqual(try repository.fetchAll().map(\.title), ["Keep all fields"])
+        draft.add { dismissals += 1 }
+        XCTAssertEqual(repository.calls.count, 2)
+        XCTAssertEqual(dismissals, 1)
+    }
+
+    func testExplicitDateAndDueAreSavedAsSelected() throws {
+        let repository = try RecordingRepository()
+        let store = TaskStore(repository: repository)
+        let zone = try XCTUnwrap(TimeZone(identifier: "UTC"))
+        let selectedDay = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-03-12T12:00:00Z"))
+        let due = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-03-13T08:15:00Z"))
+        let draft = QuickCaptureDraft(store: store, timeZone: { zone })
+        draft.title = "Selected dates"
+        draft.planChoice = .date
+        draft.plannedDate = selectedDay
+        draft.hasDueDate = true
+        draft.dueDate = due
+        draft.add {}
+        let saved = try XCTUnwrap(store.snapshots.first)
+        XCTAssertEqual(saved.plannedDay, PlannedDay.today(at: selectedDay, timeZone: zone).components)
+        XCTAssertEqual(saved.plannedTimeZoneID, zone.identifier)
+        XCTAssertEqual(saved.dueAt, due)
+        XCTAssertNil(saved.notes)
+    }
+
+    func testExplicitPlanKeepsSelectedCalendarDayAndZoneAfterTravelAndFailedSave() throws {
+        let repository = try RecordingRepository()
+        let store = TaskStore(repository: repository)
+        let selectionZone = try XCTUnwrap(TimeZone(identifier: "Pacific/Kiritimati"))
+        let destinationZone = try XCTUnwrap(TimeZone(identifier: "Pacific/Honolulu"))
+        var zone = selectionZone
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = selectionZone
+        let chosen = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-03-12T12:00:00Z"))
+        let due = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-03-13T08:15:00Z"))
+        let draft = QuickCaptureDraft(store: store, calendar: { calendar }, timeZone: { zone })
+        draft.title = "Travel with draft"
+        draft.planChoice = .date
+        draft.plannedDate = chosen
+        draft.hasDueDate = true
+        draft.dueDate = due
+        let selected = PlannedDay.today(at: chosen, calendar: calendar, timeZone: selectionZone)
+        XCTAssertEqual(draft.selectedPlan, selected)
+
+        // Kiritimati's March 13 is still March 12 in Honolulu. Reinterpreting
+        // the original instant in the destination zone would move the plan.
+        zone = destinationZone
+        calendar.timeZone = destinationZone
+        XCTAssertNotEqual(PlannedDay.today(at: chosen, calendar: calendar, timeZone: zone), selected)
+        XCTAssertEqual(PlannedDay.today(at: draft.displayedPlannedDate,
+                                        calendar: calendar, timeZone: zone).components, selected.components)
+        repository.fail = true
+        var dismissals = 0
+        draft.add { dismissals += 1 }
+        XCTAssertEqual(dismissals, 0)
+        XCTAssertEqual(draft.selectedPlan, selected)
+        XCTAssertEqual(draft.plannedDate, chosen)
+        XCTAssertEqual(draft.dueDate, due)
+        XCTAssertNotNil(draft.errorMessage)
+        XCTAssertTrue(try repository.fetchAll().isEmpty)
+        repository.fail = false
+        draft.add { dismissals += 1 }
+        let saved = try XCTUnwrap(store.snapshots.first)
+        XCTAssertEqual(dismissals, 1)
+        XCTAssertEqual(repository.calls.count, 2)
+        XCTAssertEqual(repository.calls.last?.plannedFor, selected)
+        XCTAssertEqual(saved.plannedDay, selected.components)
+        XCTAssertEqual(saved.plannedTimeZoneID, selectionZone.identifier)
+        XCTAssertEqual(saved.dueAt, due)
+        draft.add { dismissals += 1 }
+        XCTAssertEqual(repository.calls.count, 2)
     }
 
     func testRenderedSaveFailureRetainsSheetAndEditableTextUntilRetry() throws {
@@ -230,10 +366,16 @@ final class QuickCaptureTests: XCTestCase {
         XCTAssertEqual(attribute(cancel, kAXRoleAttribute) as? String, kAXButtonRole)
         XCTAssertEqual(attribute(add, kAXRoleAttribute) as? String, kAXButtonRole)
         XCTAssertEqual((attribute(add, kAXEnabledAttribute) as? NSNumber)?.boolValue, false)
-        XCTAssertEqual(attribute(try waitForElement("quick-capture-plan", in: window), kAXValueAttribute) as? String,
-                       "Plan for Today")
-        XCTAssertEqual(attribute(try waitForElement("quick-capture-due", in: window), kAXValueAttribute) as? String,
-                       "Due None")
+        let plan = try waitForElement("quick-capture-plan", in: window)
+        let due = try waitForElement("quick-capture-due", in: window)
+        XCTAssertEqual((attribute(plan, kAXEnabledAttribute) as? NSNumber)?.boolValue, true)
+        XCTAssertEqual((attribute(due, kAXEnabledAttribute) as? NSNumber)?.boolValue, true)
+        XCTAssertEqual(AXUIElementPerformAction(due, kAXPressAction as CFString), .success)
+        _ = try waitForElement("quick-capture-due-date", in: window)
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement("quick-capture-due", in: window),
+                                                 kAXPressAction as CFString), .success)
+        settle()
+        XCTAssertNil(element("quick-capture-due-date", in: window))
         XCTAssertEqual(AXUIElementSetAttributeValue(title, kAXValueAttribute as CFString,
                                                    "  \n  " as CFString), .success)
         settle()
@@ -249,6 +391,9 @@ final class QuickCaptureTests: XCTestCase {
                                                    "Discard me" as CFString), .success)
         settle()
         XCTAssertEqual((attribute(add, kAXEnabledAttribute) as? NSNumber)?.boolValue, true)
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement("quick-capture-due", in: window),
+                                                 kAXPressAction as CFString), .success)
+        _ = try waitForElement("quick-capture-due-date", in: window)
         XCTAssertEqual(AXUIElementPerformAction(cancel, kAXPressAction as CFString), .success)
         settle()
         XCTAssertNil(element("quick-capture-title", in: window))

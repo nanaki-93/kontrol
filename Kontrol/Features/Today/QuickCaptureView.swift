@@ -6,24 +6,79 @@ final class QuickCaptureDraft: ObservableObject {
     @Published var title = "" {
         didSet { errorMessage = nil }
     }
+    enum PlanChoice: Hashable { case today, date, unplanned }
+    @Published var planChoice: PlanChoice = .today {
+        didSet {
+            // The first switch to an explicit date starts from the day of selection,
+            // not the day the sheet happened to open.
+            if planChoice == .date && selectedPlan == nil { plannedDate = clock() }
+            errorMessage = nil
+        }
+    }
+    @Published var plannedDate: Date {
+        didSet {
+            // DatePicker binds a Date, but a plan is a calendar day in the zone
+            // where it was selected. Never reinterpret this instant on submission.
+            selectedPlan = PlannedDay.today(at: plannedDate, calendar: calendar(), timeZone: timeZone())
+            errorMessage = nil
+        }
+    }
+    private(set) var selectedPlan: PlannedDay?
+    @Published var hasDueDate = false { didSet { errorMessage = nil } }
+    @Published var dueDate: Date { didSet { errorMessage = nil } }
     @Published private(set) var errorMessage: String?
-    private let repository: any TaskRepository
+    private let store: TaskStore
+    private let clock: () -> Date
+    private let calendar: () -> Calendar
+    private let timeZone: () -> TimeZone
+    private var submitted = false
+    private var submitting = false
 
-    init(repository: any TaskRepository) {
-        self.repository = repository
+    init(store: TaskStore, clock: @escaping () -> Date = Date.init,
+         calendar: @escaping () -> Calendar = { .current },
+         timeZone: @escaping () -> TimeZone = { .current }) {
+        self.store = store
+        self.clock = clock
+        self.calendar = calendar
+        self.timeZone = timeZone
+        let initialDate = clock()
+        plannedDate = initialDate
+        dueDate = initialDate
     }
 
-    var canAdd: Bool { !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    /// Project the selected components into the current display zone so travel
+    /// does not make the picker appear to select a different calendar day.
+    var displayedPlannedDate: Date {
+        guard let selectedPlan else { return plannedDate }
+        var displayCalendar = calendar()
+        displayCalendar.timeZone = timeZone()
+        let day = selectedPlan.components
+        return displayCalendar.date(from: DateComponents(year: day.year, month: day.month,
+                                                         day: day.day, hour: 12)) ?? plannedDate
+    }
+
+    var canAdd: Bool {
+        !submitted && !submitting && !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     func add(onSuccess: () -> Void) {
         guard canAdd else { return }
+        submitting = true
+        defer { submitting = false }
+        let plan: PlannedDay?
+        switch planChoice {
+        case .today: plan = PlannedDay.today(at: clock(), calendar: calendar(), timeZone: timeZone())
+        case .date: plan = selectedPlan
+        case .unplanned: plan = nil
+        }
         do {
-            // nil means the repository captures the current local day and time zone.
-            _ = try repository.create(title: title, plannedFor: nil)
+            _ = try store.create(input: TaskInput(title: title, dueAt: hasDueDate ? dueDate : nil,
+                                                   plannedFor: plan))
+            submitted = true
             onSuccess()
         } catch {
             // Do not expose user text, store paths, or raw persistence errors.
-            errorMessage = "Could not save the task. Your title is still here; try again."
+            errorMessage = "Could not save the task. Your fields are still here; try again."
         }
     }
 }
@@ -43,8 +98,8 @@ struct QuickCaptureView: View {
     let onSaved: () -> Void
     @FocusState private var titleFocused: Bool
 
-    init(repository: any TaskRepository, onCancel: @escaping () -> Void, onSaved: @escaping () -> Void) {
-        _draft = StateObject(wrappedValue: QuickCaptureDraft(repository: repository))
+    init(store: TaskStore, onCancel: @escaping () -> Void, onSaved: @escaping () -> Void) {
+        _draft = StateObject(wrappedValue: QuickCaptureDraft(store: store))
         self.onCancel = onCancel
         self.onSaved = onSaved
     }
@@ -66,23 +121,32 @@ struct QuickCaptureView: View {
                             .accessibilityIdentifier("quick-capture-title")
                     }
                     VStack(alignment: .leading, spacing: AppMetrics.space2) {
-                        Text("Plan for")
-                        Text("Today")
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .accessibilityLabel("Plan for Today")
-                            .accessibilityIdentifier("quick-capture-plan")
+                        Picker("Plan for", selection: $draft.planChoice) {
+                            Text("Today").tag(QuickCaptureDraft.PlanChoice.today)
+                            Text("Choose date").tag(QuickCaptureDraft.PlanChoice.date)
+                            Text("Unplanned").tag(QuickCaptureDraft.PlanChoice.unplanned)
+                        }
+                        .accessibilityIdentifier("quick-capture-plan")
+                        if draft.planChoice == .date {
+                            DatePicker("Plan date", selection: Binding(
+                                get: { draft.displayedPlannedDate },
+                                set: { draft.plannedDate = $0 }), displayedComponents: .date)
+                                .accessibilityIdentifier("quick-capture-plan-date")
+                        }
                     }
                     VStack(alignment: .leading, spacing: AppMetrics.space2) {
-                        Text("Due")
-                        Text("None")
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .accessibilityLabel("Due None")
+                        Toggle("Due", isOn: $draft.hasDueDate)
                             .accessibilityIdentifier("quick-capture-due")
+                        if draft.hasDueDate {
+                            DatePicker("Due date and time", selection: $draft.dueDate,
+                                       displayedComponents: [.date, .hourAndMinute])
+                                .accessibilityIdentifier("quick-capture-due-date")
+                        }
                     }
                     if draft.errorMessage != nil {
                         ErrorBanner(.saveFailed)
                             .accessibilityIdentifier("quick-capture-error")
-                        Text("Your title is still here; try again.")
+                        Text("Your fields are still here; try again.")
                             .appTypography(.metadata)
                             .foregroundStyle(AppColors.textSecondary)
                     }

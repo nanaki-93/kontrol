@@ -49,11 +49,10 @@ struct TodayView: View {
             // Wait for the native sheet to finish closing before returning keyboard focus.
             addTaskFocused = true
         }) {
-            QuickCaptureView(repository: store.repository, onCancel: {
+            QuickCaptureView(store: store, onCancel: {
                 showingCapture = false
             }, onSaved: {
                 showingCapture = false
-                store.refresh()
             })
         }
     }

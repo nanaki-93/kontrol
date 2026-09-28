@@ -366,7 +366,8 @@ final class TaskPresentationTests: XCTestCase {
             let container = try ModelContainerFactory().makeContainer(mode: .persistent(store))
             let failed = SwiftDataTaskRepository(container: container, now: { instant }, makeID: { id },
                                                  timeZone: { zone }, save: { _ in throw SaveError.injected })
-            let draft = QuickCaptureDraft(repository: failed)
+            let draft = QuickCaptureDraft(store: TaskStore(repository: failed), clock: { instant },
+                                          timeZone: { zone })
             draft.title = "  One capture  "
             var dismissals = 0
             draft.add { dismissals += 1 }
@@ -375,7 +376,8 @@ final class TaskPresentationTests: XCTestCase {
             XCTAssertTrue(try failed.fetchAll().isEmpty)
             let successful = SwiftDataTaskRepository(container: container, now: { instant }, makeID: { id },
                                                      timeZone: { zone })
-            let retry = QuickCaptureDraft(repository: successful)
+            let retry = QuickCaptureDraft(store: TaskStore(repository: successful), clock: { instant },
+                                          timeZone: { zone })
             retry.title = draft.title
             retry.add { dismissals += 1 }
             XCTAssertEqual(dismissals, 1)
@@ -428,6 +430,44 @@ final class TaskPresentationTests: XCTestCase {
         XCTAssertNil(window.attachedSheet)
         XCTAssertEqual(elements(in: window, identifier: rowID).count, 1)
         XCTAssertEqual(try repository.fetchAll().map(\.id), [id])
+    }
+
+    func testQuickCapturePublishesAcrossTodayAndTasksWithoutPostSaveRead() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let storage = SwiftDataTaskRepository(container: container)
+        let repository = FailingReadRepository(storage: storage)
+        repository.failRead = false
+        let store = TaskStore(repository: repository)
+        let today = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
+                             styleMask: [.titled], backing: .buffered, defer: false)
+        today.title = "Capture shared Today \(UUID())"
+        today.contentView = NSHostingView(rootView: TodayView(store: store))
+        today.makeKeyAndOrderFront(nil)
+        let tasks = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
+                             styleMask: [.titled], backing: .buffered, defer: false)
+        tasks.title = "Capture shared Tasks \(UUID())"
+        tasks.contentView = NSHostingView(rootView: TasksView(store: store))
+        tasks.makeKeyAndOrderFront(nil)
+        defer { today.orderOut(nil); tasks.orderOut(nil) }
+        settle()
+        repository.failRead = true // A post-commit read would fail; creation still succeeds.
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement("today-add-task", in: today),
+                                                 kAXPressAction as CFString), .success)
+        XCTAssertEqual(AXUIElementSetAttributeValue(try waitForElement("quick-capture-title", in: today),
+                                                    kAXValueAttribute as CFString,
+                                                    "Shared capture" as CFString), .success)
+        settle()
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement("quick-capture-add", in: today),
+                                                 kAXPressAction as CFString), .success)
+        settle()
+        let saved = try XCTUnwrap(store.snapshots.first)
+        let row = "task-row-\(saved.id.uuidString)"
+        XCTAssertNil(today.attachedSheet)
+        XCTAssertEqual(store.readState, .loaded)
+        XCTAssertEqual(store.snapshots.count, 1)
+        XCTAssertEqual(elements(in: today, identifier: row).count, 1)
+        XCTAssertEqual(elements(in: tasks, identifier: row).count, 1)
+        XCTAssertEqual(try storage.fetchAll().map(\.id), [saved.id])
     }
 
     func testSharedCommittedSnapshotAppearsInTwoWindowsWithoutNavigation() throws {
