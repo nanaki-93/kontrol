@@ -42,6 +42,20 @@ struct TodayView: View {
         navigation.enterLesson(id: suggestion.id)
     }
 
+    /// Suggestion identity is checked at the tap, not when the row was rendered.
+    /// The temporal clock supplies the real local day; browsing a different day
+    /// must not change the lesson's proposed block date.
+    static func addToTodayDraft(_ suggestion: TodayLessonSelection.Suggestion,
+                                learning: LearningCatalogStore, temporal: TaskTemporalContext,
+                                schedule: ScheduleStore) throws -> ScheduleEditorDraft {
+        guard let current = TodayLessonSelection.suggestions(from: learning.state),
+              current.contains(suggestion) else { throw LessonExperienceError.staleSlot }
+        var calendar = temporal.calendar
+        calendar.timeZone = temporal.timeZone
+        return ScheduleEditorDraft(creatingOn: temporal.now, calendar: calendar,
+                                   in: schedule, lesson: suggestion)
+    }
+
     private func editBlock(_ block: ScheduleSnapshot) {
         lastBlockTriggerID = block.id
         blockPresentation = BlockPresentation(draft: ScheduleEditorDraft(editing: block, in: scheduleStore))
@@ -136,7 +150,12 @@ struct TodayView: View {
                 VStack(alignment: .leading, spacing: AppMetrics.space2) { dayActions; addActions }
             }
             if let learningStore, let navigation {
-                TodayLessonSection(learningStore: learningStore, navigation: navigation)
+                TodayLessonSection(learningStore: learningStore, navigation: navigation,
+                                   temporalStore: store, scheduleStore: scheduleStore,
+                                   onAddToToday: { draft in
+                    lastBlockTriggerID = nil
+                    blockPresentation = BlockPresentation(draft: draft)
+                })
             }
             ViewThatFits(in: .horizontal) {
                 HStack(alignment: .top, spacing: AppMetrics.space8) {
@@ -332,7 +351,11 @@ struct TodayView: View {
 private struct TodayLessonSection: View {
     @ObservedObject var learningStore: LearningCatalogStore
     let navigation: NavigationStore
+    @ObservedObject var temporalStore: TaskStore
+    @ObservedObject var scheduleStore: ScheduleStore
+    let onAddToToday: (ScheduleEditorDraft) -> Void
     @State private var lessonError: LessonExperienceError?
+    @State private var scheduleError: LessonExperienceError?
 
     private var canStart: Bool {
         guard learningStore.state.isAuthoritative else { return false }
@@ -347,6 +370,12 @@ private struct TodayLessonSection: View {
             if lessonError != nil {
                 ErrorBanner(.saveFailed)
                 Text("Could not start the lesson. Your work and location are retained. Retry Start now after resolving the error.")
+                    .appTypography(.metadata)
+                    .foregroundStyle(AppColors.textSecondary)
+            }
+            if scheduleError != nil {
+                ErrorBanner(.readFailed)
+                Text("Could not prepare this lesson block. Refresh learning choices and try Add to Today again.")
                     .appTypography(.metadata)
                     .foregroundStyle(AppColors.textSecondary)
             }
@@ -385,6 +414,19 @@ private struct TodayLessonSection: View {
                         }
                         .accessibilityLabel("Start now: \(suggestion.lesson.title)")
                         .accessibilityIdentifier("today-start-\(suggestion.id)")
+                        ActionButton("Add to Today", isEnabled: learningStore.state.isAuthoritative) {
+                            do {
+                                let draft = try TodayView.addToTodayDraft(
+                                    suggestion, learning: learningStore,
+                                    temporal: temporalStore.temporalContext, schedule: scheduleStore)
+                                scheduleError = nil
+                                onAddToToday(draft)
+                            } catch {
+                                scheduleError = (error as? LessonExperienceError) ?? .persistenceFailure
+                            }
+                        }
+                        .accessibilityLabel("Add to Today: \(suggestion.lesson.title)")
+                        .accessibilityIdentifier("today-add-lesson-\(suggestion.id)")
                     }
                 }
             } else if case .notLoaded = learningStore.state {

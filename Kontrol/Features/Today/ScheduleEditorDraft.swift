@@ -11,6 +11,8 @@ final class ScheduleEditorDraft: ObservableObject {
     @Published var startAt: Date { didSet { fieldsChanged() } }
     @Published var endAt: Date { didSet { fieldsChanged() } }
     @Published var note: String { didSet { fieldsChanged() } }
+    @Published private(set) var lessonID: String?
+    let linkedLessonTitle: String?
     @Published private(set) var saveError: ScheduleMutationError?
     @Published private(set) var overlapReview: ScheduleOverlapReview?
     @Published private(set) var deleteError: ScheduleMutationError?
@@ -26,12 +28,15 @@ final class ScheduleEditorDraft: ObservableObject {
 
     /// Start at 9am on the selected local day (or its first available time) and
     /// use an actual one-hour interval, including on 23/25-hour calendar days.
-    init(creatingOn selectedDate: Date, calendar: Calendar, in store: ScheduleStore) {
+    init(creatingOn selectedDate: Date, calendar: Calendar, in store: ScheduleStore,
+         lesson: TodayLessonSelection.Suggestion? = nil) {
         self.store = store
         editingID = nil
         deletionTitle = nil
-        title = ""
+        title = lesson?.lesson.title ?? ""
         note = ""
+        lessonID = lesson?.id
+        linkedLessonTitle = lesson?.lesson.title
         let dayStart = calendar.startOfDay(for: selectedDate)
         let proposed = calendar.date(bySettingHour: 9, minute: 0, second: 0, of: dayStart)
         let dayEnd = calendar.dateInterval(of: .day, for: selectedDate)?.end
@@ -39,7 +44,7 @@ final class ScheduleEditorDraft: ObservableObject {
             candidate >= dayStart && (dayEnd.map { candidate < $0 } ?? true) ? candidate : nil
         } ?? dayStart
         startAt = start
-        endAt = start.addingTimeInterval(60 * 60)
+        endAt = start.addingTimeInterval(TimeInterval(lesson?.lesson.estimatedMinutes ?? 60) * 60)
     }
 
     init(editing snapshot: ScheduleSnapshot, in store: ScheduleStore) {
@@ -50,6 +55,8 @@ final class ScheduleEditorDraft: ObservableObject {
         startAt = snapshot.startAt
         endAt = snapshot.endAt
         note = snapshot.note ?? ""
+        lessonID = snapshot.lessonID
+        linkedLessonTitle = snapshot.linkedTitleSnapshot
     }
 
     var invalidFields: Set<Field> {
@@ -99,6 +106,14 @@ final class ScheduleEditorDraft: ObservableObject {
         }
     }
 
+    /// Only a new block can drop its proposed link. Existing block links are immutable
+    /// in the schedule repository, even when their definition is no longer installed.
+    func removeLessonLink() {
+        guard editingID == nil, lessonID != nil, !finished, !submitting else { return }
+        lessonID = nil
+        fieldsChanged()
+    }
+
     /// Edit time/dismissal removes approval but retains every editable field.
     func editTime() { clearReview() }
 
@@ -125,7 +140,8 @@ final class ScheduleEditorDraft: ObservableObject {
     }
 
     private var input: ScheduleInput {
-        ScheduleInput(title: title, startAt: startAt, endAt: endAt, note: note)
+        ScheduleInput(title: title, startAt: startAt, endAt: endAt, note: note,
+                      lessonID: lessonID)
     }
 
     private func fieldsChanged() {

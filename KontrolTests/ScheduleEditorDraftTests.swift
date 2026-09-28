@@ -48,6 +48,98 @@ final class ScheduleEditorDraftTests: XCTestCase {
         XCTAssertEqual(edit.title, "Overnight")
     }
 
+    func testLessonPrefillUsesNineAMAbsoluteEstimateAcrossDSTAndCancelWritesNothing() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let catalog = SwiftDataCatalogRepository(container: container)
+        _ = try catalog.importIfNeeded(BundledCatalogLoader.load())
+        let suggestion = try XCTUnwrap(TodayLessonSelection.suggestions(from:
+            .current(catalog.loadSnapshot()))?.first)
+        let schedule = ScheduleStore(repository: SwiftDataScheduleRepository(container: container))
+        let zone = try XCTUnwrap(TimeZone(identifier: "America/New_York"))
+        for selected in [date(2026, 3, 8, 12, zone: zone), date(2026, 11, 1, 12, zone: zone)] {
+            let draft = ScheduleEditorDraft(creatingOn: selected, calendar: calendar(zone),
+                                            in: schedule, lesson: suggestion)
+            XCTAssertEqual(draft.title, suggestion.lesson.title)
+            XCTAssertEqual(draft.lessonID, suggestion.id)
+            XCTAssertEqual(calendar(zone).component(.hour, from: draft.startAt), 9)
+            XCTAssertTrue(calendar(zone).isDate(draft.startAt, inSameDayAs: selected))
+            XCTAssertEqual(draft.endAt.timeIntervalSince(draft.startAt),
+                           Double(suggestion.lesson.estimatedMinutes) * 60)
+            XCTAssertEqual(draft.invalidFields, [])
+            draft.cancel()
+            draft.submit { _ in XCTFail("Canceled prefill saved") }
+        }
+        XCTAssertTrue(try schedule.repository.fetchAll().isEmpty)
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<TaskItem>()).isEmpty)
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).isEmpty)
+    }
+
+    func testMissingLessonErrorRetainsFieldsAndLinkUntilExplicitRemoval() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let catalog = SwiftDataCatalogRepository(container: container)
+        _ = try catalog.importIfNeeded(BundledCatalogLoader.load())
+        let suggestion = try XCTUnwrap(TodayLessonSelection.suggestions(from:
+            .current(catalog.loadSnapshot()))?.first)
+        // A different, empty store simulates the definition disappearing before Save.
+        let schedule = try store()
+        let draft = ScheduleEditorDraft(creatingOn: date(2026, 5, 1), calendar: calendar(),
+                                        in: schedule, lesson: suggestion)
+        draft.title = "Edited lesson block"
+        draft.note = "Keep me 🧪"
+        draft.startAt = date(2026, 5, 1, 23)
+        draft.endAt = date(2026, 5, 2, 2)
+        draft.submit { _ in XCTFail("Missing link saved") }
+        XCTAssertEqual(draft.saveError, .lessonNotFound)
+        XCTAssertEqual(draft.lessonID, suggestion.id)
+        XCTAssertEqual(draft.title, "Edited lesson block")
+        XCTAssertEqual(draft.note, "Keep me 🧪")
+        XCTAssertEqual(draft.endAt, date(2026, 5, 2, 2))
+        XCTAssertTrue(try schedule.repository.fetchAll().isEmpty)
+        draft.removeLessonLink()
+        XCTAssertNil(draft.lessonID)
+        XCTAssertNil(draft.saveError)
+        draft.submit { saved in
+            XCTAssertNil(saved.lessonID)
+            XCTAssertEqual(saved.title, "Edited lesson block")
+            XCTAssertEqual(saved.note, "Keep me 🧪")
+        }
+        XCTAssertEqual(try schedule.repository.fetchAll().count, 1)
+    }
+
+    func testUnreadableLessonFailureCanRetryWithoutLosingLinkOrOverlapDecision() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let catalog = SwiftDataCatalogRepository(container: container)
+        _ = try catalog.importIfNeeded(BundledCatalogLoader.load())
+        let suggestion = try XCTUnwrap(TodayLessonSelection.suggestions(from:
+            .current(catalog.loadSnapshot()))?.first)
+        var unreadable = false
+        let schedule = ScheduleStore(repository: SwiftDataScheduleRepository(container: container,
+            fetchLessons: { context in
+                if unreadable { throw InjectedFailure.save }
+                return try context.fetch(FetchDescriptor<LessonDefinition>())
+            }))
+        let peer = try schedule.create(input: ScheduleInput(title: "Peer", startAt: date(2026, 5, 1, 9),
+                                                            endAt: date(2026, 5, 1, 10)))
+        let draft = ScheduleEditorDraft(creatingOn: date(2026, 5, 1), calendar: calendar(),
+                                        in: schedule, lesson: suggestion)
+        draft.note = "Retain exact note\n"
+        draft.submit { _ in XCTFail("Must review") }
+        XCTAssertEqual(draft.overlapReview?.conflicts.map(\.block.id), [peer.id])
+        unreadable = true
+        draft.keepBoth { _ in XCTFail("Unreadable link saved") }
+        XCTAssertEqual(draft.saveError, .lessonUnreadable)
+        XCTAssertTrue(draft.canKeepBoth)
+        XCTAssertEqual(draft.lessonID, suggestion.id)
+        XCTAssertEqual(draft.note, "Retain exact note\n")
+        XCTAssertEqual(try schedule.repository.fetchAll(), [peer])
+        unreadable = false
+        draft.keepBoth { saved in
+            XCTAssertEqual(saved.lessonID, suggestion.id)
+            XCTAssertEqual(saved.linkedTitleSnapshot, suggestion.lesson.title)
+        }
+        XCTAssertEqual(try schedule.repository.fetchAll().count, 2)
+    }
+
     func testFieldSpecificValidationRejectsInvalidEndpointsBeforeAnyWrite() throws {
         let storage = try store()
         let draft = ScheduleEditorDraft(creatingOn: date(2026, 2, 17), calendar: calendar(), in: storage)

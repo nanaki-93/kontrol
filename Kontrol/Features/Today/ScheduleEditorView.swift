@@ -84,6 +84,15 @@ struct ScheduleEditorView: View {
                                     .accessibilityIdentifier("schedule-editor-title-error")
                             }
                         }
+                        if let lessonID = draft.lessonID {
+                            Text("Linked lesson: \(draft.linkedLessonTitle ?? lessonID)")
+                                .appTypography(.metadata)
+                                .accessibilityIdentifier("schedule-editor-lesson-link")
+                            if draft.editingID == nil {
+                                ActionButton("Remove lesson link") { draft.removeLessonLink() }
+                                    .accessibilityIdentifier("schedule-editor-remove-lesson-link")
+                            }
+                        }
                         endpointField("Start date and time", selection: $draft.startAt,
                                       invalid: draft.invalidFields.contains(.start),
                                       guidance: "Choose a valid start date and time.", id: "start")
@@ -102,9 +111,14 @@ struct ScheduleEditorView: View {
                                 .accessibilityIdentifier("schedule-editor-error")
                             Text(error == .notFound
                                  ? "This block is no longer available. Close the editor to see the refreshed list."
-                                 : "Your fields are still here; try saving again.")
+                                 : error.message)
                                 .appTypography(.metadata)
                                 .foregroundStyle(AppColors.textSecondary)
+                            if error == .lessonNotFound || error == .lessonUnreadable {
+                                Text("To choose another lesson, cancel and use Add to Today again. Retry Save to keep this link, or remove it explicitly above.")
+                                    .appTypography(.metadata)
+                                    .foregroundStyle(AppColors.textSecondary)
+                            }
                             if error == .notFound {
                                 ActionButton("Close editor", action: onMissingBlock)
                                     .accessibilityIdentifier("schedule-editor-close-missing")
@@ -220,9 +234,16 @@ struct ScheduleEditorView: View {
             .accessibilityIdentifier("schedule-editor-conflicts")
             if draft.saveError != nil {
                 ErrorBanner(.saveFailed)
-                Text("Nothing was saved. Review the conflicts and try Keep both again, or edit the time.")
+                Text(draft.saveError.map { "Nothing was saved. \($0.message)" } ?? "")
                     .appTypography(.metadata)
                     .foregroundStyle(AppColors.textSecondary)
+                if draft.editingID == nil, draft.lessonID != nil,
+                   draft.saveError == .lessonNotFound || draft.saveError == .lessonUnreadable {
+                    Text("Retry Keep both to keep the link, or cancel and choose another lesson.")
+                        .appTypography(.metadata)
+                    ActionButton("Remove lesson link") { draft.removeLessonLink() }
+                        .accessibilityIdentifier("schedule-editor-remove-lesson-link")
+                }
             }
         }
         .frame(maxHeight: 440, alignment: .topLeading)

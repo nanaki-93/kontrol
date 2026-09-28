@@ -78,6 +78,60 @@ final class TodayLessonIntegrationTests: XCTestCase {
             topics: [], subtopics: [], concepts: [], definitions: [], progress: [], slots: [])))?.count, 0)
     }
 
+    func testAddToTodayUsesActualLocalDayAndOnlyExplicitSaveLinksBlock() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repo = SwiftDataCatalogRepository(container: container)
+        _ = try repo.importIfNeeded(BundledCatalogLoader.load())
+        let graph = AppDependencies(container: container, catalogRepository: repo)
+        let learning = graph.learningCatalogStore
+        learning.loadIfNeeded()
+        let schedule = graph.scheduleStore
+        let zone = try XCTUnwrap(TimeZone(identifier: "America/New_York"))
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = zone
+        let now = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 3, day: 8,
+                                                                     hour: 14)))
+        let temporal = TaskTemporalContext(now: now, calendar: calendar, timeZone: zone)
+        var browsed = TodayDaySelection()
+        browsed.previous(in: temporal)
+        XCTAssertFalse(browsed.followsToday)
+        XCTAssertFalse(calendar.isDate(try XCTUnwrap(browsed.selectedDate(in: temporal)), inSameDayAs: now))
+        let suggestion = try XCTUnwrap(TodayLessonSelection.suggestions(from: learning.state)?.first)
+        let canceled = try TodayView.addToTodayDraft(suggestion, learning: learning,
+                                                     temporal: temporal, schedule: schedule)
+        XCTAssertTrue(calendar.isDate(canceled.startAt, inSameDayAs: now))
+        XCTAssertEqual(calendar.component(.hour, from: canceled.startAt), 9)
+        XCTAssertEqual(canceled.endAt.timeIntervalSince(canceled.startAt),
+                       Double(suggestion.lesson.estimatedMinutes) * 60)
+        XCTAssertEqual(canceled.title, suggestion.lesson.title)
+        XCTAssertEqual(canceled.lessonID, suggestion.id)
+        XCTAssertTrue(try schedule.repository.fetchAll().isEmpty)
+        canceled.cancel()
+        canceled.submit { _ in XCTFail("Canceled") }
+        XCTAssertTrue(try schedule.repository.fetchAll().isEmpty)
+
+        let draft = try TodayView.addToTodayDraft(suggestion, learning: learning,
+                                                  temporal: temporal, schedule: schedule)
+        draft.startAt = now
+        draft.endAt = now.addingTimeInterval(3_600) // Native picker edits absolute instants.
+        let peer = try schedule.create(input: ScheduleInput(title: "Peer", startAt: now,
+                                                            endAt: now.addingTimeInterval(3_600)))
+        draft.submit { _ in XCTFail("Overlap needs review") }
+        XCTAssertEqual(draft.overlapReview?.conflicts.map(\.block.id), [peer.id])
+        XCTAssertEqual(try schedule.repository.fetchAll().count, 1)
+        draft.keepBoth { saved in
+            XCTAssertEqual(saved.lessonID, suggestion.id)
+            XCTAssertEqual(saved.linkedTitleSnapshot, suggestion.lesson.title)
+            XCTAssertEqual(saved.startAt, now)
+            XCTAssertEqual(saved.endAt, now.addingTimeInterval(3_600))
+        }
+        XCTAssertEqual(try schedule.repository.fetchAll().count, 2)
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).isEmpty)
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonProgress>()).isEmpty)
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<TaskItem>()).isEmpty)
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<FocusSession>()).isEmpty)
+    }
+
     func testStartNowResumesAndCommittedCompletionAndDismissalRefreshSuggestions() throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         let repo = SwiftDataCatalogRepository(container: container)
