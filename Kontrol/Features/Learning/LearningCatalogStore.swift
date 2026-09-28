@@ -85,9 +85,24 @@ final class LearningCatalogStore: ObservableObject {
         }
     }
 
+    /// Retry only the failed catalog read. Detail and History failures have their
+    /// own recovery paths and remain blocking until those reads succeed.
     func retry() {
         guard case .failed = state else { return }
         refresh()
+    }
+
+    @discardableResult
+    func retryDetail(lessonID: String) throws -> LessonDetailSnapshot {
+        guard case .failed(let requestedID, _) = detailState,
+              requestedID == lessonID else { throw LessonExperienceError.invalidTransition }
+        return try loadDetail(lessonID: lessonID)
+    }
+
+    @discardableResult
+    func retryHistory() throws -> [LessonHistorySnapshot] {
+        guard case .failed = historyState else { throw LessonExperienceError.invalidTransition }
+        return try loadHistory()
     }
 
     /// Reading a detail or History never creates progress. A failed read retains

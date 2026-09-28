@@ -8,6 +8,9 @@ private final class ReadingCatalogRepository: CatalogRepository {
     enum ReadError: Error { case unavailable }
     var value: LearningCatalogSnapshot
     var shouldFail = false
+    var failCatalog = false
+    var failDetail = false
+    var failHistory = false
     var detailValue: LessonDetailSnapshot?
     var historyValue: [LessonHistorySnapshot] = []
     var mutationValue: LessonMutationResult?
@@ -18,7 +21,7 @@ private final class ReadingCatalogRepository: CatalogRepository {
 
     func loadSnapshot() throws -> LearningCatalogSnapshot {
         reads += 1
-        if shouldFail { throw ReadError.unavailable }
+        if shouldFail || failCatalog { throw ReadError.unavailable }
         return value
     }
 
@@ -40,13 +43,13 @@ private final class ReadingCatalogRepository: CatalogRepository {
 
     func loadLesson(lessonID: String) throws -> LessonDetailSnapshot {
         reads += 1
-        if shouldFail { throw ReadError.unavailable }
+        if shouldFail || failDetail { throw ReadError.unavailable }
         return try XCTUnwrap(detailValue)
     }
 
     func loadHistory() throws -> [LessonHistorySnapshot] {
         reads += 1
-        if shouldFail { throw ReadError.unavailable }
+        if shouldFail || failHistory { throw ReadError.unavailable }
         return historyValue
     }
 
@@ -119,6 +122,65 @@ final class LearningCatalogStoreTests: XCTestCase {
         XCTAssertEqual(store.historyState, .failed(stale: []))
         XCTAssertThrowsError(try store.openLesson(lessonID: detail.id))
         XCTAssertEqual(repository.writes, 0)
+    }
+
+    func testIndependentReadRetriesKeepOtherFailuresBlockingUntilTheirOwnSuccess() throws {
+        let repository = ReadingCatalogRepository(snapshot(withSlot: true))
+        let store = LearningCatalogStore(repository: repository)
+        let id = "go.example"
+        let detail = LessonDetailSnapshot(id: id, progress: nil, attempt: nil, content: .unavailable)
+        repository.detailValue = detail
+        repository.failCatalog = true
+        repository.failDetail = true
+        repository.failHistory = true
+        store.loadIfNeeded()
+        XCTAssertThrowsError(try store.loadDetail(lessonID: id))
+        XCTAssertThrowsError(try store.loadHistory())
+        XCTAssertEqual(store.state, .failed(stale: nil))
+        XCTAssertEqual(store.detailState, .failed(lessonID: id, stale: nil))
+        XCTAssertEqual(store.historyState, .failed(stale: nil))
+        XCTAssertThrowsError(try store.retryDetail(lessonID: "another"))
+        XCTAssertEqual(store.detailState, .failed(lessonID: id, stale: nil))
+        repository.failCatalog = false
+        store.retry()
+        XCTAssertTrue(store.state.isAuthoritative)
+        XCTAssertEqual(store.error, .persistenceFailure)
+        XCTAssertThrowsError(try store.openLesson(lessonID: id))
+        XCTAssertEqual(repository.writes, 0)
+        repository.failDetail = false
+        XCTAssertEqual(try store.retryDetail(lessonID: id), detail)
+        XCTAssertThrowsError(try store.retryDetail(lessonID: id))
+        XCTAssertEqual(store.error, .persistenceFailure) // History is still failed.
+        XCTAssertThrowsError(try store.openLesson(lessonID: id))
+        repository.failHistory = false
+        XCTAssertEqual(try store.retryHistory(), [])
+        XCTAssertNil(store.error)
+        XCTAssertThrowsError(try store.retryHistory())
+        XCTAssertEqual(repository.writes, 0)
+    }
+
+    func testFailedRetryRetainsSameIDDetailAndHistoryUntilSuccessfulRead() throws {
+        let repository = ReadingCatalogRepository(snapshot(withSlot: true))
+        let store = LearningCatalogStore(repository: repository)
+        store.loadIfNeeded()
+        let detail = LessonDetailSnapshot(id: "go.example", progress: nil, attempt: nil, content: .unavailable)
+        repository.detailValue = detail
+        _ = try store.loadDetail(lessonID: detail.id)
+        _ = try store.loadHistory()
+        repository.failDetail = true
+        repository.failHistory = true
+        XCTAssertThrowsError(try store.loadDetail(lessonID: detail.id))
+        XCTAssertThrowsError(try store.loadHistory())
+        XCTAssertThrowsError(try store.retryDetail(lessonID: detail.id))
+        XCTAssertThrowsError(try store.retryHistory())
+        XCTAssertEqual(store.detailState, .failed(lessonID: detail.id, stale: detail))
+        XCTAssertEqual(store.historyState, .failed(stale: []))
+        repository.failHistory = false
+        XCTAssertEqual(try store.retryHistory(), [])
+        XCTAssertEqual(store.error, .persistenceFailure)
+        repository.failDetail = false
+        XCTAssertEqual(try store.retryDetail(lessonID: detail.id), detail)
+        XCTAssertNil(store.error)
     }
 
     func testEmptyIsSuccessfulAndReadFailureIsRetryableNotEmpty() {

@@ -118,6 +118,76 @@ final class LessonExperienceStoreTests: XCTestCase {
         XCTAssertEqual(drafts.buffers[id]?.status, .saved)
     }
 
+    func testStaleReloadDoesNotAdoptRevisionOrOverwriteExactDirtyTextWithoutReconciliation() throws {
+        let (repository, graph, drafts, scheduler, opened) = try draftFixture()
+        let id = try XCTUnwrap(opened.detail.attempt?.id)
+        for local in ["", "  🧪\n  漢字\n", "\nline one\n\nline two\n"] {
+            drafts.edit(local, attemptID: id)
+            let delayed = scheduler.jobs.last!.callback
+            let baseline = try XCTUnwrap(drafts.buffers[id]?.expectedRevision)
+            _ = try graph.learningCatalogStore.saveAnswer(attemptID: id, expectedRevision: baseline,
+                                                          answer: "remote \(baseline)")
+            XCTAssertThrowsError(try drafts.flush(attemptID: id)) { error in
+                XCTAssertEqual(error as? LessonExperienceError, .staleRevision)
+            }
+            XCTAssertThrowsError(try drafts.retry(attemptID: id))
+            let latest = try drafts.reload(attemptID: id)
+            drafts.observe(latest) // receipt observation cannot silently adopt a dirty baseline
+            delayed() // cancelled debounce must not save or clear a newer dirty edit
+            XCTAssertEqual(drafts.buffers[id]?.text, local)
+            XCTAssertEqual(drafts.buffers[id]?.expectedRevision, baseline)
+            XCTAssertEqual(drafts.buffers[id]?.status, .notSaved(.staleRevision))
+            XCTAssertTrue(try XCTUnwrap(drafts.buffers[id]).isDirty)
+            XCTAssertEqual(try repository.loadLesson(lessonID: opened.detail.id).attempt?.answerDraft,
+                           "remote \(baseline)")
+            try drafts.reconcileForRetry(attemptID: id, with: latest)
+            try drafts.retry(attemptID: id)
+            XCTAssertEqual(try repository.loadLesson(lessonID: opened.detail.id).attempt?.answerDraft, local)
+        }
+    }
+
+    func testReconciliationRequiresExplicitReloadAndLatestMatchingDetail() throws {
+        let (repository, graph, drafts, _, opened) = try draftFixture()
+        let id = try XCTUnwrap(opened.detail.attempt?.id)
+        drafts.edit("keep local", attemptID: id)
+        let remote = try graph.learningCatalogStore.saveAnswer(attemptID: id, expectedRevision: 0, answer: "remote")
+        XCTAssertThrowsError(try drafts.reconcileForRetry(attemptID: id, with: remote.detail))
+        XCTAssertThrowsError(try drafts.flush(attemptID: id))
+        let loaded = try drafts.reload(attemptID: id)
+        // A different committed receipt must invalidate the previously loaded projection.
+        _ = try graph.learningCatalogStore.saveAnswer(attemptID: id, expectedRevision: 1, answer: "newer remote")
+        XCTAssertThrowsError(try drafts.reconcileForRetry(attemptID: id, with: loaded))
+        XCTAssertEqual(drafts.buffers[id]?.text, "keep local")
+        XCTAssertEqual(drafts.buffers[id]?.expectedRevision, 0)
+        XCTAssertEqual(try repository.loadLesson(lessonID: opened.detail.id).attempt?.answerDraft, "newer remote")
+        let latest = try drafts.reload(attemptID: id)
+        try drafts.reconcileForRetry(attemptID: id, with: latest)
+        try drafts.retry(attemptID: id)
+        XCTAssertEqual(try repository.loadLesson(lessonID: opened.detail.id).attempt?.answerDraft, "keep local")
+    }
+
+    func testCleanReceiptObservationAdvancesRevealAndAcknowledgementButNotDirtyText() throws {
+        let (_, graph, drafts, _, opened) = try draftFixture()
+        let id = try XCTUnwrap(opened.detail.attempt?.id)
+        let revealed = try graph.learningCatalogStore.revealSolution(attemptID: id, expectedRevision: 0)
+        drafts.observe(revealed.detail)
+        XCTAssertEqual(drafts.buffers[id]?.expectedRevision, 1)
+        XCTAssertEqual(drafts.buffers[id]?.status, .saved)
+        let acknowledged = try graph.learningCatalogStore.setSelfCheckAcknowledged(
+            attemptID: id, expectedRevision: 1, acknowledged: true)
+        drafts.observe(acknowledged.detail)
+        XCTAssertEqual(drafts.buffers[id]?.expectedRevision, 2)
+        drafts.edit("\n  local 🧪\n", attemptID: id)
+        let changed = try graph.learningCatalogStore.saveAnswer(attemptID: id, expectedRevision: 2, answer: "remote")
+        drafts.observe(changed.detail)
+        XCTAssertEqual(drafts.buffers[id]?.text, "\n  local 🧪\n")
+        XCTAssertEqual(drafts.buffers[id]?.expectedRevision, 2)
+        XCTAssertTrue(try XCTUnwrap(drafts.buffers[id]).isDirty)
+        XCTAssertThrowsError(try drafts.retry(attemptID: id)) { error in
+            XCTAssertEqual(error as? LessonExperienceError, .staleRevision)
+        }
+    }
+
     func testIndependentAttemptBuffersAndFlushAllBarrier() throws {
         let (repository, graph, drafts, scheduler, opened) = try draftFixture()
         let firstID = try XCTUnwrap(opened.detail.attempt?.id)

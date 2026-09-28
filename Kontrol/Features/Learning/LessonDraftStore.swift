@@ -27,6 +27,9 @@ final class LessonDraftStore: ObservableObject {
     private let schedule: Scheduler
     private var generations: [UUID: UInt64] = [:]
     private var cancellations: [UUID: () -> Void] = [:]
+    // A conflict must be inspected through an explicit reload before the local
+    // draft may adopt the newer revision. This is never a write by itself.
+    private var reloadedConflicts: [UUID: LessonDetailSnapshot] = [:]
 
     init(learning: LearningCatalogStore, clock: @escaping () -> Date = Date.init,
          schedule: @escaping Scheduler = { deadline, callback in
@@ -99,7 +102,9 @@ final class LessonDraftStore: ObservableObject {
             return receipt
         } catch {
             if var current = buffers[attemptID], generations[attemptID] == generation {
-                current.status = .notSaved((error as? LessonExperienceError) ?? .persistenceFailure)
+                let classification = (error as? LessonExperienceError) ?? .persistenceFailure
+                if classification == .staleRevision { reloadedConflicts[attemptID] = nil }
+                current.status = .notSaved(classification)
                 buffers[attemptID] = current
             }
             throw error
@@ -125,9 +130,11 @@ final class LessonDraftStore: ObservableObject {
     @discardableResult
     func reload(attemptID: UUID) throws -> LessonDetailSnapshot {
         guard let buffer = buffers[attemptID] else { throw LessonExperienceError.attemptNotFound }
+        reloadedConflicts[attemptID] = nil
         let detail = try learning.loadDetail(lessonID: buffer.lessonID)
         guard detail.attempt?.id == attemptID else { throw LessonExperienceError.attemptNotFound }
         observe(detail)
+        if buffer.isDirty { reloadedConflicts[attemptID] = detail }
         return detail
     }
 
@@ -139,9 +146,11 @@ final class LessonDraftStore: ObservableObject {
               attempt.id == attemptID, attempt.completedAt == nil,
               detail.progress?.status == .started else { throw LessonExperienceError.invalidTransition }
         // The caller must have just loaded this authoritative detail.
-        guard case .current(let loaded) = learning.detailState, loaded == detail else {
+        guard reloadedConflicts[attemptID] == detail,
+              case .current(let loaded) = learning.detailState, loaded == detail else {
             throw LessonExperienceError.invalidTransition
         }
+        reloadedConflicts[attemptID] = nil
         cancelPending(attemptID)
         advance(attemptID)
         buffer.expectedRevision = attempt.revision
