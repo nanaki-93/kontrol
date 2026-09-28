@@ -42,6 +42,56 @@ final class LessonExperienceStoreTests: XCTestCase {
         return (repository, graph, graph.lessonDraftStore, scheduler, opened)
     }
 
+    func testExplicitChoiceEntryPinsOnceAndBrowsingRemainsReadOnly() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataCatalogRepository(container: container)
+        _ = try repository.importIfNeeded(BundledCatalogLoader.load())
+        let graph = AppDependencies(container: container, catalogRepository: repository)
+        let store = graph.learningCatalogStore
+        store.loadIfNeeded()
+        let snapshot = try XCTUnwrap(store.state.snapshot)
+        let first = try XCTUnwrap(LearningView.choices(for: "go", in: snapshot).first)
+        XCTAssertEqual(LearningView.choices(for: "go", in: snapshot).count, 4)
+        _ = LearningView.orderedTopics(in: snapshot)
+        _ = LearningView.choices(for: "java", in: snapshot)
+        let partial = LearningCatalogSnapshot(topics: snapshot.topics, subtopics: snapshot.subtopics,
+            concepts: snapshot.concepts, definitions: snapshot.definitions, progress: snapshot.progress,
+            slots: Array(snapshot.slots.filter { $0.topicID == "go" }.prefix(2)))
+        XCTAssertEqual(LearningView.choices(for: "go", in: partial).count, 2)
+        XCTAssertTrue(LearningView.choices(for: "java", in: partial).isEmpty)
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonProgress>()).isEmpty)
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).isEmpty)
+
+        let suite = "LessonChoiceEntry.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let navigation = NavigationStore(preferences: UserDefaultsDestinationPreferences(defaults: defaults))
+        navigation.attachDrafts(graph.lessonDraftStore)
+        let opened = try store.openLesson(lessonID: first.id)
+        graph.lessonDraftStore.observe(opened.detail)
+        navigation.enterLesson(id: first.id)
+        XCTAssertEqual(navigation.selectedDestination, .learning)
+        XCTAssertEqual(navigation.learningRoute, .detail(first.id))
+        let attempt = try XCTUnwrap(opened.detail.attempt)
+        XCTAssertNotNil(attempt.pinnedContentData)
+        XCTAssertEqual(opened.detail.content, .pinned(first))
+        XCTAssertEqual(opened.detail.progress?.status, .started)
+        XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).count, 1)
+
+        graph.lessonDraftStore.edit("  🧪\nresumed\n", attemptID: attempt.id)
+        navigation.backToChoices() // guarded save before leaving
+        XCTAssertEqual(try repository.loadLesson(lessonID: first.id).attempt?.answerDraft, "  🧪\nresumed\n")
+        let resumed = try store.openLesson(lessonID: first.id)
+        graph.lessonDraftStore.observe(resumed.detail)
+        navigation.enterLesson(id: first.id)
+        XCTAssertEqual(resumed.detail.attempt?.id, attempt.id)
+        XCTAssertEqual(resumed.detail.attempt?.pinnedContentData, attempt.pinnedContentData)
+        XCTAssertEqual(resumed.detail.attempt?.answerDraft, "  🧪\nresumed\n")
+        XCTAssertEqual(LearningView.choices(for: "go", in: try XCTUnwrap(store.state.snapshot)).map(\.id),
+                       LearningView.choices(for: "go", in: snapshot).map(\.id))
+        XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).count, 1)
+    }
+
     func testDebounceLatestEditAtExactlyFiveHundredMillisecondsAndSharedWindows() throws {
         let (repository, graph, drafts, scheduler, opened) = try draftFixture()
         let id = try XCTUnwrap(opened.detail.attempt?.id)

@@ -116,24 +116,11 @@ final class LearningPresentationTests: XCTestCase {
                 XCTAssertTrue(name.contains(field), "Missing \(field) from \(name)")
             }
         }
-        // Native disclosure exposes all stored sections as text, without creating an attempt.
-        XCTAssertEqual(ids.filter { $0.hasPrefix("learning-inspect-") },
-                       go.map { "learning-inspect-\($0.id)" })
+        XCTAssertEqual(ids.filter { $0.hasPrefix("learning-open-") },
+                       go.map { "learning-open-\($0.id)" })
         let inspected = try XCTUnwrap(go.first)
-        let disclosure = try XCTUnwrap(elements.first {
-            attribute($0, kAXIdentifierAttribute) as? String == "learning-inspect-\(inspected.id)"
-        })
-        XCTAssertEqual(AXUIElementPerformAction(disclosure, kAXPressAction as CFString), .success)
-        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
-        let expanded = descendants(of: try XCTUnwrap(learningWindow))
-        let expandedText = text(expanded).joined(separator: "\n")
-        for section in ["Read-only reference", "Explanation", "Worked example",
-                        "Exercise prompt (for reading)", "Reference material · Example response",
-                        "Reference material · Self-check criteria", inspected.explanation,
-                        inspected.workedExample, inspected.exercise, inspected.referenceAnswer] + inspected.selfCheckCriteria {
-            XCTAssertTrue(expandedText.contains(section), "Missing read-only section: \(section)")
-        }
-        XCTAssertFalse(identifiers(expanded).contains { $0.hasPrefix("learning-answer-") })
+        XCTAssertFalse(text(elements).joined(separator: "\n").contains(inspected.referenceAnswer))
+        XCTAssertFalse(ids.contains { $0.hasPrefix("learning-inspect-") || $0.hasPrefix("learning-answer-") })
         XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonProgress>()).isEmpty)
         XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).isEmpty)
         // Topic controls change this window's projection, not the shared assignments.
@@ -143,10 +130,10 @@ final class LearningPresentationTests: XCTestCase {
         let javaIDs = identifiers(descendants(of: try XCTUnwrap(learningWindow)))
         XCTAssertEqual(javaIDs.filter { $0.hasPrefix("learning-lesson-") },
                        LearningView.choices(for: "java", in: snapshot).map { "learning-lesson-\($0.id)" })
-        XCTAssertEqual(javaIDs.filter { $0.hasPrefix("learning-inspect-") },
-                       LearningView.choices(for: "java", in: snapshot).map { "learning-inspect-\($0.id)" })
-        XCTAssertFalse(text(descendants(of: try XCTUnwrap(learningWindow))).contains(inspected.explanation),
-                       "Changing topics closes the window-local inspection")
+        XCTAssertEqual(javaIDs.filter { $0.hasPrefix("learning-open-") },
+                       LearningView.choices(for: "java", in: snapshot).map { "learning-open-\($0.id)" })
+        XCTAssertFalse(text(descendants(of: try XCTUnwrap(learningWindow))).contains(inspected.referenceAnswer),
+                       "Changing topics must not reveal a reference answer")
         let captureDirectory = URL(fileURLWithPath: "/tmp/kontrol-f01-evidence/fixtures", isDirectory: true)
         try FileManager.default.createDirectory(at: captureDirectory, withIntermediateDirectories: true)
         for size in [CGSize(width: 1000, height: 700), CGSize(width: 1440, height: 940)] {
@@ -307,15 +294,20 @@ final class LearningPresentationTests: XCTestCase {
         }
     }
 
-    // Hosted GUI assertions compile in F05; F13 runs them with accessibility permission.
-    func testNarrowEnlargedTopicsAndDisclosureRemainReachable() throws {
+    // Hosted GUI assertions compile here; F13 runs them with accessibility permission.
+    func testNarrowEnlargedTopicsAndOpenActionsRemainReachable() throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         let repository = SwiftDataCatalogRepository(container: container)
         _ = try repository.importIfNeeded(BundledCatalogLoader.load(from: Bundle.main))
         let snapshot = try repository.loadSnapshot()
         let store = LearningCatalogStore(repository: repository)
+        let suite = "LearningOpenLayout.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let navigation = NavigationStore(preferences: UserDefaultsDestinationPreferences(defaults: defaults))
+        navigation.select(.learning)
         for width: CGFloat in [420, 620] {
-            try inspect(LearningView(store: store), width: width, scale: 1.3) { window, elements in
+            try inspect(LearningView(store: store, navigation: navigation), width: width, scale: 1.3) { window, elements in
                 let topics = elements.filter {
                     (attribute($0, kAXIdentifierAttribute) as? String)?.hasPrefix("learning-topic-") == true
                 }
@@ -360,14 +352,14 @@ final class LearningPresentationTests: XCTestCase {
                 })
                 XCTAssertTrue(((attribute(row, kAXDescriptionAttribute) as? String ?? "") +
                                (attribute(row, kAXValueAttribute) as? String ?? "")).contains(first.title))
-                let disclosure = try XCTUnwrap(current.first {
-                    attribute($0, kAXIdentifierAttribute) as? String == "learning-inspect-\(first.id)"
+                let open = try XCTUnwrap(current.first {
+                    attribute($0, kAXIdentifierAttribute) as? String == "learning-open-\(first.id)"
                 })
-                XCTAssertTrue((attribute(disclosure, kAXDescriptionAttribute) as? String ?? "").contains(first.title))
-                XCTAssertEqual(AXUIElementSetAttributeValue(disclosure, kAXFocusedAttribute as CFString, kCFBooleanTrue), .success)
-                XCTAssertEqual(attribute(disclosure, kAXFocusedAttribute) as? Bool, true)
-                try pressSpace(in: window)
-                XCTAssertTrue(text(descendants(of: active)).joined(separator: " ").contains(first.referenceAnswer))
+                let label = (attribute(open, kAXTitleAttribute) as? String ?? "") +
+                    (attribute(open, kAXDescriptionAttribute) as? String ?? "")
+                XCTAssertTrue(label.contains(first.title))
+                XCTAssertFalse(text(current).joined(separator: " ").contains(first.referenceAnswer))
+                XCTAssertFalse(identifiers(current).contains { $0.hasPrefix("learning-inspect-") })
             }
         }
         XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).isEmpty)

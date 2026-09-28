@@ -4,11 +4,10 @@ import SwiftUI
 /// Reading or switching topics never reconciles slots or creates personal records.
 struct LearningView: View {
     @ObservedObject var store: LearningCatalogStore
-    /// Supplied by the shell for guarded topic/inspection navigation. Standalone
-    /// previews retain their own read-only selection.
+    /// Supplied by the shell for guarded entry. Standalone previews browse only.
     var navigation: NavigationStore? = nil
     @State private var selectedTopicID: String?
-    @State private var inspectedLessonID: String?
+    @State private var entryError: LessonExperienceError?
     @FocusState private var focusedTopicID: String?
     @FocusState private var focusedLessonID: String?
 
@@ -29,8 +28,8 @@ struct LearningView: View {
             .compactMap { definitions[$0.lessonID] }
     }
 
-    /// Resolve inspection only through a committed slot in the currently selected topic.
-    /// A stale selection cannot expose an unslotted or replaced definition.
+    /// Resolve a slot identity from committed choices (never from a stale index).
+    /// Retained for non-UI catalog projections; the choices UI does not disclose content.
     static func inspectedLesson(_ id: String?, for topicID: String,
                                 in snapshot: LearningCatalogSnapshot) -> LessonDefinitionSnapshot? {
         choices(for: topicID, in: snapshot).first { $0.id == id }
@@ -48,6 +47,22 @@ struct LearningView: View {
                 Button("History") { navigation.showHistory() }
                     .accessibilityIdentifier("learning-history")
             }
+            if entryError != nil {
+                ErrorBanner(.saveFailed)
+                Text("Lesson could not be opened. Check the choice and try again.")
+                    .appTypography(.body)
+                    .foregroundStyle(AppColors.textSecondary)
+            }
+            if case .failed(let lessonID, _) = store.detailState {
+                ErrorBanner(.readFailed, recoveryTitle: "Retry lesson read") {
+                    _ = try? store.retryDetail(lessonID: lessonID)
+                }
+            }
+            if case .failed = store.historyState {
+                ErrorBanner(.readFailed, recoveryTitle: "Retry History read") {
+                    _ = try? store.retryHistory()
+                }
+            }
             switch store.state {
             case .notLoaded, .loading:
                 LoadingState("Loading learning choices")
@@ -61,7 +76,7 @@ struct LearningView: View {
             case .empty(let snapshot), .current(let snapshot):
                 if Self.orderedTopics(in: snapshot).isEmpty {
                     EmptyState("No learning topics are installed.",
-                               guidance: "There are no choices to inspect.")
+                               guidance: "There are no lessons to open.")
                 } else {
                     // The shell owns vertical scrolling. ViewThatFits sees its finite width
                     // without requesting an unbounded-height GeometryReader inside it.
@@ -114,7 +129,7 @@ struct LearningView: View {
                         } else {
                             selectedTopicID = topic.id
                         }
-                        inspectedLessonID = nil
+                        entryError = nil
                     } label: {
                         Text(topic.name)
                             .appTypography(.body)
@@ -148,7 +163,7 @@ struct LearningView: View {
                 SectionHeader(selected.name, metadata: "\(choices.count) available")
                 if choices.isEmpty {
                     EmptyState("No choices available in \(selected.name).",
-                               guidance: "There are no eligible choices to inspect right now. Try another topic.")
+                               guidance: "There are no eligible lessons to open right now. Try another topic.")
                 } else {
                     ForEach(choices) { lesson in
                         VStack(alignment: .leading, spacing: AppMetrics.space2) {
@@ -166,33 +181,15 @@ struct LearningView: View {
                             }
                             .accessibilityElement(children: .combine)
                             .accessibilityIdentifier("learning-lesson-\(lesson.id)")
-                            DisclosureGroup(isExpanded: Binding(
-                                get: { Self.inspectedLesson(inspectedLessonID, for: selected.id, in: snapshot)?.id == lesson.id },
-                                set: { expanded in
-                                    guard navigation?.flushForLifecycle() != false else { return }
-                                    inspectedLessonID = expanded ? lesson.id : nil
-                                }
-                            )) {
-                                inspection(lesson)
-                            } label: {
-                                Text("Inspect \(lesson.title) · Read-only reference")
-                                    .appTypography(.body)
-                                    .frame(maxWidth: .infinity, minHeight: AppMetrics.preferredTarget, alignment: .leading)
-                            }
-                            .focusable()
-                            .focused($focusedLessonID, equals: lesson.id)
-                            .overlay {
-                                if focusedLessonID == lesson.id {
-                                    RoundedRectangle(cornerRadius: AppMetrics.smallRadius)
-                                        .strokeBorder(AppColors.focusRing, lineWidth: 2)
-                                        .allowsHitTesting(false)
-                                }
-                            }
-                            .accessibilityLabel("Inspect \(lesson.title), read-only reference")
-                            .accessibilityIdentifier("learning-inspect-\(lesson.id)")
                             if let navigation {
-                                Button("View \(lesson.title)") { navigation.showLesson(id: lesson.id) }
-                                    .accessibilityIdentifier("learning-view-\(lesson.id)")
+                                let started = snapshot.progress.contains { $0.lessonID == lesson.id && $0.status == .started }
+                                Button("\(started ? "Resume" : "Open") \(lesson.title)") {
+                                    open(lesson.id, using: navigation)
+                                }
+                                .frame(minHeight: AppMetrics.preferredTarget)
+                                .focusable()
+                                .focused($focusedLessonID, equals: lesson.id)
+                                .accessibilityIdentifier("learning-open-\(lesson.id)")
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -205,33 +202,22 @@ struct LearningView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func inspection(_ lesson: LessonDefinitionSnapshot) -> some View {
-        VStack(alignment: .leading, spacing: AppMetrics.space4) {
-            Text("Read-only reference · No responses are saved here.")
-                .appTypography(.metadata)
-                .foregroundStyle(AppColors.textSecondary)
-            section("Explanation", text: lesson.explanation)
-            section("Worked example", text: lesson.workedExample)
-            section("Exercise prompt (for reading)", text: lesson.exercise)
-            section("Reference material · Example response", text: lesson.referenceAnswer)
-            section("Reference material · Self-check criteria",
-                    text: lesson.selfCheckCriteria.map { "• \($0)" }.joined(separator: "\n"))
+    private func open(_ id: String, using navigation: NavigationStore) {
+        // Recheck the current committed slot before mutating a choice rendered earlier.
+        guard let snapshot = store.state.snapshot, store.state.isAuthoritative,
+              snapshot.slots.contains(where: { $0.lessonID == id }) else {
+            entryError = .staleSlot
+            return
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func section(_ heading: String, text: String) -> some View {
-        VStack(alignment: .leading, spacing: AppMetrics.space2) {
-            Text(heading)
-                .appTypography(.body)
-                .foregroundStyle(AppColors.textPrimary)
-            // Verbatim text: authored content is data, never HTML, Markdown, or executable code.
-            Text(verbatim: text)
-                .appTypography(.body)
-                .foregroundStyle(AppColors.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .textSelection(.enabled)
+        // A failed draft barrier must not create an attempt or move the route.
+        guard navigation.flushForLifecycle() else { return }
+        do {
+            let receipt = try store.openLesson(lessonID: id)
+            guard receipt.detail.id == id else { throw LessonExperienceError.invalidStoredData }
+            entryError = nil
+            navigation.enterLesson(id: id)
+        } catch {
+            entryError = (error as? LessonExperienceError) ?? .persistenceFailure
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
