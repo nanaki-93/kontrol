@@ -221,3 +221,64 @@ Warnings/diagnostics: `platform=macOS` matched arm64 and x86_64; xcodebuild used
 - Reserve an active, uncontended Mac GUI session to **execute** the hosted Today/schedule presentation tests (including any hosted `AppShellTests`, `QuickCaptureTests`, and F02 `TaskPresentationTests`) and the full `make test` suite. The inherited F02 intermittent AX visibility and sheet-dismissal failures (`testNativeTasksEditorCreatesEditsAndCancelsWithoutWriting`, `testQuickCapturePublishesAcrossTodayAndTasksWithoutPostSaveRead`) and **skipped** `TaskPresentationTests/testNativeDeleteAlertKeyboardNavigationAndConfirmation` remain unresolved. Selected non-GUI tests and `build-for-testing` do not resolve them.
 - On isolated data, run live day browsing, task capture/completion, schedule create/edit/move/overnight and multiple-conflict Keep both/Edit time/cancel, deletion confirmation/failure recovery, and relaunch persistence. Inspect empty/error/stale states, focus return and draft preservation. Launch the **signed sandbox app offline**, quit/relaunch, and check task/block identities and unchanged unrelated records; no signed F03 GUI journey or offline claim is made here.
 - Capture **rendered** M06 Today, M07 editor, M08 overlap and M09 quick capture, plus [overnight/validation](.mockups/screens/f03/schedule-editor-endpoints.html) and [multiple conflicts](.mockups/screens/f03/schedule-overlap-multiple.html), at **1000×700 and 1440×940 points**. Compare actual pairs and record differences; no F03 before/after image pair or visual equality is claimed. Check reflow/enlarged text, long-field/action scrolling, keyboard-only navigation/Escape/default/destructive confirmation, initial Title focus/restoration, accessible row/action names and target sizes, spoken VoiceOver, reduced motion and macOS 14 runtime/API/symbol behavior. These require F13 observation; neither compilation nor ad-hoc signing certifies them.
+
+## F04 focus sessions non-GUI gate ledger (2026-09-28)
+
+F04 adds a V3 focus session, one app-owned timer, task linkage, relaunch reconciliation and committed history. The [F04 contract](docs/features/F04-focus.md), [M10–M14 and variant index](docs/mockups/INDEX.md), and [QA / F13 gate](docs/qa.md) define the remaining acceptance. This is **implementation/non-GUI evidence only**, not feature-wide GUI or release approval. Earlier F00/F02 statements above about Focus being a placeholder or no focus model describe their historical checkpoints, not this build.
+
+Observed from the repository root on `/Applications/Xcode.app/Contents/Developer`, Xcode **27.0 (27A266a)**, Apple Swift **6.4 (swiftlang-6.4.0.34.1)**, macOS **27.0 (26A428)**, arm64. Both targets retain Swift 5 language mode and macOS 14.0 minimum. Step 4.1's final gate used these commands (exit 0; output in `/tmp/kontrol-f04-step41-escalation-{toolchain,build,build-for-testing,tests,analyze,sandbox,codesign-verify,entitlements}.log`):
+
+```sh
+xcode-select -p
+xcodebuild -version
+xcrun swift --version
+make build DERIVED_DATA=/tmp/kontrol-f04-derived
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug -destination 'platform=macOS' -derivedDataPath /tmp/kontrol-f04-derived CODE_SIGNING_ALLOWED=NO build-for-testing
+# The explicit non-GUI selection in .pi/SPEC.md §5, Executable Implementation Gate:
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug -destination 'platform=macOS' -derivedDataPath /tmp/kontrol-f04-derived CODE_SIGNING_ALLOWED=NO \
+  -only-testing:KontrolTests/FocusTimingTests \
+  -only-testing:KontrolTests/FocusRepositoryTests \
+  -only-testing:KontrolTests/FocusServiceTests \
+  -only-testing:KontrolTests/FocusHistorySelectionTests \
+  -only-testing:KontrolTests/FocusMigrationTests \
+  -only-testing:KontrolTests/FocusTaskLinkTests \
+  -only-testing:KontrolTests/TaskRepositoryTests \
+  -only-testing:KontrolTests/TaskSelectionTests \
+  -only-testing:KontrolTests/TaskStoreTests \
+  -only-testing:KontrolTests/TaskEditorDraftTests \
+  -only-testing:KontrolTests/ScheduleSelectionTests \
+  -only-testing:KontrolTests/ScheduleRepositoryTests \
+  -only-testing:KontrolTests/ScheduleStoreTests \
+  -only-testing:KontrolTests/ScheduleEditorDraftTests \
+  -only-testing:KontrolTests/TodayDaySelectionTests \
+  -only-testing:KontrolTests/ScheduleMigrationTests \
+  -only-testing:KontrolTests/V1FixtureTests \
+  -only-testing:KontrolTests/SchemaTests \
+  -only-testing:KontrolTests/ContainerFactoryTests \
+  -only-testing:KontrolTests/CatalogValidatorTests \
+  -only-testing:KontrolTests/CatalogImportTests \
+  -only-testing:KontrolTests/BundledCatalogTests \
+  -only-testing:KontrolTests/LaunchCoordinatorTests \
+  -only-testing:KontrolTests/LaunchRecoveryTests \
+  -only-testing:KontrolTests/NavigationStoreTests \
+  -only-testing:KontrolTests/ProjectSmokeTests \
+  -only-testing:KontrolTests/AppShellTests/testOneStorePerDependencyGraphAcrossRoutesAndWindows \
+  -only-testing:KontrolTests/AppShellTests/testNavigationMetadataAndRouting test
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug -destination 'platform=macOS' -derivedDataPath /tmp/kontrol-f04-derived CODE_SIGNING_ALLOWED=NO analyze
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug -destination 'platform=macOS' -derivedDataPath /tmp/kontrol-f04-sandbox CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= build
+codesign --verify --deep --strict /tmp/kontrol-f04-sandbox/Build/Products/Debug/Kontrol.app
+codesign --display --entitlements - /tmp/kontrol-f04-sandbox/Build/Products/Debug/Kontrol.app
+git diff --check
+```
+
+The app build, test-bundle compilation (`TEST BUILD SUCCEEDED`), selected test run (**230 tests, 0 failures, 0 unexpected**), analyzer, signed build, strict signature verification and whitespace check passed. Test result bundle: `/tmp/kontrol-f04-derived/Logs/Test/Test-Kontrol-2026.09.28_20-19-15-+0800.xcresult`; the test transcript prints the 230-test aggregate twice (not 460 tests). The signed app at `/tmp/kontrol-f04-sandbox/Build/Products/Debug/Kontrol.app` has sandbox entitlement `true` and Debug `get-task-allow=true` (ad-hoc local signature, **not** distribution signing or an offline launch). Original V1/V2/V3 fixture and sidecar hashes matched between `/tmp/kontrol-f04-step41-escalation-fixtures-before.sha` and `/tmp/kontrol-f04-step41-escalation-fixtures-after.sha` (`diff -u` exit 0). Selected tests cover disk-open transition/completion and migration copies, injected failures, integrity conflicts, task deletion and shared ownership; they do not execute hosted presentation tests.
+
+Diagnostics: `platform=macOS` matched arm64 and x86_64 destinations and selected arm64; AppIntents metadata extraction was skipped because there is no AppIntents.framework dependency. The test process logged `com.apple.linkd.autoShortcut` connection errors and CoreData format errors from the deliberately invalid-store recovery test; its assertions passed. No Swift compiler/analyzer warning was reported in the final gate. During Step 4.1 an earlier focused run (`/tmp/kontrol-f04-step41-escalation-focused.log`) **failed 1 of 42** on the deadline timestamp regression; the repair was followed by the passing 230-test final selection above. This historical failure is not presented as a current pass without that rerun. No hosted GUI tests or full `make test` were run at the F04 gate.
+
+### F04 outstanding F13 acceptance (not established by the non-GUI gate)
+
+- Reserve an active, uncontended Mac GUI session to **execute** hosted `FocusPresentationTests` (compiled by `build-for-testing`), hosted shell/Focus navigation checks, and full `make test`; repair failures/skips rather than counting compilation as execution. Keep F02's intermittent hosted AX visibility and editor-sheet dismissal failures (`testNativeTasksEditorCreatesEditsAndCancelsWithoutWriting`, `testQuickCapturePublishesAcrossTodayAndTasksWithoutPostSaveRead`) and its **skipped** `TaskPresentationTests/testNativeDeleteAlertKeyboardNavigationAndConfirmation` open. F03's hosted Today/schedule tests and signed offline journeys likewise remain open in the [F03 ledger](#f03-manual-schedule-non-gui-gate-ledger-2026-09-28); no F02/F03 GUI failure is reclassified by F04.
+- On isolated data with the **signed sandbox app offline**, Start/Pause/Resume/End and natural completion; navigate/close and reopen windows, sleep/wake, quit/relaunch before and after the deadline, choose recovery Resume/End, delete a linked task, then check unchanged task completion, stable identity/duration and history across relaunch. Non-GUI tests and signing alone do not establish these interactive journeys.
+- Capture rendered [M10 ready](docs/mockups/M10-focus-ready.png), [M11 running](docs/mockups/M11-focus-running.png), [M12 paused](docs/mockups/M12-focus-paused.png), [M13 recovery](docs/mockups/M13-focus-recovery.png), [M14 history](docs/mockups/M14-focus-history.png) and the [custom duration](.mockups/screens/f04/custom-duration-validation.html), [no open tasks](.mockups/screens/f04/no-available-tasks.html), [persistence failure](.mockups/screens/f04/persistence-failure.html) and [completion pending](.mockups/screens/f04/completion-pending.html) variants at **1000×700 and 1440×940 points**; compare actual rendered pairs with references and record paths and differences. No F04 rendered before/after capture or screenshot comparison is claimed here.
+- In the GUI session check logical keyboard order, focus/restoration, readable labels and AX state/countdown (without per-second live announcements), spoken VoiceOver, visible focus and ≥32-point targets, scrolling/enlarged text and reduced motion at both sizes. Verify runtime behavior/API/symbols on **macOS 14**; this macOS 27 host and 14.0 deployment minimum do not substitute for that check.
+- **Future work, not F04 successes:** F06 lesson picker/link/navigation and progress integration; F13 persistent focus-default settings. F04 stores reserved lesson-link metadata but does not expose lesson selection.
