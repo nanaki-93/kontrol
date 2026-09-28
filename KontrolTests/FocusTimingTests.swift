@@ -290,6 +290,140 @@ final class FocusTimingTests: XCTestCase {
         XCTAssertEqual(finished.snapshot.actualSeconds, 60)
     }
 
+    func testRelaunchBeforeDeadlineFreezesWallAccrualOnce() throws {
+        let original = try row(planned: 60, accrued: 10.25,
+                               deadline: start.addingTimeInterval(49.75),
+                               task: UUID(), title: "Saved title")
+        let result = try FocusTiming.reconcileOnRelaunch(original,
+                                                         at: start.addingTimeInterval(15.5))
+        guard case .changed(let change) = result,
+              case .reconcile(let payload) = change.transition else {
+            return XCTFail("Expected durable reconciliation")
+        }
+        XCTAssertEqual(payload.expectedCheckpointAt, start)
+        XCTAssertEqual(payload.sampledAt, start.addingTimeInterval(15.5))
+        XCTAssertEqual(payload.accumulatedActiveSeconds, 25.75)
+        let pending = change.snapshot
+        XCTAssertEqual(pending.id, original.id)
+        XCTAssertEqual(pending.state, .paused)
+        XCTAssertTrue(pending.recoveryRequired)
+        XCTAssertEqual(pending.actualSeconds, 25.75)
+        XCTAssertNil(pending.activeSegmentStartedAt)
+        XCTAssertNil(pending.deadline)
+        XCTAssertEqual(pending.pausedAt, start.addingTimeInterval(15.5))
+        XCTAssertEqual(pending.checkpointAt, start.addingTimeInterval(15.5))
+        XCTAssertEqual(pending.linkedTaskID, original.linkedTaskID)
+        XCTAssertEqual(pending.linkedTitleSnapshot, "Saved title")
+        XCTAssertEqual(try FocusTiming.reconcileOnRelaunch(pending,
+            at: start.addingTimeInterval(1_000_000)), .unchanged(pending))
+        XCTAssertEqual(try FocusTiming.reconcileOnRelaunch(pending, at: start), .unchanged(pending))
+    }
+
+    func testRelaunchAtAndAfterDeadlineCompletesAtEffectiveDeadline() throws {
+        let original = try row(planned: 60, accrued: 10.25,
+                               deadline: start.addingTimeInterval(49.75))
+        for now in [start.addingTimeInterval(49.75), start.addingTimeInterval(50_000)] {
+            guard case .changed(let change) = try FocusTiming.reconcileOnRelaunch(original, at: now),
+                  case .reconcile(let payload) = change.transition else {
+                return XCTFail("Expected one completed reconciliation")
+            }
+            let finished = change.snapshot
+            XCTAssertEqual(finished.state, .completed)
+            XCTAssertEqual(finished.actualSeconds, 60)
+            XCTAssertEqual(finished.endedAt, start.addingTimeInterval(49.75))
+            XCTAssertEqual(finished.checkpointAt, start.addingTimeInterval(49.75))
+            XCTAssertEqual(payload.expectedCheckpointAt, start)
+            XCTAssertEqual(payload.sampledAt, finished.checkpointAt)
+            XCTAssertEqual(payload.accumulatedActiveSeconds, 60)
+            XCTAssertNil(finished.activeSegmentStartedAt)
+            XCTAssertNil(finished.deadline)
+            XCTAssertFalse(finished.recoveryRequired)
+            XCTAssertEqual(try FocusTiming.reconcileOnRelaunch(finished, at: now),
+                           .unchanged(finished))
+        }
+    }
+
+    func testRelaunchLeavesPreviouslyPausedAndTerminalRowsUnchanged() throws {
+        let paused = try row(state: .paused, accrued: 3.125, paused: start.addingTimeInterval(4),
+                             checkpoint: start.addingTimeInterval(4))
+        let ended = try row(state: .ended, accrued: 3.125, ended: start.addingTimeInterval(4),
+                            checkpoint: start.addingTimeInterval(4))
+        for record in [paused, ended] {
+            XCTAssertEqual(try FocusTiming.reconcileOnRelaunch(record,
+                at: start.addingTimeInterval(100_000)), .unchanged(record))
+        }
+    }
+
+    func testBackwardAndIncoherentWallTimesOnlyFreezeTrustedAccrual() throws {
+        let checkpoint = start.addingTimeInterval(20)
+        let original = try row(planned: 60, accrued: 12.375, anchor: checkpoint,
+                               deadline: checkpoint.addingTimeInterval(47.625),
+                               checkpoint: checkpoint)
+        for now in [start.addingTimeInterval(-100), start.addingTimeInterval(19)] {
+            guard case .changed(let change) = try FocusTiming.reconcileOnRelaunch(original,
+                                                                                     at: now) else {
+                return XCTFail("Expected pending recovery")
+            }
+            XCTAssertEqual(change.snapshot.state, .paused)
+            XCTAssertTrue(change.snapshot.recoveryRequired)
+            XCTAssertEqual(change.snapshot.actualSeconds, 12.375)
+            XCTAssertEqual(change.snapshot.pausedAt, checkpoint)
+            XCTAssertEqual(change.snapshot.checkpointAt, checkpoint)
+        }
+        // A valid running row may have a later durable stamp after an in-process
+        // clock rebase. Even if wall time is past the saved deadline, that ordering
+        // is not a trustworthy closed-app interval.
+        let laterStamp = checkpoint.addingTimeInterval(50)
+        let inconsistent = try row(planned: 60, accrued: 12.375, anchor: checkpoint,
+                                   deadline: checkpoint.addingTimeInterval(47.625),
+                                   checkpoint: laterStamp)
+        guard case .changed(let change) = try FocusTiming.reconcileOnRelaunch(inconsistent,
+            at: laterStamp.addingTimeInterval(100)) else {
+            return XCTFail("Expected conservative pending recovery")
+        }
+        XCTAssertEqual(change.snapshot.state, .paused)
+        XCTAssertEqual(change.snapshot.actualSeconds, 12.375)
+        XCTAssertTrue(change.snapshot.recoveryRequired)
+        XCTAssertEqual(change.snapshot.checkpointAt, laterStamp.addingTimeInterval(100))
+
+        // An anchor before the durable checkpoint must not replay that interval,
+        // even when the wall clock has subsequently advanced past the deadline.
+        let ambiguous = try row(planned: 60, accrued: 12.375, anchor: checkpoint,
+                                deadline: checkpoint.addingTimeInterval(47.625),
+                                checkpoint: checkpoint.addingTimeInterval(2))
+        guard case .changed(let frozen) = try FocusTiming.reconcileOnRelaunch(ambiguous,
+            at: checkpoint.addingTimeInterval(100)) else {
+            return XCTFail("Expected conservative pending recovery")
+        }
+        XCTAssertEqual(frozen.snapshot.state, .paused)
+        XCTAssertEqual(frozen.snapshot.actualSeconds, 12.375)
+        XCTAssertTrue(frozen.snapshot.recoveryRequired)
+    }
+
+    func testRelaunchRejectsInvalidWallAndCorruptStoredRecords() throws {
+        let valid = try row()
+        for time in [Double.nan, .infinity, -.infinity] {
+            invalid({ try FocusTiming.reconcileOnRelaunch(valid,
+                at: Date(timeIntervalSinceReferenceDate: time)) }, .invalidTransition)
+        }
+        // A corrupt model never becomes a snapshot eligible for reconciliation.
+        let model = FocusSession(id: UUID(), state: "running", plannedSeconds: 60,
+                                 accumulatedActiveSeconds: 0,
+                                 activeSegmentStartedAt: start,
+                                 deadline: start.addingTimeInterval(60),
+                                 startedAt: start, checkpointAt: start)
+        model.deadline = start.addingTimeInterval(5)
+        invalid({ try FocusSessionSnapshot(model) }, .invalidStoredData)
+        model.deadline = nil
+        invalid({ try FocusSessionSnapshot(model) }, .invalidStoredData)
+        model.deadline = start.addingTimeInterval(60)
+        model.accumulatedActiveSeconds = .nan
+        invalid({ try FocusSessionSnapshot(model) }, .invalidStoredData)
+        model.accumulatedActiveSeconds = 0
+        model.state = "unknown"
+        invalid({ try FocusSessionSnapshot(model) }, .invalidStoredData)
+    }
+
     func testTimingRejectsInvalidSamplesAndStates() throws {
         let running = try row()
         let maximum = try row(planned: Int.max,

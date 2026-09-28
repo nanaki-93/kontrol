@@ -20,7 +20,58 @@ struct FocusTimingChange: Equatable {
     let snapshot: FocusSessionSnapshot
 }
 
+/// An unchanged result requires no write. In particular, an interrupted session
+/// already awaiting a decision must not replay its old running wall interval.
+enum FocusReconciliation: Equatable {
+    case unchanged(FocusSessionSnapshot)
+    case changed(FocusTimingChange)
+}
+
 enum FocusTiming {
+    /// Called only on initial process load, when the former monotonic anchor is
+    /// gone. The caller persists `changed` before publishing or allowing Start.
+    static func reconcileOnRelaunch(_ session: FocusSessionSnapshot,
+                                    at wall: Date) throws -> FocusReconciliation {
+        guard wall.timeIntervalSinceReferenceDate.isFinite else {
+            throw FocusError.invalidTransition
+        }
+        guard session.state == .running else { return .unchanged(session) }
+        // Snapshot construction validates running anchors, deadline and stored
+        // values. Never interpret a missing or contradictory anchor as a finish.
+        guard let anchor = session.activeSegmentStartedAt, let deadline = session.deadline else {
+            throw FocusError.invalidStoredData
+        }
+        // A checkpoint later than its segment anchor is ambiguous: counting from
+        // the anchor could replay time predating the last durable timestamp.
+        let coherent = session.checkpointAt == anchor && wall >= anchor &&
+            session.checkpointAt < deadline
+        let remaining = Double(session.plannedSeconds) - session.accumulatedActiveSeconds
+        if coherent && wall >= deadline {
+            let stamp = max(session.checkpointAt, deadline)
+            let elapsed = Double(session.plannedSeconds)
+            let payload = payloadFor(session, at: stamp, elapsed: elapsed)
+            return .changed(FocusTimingChange(transition: .reconcile(payload),
+                snapshot: try copy(session, state: .completed, elapsed: elapsed,
+                                   endedAt: deadline, checkpointAt: stamp)))
+        }
+
+        // A backwards wall clock or a checkpoint after the saved deadline makes
+        // the wall interval untrustworthy. Freeze only the previously trusted time.
+        // Compare to the deadline before accruing, so a rounded interval cannot
+        // turn an inconsistent wall timestamp into an implicit completion.
+        let delta = coherent ? max(0, wall.timeIntervalSince(anchor)) : 0
+        let accrued = min(remaining, delta)
+        let candidate = session.accumulatedActiveSeconds + accrued
+        let elapsed = candidate < Double(session.plannedSeconds) ? candidate :
+            session.accumulatedActiveSeconds
+        let stamp = max(session.startedAt, session.checkpointAt, wall)
+        let payload = payloadFor(session, at: stamp, elapsed: elapsed)
+        return .changed(FocusTimingChange(transition: .reconcile(payload),
+            snapshot: try copy(session, state: .paused, elapsed: elapsed,
+                               pausedAt: stamp, checkpointAt: stamp,
+                               recoveryRequired: true)))
+    }
+
     static func sample(_ session: FocusSessionSnapshot,
                        monotonicDelta: TimeInterval) throws -> FocusTimingSample {
         guard session.state == .running, !session.recoveryRequired,
@@ -127,13 +178,14 @@ enum FocusTiming {
     private static func copy(_ session: FocusSessionSnapshot, state: FocusSessionState,
                              elapsed: Double, anchor: Date? = nil, deadline: Date? = nil,
                              pausedAt: Date? = nil, endedAt: Date? = nil,
-                             checkpointAt: Date) throws -> FocusSessionSnapshot {
+                             checkpointAt: Date, recoveryRequired: Bool = false) throws -> FocusSessionSnapshot {
         try FocusSessionSnapshot(id: session.id, state: state,
                                  plannedSeconds: session.plannedSeconds,
                                  accumulatedActiveSeconds: elapsed,
                                  activeSegmentStartedAt: anchor, deadline: deadline,
                                  pausedAt: pausedAt, startedAt: session.startedAt,
                                  endedAt: endedAt, checkpointAt: checkpointAt,
+                                 recoveryRequired: recoveryRequired,
                                  linkedTaskID: session.linkedTaskID,
                                  linkedLessonID: session.linkedLessonID,
                                  linkedTitleSnapshot: session.linkedTitleSnapshot)
