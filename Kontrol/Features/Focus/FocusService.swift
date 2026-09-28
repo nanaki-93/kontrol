@@ -274,7 +274,8 @@ final class FocusService: ObservableObject {
             guard readState.canStart else { throw FocusServiceError.activeStatusUnknown }
             guard activeSession == nil else { throw FocusError.activeSessionConflict }
             let input = FocusStartInput(plannedSeconds: try configuration.plannedSeconds(),
-                startedAt: wallClock(), linkedTaskID: configuration.linkedTaskID)
+                startedAt: wallClock(), linkedTaskID: configuration.linkedTaskID,
+                linkedLessonID: configuration.linkedLessonID)
             do { receipt = try repository.create(input: input) }
             catch {
                 recordMutationFailure(error, for: action)

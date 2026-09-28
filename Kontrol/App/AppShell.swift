@@ -101,7 +101,8 @@ struct AppShell: View {
                             LearningHistoryView(store: dependencies.learningCatalogStore, navigation: navigation)
                         }
                     case .focus:
-                        FocusView(service: dependencies.focusService, taskStore: dependencies.taskStore)
+                        FocusView(service: dependencies.focusService, taskStore: dependencies.taskStore,
+                                  learningStore: dependencies.learningCatalogStore)
                     case .tasks:
                         TasksView(store: dependencies.taskStore)
                     case .settings:

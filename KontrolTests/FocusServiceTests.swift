@@ -38,7 +38,8 @@ final class FocusServiceTests: XCTestCase {
                 activeSegmentStartedAt: input.startedAt,
                 deadline: input.startedAt.addingTimeInterval(Double(input.plannedSeconds)),
                 startedAt: input.startedAt, checkpointAt: input.startedAt,
-                linkedTaskID: input.linkedTaskID)
+                linkedTaskID: input.linkedTaskID, linkedLessonID: input.linkedLessonID,
+                linkedTitleSnapshot: input.linkedLessonID == nil ? nil : "Captured lesson")
             rows.insert(receipt, at: 0)
             return receipt
         }
@@ -247,6 +248,28 @@ final class FocusServiceTests: XCTestCase {
         XCTAssertThrowsError(try service.start(configuration: FocusConfiguration())) {
             XCTAssertEqual($0 as? FocusServiceError, .activeStatusUnknown)
         }
+    }
+
+    func testLessonStartForwardsIDAndUnavailableCommitNeverStartsUnlinked() throws {
+        let repo = FakeRepository()
+        let service = FocusService(repository: repo, wallClock: { self.start },
+            notificationCenter: NotificationCenter(), workspaceNotificationCenter: NotificationCenter())
+        service.loadIfNeeded()
+        let selected = FocusConfiguration(linkedLessonID: "lesson-1")
+        repo.writeError = .unavailableLesson
+        XCTAssertThrowsError(try service.start(configuration: selected)) {
+            XCTAssertEqual($0 as? FocusError, .unavailableLesson)
+        }
+        XCTAssertEqual(repo.lastInput?.linkedLessonID, "lesson-1")
+        XCTAssertNil(repo.lastInput?.linkedTaskID)
+        XCTAssertNil(service.activeSession)
+        XCTAssertTrue(service.snapshots.isEmpty)
+        XCTAssertNil(service.mutationFailure)
+        repo.writeError = nil
+        try service.start(configuration: selected)
+        XCTAssertEqual(service.activeSession?.linkedLessonID, "lesson-1")
+        XCTAssertNil(service.activeSession?.linkedTaskID)
+        XCTAssertEqual(repo.creates, 2)
     }
 
     func testFailedStartDoesNotPublishAnUncommittedSession() throws {

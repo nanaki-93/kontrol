@@ -1,19 +1,48 @@
 import SwiftUI
 
-/// Unsaved, window-local configuration. A task that disappears stays selected until the
-/// user explicitly changes it; the repository checks availability again at commit time.
+/// Unsaved, window-local configuration. Disappearing links stay selected until explicitly
+/// changed; neither selecting a lesson nor validating the draft opens an attempt.
 struct FocusReadyDraft {
     var duration: FocusDuration = .default
-    var linkedTaskID: UUID?
+    private(set) var linkedTaskID: UUID?
+    private(set) var linkedLessonID: String?
 
-    func configuration(openTasks: [TaskSnapshot], tasksReadable: Bool) throws -> FocusConfiguration {
+    mutating func selectTask(_ id: UUID?) {
+        linkedTaskID = id
+        linkedLessonID = nil
+    }
+
+    mutating func selectLesson(_ id: String?) {
+        linkedLessonID = id
+        linkedTaskID = nil
+    }
+
+    /// Use the authoritative catalog inventory, not the four Learning choice slots.
+    /// Selecting a lesson does not create a progress row or open an attempt.
+    static func lessons(from state: LearningCatalogReadState) -> [LessonDefinitionSnapshot]? {
+        guard state.isAuthoritative, let snapshot = state.snapshot else { return nil }
+        let active = Dictionary(uniqueKeysWithValues: snapshot.progress.map { ($0.lessonID, $0.status) })
+        return snapshot.definitions.filter { lesson in
+            let status = active[lesson.id] ?? .available
+            return status == .available || status == .started
+        }.sorted { $0.title == $1.title ? $0.id < $1.id : $0.title < $1.title }
+    }
+
+    func configuration(openTasks: [TaskSnapshot], tasksReadable: Bool,
+                       lessons: [LessonDefinitionSnapshot]? = nil) throws -> FocusConfiguration {
         _ = try duration.seconds()
         if let linkedTaskID {
             guard tasksReadable, openTasks.contains(where: { $0.id == linkedTaskID && !$0.isCompleted }) else {
                 throw FocusError.unavailableTask
             }
         }
-        return FocusConfiguration(duration: duration, linkedTaskID: linkedTaskID)
+        if let linkedLessonID {
+            guard lessons?.contains(where: { $0.id == linkedLessonID }) == true else {
+                throw FocusError.unavailableLesson
+            }
+        }
+        return FocusConfiguration(duration: duration, linkedTaskID: linkedTaskID,
+                                  linkedLessonID: linkedLessonID)
     }
 }
 
@@ -54,6 +83,7 @@ struct FocusRecoveryPresentation {
 struct FocusView: View {
     @ObservedObject var service: FocusService
     @ObservedObject var taskStore: TaskStore
+    @ObservedObject var learningStore: LearningCatalogStore
     @State private var draft = FocusReadyDraft()
     @State private var customMinutes = ""
     @State private var showingSessions = false
@@ -71,16 +101,22 @@ struct FocusView: View {
             .sorted { $0.title == $1.title ? $0.id.uuidString < $1.id.uuidString : $0.title < $1.title }
     }
 
+    private var lessons: [LessonDefinitionSnapshot]? { FocusReadyDraft.lessons(from: learningStore.state) }
+
     private var configuration: FocusConfiguration? {
-        try? draft.configuration(openTasks: openTasks, tasksReadable: taskStore.readState == .loaded)
+        try? draft.configuration(openTasks: openTasks, tasksReadable: taskStore.readState == .loaded,
+                                 lessons: lessons)
     }
 
     private var validationMessage: String? {
         do {
-            _ = try draft.configuration(openTasks: openTasks, tasksReadable: taskStore.readState == .loaded)
+            _ = try draft.configuration(openTasks: openTasks, tasksReadable: taskStore.readState == .loaded,
+                                        lessons: lessons)
             return nil
         } catch FocusError.unavailableTask {
             return "The selected task is no longer available. Choose another open task or select No task."
+        } catch FocusError.unavailableLesson {
+            return "The selected lesson is unavailable. Retry learning choices or choose another lesson or No link."
         } catch {
             return "Enter a positive whole number of minutes that fits the timer."
         }
@@ -146,7 +182,10 @@ struct FocusView: View {
         .padding(.top, AppMetrics.space8)
         .padding(.bottom, AppMetrics.space8)
         .fixedSize(horizontal: false, vertical: true) // AppShell scrolls overflow at enlarged text sizes.
-        .onAppear { if taskStore.readState == .notLoaded { taskStore.refresh() } }
+        .onAppear {
+            if taskStore.readState == .notLoaded { taskStore.refresh() }
+            learningStore.loadIfNeeded()
+        }
     }
 
     private func recoveryContent(_ session: FocusSessionSnapshot) -> some View {
@@ -386,7 +425,10 @@ struct FocusView: View {
                     Text("Task choices are unavailable. You can still start without a task.")
                         .appTypography(.metadata)
                 }
-                Picker("Link to task", selection: $draft.linkedTaskID) {
+                Picker("Link to task", selection: Binding(
+                    get: { draft.linkedTaskID },
+                    set: { draft.selectTask($0); startError = nil }
+                )) {
                     Text("No task").tag(nil as UUID?)
                     ForEach(openTasks) { task in Text(task.title).tag(task.id as UUID?) }
                     if let id = draft.linkedTaskID, !openTasks.contains(where: { $0.id == id }) {
@@ -397,6 +439,34 @@ struct FocusView: View {
                 .accessibilityIdentifier("focus-task-picker")
                 if openTasks.isEmpty && taskStore.readState == .loaded {
                     Text("No open tasks. Start without a task, or add one in Tasks.")
+                        .appTypography(.metadata)
+                        .foregroundStyle(AppColors.textSecondary)
+                }
+            }
+            VStack(alignment: .leading, spacing: AppMetrics.space3) {
+                SectionHeader("Optional lesson")
+                if lessons == nil {
+                    ErrorBanner(.readFailed, recoveryTitle: "Retry learning choices", recovery: {
+                        if case .failed = learningStore.state { learningStore.retry() }
+                        else { learningStore.loadIfNeeded() }
+                    })
+                    Text("Lesson choices are unavailable. You can still start without a lesson.")
+                        .appTypography(.metadata)
+                }
+                Picker("Link to lesson", selection: Binding(
+                    get: { draft.linkedLessonID },
+                    set: { draft.selectLesson($0); startError = nil }
+                )) {
+                    Text("No lesson").tag(nil as String?)
+                    ForEach(lessons ?? []) { lesson in Text(lesson.title).tag(lesson.id as String?) }
+                    if let id = draft.linkedLessonID, lessons?.contains(where: { $0.id == id }) != true {
+                        Text("Unavailable lesson — choose again").tag(id as String?)
+                    }
+                }
+                .frame(maxWidth: 380)
+                .accessibilityIdentifier("focus-lesson-picker")
+                if lessons?.isEmpty == true {
+                    Text("No available lessons. Start without a lesson or visit Learning.")
                         .appTypography(.metadata)
                         .foregroundStyle(AppColors.textSecondary)
                 }
@@ -414,6 +484,8 @@ struct FocusView: View {
                 }
                 Text(startError == .unavailableTask
                      ? "That task changed before Start. Choose another task or No task, then try again."
+                     : startError == .unavailableLesson
+                     ? "That lesson changed before Start. Retry learning choices or choose another lesson or No link, then try again."
                      : startError == .activeSessionConflict
                      ? "Another window has started a session. Focus can only run one session at a time."
                      : "Start did not save. Your choices are still here; try Start again.")
@@ -463,6 +535,8 @@ struct FocusView: View {
         } catch {
             startError = error as? FocusError ?? .persistenceFailure
             if startError == .unavailableTask { taskStore.refresh() }
+            // Keep the selected ID even if the next read removes it; the user must correct it.
+            if startError == .unavailableLesson { learningStore.refresh() }
         }
     }
 }

@@ -30,7 +30,7 @@ final class FocusPresentationTests: XCTestCase {
         let graph = try dependencies()
         let task = try graph.taskStore.create(input: TaskInput(title: "Open task"))
         var draft = FocusReadyDraft()
-        draft.linkedTaskID = task.id
+        draft.selectTask(task.id)
         XCTAssertEqual(try draft.configuration(openTasks: graph.taskStore.snapshots, tasksReadable: true).linkedTaskID, task.id)
         XCTAssertThrowsError(try draft.configuration(openTasks: graph.taskStore.snapshots, tasksReadable: false)) {
             XCTAssertEqual($0 as? FocusError, .unavailableTask)
@@ -38,7 +38,7 @@ final class FocusPresentationTests: XCTestCase {
         try graph.taskStore.setCompleted(id: task.id, completed: true)
         XCTAssertThrowsError(try draft.configuration(openTasks: graph.taskStore.snapshots, tasksReadable: true))
         XCTAssertEqual(draft.linkedTaskID, task.id)
-        draft.linkedTaskID = nil
+        draft.selectTask(nil)
         XCTAssertNil(try draft.configuration(openTasks: graph.taskStore.snapshots, tasksReadable: true).linkedTaskID)
     }
 
@@ -254,7 +254,8 @@ final class FocusPresentationTests: XCTestCase {
 
     func testHostedReadySurface() throws {
         let graph = try dependencies()
-        let host = NSHostingView(rootView: FocusView(service: graph.focusService, taskStore: graph.taskStore))
+        let host = NSHostingView(rootView: FocusView(service: graph.focusService, taskStore: graph.taskStore,
+                                                   learningStore: graph.learningCatalogStore))
         host.frame = CGRect(x: 0, y: 0, width: 1000, height: 700)
         host.layoutSubtreeIfNeeded()
         XCTAssertEqual(host.frame.width, 1000)
@@ -276,7 +277,8 @@ final class FocusPresentationTests: XCTestCase {
             focusRepository: repository,
             focusWallClock: { start.addingTimeInterval(Double(elapsed)) },
             focusMonotonicClock: { base.advanced(by: .seconds(elapsed)) })
-        let host = NSHostingView(rootView: FocusView(service: graph.focusService, taskStore: graph.taskStore))
+        let host = NSHostingView(rootView: FocusView(service: graph.focusService, taskStore: graph.taskStore,
+                                                   learningStore: graph.learningCatalogStore))
         host.frame = CGRect(x: 0, y: 0, width: 1000, height: 700)
         host.layoutSubtreeIfNeeded()
         XCTAssertEqual(graph.focusService.activeSession?.recoveryRequired, true)
@@ -292,7 +294,8 @@ final class FocusPresentationTests: XCTestCase {
     func testHostedRunningAndPausedSurfaces() throws {
         let graph = try dependencies()
         try graph.focusService.start(configuration: FocusConfiguration())
-        let host = NSHostingView(rootView: FocusView(service: graph.focusService, taskStore: graph.taskStore))
+        let host = NSHostingView(rootView: FocusView(service: graph.focusService, taskStore: graph.taskStore,
+                                                   learningStore: graph.learningCatalogStore))
         host.frame = CGRect(x: 0, y: 0, width: 1000, height: 700)
         host.layoutSubtreeIfNeeded()
         XCTAssertNotNil(graph.focusService.countdownSeconds)

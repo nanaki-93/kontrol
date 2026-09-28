@@ -236,6 +236,113 @@ final class FocusLessonLinkTests: XCTestCase {
         }
     }
 
+    func testReadyChoicesAreReadOnlyAndStaleSelectionRequiresExplicitCorrection() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let catalog = SwiftDataCatalogRepository(container: container)
+        _ = try catalog.importIfNeeded(BundledCatalogLoader.load())
+        let learning = LearningCatalogStore(repository: catalog)
+        learning.loadIfNeeded()
+        let snapshot = try XCTUnwrap(learning.state.snapshot)
+        let choice = try XCTUnwrap(snapshot.slots.first)
+        let options = try XCTUnwrap(FocusReadyDraft.lessons(from: learning.state))
+        XCTAssertTrue(options.contains { $0.id == choice.lessonID })
+        let terminal = LearningCatalogSnapshot(topics: snapshot.topics, subtopics: snapshot.subtopics,
+            concepts: snapshot.concepts, definitions: snapshot.definitions,
+            progress: [LessonProgressSnapshot(lessonID: choice.lessonID, status: .completed)],
+            slots: snapshot.slots)
+        XCTAssertFalse(try XCTUnwrap(FocusReadyDraft.lessons(from: .current(terminal)))
+            .contains { $0.id == choice.lessonID })
+        let restored = LearningCatalogSnapshot(topics: snapshot.topics, subtopics: snapshot.subtopics,
+            concepts: snapshot.concepts, definitions: snapshot.definitions,
+            progress: [LessonProgressSnapshot(lessonID: choice.lessonID, status: .started)],
+            slots: snapshot.slots.filter { $0.lessonID != choice.lessonID })
+        XCTAssertTrue(try XCTUnwrap(FocusReadyDraft.lessons(from: .current(restored)))
+            .contains { $0.id == choice.lessonID })
+        XCTAssertNil(FocusReadyDraft.lessons(from: .failed(stale: snapshot)))
+        XCTAssertNil(FocusReadyDraft.lessons(from: .notLoaded))
+        XCTAssertNil(FocusReadyDraft.lessons(from: .loading))
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).isEmpty)
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonProgress>()).isEmpty)
+        var draft = FocusReadyDraft()
+        draft.selectLesson(choice.lessonID)
+        XCTAssertEqual(try draft.configuration(openTasks: [], tasksReadable: true, lessons: options).linkedLessonID,
+                       choice.lessonID)
+        XCTAssertThrowsError(try draft.configuration(openTasks: [], tasksReadable: true, lessons: nil)) {
+            XCTAssertEqual($0 as? FocusError, .unavailableLesson)
+        }
+        let removed = options.filter { $0.id != choice.lessonID }
+        XCTAssertThrowsError(try draft.configuration(openTasks: [], tasksReadable: true, lessons: removed)) {
+            XCTAssertEqual($0 as? FocusError, .unavailableLesson)
+        }
+        XCTAssertEqual(draft.linkedLessonID, choice.lessonID)
+        draft.selectTask(taskID)
+        XCTAssertNil(draft.linkedLessonID)
+        XCTAssertEqual(draft.linkedTaskID, taskID)
+        draft.selectLesson(choice.lessonID)
+        XCTAssertNil(draft.linkedTaskID)
+        draft.selectLesson(nil)
+        XCTAssertNil(try draft.configuration(openTasks: [], tasksReadable: false).linkedLessonID)
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).isEmpty)
+    }
+
+    func testAvailableUnslottedLessonCanBeSelectedAndStartedWithoutLearningWrites() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let catalog = SwiftDataCatalogRepository(container: container)
+        _ = try catalog.importIfNeeded(BundledCatalogLoader.load())
+        let learning = LearningCatalogStore(repository: catalog)
+        learning.loadIfNeeded()
+        let snapshot = try XCTUnwrap(learning.state.snapshot)
+        let assignedIDs = Set(snapshot.slots.map(\.lessonID))
+        let progress = Dictionary(uniqueKeysWithValues: snapshot.progress.map { ($0.lessonID, $0.status) })
+        let unslotted = try XCTUnwrap(snapshot.definitions.first {
+            !assignedIDs.contains($0.id) && (progress[$0.id] ?? .available) == .available
+        })
+        let options = try XCTUnwrap(FocusReadyDraft.lessons(from: learning.state))
+        XCTAssertTrue(options.contains { $0.id == unslotted.id })
+        var draft = FocusReadyDraft()
+        draft.selectLesson(unslotted.id)
+        let config = try draft.configuration(openTasks: [], tasksReadable: false, lessons: options)
+        XCTAssertEqual(config.linkedLessonID, unslotted.id)
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).isEmpty)
+
+        let focus = FocusService(repository: SwiftDataFocusRepository(container: container),
+            wallClock: { self.start }, notificationCenter: NotificationCenter(),
+            workspaceNotificationCenter: NotificationCenter())
+        focus.loadIfNeeded()
+        try focus.start(configuration: config)
+        XCTAssertEqual(focus.activeSession?.linkedLessonID, unslotted.id)
+        XCTAssertEqual(focus.activeSession?.linkedTitleSnapshot, unslotted.title)
+        try focus.end()
+        XCTAssertEqual(focus.snapshots.first?.state, .ended)
+        XCTAssertEqual(try catalog.loadSnapshot(), snapshot)
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).isEmpty)
+    }
+
+    func testStartAndEndLinkedLessonNeverMutateLearning() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let catalog = SwiftDataCatalogRepository(container: container)
+        _ = try catalog.importIfNeeded(BundledCatalogLoader.load())
+        let learning = LearningCatalogStore(repository: catalog)
+        learning.loadIfNeeded()
+        let options = try XCTUnwrap(FocusReadyDraft.lessons(from: learning.state))
+        let id = try XCTUnwrap(learning.state.snapshot?.slots.first?.lessonID)
+        var draft = FocusReadyDraft()
+        draft.selectLesson(id)
+        let config = try draft.configuration(openTasks: [], tasksReadable: false, lessons: options)
+        let focus = FocusService(repository: SwiftDataFocusRepository(container: container),
+            wallClock: { self.start }, notificationCenter: NotificationCenter(),
+            workspaceNotificationCenter: NotificationCenter())
+        focus.loadIfNeeded()
+        try focus.start(configuration: config)
+        XCTAssertEqual(focus.activeSession?.linkedLessonID, id)
+        XCTAssertEqual(focus.activeSession?.linkedTitleSnapshot, options.first { $0.id == id }?.title)
+        try focus.end()
+        XCTAssertEqual(focus.snapshots.first?.state, .ended)
+        XCTAssertNil(try catalog.loadLesson(lessonID: id).attempt)
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).isEmpty)
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonProgress>()).isEmpty)
+    }
+
     func testLaterLessonChangesDoNotRewriteOrStopCommittedSession() throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         try seed(container, status: .started)
