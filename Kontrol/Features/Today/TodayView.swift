@@ -3,7 +3,36 @@ import SwiftUI
 struct TodayView: View {
     @ObservedObject var store: TaskStore
     @State private var showingCapture = false
+    @State private var presentation: EditorPresentation?
+    @State private var editorOpenError = false
+    @State private var actionError: TaskMutationError?
+    @State private var lastEditorTriggerID: UUID?
     @FocusState private var addTaskFocused: Bool
+    @FocusState private var editFocusedID: UUID?
+
+    private struct EditorPresentation: Identifiable {
+        let id = UUID()
+        let draft: TaskEditorDraft
+    }
+
+    private func edit(_ row: TaskSnapshot) {
+        do {
+            presentation = EditorPresentation(draft: try TaskEditorDraft(editing: row, in: store))
+            editorOpenError = false
+        } catch {
+            editorOpenError = true
+            store.refresh()
+        }
+    }
+
+    private func setCompleted(_ row: TaskSnapshot, completed: Bool) {
+        do {
+            try store.setCompleted(id: row.id, completed: completed)
+            actionError = nil
+        } catch {
+            actionError = store.mutationError ?? .writeFailed
+        }
+    }
 
     private var localDateStyle: Date.FormatStyle {
         var style = Date.FormatStyle.dateTime.weekday(.wide).day().month(.wide)
@@ -24,6 +53,35 @@ struct TodayView: View {
 
             SectionHeader("Next")
                 .padding(.top, AppMetrics.space2)
+            if editorOpenError {
+                ErrorBanner(.readFailed, recoveryTitle: "Retry", recovery: {
+                    editorOpenError = false
+                    store.retryRead()
+                })
+                Text("Could not open this task. Refresh the list and try again.")
+                    .appTypography(.metadata)
+                    .foregroundStyle(AppColors.textSecondary)
+            }
+            if let actionError {
+                switch actionError {
+                case .writeFailed:
+                    ErrorBanner(.saveFailed)
+                        .accessibilityIdentifier("today-action-error")
+                    Text("\(actionError.message) Use the task action again to retry.")
+                        .appTypography(.metadata)
+                        .foregroundStyle(AppColors.textSecondary)
+                case .notFound:
+                    Text("This task is no longer available. Refresh the list or choose another task.")
+                        .appTypography(.metadata)
+                        .foregroundStyle(AppColors.error)
+                        .accessibilityIdentifier("today-action-error")
+                    ActionButton("Refresh tasks") {
+                        store.retryRead()
+                        self.actionError = nil
+                    }
+                    .accessibilityIdentifier("today-action-refresh")
+                }
+            }
             if let message = store.readState.message {
                 ErrorBanner(.readFailed, recoveryTitle: "Retry", recovery: store.retryRead)
                 Text(message)
@@ -34,7 +92,12 @@ struct TodayView: View {
             if store.readState == .loaded && today.isEmpty {
                 EmptyState("No tasks planned or due today.", guidance: "Use Add task to capture one.")
             } else if !today.isEmpty {
-                TaskRows(rows: today, temporalContext: store.temporalContext)
+                ScrollView {
+                    TaskRows(rows: today, temporalContext: store.temporalContext, onEdit: { row in
+                        lastEditorTriggerID = row.id
+                        edit(row)
+                    }, onSetCompleted: setCompleted, editFocus: $editFocusedID)
+                }
             }
             Divider().overlay(AppColors.border)
             SectionHeader("Schedule")
@@ -53,6 +116,22 @@ struct TodayView: View {
                 showingCapture = false
             }, onSaved: {
                 showingCapture = false
+            })
+        }
+        .sheet(item: $presentation, onDismiss: {
+            if let id = lastEditorTriggerID, store.select(.today).contains(where: { $0.id == id }) {
+                editFocusedID = id
+            } else {
+                addTaskFocused = true
+            }
+            lastEditorTriggerID = nil
+        }) { item in
+            TaskEditorView(draft: item.draft, onCancel: {
+                presentation = nil
+            }, onSaved: {
+                presentation = nil
+            }, onMissingTask: {
+                presentation = nil
             })
         }
     }

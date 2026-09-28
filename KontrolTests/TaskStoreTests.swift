@@ -150,6 +150,39 @@ final class TaskStoreTests: XCTestCase {
         XCTAssertNil(store.mutationError)
     }
 
+    func testCompletionReopeningRepartitionsCachedFiltersWithoutFetchAndFailuresDoNotRepartition() throws {
+        let spy = try makeSpy()
+        let now = instant("2026-01-01T12:00:00Z")
+        let store = TaskStore(repository: spy, clock: { now },
+                              timeZone: { TimeZone(secondsFromGMT: 0)! })
+        store.refresh()
+        let today = try store.create(input: TaskInput(title: "Due now", dueAt: now))
+        let upcoming = try store.create(input: TaskInput(title: "No date"))
+        XCTAssertEqual(store.select(.today).map(\.id), [today.id])
+        XCTAssertEqual(store.select(.upcoming).map(\.id), [upcoming.id])
+        spy.failWrites = true
+        XCTAssertThrowsError(try store.setCompleted(id: today.id, completed: true))
+        XCTAssertEqual(store.select(.today).map(\.id), [today.id])
+        XCTAssertTrue(store.select(.completed).isEmpty)
+        XCTAssertEqual(store.mutationError, .writeFailed)
+        spy.failWrites = false
+        let completed = try store.setCompleted(id: today.id, completed: true)
+        XCTAssertNotNil(completed.completedAt)
+        XCTAssertTrue(store.select(.today).isEmpty)
+        XCTAssertEqual(store.select(.completed).map(\.id), [today.id])
+        spy.failWrites = true
+        XCTAssertThrowsError(try store.setCompleted(id: today.id, completed: false))
+        XCTAssertEqual(store.select(.completed), [completed])
+        spy.failWrites = false
+        let reopened = try store.setCompleted(id: today.id, completed: false)
+        XCTAssertNil(reopened.completedAt)
+        XCTAssertEqual(store.select(.today).map(\.id), [today.id])
+        XCTAssertTrue(store.select(.completed).isEmpty)
+        XCTAssertEqual(store.select(.upcoming).map(\.id), [upcoming.id])
+        XCTAssertEqual(spy.fetchCount, 1, "actions publish committed snapshots without navigation or refetch")
+        XCTAssertEqual(spy.saves.count, 4, "only two creates and two successful transitions save")
+    }
+
     func testReadFailureNeverLooksLikeEmptySuccessAndRetryIsExplicit() throws {
         let spy = try makeSpy()
         let store = TaskStore(repository: spy)

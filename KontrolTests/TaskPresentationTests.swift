@@ -232,6 +232,170 @@ final class TaskPresentationTests: XCTestCase {
         return try XCTUnwrap(elements(in: window, identifier: identifier).first)
     }
 
+    func testRowActionsPublishAcrossBothRoutesAndReopenRestoresToday() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let now = Date()
+        let repository = SwiftDataTaskRepository(container: container, now: { now })
+        let store = TaskStore(repository: repository, clock: { now })
+        let saved = try store.create(input: TaskInput(title: "Shared action", dueAt: now))
+        let windows = (0..<2).map { index in
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
+                                  styleMask: [.titled], backing: .buffered, defer: false)
+            window.title = "Row action \(index) \(UUID())"
+            window.contentView = NSHostingView(rootView: index == 0 ?
+                AnyView(TodayView(store: store)) : AnyView(TasksView(store: store)))
+            window.makeKeyAndOrderFront(nil)
+            return window
+        }
+        defer { windows.forEach { $0.orderOut(nil) } }
+        settle()
+        let rowID = "task-row-\(saved.id.uuidString)"
+        let completeID = "task-complete-\(saved.id.uuidString)"
+        let reopenID = "task-reopen-\(saved.id.uuidString)"
+        for window in windows {
+            let row = try waitForElement(rowID, in: window)
+            let complete = try waitForElement(completeID, in: window)
+            let edit = try waitForElement("task-edit-\(saved.id.uuidString)", in: window)
+            XCTAssertEqual(attribute(complete, kAXRoleAttribute) as? String, kAXButtonRole)
+            XCTAssertEqual(attribute(complete, kAXDescriptionAttribute) as? String, "Complete Shared action")
+            XCTAssertEqual(attribute(edit, kAXRoleAttribute) as? String, kAXButtonRole)
+            XCTAssertEqual(attribute(edit, kAXDescriptionAttribute) as? String, "Edit Shared action")
+            let children = descendants(of: row)
+            XCTAssertFalse(children.contains { attribute($0, kAXRoleAttribute) as? String == kAXButtonRole },
+                           "row content must not swallow its sibling actions")
+        }
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement(completeID, in: windows[0]),
+                                                 kAXPressAction as CFString), .success)
+        settle()
+        XCTAssertTrue(elements(in: windows[0], identifier: rowID).isEmpty)
+        XCTAssertTrue(elements(in: windows[1], identifier: rowID).isEmpty)
+        XCTAssertNotNil(store.snapshots.first?.completedAt)
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement("tasks-filter-completed", in: windows[1]),
+                                                 kAXPressAction as CFString), .success)
+        settle()
+        XCTAssertEqual(elements(in: windows[1], identifier: rowID).count, 1)
+        XCTAssertTrue(visibleText(in: windows[1]).contains(where: { $0.contains("Completed") && $0.contains("at") }))
+        XCTAssertEqual(attribute(try waitForElement("tasks-filter-completed", in: windows[1]),
+                                 kAXDescriptionAttribute) as? String, "Completed, 1 tasks")
+        XCTAssertEqual(attribute(try waitForElement(reopenID, in: windows[1]),
+                                 kAXDescriptionAttribute) as? String, "Reopen Shared action")
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement(reopenID, in: windows[1]),
+                                                 kAXPressAction as CFString), .success)
+        settle()
+        XCTAssertTrue(elements(in: windows[1], identifier: rowID).isEmpty)
+        XCTAssertEqual(elements(in: windows[0], identifier: rowID).count, 1)
+        XCTAssertNil(store.snapshots.first?.completedAt)
+        XCTAssertEqual(try repository.fetchAll().first?.completedAt, nil)
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement("task-edit-\(saved.id.uuidString)", in: windows[0]),
+                                                 kAXPressAction as CFString), .success)
+        XCTAssertEqual(attribute(try waitForElement("task-editor-title", in: windows[0]),
+                                 kAXValueAttribute) as? String, "Shared action")
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement("task-editor-cancel", in: windows[0]),
+                                                 kAXPressAction as CFString), .success)
+        settle()
+        XCTAssertNil(windows[0].attachedSheet)
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement("task-edit-\(saved.id.uuidString)", in: windows[0]),
+                                                 kAXPressAction as CFString), .success)
+        XCTAssertEqual(AXUIElementSetAttributeValue(try waitForElement("task-editor-title", in: windows[0]),
+                                                    kAXValueAttribute as CFString, "Edited from Today" as CFString), .success)
+        settle()
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement("task-editor-submit", in: windows[0]),
+                                                 kAXPressAction as CFString), .success)
+        settle()
+        XCTAssertNil(windows[0].attachedSheet)
+        XCTAssertEqual(store.snapshots.first?.id, saved.id)
+        XCTAssertEqual(store.snapshots.first?.title, "Edited from Today")
+        XCTAssertEqual(try repository.fetchAll().map(\.id), [saved.id])
+    }
+
+    func testFailedRowActionsKeepRowsAndShowSafeExplicitRetryGuidance() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        var fail = false
+        let repository = SwiftDataTaskRepository(container: container, save: { context in
+            if fail { throw SaveError.injected }
+            try context.save()
+        })
+        let store = TaskStore(repository: repository)
+        let saved = try store.create(input: TaskInput(title: "Private task", plannedFor: .today(at: .now)))
+        let windows = (0..<2).map { index in
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
+                                  styleMask: [.titled], backing: .buffered, defer: false)
+            window.title = "Failed row action \(index) \(UUID())"
+            window.contentView = NSHostingView(rootView: index == 0 ?
+                AnyView(TodayView(store: store)) : AnyView(TasksView(store: store)))
+            window.makeKeyAndOrderFront(nil)
+            return window
+        }
+        defer { windows.forEach { $0.orderOut(nil) } }
+        settle()
+        let complete = "task-complete-\(saved.id.uuidString)"
+        fail = true
+        for (index, window) in windows.enumerated() {
+            XCTAssertEqual(AXUIElementPerformAction(try waitForElement(complete, in: window),
+                                                     kAXPressAction as CFString), .success)
+            settle()
+            XCTAssertEqual(elements(in: window, identifier: "task-row-\(saved.id.uuidString)").count, 1)
+            XCTAssertEqual(elements(in: window, identifier: index == 0 ? "today-action-error" : "tasks-action-error").count, 1)
+            XCTAssertTrue(visibleText(in: window).contains(where: { $0.contains("Use the task action again to retry.") }))
+            XCTAssertFalse(visibleText(in: window).contains(where: { $0.contains("injected") }))
+        }
+        XCTAssertNil(store.snapshots.first?.completedAt)
+        XCTAssertNil(try repository.fetchAll().first?.completedAt)
+        fail = false
+        XCTAssertEqual(AXUIElementPerformAction(try waitForElement(complete, in: windows[0]),
+                                                 kAXPressAction as CFString), .success)
+        settle()
+        XCTAssertTrue(elements(in: windows[0], identifier: "today-action-error").isEmpty)
+        XCTAssertNotNil(store.snapshots.first?.completedAt)
+    }
+
+    func testMissingRowActionOffersRefreshInsteadOfRetryingRemovedRowOnBothRoutes() throws {
+        for isToday in [true, false] {
+            let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+            let storage = SwiftDataTaskRepository(container: container)
+            let repository = FailingReadRepository(storage: storage)
+            repository.failRead = false
+            let store = TaskStore(repository: repository)
+            let saved = try store.create(input: TaskInput(title: "Removed elsewhere", dueAt: .now))
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
+                                  styleMask: [.titled], backing: .buffered, defer: false)
+            window.title = "Missing row action \(UUID())"
+            window.contentView = NSHostingView(rootView: isToday ?
+                AnyView(TodayView(store: store)) : AnyView(TasksView(store: store)))
+            window.makeKeyAndOrderFront(nil)
+            defer { window.orderOut(nil) }
+            settle()
+            let rowID = "task-row-\(saved.id.uuidString)"
+            let completeID = "task-complete-\(saved.id.uuidString)"
+            let prefix = isToday ? "today" : "tasks"
+            _ = try waitForElement(completeID, in: window)
+            try storage.delete(id: saved.id) // A different owner removed the displayed UUID.
+            // On Today exercise a failed automatic refresh too: cached rows remain
+            // stale, but the offered recovery must work once reads return.
+            repository.failRead = isToday
+            XCTAssertEqual(AXUIElementPerformAction(try waitForElement(completeID, in: window),
+                                                     kAXPressAction as CFString), .success)
+            settle()
+            XCTAssertEqual(store.mutationError, .notFound)
+            XCTAssertEqual(elements(in: window, identifier: "\(prefix)-action-error").count, 1)
+            XCTAssertTrue(visibleText(in: window).contains(where: { $0.contains("This task is no longer available") }))
+            XCTAssertFalse(visibleText(in: window).contains("Error: Changes could not be saved."))
+            XCTAssertFalse(visibleText(in: window).contains(where: { $0.contains("Use the task action again") }))
+            XCTAssertEqual(elements(in: window, identifier: rowID).count, isToday ? 1 : 0)
+            if isToday {
+                XCTAssertEqual(store.readState, .failed(hasStaleRows: true))
+                repository.failRead = false
+            }
+            XCTAssertEqual(AXUIElementPerformAction(try waitForElement("\(prefix)-action-refresh", in: window),
+                                                     kAXPressAction as CFString), .success)
+            settle()
+            XCTAssertEqual(store.readState, .loaded)
+            XCTAssertTrue(elements(in: window, identifier: rowID).isEmpty)
+            XCTAssertTrue(elements(in: window, identifier: "\(prefix)-action-error").isEmpty)
+            XCTAssertTrue(try storage.fetchAll().isEmpty)
+        }
+    }
+
     func testTasksEmptyAndFailedReadRemainDistinctWithoutMutatingSavedRows() throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         let repository = SwiftDataTaskRepository(container: container)

@@ -6,6 +6,7 @@ struct TaskRows: View {
     let rows: [TaskSnapshot]
     let temporalContext: TaskTemporalContext
     var onEdit: ((TaskSnapshot) -> Void)? = nil
+    var onSetCompleted: ((TaskSnapshot, Bool) -> Void)? = nil
     var editFocus: FocusState<UUID?>.Binding? = nil
 
     private var dateStyle: Date.FormatStyle {
@@ -81,12 +82,23 @@ struct TaskRows: View {
                                status: row.isCompleted ? StatusPill("Completed", kind: .success) : nil)
                         .accessibilityElement(children: .combine)
                         .accessibilityIdentifier("task-row-\(row.id.uuidString)")
-                    if let onEdit {
-                        if let editFocus {
-                            editButton(for: row, action: onEdit)
-                                .focused(editFocus, equals: row.id)
-                        } else {
-                            editButton(for: row, action: onEdit)
+                    // The read-only row and its controls are independent AX children.
+                    // Never combine an ancestor containing buttons into one element.
+                    VStack(spacing: AppMetrics.space2) {
+                        if let onSetCompleted {
+                            ActionButton(row.isCompleted ? "Reopen" : "Complete") {
+                                onSetCompleted(row, !row.isCompleted)
+                            }
+                            .accessibilityLabel("\(row.isCompleted ? "Reopen" : "Complete") \(row.title)")
+                            .accessibilityIdentifier("task-\(row.isCompleted ? "reopen" : "complete")-\(row.id.uuidString)")
+                        }
+                        if let onEdit {
+                            if let editFocus {
+                                editButton(for: row, action: onEdit)
+                                    .focused(editFocus, equals: row.id)
+                            } else {
+                                editButton(for: row, action: onEdit)
+                            }
                         }
                     }
                 }
@@ -101,6 +113,7 @@ struct TasksView: View {
     @State private var filter: TaskFilter = .today
     @State private var presentation: EditorPresentation?
     @State private var editorOpenError = false
+    @State private var actionError: TaskMutationError?
     @State private var lastEditorTriggerID: UUID?
     @FocusState private var addFocused: Bool
     @FocusState private var editFocusedID: UUID?
@@ -118,6 +131,15 @@ struct TasksView: View {
         } catch {
             editorOpenError = true
             store.refresh()
+        }
+    }
+
+    private func setCompleted(_ row: TaskSnapshot, completed: Bool) {
+        do {
+            try store.setCompleted(id: row.id, completed: completed)
+            actionError = nil
+        } catch {
+            actionError = store.mutationError ?? .writeFailed
         }
     }
 
@@ -170,6 +192,26 @@ struct TasksView: View {
                     .appTypography(.metadata)
                     .foregroundStyle(AppColors.textSecondary)
             }
+            if let actionError {
+                switch actionError {
+                case .writeFailed:
+                    ErrorBanner(.saveFailed)
+                        .accessibilityIdentifier("tasks-action-error")
+                    Text("\(actionError.message) Use the task action again to retry.")
+                        .appTypography(.metadata)
+                        .foregroundStyle(AppColors.textSecondary)
+                case .notFound:
+                    Text("This task is no longer available. Refresh the list or choose another task.")
+                        .appTypography(.metadata)
+                        .foregroundStyle(AppColors.error)
+                        .accessibilityIdentifier("tasks-action-error")
+                    ActionButton("Refresh tasks") {
+                        store.retryRead()
+                        self.actionError = nil
+                    }
+                    .accessibilityIdentifier("tasks-action-refresh")
+                }
+            }
             if let message = store.readState.message {
                 ErrorBanner(.readFailed, recoveryTitle: "Retry", recovery: store.retryRead)
                 Text(message)
@@ -185,7 +227,7 @@ struct TasksView: View {
                     TaskRows(rows: selected, temporalContext: store.temporalContext, onEdit: { row in
                         lastEditorTriggerID = row.id
                         edit(row)
-                    }, editFocus: $editFocusedID)
+                    }, onSetCompleted: setCompleted, editFocus: $editFocusedID)
                 }
             }
             Spacer(minLength: 0)
