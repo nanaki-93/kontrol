@@ -523,6 +523,164 @@ final class FocusRepositoryTests: XCTestCase {
         }
     }
 
+    func testEachCommandAndNaturalCompletionSurviveIndependentDiskOpens() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "KontrolFocusEndToEnd-\(UUID().uuidString)", isDirectory: true)
+        let url = directory.appendingPathComponent("Kontrol.store")
+        func open(makeID: @escaping () -> UUID = UUID.init,
+                  _ check: (SwiftDataFocusRepository) throws -> Void) throws {
+            try autoreleasepool {
+                try check(SwiftDataFocusRepository(container:
+                    ModelContainerFactory().makeContainer(mode: .persistent(url)), makeID: makeID))
+            }
+        }
+        try open(makeID: { self.first }) { writer in
+            XCTAssertEqual(try writer.create(input: input(seconds: 30)).id, first)
+        }
+        try open { writer in
+            let started = try XCTUnwrap(writer.fetchAll().first)
+            let paused = try writer.transition(id: first, command: FocusTiming.pause(started,
+                at: start.addingTimeInterval(7.25), monotonicDelta: 7.25).transition)
+            XCTAssertEqual(paused.actualSeconds, 7.25)
+        }
+        try open { writer in
+            let paused = try XCTUnwrap(writer.fetchAll().first)
+            let resumed = try writer.transition(id: first, command: FocusTiming.resume(paused,
+                at: start.addingTimeInterval(307.25)).transition)
+            XCTAssertEqual(resumed.actualSeconds, 7.25) // 300 seconds paused, zero accrued
+        }
+        try open { writer in
+            let resumed = try XCTUnwrap(writer.fetchAll().first)
+            let ended = try writer.transition(id: first, command: FocusTiming.end(resumed,
+                at: start.addingTimeInterval(311.75), monotonicDelta: 4.5).transition)
+            XCTAssertEqual(ended.state, .ended)
+            XCTAssertEqual(ended.actualSeconds, 11.75)
+        }
+        try open(makeID: { self.second }) { writer in
+            let ended = try XCTUnwrap(writer.fetchAll().first)
+            XCTAssertEqual(ended.endedAt, start.addingTimeInterval(311.75))
+            XCTAssertEqual(ended.actualSeconds, 11.75)
+            XCTAssertEqual(try writer.create(input: FocusStartInput(plannedSeconds: 30,
+                startedAt: start.addingTimeInterval(400))).id, second)
+        }
+        try open { writer in
+            let running = try XCTUnwrap(writer.fetchAll().first { $0.id == second })
+            let completion = try FocusTiming.complete(running,
+                at: start.addingTimeInterval(440), monotonicDelta: 40)
+            let finished = try writer.transition(id: second, command: completion.transition,
+                                                 effectiveEndedAt: completion.snapshot.endedAt)
+            XCTAssertEqual(finished.state, .completed)
+            XCTAssertEqual(finished.actualSeconds, 30)
+            XCTAssertEqual(finished.endedAt, start.addingTimeInterval(430))
+        }
+        try open { writer in
+            let history = try writer.fetchAll()
+            XCTAssertEqual(history.count, 2)
+            XCTAssertEqual(history.first { $0.id == first }?.actualSeconds, 11.75)
+            XCTAssertEqual(history.first { $0.id == second }?.endedAt, start.addingTimeInterval(430))
+            XCTAssertTrue(history.allSatisfy { !$0.state.isActive })
+        }
+    }
+
+    func testRelaunchAfterRapidCheckpointUsesSavedWallAnchorNotLogicalWatermark() throws {
+        for (relaunch, expectedState, expectedElapsed) in [
+            (10.0, FocusSessionState.paused, 14.0),
+            (40.0, FocusSessionState.completed, 30.0)
+        ] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "KontrolFocusCheckpointRelaunch-\(UUID().uuidString)", isDirectory: true)
+            let url = directory.appendingPathComponent("Kontrol.store")
+            try autoreleasepool {
+                let writer = SwiftDataFocusRepository(container:
+                    try ModelContainerFactory().makeContainer(mode: .persistent(url)),
+                    makeID: { self.first })
+                let started = try writer.create(input: input(seconds: 30))
+                // A first checkpoint sampled at exactly the previous watermark
+                // advances it by 1 ms while retaining the true wall anchor.
+                let checkpoint = try FocusTiming.checkpoint(started, at: start, monotonicDelta: 4)
+                let saved = try writer.transition(id: first, command: checkpoint.transition)
+                XCTAssertEqual(saved.activeSegmentStartedAt, start)
+                XCTAssertGreaterThan(saved.checkpointAt, start)
+                XCTAssertEqual(saved.actualSeconds, 4)
+            }
+            try autoreleasepool {
+                let writer = SwiftDataFocusRepository(container:
+                    try ModelContainerFactory().makeContainer(mode: .persistent(url)))
+                let saved = try XCTUnwrap(writer.fetchAll().first)
+                guard case .changed(let calculation) = try FocusTiming.reconcileOnRelaunch(
+                    saved, at: start.addingTimeInterval(relaunch)) else {
+                    return XCTFail("expected one durable reconciliation")
+                }
+                let result = try writer.transition(id: first, command: calculation.transition)
+                XCTAssertEqual(result.state, expectedState)
+                XCTAssertEqual(result.actualSeconds, expectedElapsed)
+                XCTAssertEqual(result.recoveryRequired, expectedState == .paused)
+                if expectedState == .completed {
+                    XCTAssertEqual(result.endedAt, start.addingTimeInterval(26))
+                }
+            }
+            try autoreleasepool {
+                let writer = SwiftDataFocusRepository(container:
+                    try ModelContainerFactory().makeContainer(mode: .persistent(url)))
+                let durable = try XCTUnwrap(writer.fetchAll().first)
+                XCTAssertEqual(durable.state, expectedState)
+                XCTAssertEqual(durable.actualSeconds, expectedElapsed)
+                XCTAssertEqual(try FocusTiming.reconcileOnRelaunch(durable,
+                    at: start.addingTimeInterval(100)), .unchanged(durable))
+            }
+        }
+    }
+
+    func testRollbackImmediatelyAfterRapidCheckpointReconcilesOnceAcrossDiskOpens() throws {
+        for offset in [-0.5, 0, 0.0005] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "KontrolFocusRapidRollback-\(UUID().uuidString)", isDirectory: true)
+            let url = directory.appendingPathComponent("Kontrol.store")
+            var saved: FocusSessionSnapshot!
+            try autoreleasepool {
+                let writer = SwiftDataFocusRepository(container:
+                    try ModelContainerFactory().makeContainer(mode: .persistent(url)),
+                    makeID: { self.first })
+                let started = try writer.create(input: input(seconds: 30))
+                saved = try writer.transition(id: first, command: FocusTiming.checkpoint(
+                    started, at: start, monotonicDelta: 4).transition)
+                XCTAssertEqual(saved.actualSeconds, 4)
+                XCTAssertEqual(saved.activeSegmentStartedAt, start)
+                XCTAssertGreaterThan(saved.checkpointAt, start)
+            }
+            let wall = start.addingTimeInterval(offset)
+            var pending: FocusSessionSnapshot!
+            try autoreleasepool {
+                let writer = SwiftDataFocusRepository(container:
+                    try ModelContainerFactory().makeContainer(mode: .persistent(url)))
+                XCTAssertEqual(try writer.fetchAll(), [saved])
+                guard case .changed(let change) = try FocusTiming.reconcileOnRelaunch(saved,
+                    at: wall), case .reconcile(let payload) = change.transition else {
+                    return XCTFail("expected pending recovery")
+                }
+                XCTAssertEqual(payload.sampledAt, wall) // not the later checkpoint watermark
+                XCTAssertEqual(payload.expectedCheckpointAt, saved.checkpointAt)
+                XCTAssertEqual(payload.accumulatedActiveSeconds, 4)
+                pending = try writer.transition(id: first, command: change.transition)
+                XCTAssertEqual(pending.state, .paused)
+                XCTAssertTrue(pending.recoveryRequired)
+                XCTAssertEqual(pending.actualSeconds, 4)
+                XCTAssertGreaterThan(pending.checkpointAt, saved.checkpointAt)
+                XCTAssertEqual(try writer.transition(id: first, command: change.transition), pending)
+            }
+            try autoreleasepool {
+                let writer = SwiftDataFocusRepository(container:
+                    try ModelContainerFactory().makeContainer(mode: .persistent(url)))
+                XCTAssertEqual(try writer.fetchAll(), [pending])
+                XCTAssertEqual(try FocusTiming.reconcileOnRelaunch(pending,
+                    at: start.addingTimeInterval(100)), .unchanged(pending))
+                XCTAssertThrowsError(try writer.create(input: input())) {
+                    XCTAssertEqual($0 as? FocusError, .activeSessionConflict)
+                }
+            }
+        }
+    }
+
     func testTimingWriteMergesClearedLinkInsteadOfResurrectingStaleMetadata() throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         let seed = ModelContext(container)

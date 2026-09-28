@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 import SwiftData
 import XCTest
 @testable import Kontrol
@@ -28,17 +29,52 @@ final class FocusMigrationTests: XCTestCase {
         })
     }
 
+    private func assertSameFiles(_ actual: [String: Data], _ expected: [String: Data],
+                                 file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertEqual(Set(actual.keys), Set(expected.keys), file: file, line: line)
+        for name in expected.keys.sorted() {
+            XCTAssertEqual(actual[name], expected[name], "\(name) changed", file: file, line: line)
+        }
+    }
+
     @discardableResult
     private func copyClosed(_ source: URL, to destination: URL) throws -> [String: Data] {
         let original = try bytes(source)
-        XCTAssertEqual(Set(original.keys), ["Kontrol.store", "Kontrol.store-shm", "Kontrol.store-wal"])
+        XCTAssertTrue(original.keys.contains("Kontrol.store"))
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: false)
         for name in original.keys {
             try FileManager.default.copyItem(at: source.appendingPathComponent(name),
                                              to: destination.appendingPathComponent(name))
         }
-        XCTAssertEqual(try bytes(destination), original)
+        assertSameFiles(try bytes(destination), original)
         return original
+    }
+
+    /// SwiftData can retain the seed writer's WAL descriptors after its owners are
+    /// released. SQLite's backup API makes an atomic, standalone closed snapshot
+    /// instead of racing a bytewise copy against a pending WAL checkpoint.
+    private func snapshotSeed(at writer: URL, to source: URL) throws {
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: false)
+        var input: OpaquePointer?
+        var output: OpaquePointer?
+        let path = writer.appendingPathComponent("Kontrol.store").path
+        let destination = source.appendingPathComponent("Kontrol.store").path
+        guard sqlite3_open_v2(path, &input, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+            defer { if let input { sqlite3_close(input) } }
+            throw FocusError.persistenceFailure
+        }
+        defer { sqlite3_close(input) }
+        guard sqlite3_open_v2(destination, &output, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil) == SQLITE_OK else {
+            defer { if let output { sqlite3_close(output) } }
+            throw FocusError.persistenceFailure
+        }
+        defer { sqlite3_close(output) }
+        guard let backup = sqlite3_backup_init(output, "main", input, "main") else {
+            throw FocusError.persistenceFailure
+        }
+        let result = sqlite3_backup_step(backup, -1)
+        let finished = sqlite3_backup_finish(backup)
+        guard result == SQLITE_DONE, finished == SQLITE_OK else { throw FocusError.persistenceFailure }
     }
 
     private func bundled(_ version: String) throws -> URL {
@@ -86,6 +122,9 @@ final class FocusMigrationTests: XCTestCase {
     func testBothFrozenHistoricalVersionsUpgradeAcrossDistinctDiskOpens() throws {
         let sources = try ["V1": bundled("V1"), "V2": bundled("V2")]
         let originals = try sources.mapValues(bytes)
+        for original in originals.values {
+            XCTAssertEqual(Set(original.keys), ["Kontrol.store", "Kontrol.store-shm", "Kontrol.store-wal"])
+        }
         for version in ["V1", "V2"] {
             let source = try XCTUnwrap(sources[version])
             let copy = directory("frozen-\(version)")
@@ -96,7 +135,7 @@ final class FocusMigrationTests: XCTestCase {
             // Opened copies are not unlinked: SwiftData may keep internal SQLite descriptors.
         }
         for (version, source) in sources {
-            XCTAssertEqual(try bytes(source), originals[version], "\(version) originals and sidecars must remain frozen")
+            assertSameFiles(try bytes(source), try XCTUnwrap(originals[version]))
         }
     }
 
@@ -121,7 +160,7 @@ final class FocusMigrationTests: XCTestCase {
                     XCTAssertEqual(try rows(ScheduleBlock.self, in: container).count, 1)
                 }
             }
-            XCTAssertEqual(try bytes(source), original)
+            assertSameFiles(try bytes(source), original)
         }
     }
 
@@ -256,10 +295,9 @@ final class FocusMigrationTests: XCTestCase {
             let source = directory("rich-\(version)-closed-source")
             let copy = directory("rich-\(version)-copy")
             try seed(version, at: writer.appendingPathComponent("Kontrol.store"))
-            // SwiftData may retain the writer's SQLite descriptors after its Swift
-            // owners release. Preserve an independent closed snapshot as the
-            // historical source, then copy that complete file set for migration.
-            try copyClosed(writer, to: source)
+            // Preserve a transactionally closed historical source. A raw copy of
+            // the still-owned writer can race SwiftData's WAL checkpoint.
+            try snapshotSeed(at: writer, to: source)
             let original = try copyClosed(source, to: copy)
             let url = copy.appendingPathComponent("Kontrol.store")
             try autoreleasepool {
@@ -275,13 +313,14 @@ final class FocusMigrationTests: XCTestCase {
                 try assertRich(container)
             }
             try autoreleasepool { try assertRich(factory.makeContainer(mode: .persistent(url))) }
-            XCTAssertEqual(try bytes(source), original, "\(version) original including sidecars remains unchanged")
+            assertSameFiles(try bytes(source), original)
         }
     }
 
     func testV3FixtureIsDirectlyReadableAsV3AndReopensUnchanged() throws {
         let source = try bundled("V3")
         let original = try bytes(source)
+        XCTAssertEqual(Set(original.keys), ["Kontrol.store", "Kontrol.store-shm", "Kontrol.store-wal"])
         let copy = directory("frozen-V3")
         try copyClosed(source, to: copy)
         let url = copy.appendingPathComponent("Kontrol.store")

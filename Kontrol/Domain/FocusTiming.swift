@@ -43,13 +43,18 @@ enum FocusTiming {
         }
         // A checkpoint later than its segment anchor is ambiguous: counting from
         // the anchor could replay time predating the last durable timestamp.
-        let coherent = session.checkpointAt == anchor && wall >= anchor &&
-            session.checkpointAt < deadline
+        // The repository's durable stale-write watermark can be a millisecond
+        // ahead of the sampled wall anchor after a rapid checkpoint. That is
+        // still a coherent segment; a significant gap (e.g. clock rollback)
+        // must instead freeze trusted accrued time for recovery.
+        let watermarkGap = session.checkpointAt.timeIntervalSince(anchor)
+        let coherent = watermarkGap >= 0 && watermarkGap < 0.01 &&
+            wall >= session.checkpointAt && session.checkpointAt < deadline
         let remaining = Double(session.plannedSeconds) - session.accumulatedActiveSeconds
         if coherent && wall >= deadline {
             let stamp = max(session.checkpointAt, deadline)
             let elapsed = Double(session.plannedSeconds)
-            let payload = payloadFor(session, at: stamp, elapsed: elapsed)
+            let payload = payloadFor(session, at: wall, elapsed: elapsed)
             return .changed(FocusTimingChange(transition: .reconcile(payload),
                 snapshot: try copy(session, state: .completed, elapsed: elapsed,
                                    endedAt: deadline, checkpointAt: stamp)))
@@ -65,7 +70,10 @@ enum FocusTiming {
         let elapsed = candidate < Double(session.plannedSeconds) ? candidate :
             session.accumulatedActiveSeconds
         let stamp = max(session.startedAt, session.checkpointAt, wall)
-        let payload = payloadFor(session, at: stamp, elapsed: elapsed)
+        // Preserve the sampled wall time even when the durable pause timestamp
+        // must stay at or after the checkpoint watermark. The repository
+        // replays reconciliation against this exact wall sample.
+        let payload = payloadFor(session, at: wall, elapsed: elapsed)
         return .changed(FocusTimingChange(transition: .reconcile(payload),
             snapshot: try copy(session, state: .paused, elapsed: elapsed,
                                pausedAt: stamp, checkpointAt: stamp,
@@ -130,7 +138,7 @@ enum FocusTiming {
         // make every subsequent tick look like another clock correction.
         let payload = FocusTransitionPayload(expectedCheckpointAt: session.checkpointAt,
             sampledAt: stamp, accumulatedActiveSeconds: measured.elapsedSeconds,
-            wallAnchorAt: wall < stamp ? wall : nil)
+            wallAnchorAt: wall)
         return FocusTimingChange(transition: .checkpoint(payload),
             snapshot: try copy(session, state: .running, elapsed: measured.elapsedSeconds,
                                anchor: wall, deadline: wall.addingTimeInterval(remaining),

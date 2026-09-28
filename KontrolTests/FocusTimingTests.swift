@@ -339,7 +339,7 @@ final class FocusTimingTests: XCTestCase {
             XCTAssertEqual(finished.endedAt, start.addingTimeInterval(49.75))
             XCTAssertEqual(finished.checkpointAt, start.addingTimeInterval(49.75))
             XCTAssertEqual(payload.expectedCheckpointAt, start)
-            XCTAssertEqual(payload.sampledAt, finished.checkpointAt)
+            XCTAssertEqual(payload.sampledAt, now)
             XCTAssertEqual(payload.accumulatedActiveSeconds, 60)
             XCTAssertNil(finished.activeSegmentStartedAt)
             XCTAssertNil(finished.deadline)
@@ -367,9 +367,11 @@ final class FocusTimingTests: XCTestCase {
                                checkpoint: checkpoint)
         for now in [start.addingTimeInterval(-100), start.addingTimeInterval(19)] {
             guard case .changed(let change) = try FocusTiming.reconcileOnRelaunch(original,
-                                                                                     at: now) else {
+                                                                                     at: now),
+                  case .reconcile(let payload) = change.transition else {
                 return XCTFail("Expected pending recovery")
             }
+            XCTAssertEqual(payload.sampledAt, now)
             XCTAssertEqual(change.snapshot.state, .paused)
             XCTAssertTrue(change.snapshot.recoveryRequired)
             XCTAssertEqual(change.snapshot.actualSeconds, 12.375)

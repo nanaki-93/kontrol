@@ -439,7 +439,7 @@ final class FocusServiceTests: XCTestCase {
         sleep.post(name: NSWorkspace.willSleepNotification, object: nil)
         XCTAssertEqual(repo.transitions, 0)
         XCTAssertEqual(service?.activeSession, paused)
-        weak var weakService = service
+        weak let weakService = service
         service = nil
         XCTAssertNil(weakService)
         notifications.post(name: .NSSystemClockDidChange, object: nil)

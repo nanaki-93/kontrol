@@ -134,9 +134,19 @@ final class SwiftDataFocusRepository: FocusRepository {
         guard payload.expectedCheckpointAt == current.checkpointAt else {
             throw FocusError.staleBaseline
         }
-        guard payload.sampledAt >= current.checkpointAt,
-              payload.accumulatedActiveSeconds >= current.accumulatedActiveSeconds else {
-            throw FocusError.invalidTransition
+        // Reconciliation carries the *actual* relaunch wall sample. It can be
+        // behind the durable checkpoint after a clock rollback; only the
+        // resulting write timestamp is clamped to the logical watermark.
+        // Other transitions must still submit an ordered sampled timestamp.
+        if case .reconcile = command {
+            guard payload.accumulatedActiveSeconds >= current.accumulatedActiveSeconds else {
+                throw FocusError.invalidTransition
+            }
+        } else {
+            guard payload.sampledAt >= current.checkpointAt,
+                  payload.accumulatedActiveSeconds >= current.accumulatedActiveSeconds else {
+                throw FocusError.invalidTransition
+            }
         }
         if payload.wallAnchorAt != nil {
             guard case .checkpoint = command else { throw FocusError.invalidTransition }
