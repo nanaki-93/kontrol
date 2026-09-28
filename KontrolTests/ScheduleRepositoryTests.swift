@@ -25,6 +25,16 @@ final class ScheduleRepositoryTests: XCTestCase {
         try SwiftDataScheduleRepository(container: container).fetchAll()
     }
 
+    private func warning(_ action: () throws -> ScheduleSnapshot) throws -> ScheduleOverlapReview {
+        do {
+            _ = try action()
+            XCTFail("Expected an overlap decision")
+            throw Injected.failed
+        } catch let ScheduleRepositoryError.overlap(review) {
+            return review
+        }
+    }
+
     func testCreateNormalizesAndCommitsOnceWithoutPostSaveRead() throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         var ids = 0
@@ -95,13 +105,9 @@ final class ScheduleRepositoryTests: XCTestCase {
         let crossing = input("Cross", 0, 5400)
         let expected = [ScheduleConflict(block: a, duration: 1800),
                         ScheduleConflict(block: b, duration: 1800)]
-        XCTAssertThrowsError(try guarded.create(input: crossing, allowOverlap: false)) {
-            XCTAssertEqual($0 as? ScheduleRepositoryError, .overlap(expected))
-        }
-        XCTAssertThrowsError(try guarded.update(id: first, input: crossing, allowOverlap: false)) {
-            XCTAssertEqual($0 as? ScheduleRepositoryError,
-                           .overlap([ScheduleConflict(block: b, duration: 1800)]))
-        }
+        XCTAssertEqual(try warning { try guarded.create(input: crossing) }.conflicts, expected)
+        XCTAssertEqual(try warning { try guarded.update(id: first, input: crossing) }.conflicts,
+                       [ScheduleConflict(block: b, duration: 1800)])
         XCTAssertEqual(ids, 0)
         XCTAssertEqual(saves, 0)
         XCTAssertEqual(try rows(container), original)
@@ -159,10 +165,8 @@ final class ScheduleRepositoryTests: XCTestCase {
                 if reads > 1 { throw Injected.failed }
                 return try context.fetch(FetchDescriptor<ScheduleBlock>())
             }, save: { context in saves += 1; try context.save() })
-        XCTAssertThrowsError(try editing.update(id: first, input: input("Move", 7200, 9000))) {
-            XCTAssertEqual($0 as? ScheduleRepositoryError,
-                           .overlap([ScheduleConflict(block: peer, duration: 1800)]))
-        }
+        XCTAssertEqual(try warning { try editing.update(id: first, input: input("Move", 7200, 9000)) }
+                       .conflicts, [ScheduleConflict(block: peer, duration: 1800)])
         XCTAssertEqual(saves, 0)
         XCTAssertEqual(reads, 1)
         XCTAssertEqual(try rows(container), [original, peer])
@@ -199,6 +203,184 @@ final class ScheduleRepositoryTests: XCTestCase {
         XCTAssertEqual(ids, 0)
         XCTAssertEqual(saves, 0)
         XCTAssertEqual(try rows(container), [saved])
+    }
+
+    func testKeepBothRequiresMatchingDraftAndSingleUseReceiptForCreate() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let peer = try repository(container, id: first).create(input: input("Peer", 0, 3600))
+        var ids = 0
+        var saves = 0
+        let writer = SwiftDataScheduleRepository(container: container,
+            makeID: { ids += 1; return self.second },
+            save: { context in saves += 1; try context.save() })
+        let draft = input("New", 1800, 5400, note: "Original")
+        let expected = [ScheduleConflict(block: peer, duration: 1800)]
+        XCTAssertEqual(try warning { try writer.create(input: draft, allowOverlap: true) }.conflicts,
+                       expected)
+        let review = try warning { try writer.create(input: draft) }
+        XCTAssertEqual(review.conflicts, expected)
+        // Every editable field is part of the receipt, even if normalization would
+        // result in the same persisted value.
+        for changed in [input("New ", 1800, 5400, note: "Original"),
+                        input("Other", 1800, 5400, note: "Original"),
+                        input("New", 1801, 5400, note: "Original"),
+                        input("New", 1800, 5399, note: "Original"),
+                        input("New", 1800, 5400, note: "Changed")] {
+            XCTAssertEqual(try warning {
+                try writer.create(input: changed, allowOverlap: true, review: review)
+            }.conflicts.count, 1)
+            XCTAssertEqual(try rows(container), [peer])
+        }
+        XCTAssertEqual(ids, 0)
+        XCTAssertEqual(saves, 0)
+        // A rejected draft invalidates its old receipt; request a fresh warning.
+        XCTAssertEqual(try warning {
+            try writer.create(input: draft, allowOverlap: true, review: review)
+        }.conflicts, expected)
+        let fresh = try warning { try writer.create(input: draft) }
+        let saved = try writer.create(input: draft, allowOverlap: true, review: fresh)
+        XCTAssertEqual(saved.id, second)
+        XCTAssertEqual(try rows(container), [peer, saved])
+        XCTAssertEqual(ids, 1)
+        XCTAssertEqual(saves, 1)
+        XCTAssertEqual(try warning {
+            try writer.create(input: draft, allowOverlap: true, review: fresh)
+        }.conflicts.count, 2)
+        XCTAssertEqual(ids, 1)
+        XCTAssertEqual(saves, 1)
+        XCTAssertEqual(try rows(container), [peer, saved])
+    }
+
+    func testKeepBothRechecksChangedRemovedAndAddedPeersIncludingMetadata() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let a = try repository(container, id: first).create(input: input("A", 0, 1800))
+        let b = try repository(container, id: second).create(input: input("B", 3600, 5400))
+        let draft = input("Cross", 900, 4500)
+        let writer = repository(container, id: third)
+        let initial = try warning { try writer.create(input: draft) }
+        XCTAssertEqual(initial.conflicts, [ScheduleConflict(block: a, duration: 900),
+                                           ScheduleConflict(block: b, duration: 900)])
+        let mutation = ModelContext(container)
+        mutation.autosaveEnabled = false
+        let models = try mutation.fetch(FetchDescriptor<ScheduleBlock>())
+        let changed = try XCTUnwrap(models.first { $0.id == first })
+        changed.linkedTitleSnapshot = "Changed link"
+        try mutation.save()
+        let changedReview = try warning {
+            try writer.create(input: draft, allowOverlap: true, review: initial)
+        }
+        XCTAssertEqual(changedReview.conflicts.count, 2)
+        XCTAssertEqual(changedReview.conflicts[0].block.linkedTitleSnapshot, "Changed link")
+        XCTAssertEqual(changedReview.conflicts[1].block, b)
+        mutation.delete(try XCTUnwrap(models.first { $0.id == second }))
+        try mutation.save()
+        let removedReview = try warning {
+            try writer.create(input: draft, allowOverlap: true, review: changedReview)
+        }
+        XCTAssertEqual(removedReview.conflicts.count, 1)
+        let added = ModelContext(container)
+        added.autosaveEnabled = false
+        let fourth = UUID(uuidString: "00000000-0000-0000-0000-000000000004")!
+        added.insert(ScheduleBlock(id: fourth, title: "Added", startAt: base.addingTimeInterval(2000),
+                                   endAt: base.addingTimeInterval(3000)))
+        try added.save()
+        let addedReview = try warning {
+            try writer.create(input: draft, allowOverlap: true, review: removedReview)
+        }
+        XCTAssertEqual(addedReview.conflicts.map(\.block.title), ["A", "Added"])
+        added.insert(ScheduleBlock(id: second, title: "Replacement", startAt: base.addingTimeInterval(4000),
+                                   endAt: base.addingTimeInterval(5000)))
+        try added.save()
+        let replacementReview = try warning {
+            try writer.create(input: draft, allowOverlap: true, review: addedReview)
+        }
+        XCTAssertEqual(replacementReview.conflicts.map(\.block.title), ["A", "Added", "Replacement"])
+        let before = try rows(container)
+        let saved = try writer.create(input: draft, allowOverlap: true, review: replacementReview)
+        XCTAssertEqual(saved.id, third)
+        XCTAssertEqual(try rows(container), (before + [saved]).sorted { $0.startAt < $1.startAt })
+    }
+
+    func testEditConfirmationExcludesSelfPreservesPeersAndRejectsWrongTarget() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let original = try repository(container, id: first).create(input: input("Original", 0, 3600))
+        let peer = try repository(container, id: second).create(input: input("Peer", 3600, 7200))
+        let draft = input("Moved", 5400, 9000)
+        let writer = repository(container, id: third)
+        let review = try warning { try writer.update(id: first, input: draft) }
+        XCTAssertEqual(review.conflicts, [ScheduleConflict(block: peer, duration: 1800)])
+        XCTAssertTrue(try warning {
+            try writer.update(id: second, input: draft, allowOverlap: true, review: review)
+        }.conflicts.isEmpty)
+        XCTAssertEqual(try rows(container), [original, peer])
+        let fresh = try warning { try writer.update(id: first, input: draft) }
+        let moved = try writer.update(id: first, input: draft, allowOverlap: true, review: fresh)
+        XCTAssertEqual(moved.id, first)
+        XCTAssertEqual(try rows(container), [peer, moved])
+        XCTAssertEqual(try warning {
+            try writer.update(id: first, input: draft, allowOverlap: true, review: fresh)
+        }.conflicts, [ScheduleConflict(block: peer, duration: 1800)])
+        XCTAssertEqual(try rows(container), [peer, moved])
+    }
+
+    func testFailedConfirmedSaveRetainsReceiptForExplicitRetry() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let peer = try repository(container, id: first).create(input: input("Peer", 0, 3600))
+        let draft = input("Confirmed", 1800, 5400)
+        var saves = 0
+        let writer = SwiftDataScheduleRepository(container: container, makeID: { self.second },
+            save: { context in
+                saves += 1
+                if saves == 1 { throw Injected.failed }
+                try context.save()
+            })
+        let review = try warning { try writer.create(input: draft) }
+        XCTAssertThrowsError(try writer.create(input: draft, allowOverlap: true, review: review)) {
+            XCTAssertEqual($0 as? ScheduleRepositoryError, .persistence)
+        }
+        XCTAssertEqual(try rows(container), [peer])
+        let saved = try writer.create(input: draft, allowOverlap: true, review: review)
+        XCTAssertEqual(saves, 2)
+        XCTAssertEqual(try rows(container), [peer, saved])
+        XCTAssertEqual(try warning {
+            try writer.create(input: draft, allowOverlap: true, review: review)
+        }.conflicts.count, 2)
+    }
+
+    func testEditReceiptRejectsMissingTargetAndFailedSaveAllowsRetry() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let peer = try repository(container, id: first).create(input: input("Peer", 0, 3600))
+        let target = try repository(container, id: second).create(input: input("Target", 3600, 7200))
+        let draft = input("Move", 1800, 5400)
+        var saves = 0
+        let writer = SwiftDataScheduleRepository(container: container,
+            save: { context in
+                saves += 1
+                if saves == 1 { throw Injected.failed }
+                try context.save()
+            })
+        let review = try warning { try writer.update(id: second, input: draft) }
+        XCTAssertEqual(review.conflicts, [ScheduleConflict(block: peer, duration: 1800)])
+        XCTAssertThrowsError(try writer.update(id: second, input: draft, allowOverlap: true,
+                                               review: review)) {
+            XCTAssertEqual($0 as? ScheduleRepositoryError, .persistence)
+        }
+        XCTAssertEqual(try rows(container), [peer, target])
+        let moved = try writer.update(id: second, input: draft, allowOverlap: true, review: review)
+        XCTAssertEqual(moved.id, second)
+        XCTAssertEqual(saves, 2)
+        XCTAssertEqual(try rows(container), [peer, moved])
+
+        let deletion = ModelContext(container)
+        deletion.autosaveEnabled = false
+        deletion.delete(try XCTUnwrap(deletion.fetch(FetchDescriptor<ScheduleBlock>())
+            .first { $0.id == second }))
+        try deletion.save()
+        XCTAssertThrowsError(try writer.update(id: second, input: draft, allowOverlap: true,
+                                               review: review)) {
+            XCTAssertEqual($0 as? ScheduleRepositoryError, .notFound(self.second))
+        }
+        XCTAssertEqual(try rows(container), [peer])
     }
 
     func testFailedCreateAndEditDiscardPrivateChangesWithoutTouchingOtherOwner() throws {

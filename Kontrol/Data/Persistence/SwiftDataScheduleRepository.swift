@@ -1,18 +1,39 @@
 import Foundation
 import SwiftData
 
+/// A single-use decision for one exact draft, operation, and set of persisted peers.
+/// Only the repository can issue a receipt; copying it shares its consumed state.
+struct ScheduleOverlapReview: Equatable {
+    let conflicts: [ScheduleConflict]
+    fileprivate let input: ScheduleInput
+    fileprivate let editingID: UUID?
+    fileprivate let containerID: ObjectIdentifier
+    fileprivate let approval = Approval()
+
+    fileprivate final class Approval {
+        var consumed = false
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.input == rhs.input && lhs.editingID == rhs.editingID &&
+            lhs.containerID == rhs.containerID && lhs.conflicts == rhs.conflicts &&
+            lhs.approval === rhs.approval
+    }
+}
+
 enum ScheduleRepositoryError: Error, Equatable {
     case validation(ScheduleValidationError)
     case notFound(UUID)
-    case overlap([ScheduleConflict])
+    case overlap(ScheduleOverlapReview)
     case persistence
 }
 
 @MainActor
 protocol ScheduleRepository {
     func fetchAll() throws -> [ScheduleSnapshot]
-    func create(input: ScheduleInput, allowOverlap: Bool) throws -> ScheduleSnapshot
-    func update(id: UUID, input: ScheduleInput, allowOverlap: Bool) throws -> ScheduleSnapshot
+    func create(input: ScheduleInput, allowOverlap: Bool, review: ScheduleOverlapReview?) throws -> ScheduleSnapshot
+    func update(id: UUID, input: ScheduleInput, allowOverlap: Bool,
+                review: ScheduleOverlapReview?) throws -> ScheduleSnapshot
 }
 
 /// All reads used for a decision and its write take place in the same private context.
@@ -40,20 +61,24 @@ final class SwiftDataScheduleRepository: ScheduleRepository {
         return try snapshots(in: context)
     }
 
-    func create(input: ScheduleInput, allowOverlap: Bool = false) throws -> ScheduleSnapshot {
+    func create(input: ScheduleInput, allowOverlap: Bool = false,
+                review: ScheduleOverlapReview? = nil) throws -> ScheduleSnapshot {
         let clean = try validate(input)
         let context = privateContext()
         let existing = try snapshots(in: context)
-        try requireOverlapDecision(for: clean, against: existing, excluding: nil,
-                                   allowOverlap: allowOverlap)
+        let approval = try requireOverlapDecision(for: input, clean: clean, against: existing,
+                                                   excluding: nil, allowOverlap: allowOverlap,
+                                                   review: review)
         let block = ScheduleBlock(id: makeID(), title: clean.title, startAt: clean.startAt,
                                   endAt: clean.endAt, note: clean.note)
         context.insert(block)
         try commit(context)
+        approval?.approval.consumed = true
         return ScheduleSnapshot(block)
     }
 
-    func update(id: UUID, input: ScheduleInput, allowOverlap: Bool = false) throws -> ScheduleSnapshot {
+    func update(id: UUID, input: ScheduleInput, allowOverlap: Bool = false,
+                review: ScheduleOverlapReview? = nil) throws -> ScheduleSnapshot {
         let clean = try validate(input)
         let context = privateContext()
         // Fetch once so a failed read cannot be mistaken for a missing row or an empty
@@ -62,14 +87,17 @@ final class SwiftDataScheduleRepository: ScheduleRepository {
         guard let target = blocks.first(where: { $0.id == id }) else {
             throw ScheduleRepositoryError.notFound(id)
         }
-        try requireOverlapDecision(for: clean, against: blocks.map(ScheduleSnapshot.init),
-                                   excluding: id, allowOverlap: allowOverlap)
+        let approval = try requireOverlapDecision(for: input, clean: clean,
+                                                   against: blocks.map(ScheduleSnapshot.init),
+                                                   excluding: id, allowOverlap: allowOverlap,
+                                                   review: review)
         target.title = clean.title
         target.startAt = clean.startAt
         target.endAt = clean.endAt
         target.note = clean.note
         // Do not touch id, lessonID, or linkedTitleSnapshot, even for missing lessons.
         try commit(context)
+        approval?.approval.consumed = true
         return ScheduleSnapshot(target)
     }
 
@@ -101,10 +129,31 @@ final class SwiftDataScheduleRepository: ScheduleRepository {
         }
     }
 
-    private func requireOverlapDecision(for input: ScheduleInput, against blocks: [ScheduleSnapshot],
-                                        excluding id: UUID?, allowOverlap: Bool) throws {
-        let conflicts = ScheduleSelection.conflicts(for: input, against: blocks, excluding: id)
-        if !allowOverlap && !conflicts.isEmpty { throw ScheduleRepositoryError.overlap(conflicts) }
+    /// The fresh read and subsequent commit are synchronous on the main actor. A changed
+    /// draft, peer snapshot (including metadata), or conflict membership requires a new
+    /// decision. A vanished conflict returns an empty review; retry a normal save instead.
+    private func requireOverlapDecision(for input: ScheduleInput, clean: ScheduleInput,
+                                        against blocks: [ScheduleSnapshot], excluding id: UUID?,
+                                        allowOverlap: Bool, review: ScheduleOverlapReview?) throws
+        -> ScheduleOverlapReview? {
+        let conflicts = ScheduleSelection.conflicts(for: clean, against: blocks, excluding: id)
+        if allowOverlap {
+            if let review = review, !review.approval.consumed,
+               review.containerID == ObjectIdentifier(container), review.editingID == id,
+               review.input == input, review.conflicts == conflicts, !conflicts.isEmpty {
+                return review
+            }
+            review?.approval.consumed = true
+            throw ScheduleRepositoryError.overlap(ScheduleOverlapReview(
+                conflicts: conflicts, input: input, editingID: id,
+                containerID: ObjectIdentifier(container)))
+        }
+        if !conflicts.isEmpty {
+            throw ScheduleRepositoryError.overlap(ScheduleOverlapReview(
+                conflicts: conflicts, input: input, editingID: id,
+                containerID: ObjectIdentifier(container)))
+        }
+        return nil
     }
 
     private func commit(_ context: ModelContext) throws {
