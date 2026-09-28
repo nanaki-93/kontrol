@@ -8,15 +8,17 @@ final class SchemaTests: XCTestCase {
         try ModelContainerFactory().makeContainer(mode: .inMemory)
     }
 
-    func testV1AndV2IdentitiesRemainAndV3AddsOnlyFocusSession() {
+    func testReleasedIdentitiesRemainAndV4ReplacesOnlyDefinitionAndAddsSlot() {
         XCTAssertEqual(KontrolSchemaV1.versionIdentifier, Schema.Version(1, 0, 0))
         XCTAssertEqual(KontrolSchemaV2.versionIdentifier, Schema.Version(2, 0, 0))
         XCTAssertEqual(KontrolSchemaV3.versionIdentifier, Schema.Version(3, 0, 0))
-        XCTAssertEqual(KontrolMigrationPlan.schemas.count, 3)
+        XCTAssertEqual(KontrolSchemaV4.versionIdentifier, Schema.Version(4, 0, 0))
+        XCTAssertEqual(KontrolMigrationPlan.schemas.count, 4)
         XCTAssertTrue(KontrolMigrationPlan.schemas[0] == KontrolSchemaV1.self)
         XCTAssertTrue(KontrolMigrationPlan.schemas[1] == KontrolSchemaV2.self)
         XCTAssertTrue(KontrolMigrationPlan.schemas[2] == KontrolSchemaV3.self)
-        XCTAssertEqual(KontrolMigrationPlan.stages.count, 2)
+        XCTAssertTrue(KontrolMigrationPlan.schemas[3] == KontrolSchemaV4.self)
+        XCTAssertEqual(KontrolMigrationPlan.stages.count, 3)
         let v1 = KontrolSchemaV1.models
         XCTAssertEqual(Set(v1.map { String(describing: $0) }),
                        Set(["TaskItem", "Topic", "Subtopic", "Concept",
@@ -34,6 +36,34 @@ final class SchemaTests: XCTestCase {
             XCTAssertTrue(original == retained)
         }
         XCTAssertTrue(v3.last == FocusSession.self)
+        let v4 = KontrolSchemaV4.models
+        XCTAssertEqual(v4.count, v3.count + 1)
+        for historical in v3 where historical != KontrolSchemaV1.LessonDefinition.self {
+            XCTAssertTrue(v4.contains { $0 == historical })
+        }
+        XCTAssertFalse(v4.contains { $0 == KontrolSchemaV1.LessonDefinition.self })
+        XCTAssertTrue(v4.contains { $0 == LessonDefinition.self })
+        XCTAssertTrue(v4.contains { $0 == LessonSlot.self })
+    }
+
+    func testV4SlotScalarKeysAndDefinitionObjectiveSurviveReopen() throws {
+        let container = try makeContainer()
+        let at = Date(timeIntervalSince1970: 1_700_000_000)
+        let context = ModelContext(container)
+        let slot = LessonSlot(topicID: "go:1", slotIndex: 2, lessonID: "go.lesson", assignedAt: at)
+        let other = LessonSlot(topicID: "go", slotIndex: 1, lessonID: "go.other", assignedAt: at)
+        XCTAssertNotEqual(slot.key, other.key)
+        XCTAssertEqual(slot.key, LessonSlot.canonicalKey(topicID: slot.topicID, slotIndex: slot.slotIndex))
+        context.insert(slot)
+        context.insert(other)
+        try context.save()
+        let rows = try ModelContext(container).fetch(FetchDescriptor<LessonSlot>())
+        XCTAssertEqual(rows.count, 2)
+        let stored = try XCTUnwrap(rows.first { $0.lessonID == "go.lesson" })
+        XCTAssertEqual(stored.key, "4:go:1:2")
+        XCTAssertEqual(stored.topicID, "go:1")
+        XCTAssertEqual(stored.slotIndex, 2)
+        XCTAssertEqual(stored.assignedAt, at)
     }
 
     func testFocusSessionScalarFieldsPersistWithoutChangingOtherEntities() throws {
@@ -177,6 +207,7 @@ final class SchemaTests: XCTestCase {
         XCTAssertEqual(try context.fetch(FetchDescriptor<Concept>()).first?.subtopicID, subtopic.id)
         XCTAssertEqual(try context.fetch(FetchDescriptor<LessonDefinition>()).first?.conceptIDs, [concept.id])
         XCTAssertEqual(try context.fetch(FetchDescriptor<LessonDefinition>()).first?.contentVersion, 2)
+        XCTAssertEqual(try context.fetch(FetchDescriptor<LessonDefinition>()).first?.objective, "")
         XCTAssertEqual(try context.fetch(FetchDescriptor<LessonProgress>()).first?.status, .available)
         XCTAssertNil(progress.firstShownAt)
         XCTAssertNil(progress.startedAt)

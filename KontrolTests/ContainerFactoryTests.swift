@@ -59,6 +59,124 @@ final class ContainerFactoryTests: XCTestCase {
         XCTAssertTrue(try taskIDs(in: memory).isEmpty)
     }
 
+    func testCopiedFrozenV2AndV3StoresOpenAsV4WithoutChangingOriginals() throws {
+        for version in ["V2", "V3"] {
+            let source = try XCTUnwrap(Bundle(for: Self.self).url(forResource: version, withExtension: nil))
+            let directory = try temporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let files = try FileManager.default.contentsOfDirectory(at: source,
+                includingPropertiesForKeys: [.isRegularFileKey]).filter {
+                    try $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true
+                }
+            let originals = try Dictionary(uniqueKeysWithValues: files.map {
+                ($0.lastPathComponent, try Data(contentsOf: $0))
+            })
+            XCTAssertNotNil(originals["Kontrol.store"])
+            for file in files {
+                try FileManager.default.copyItem(at: file,
+                    to: directory.appendingPathComponent(file.lastPathComponent))
+            }
+            func checkOpen() throws {
+                let container = try factory.makeContainer(mode: .persistent(
+                    directory.appendingPathComponent("Kontrol.store")))
+                let tasks = try ModelContext(container).fetch(FetchDescriptor<TaskItem>())
+                XCTAssertEqual(tasks.count, 1)
+                XCTAssertEqual(tasks.first?.title, "\(version) fixture task")
+                XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<ScheduleBlock>()).count, 1)
+                XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<FocusSession>()).count,
+                               version == "V3" ? 1 : 0)
+                XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonSlot>()).isEmpty)
+            }
+            try checkOpen()
+            try checkOpen()
+            let after = try FileManager.default.contentsOfDirectory(at: source,
+                includingPropertiesForKeys: [.isRegularFileKey])
+            XCTAssertEqual(Set(after.map(\.lastPathComponent)), Set(originals.keys))
+            for file in after {
+                XCTAssertEqual(try Data(contentsOf: file), originals[file.lastPathComponent])
+            }
+        }
+    }
+
+    func testCopiedV3DefinitionMigratesWithIdentityAndObjectiveDefault() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("source", isDirectory: true)
+        let copy = directory.appendingPathComponent("copy", isDirectory: true)
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: false)
+        try FileManager.default.createDirectory(at: copy, withIntermediateDirectories: false)
+        let sourceURL = source.appendingPathComponent("Kontrol.store")
+        let copiedURL = copy.appendingPathComponent("Kontrol.store")
+        let lessonID = "go.historical.v1"
+        let attemptID = UUID()
+        let startedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        // Write against the released V3 schema, without the production migration plan.
+        func writeV3AndClose() throws -> PersistentIdentifier {
+            let schema = Schema(versionedSchema: KontrolSchemaV3.self)
+            let config = ModelConfiguration(schema: schema, url: sourceURL, cloudKitDatabase: .none)
+            let container = try ModelContainer(for: schema, configurations: [config])
+            let context = ModelContext(container)
+            let historical = KontrolSchemaV1.LessonDefinition(
+                id: lessonID, objectiveKey: "go.historical", title: "Historical title",
+                topicID: "go", subtopicID: "go.old", conceptIDs: ["go.old.concept"],
+                difficulty: "basic", format: "learn", estimatedMinutes: 12,
+                explanation: "Explanation", workedExample: "Example", exercise: "Exercise",
+                referenceAnswer: "Answer", selfCheckCriteria: ["Criterion"], contentVersion: 3,
+                normalizedContentHash: "historical-hash", source: "seed", provenance: "old-bundle")
+            context.insert(historical)
+            context.insert(LessonProgress(lessonID: lessonID, status: .started, startedAt: startedAt))
+            context.insert(LessonAttempt(id: attemptID, lessonID: lessonID, contentVersion: 3,
+                                         answerDraft: "Do not discard"))
+            context.insert(CatalogImportState(catalogID: "kontrol.starter", lastImportedVersion: 1))
+            try context.save()
+            return historical.persistentModelID
+        }
+        let originalIdentity = try writeV3AndClose()
+        let originals = try FileManager.default.contentsOfDirectory(at: source,
+            includingPropertiesForKeys: [.isRegularFileKey]).filter {
+                try $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true
+            }
+        XCTAssertTrue(originals.contains { $0.lastPathComponent == "Kontrol.store" })
+        let bytes = try Dictionary(uniqueKeysWithValues: originals.map {
+            ($0.lastPathComponent, try Data(contentsOf: $0))
+        })
+        for file in originals {
+            try FileManager.default.copyItem(at: file,
+                to: copy.appendingPathComponent(file.lastPathComponent))
+        }
+        func openAndCheck() throws {
+            let container = try factory.makeContainer(mode: .persistent(copiedURL))
+            let context = ModelContext(container)
+            let definitions = try context.fetch(FetchDescriptor<LessonDefinition>())
+            XCTAssertEqual(definitions.count, 1)
+            let definition = try XCTUnwrap(definitions.first)
+            XCTAssertEqual(definition.id, lessonID)
+            // SwiftData wraps Core Data object IDs per coordinator; the wrappers
+            // are not Equatable across distinct opens even for the same SQLite row.
+            // Retain the entity and store identity as well as its unique stable ID.
+            XCTAssertEqual(definition.persistentModelID.entityName, originalIdentity.entityName)
+            XCTAssertEqual(definition.persistentModelID.storeIdentifier, originalIdentity.storeIdentifier)
+            XCTAssertEqual(definition.objectiveKey, "go.historical")
+            XCTAssertEqual(definition.title, "Historical title")
+            XCTAssertEqual(definition.conceptIDs, ["go.old.concept"])
+            XCTAssertEqual(definition.contentVersion, 3)
+            XCTAssertEqual(definition.objective, "")
+            XCTAssertEqual(try context.fetch(FetchDescriptor<LessonProgress>()).first?.startedAt, startedAt)
+            XCTAssertEqual(try context.fetch(FetchDescriptor<LessonAttempt>()).first?.id, attemptID)
+            XCTAssertEqual(try context.fetch(FetchDescriptor<LessonAttempt>()).first?.answerDraft, "Do not discard")
+            XCTAssertEqual(try context.fetch(FetchDescriptor<CatalogImportState>()).first?.lastImportedVersion, 1)
+            XCTAssertTrue(try context.fetch(FetchDescriptor<LessonSlot>()).isEmpty)
+        }
+        try openAndCheck()
+        try openAndCheck()
+        let after = try FileManager.default.contentsOfDirectory(at: source,
+            includingPropertiesForKeys: [.isRegularFileKey])
+        XCTAssertEqual(Set(after.map(\.lastPathComponent)), Set(bytes.keys))
+        for file in after {
+            XCTAssertEqual(try Data(contentsOf: file), bytes[file.lastPathComponent])
+        }
+    }
+
     func testFreshFactoryStorePersistsV3FocusV2BlockAndV1TaskAcrossReopen() throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

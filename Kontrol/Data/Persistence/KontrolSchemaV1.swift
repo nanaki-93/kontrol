@@ -236,7 +236,6 @@ typealias TaskItem = KontrolSchemaV1.TaskItem
 typealias Topic = KontrolSchemaV1.Topic
 typealias Subtopic = KontrolSchemaV1.Subtopic
 typealias Concept = KontrolSchemaV1.Concept
-typealias LessonDefinition = KontrolSchemaV1.LessonDefinition
 typealias LessonProgress = KontrolSchemaV1.LessonProgress
 typealias LessonAttempt = KontrolSchemaV1.LessonAttempt
 typealias CatalogImportState = KontrolSchemaV1.CatalogImportState
