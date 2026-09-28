@@ -92,6 +92,97 @@ final class LessonExperienceStoreTests: XCTestCase {
         XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).count, 1)
     }
 
+    func testRequestedIDAndAttemptIDGuardResponseEvenAfterAnotherDetailPublishes() throws {
+        let (_, graph, drafts, _, first) = try draftFixture()
+        let firstAttempt = try XCTUnwrap(first.detail.attempt)
+        let otherID = try XCTUnwrap(graph.learningCatalogStore.state.snapshot?.slots.first {
+            $0.lessonID != first.detail.id
+        }?.lessonID)
+        drafts.edit("  first 🧪\n", attemptID: firstAttempt.id)
+        let second = try graph.learningCatalogStore.openLesson(lessonID: otherID)
+        drafts.observe(second.detail)
+        XCTAssertNil(LessonExperienceView.matchedDetail(graph.learningCatalogStore.detailState,
+                                                         lessonID: first.detail.id))
+        XCTAssertNil(LessonExperienceView.response(second.detail, drafts: drafts, lessonID: first.detail.id))
+        XCTAssertNil(LessonExperienceView.studiedDefinition(second.detail, lessonID: first.detail.id))
+        XCTAssertEqual(LessonExperienceView.response(first.detail, drafts: drafts,
+                                                      lessonID: first.detail.id)?.text, "  first 🧪\n")
+        XCTAssertEqual(LessonExperienceView.response(second.detail, drafts: drafts,
+                                                      lessonID: otherID)?.text, "")
+    }
+
+    func testEveryFormatKeepsPinnedSectionsAndExactBlankUnicodeIndentedMultilineDraftAcrossReopen() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataCatalogRepository(container: container)
+        _ = try repository.importIfNeeded(BundledCatalogLoader.load())
+        let graph = AppDependencies(container: container, catalogRepository: repository)
+        let store = graph.learningCatalogStore
+        store.loadIfNeeded()
+        let definitions = try XCTUnwrap(store.state.snapshot).definitions
+        let samples = ["learn": "", "code": "    let x = 1\n\n  🧪\n", "question": "\n漢字\n", "design": "  one\n    two\n"]
+        for format in ["learn", "code", "question", "design"] {
+            let definition = try XCTUnwrap(definitions.first { $0.format == format })
+            let opened = try store.openLesson(lessonID: definition.id)
+            let attempt = try XCTUnwrap(opened.detail.attempt)
+            XCTAssertEqual(LessonExperienceView.studiedDefinition(opened.detail, lessonID: definition.id), definition)
+            graph.lessonDraftStore.observe(opened.detail)
+            // Deliberately edit even the empty answer: a blank must be a valid exact response.
+            graph.lessonDraftStore.edit(try XCTUnwrap(samples[format]), attemptID: attempt.id)
+            let navigation = NavigationStore()
+            navigation.attachDrafts(graph.lessonDraftStore)
+            navigation.showLesson(id: definition.id)
+            navigation.backToChoices()
+            XCTAssertEqual(navigation.learningRoute, .choices)
+        }
+        // Change an installed definition after study; the practice route still reads the pin.
+        let context = ModelContext(container)
+        context.autosaveEnabled = false
+        let firstID = try XCTUnwrap(definitions.first { $0.format == "learn" }?.id)
+        let installed = try XCTUnwrap(context.fetch(FetchDescriptor<LessonDefinition>()).first { $0.id == firstID })
+        installed.explanation = "Replacement catalog explanation"
+        try context.save()
+        // A fresh app-owned graph reads the saved answer and pinned authored sections offline.
+        let reopened = AppDependencies(container: container, catalogRepository: repository)
+        reopened.learningCatalogStore.loadIfNeeded()
+        for format in ["learn", "code", "question", "design"] {
+            let definition = try XCTUnwrap(definitions.first { $0.format == format })
+            let detail = try reopened.learningCatalogStore.loadDetail(lessonID: definition.id)
+            XCTAssertEqual(LessonExperienceView.studiedDefinition(detail, lessonID: definition.id), definition)
+            reopened.lessonDraftStore.observe(detail)
+            XCTAssertEqual(LessonExperienceView.response(detail, drafts: reopened.lessonDraftStore,
+                                                          lessonID: definition.id)?.text, samples[format])
+        }
+    }
+
+    func testMissingPinIsUnavailableAndCorruptPinIsAFailedReadNotCurrentCatalog() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataCatalogRepository(container: container)
+        _ = try repository.importIfNeeded(BundledCatalogLoader.load())
+        let store = LearningCatalogStore(repository: repository)
+        store.loadIfNeeded()
+        let id = try XCTUnwrap(store.state.snapshot?.slots.first?.lessonID)
+        let opened = try store.openLesson(lessonID: id)
+        let attemptID = try XCTUnwrap(opened.detail.attempt?.id)
+        let context = ModelContext(container)
+        context.autosaveEnabled = false
+        let row = try XCTUnwrap(context.fetch(FetchDescriptor<LessonAttempt>()).first { $0.id == attemptID })
+        row.pinnedContentData = nil
+        try context.save()
+        let missing = try store.loadDetail(lessonID: id)
+        XCTAssertEqual(missing.content, .unavailable)
+        XCTAssertNil(LessonExperienceView.studiedDefinition(missing, lessonID: id))
+        row.pinnedContentData = Data("corrupt".utf8)
+        try context.save()
+        XCTAssertThrowsError(try store.loadDetail(lessonID: id)) {
+            XCTAssertEqual($0 as? LessonExperienceError, .invalidStoredData)
+        }
+        guard case .failed(let requestedID, _) = store.detailState else {
+            return XCTFail("Corrupt pin must fail the requested detail read")
+        }
+        XCTAssertEqual(requestedID, id)
+        XCTAssertNil(LessonExperienceView.matchedDetail(store.detailState, lessonID: id))
+    }
+
     func testDebounceLatestEditAtExactlyFiveHundredMillisecondsAndSharedWindows() throws {
         let (repository, graph, drafts, scheduler, opened) = try draftFixture()
         let id = try XCTUnwrap(opened.detail.attempt?.id)
@@ -214,6 +305,39 @@ final class LessonExperienceStoreTests: XCTestCase {
         try drafts.reconcileForRetry(attemptID: id, with: latest)
         try drafts.retry(attemptID: id)
         XCTAssertEqual(try repository.loadLesson(lessonID: opened.detail.id).attempt?.answerDraft, "keep local")
+    }
+
+    func testPracticeConflictKeepsComparisonAndLocalDraftWhenReconciliationFails() throws {
+        let (repository, graph, drafts, _, opened) = try draftFixture()
+        let attemptID = try XCTUnwrap(opened.detail.attempt?.id)
+        drafts.edit("  local 🧪\n", attemptID: attemptID)
+        _ = try graph.learningCatalogStore.saveAnswer(attemptID: attemptID, expectedRevision: 0, answer: "remote first")
+        XCTAssertThrowsError(try drafts.flush(attemptID: attemptID))
+
+        var comparison = LessonExperienceView.ConflictComparisonState()
+        comparison.reload(drafts: drafts, attemptID: attemptID)
+        XCTAssertEqual(comparison.detail?.attempt?.answerDraft, "remote first")
+        XCTAssertNil(comparison.error)
+        _ = try graph.learningCatalogStore.saveAnswer(attemptID: attemptID, expectedRevision: 1, answer: "remote newer")
+        comparison.reconcile(drafts: drafts, attemptID: attemptID)
+        XCTAssertEqual(comparison.detail?.attempt?.answerDraft, "remote first")
+        XCTAssertNotNil(comparison.error)
+        XCTAssertTrue(try XCTUnwrap(comparison.error).contains("Reload"))
+        XCTAssertEqual(drafts.buffers[attemptID]?.text, "  local 🧪\n")
+        XCTAssertEqual(drafts.buffers[attemptID]?.expectedRevision, 0)
+        XCTAssertEqual(drafts.buffers[attemptID]?.status, .notSaved(.staleRevision))
+        XCTAssertThrowsError(try drafts.retry(attemptID: attemptID))
+        XCTAssertEqual(try repository.loadLesson(lessonID: opened.detail.id).attempt?.answerDraft, "remote newer")
+
+        comparison.reload(drafts: drafts, attemptID: attemptID)
+        XCTAssertNil(comparison.error)
+        XCTAssertEqual(comparison.detail?.attempt?.answerDraft, "remote newer")
+        comparison.reconcile(drafts: drafts, attemptID: attemptID)
+        XCTAssertNil(comparison.error)
+        XCTAssertNil(comparison.detail)
+        XCTAssertEqual(drafts.buffers[attemptID]?.text, "  local 🧪\n")
+        try drafts.retry(attemptID: attemptID)
+        XCTAssertEqual(try repository.loadLesson(lessonID: opened.detail.id).attempt?.answerDraft, "  local 🧪\n")
     }
 
     func testCleanReceiptObservationAdvancesRevealAndAcknowledgementButNotDirtyText() throws {

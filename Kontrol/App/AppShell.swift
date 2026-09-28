@@ -94,7 +94,8 @@ struct AppShell: View {
                         case .choices:
                             LearningView(store: dependencies.learningCatalogStore, navigation: navigation)
                         case .detail(let id):
-                            lessonRoute(id: id)
+                            LessonExperienceView(lessonID: id, store: dependencies.learningCatalogStore,
+                                                 drafts: dependencies.lessonDraftStore, navigation: navigation)
                         case .history:
                             historyRoute
                         }
@@ -116,36 +117,6 @@ struct AppShell: View {
         .preferredColorScheme(.dark)
         .onAppear { navigation.attachDrafts(dependencies.lessonDraftStore) }
         .background(WindowCloseGuard { navigation.flushForLifecycle() })
-    }
-
-    // Reading a route does not start an attempt. Resolve by stable ID here,
-    // never by a rotating slot index or a possibly updated definition.
-    private func lessonRoute(id: String) -> some View {
-        VStack(alignment: .leading, spacing: AppMetrics.space4) {
-            Button("Back to choices") { navigation.backToChoices() }
-            switch dependencies.learningCatalogStore.detailState {
-            case .current(let detail) where detail.id == id:
-                Text(Self.title(for: detail.content)).appTypography(.body)
-                Text("Lesson practice is not available yet.").appTypography(.body)
-            case .failed(let lessonID, _) where lessonID == id:
-                ErrorBanner(.readFailed, recoveryTitle: "Retry lesson") {
-                    _ = try? dependencies.learningCatalogStore.loadDetail(lessonID: id)
-                }
-            default:
-                LoadingState("Opening lesson")
-            }
-        }
-        .padding(AppMetrics.horizontalInset)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .onAppear { _ = try? dependencies.learningCatalogStore.loadDetail(lessonID: id) }
-    }
-
-    private static func title(for content: LessonStudiedContent) -> String {
-        switch content {
-        case .current(let lesson), .pinned(let lesson): lesson.title
-        case .legacyCompleted(let lesson): lesson.title
-        case .unavailable: "Lesson content unavailable"
-        }
     }
 
     private var historyRoute: some View {
