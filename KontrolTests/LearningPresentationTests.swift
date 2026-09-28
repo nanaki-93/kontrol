@@ -64,7 +64,10 @@ final class LearningPresentationTests: XCTestCase {
         XCTAssertEqual(try repository.importIfNeeded(catalog), .imported)
         let summaries = try LearningTopicSummary.load(from: container)
         XCTAssertEqual(summaries.map(\.name), ["Go", "Java", "System Design", "Performance", "Security"])
-        XCTAssertEqual(summaries.map(\.lessons.count), [1, 1, 1, 1, 1])
+        XCTAssertEqual(summaries.map(\.lessons.count), catalog.value.topics.map { topic in
+            catalog.value.lessons.filter { $0.topicID == topic.id }.count
+        })
+        XCTAssertEqual(summaries.flatMap(\.lessons).count, catalog.value.lessons.count)
         XCTAssertEqual(Set(summaries.flatMap(\.lessons).map(\.title)), Set(catalog.value.lessons.map(\.title)))
         XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonProgress>()).isEmpty)
         XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).isEmpty)
@@ -153,9 +156,12 @@ final class LearningPresentationTests: XCTestCase {
         let context = ModelContext(container)
         context.autosaveEnabled = false
         let lesson = try XCTUnwrap(context.fetch(FetchDescriptor<LessonDefinition>()).first { $0.topicID == "go" })
+        let lessonID = lesson.id
         lesson.title = "Corrected starter title"
         try context.save()
-        XCTAssertEqual(try LearningTopicSummary.load(from: container).first?.lessons.first?.title,
+        let summaries = try LearningTopicSummary.load(from: container)
+        let go = try XCTUnwrap(summaries.first { $0.id == "go" })
+        XCTAssertEqual(try XCTUnwrap(go.lessons.first { $0.id == lessonID }).title,
                        "Corrected starter title")
     }
 

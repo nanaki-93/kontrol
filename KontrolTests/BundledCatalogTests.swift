@@ -3,19 +3,28 @@ import XCTest
 @testable import Kontrol
 
 final class BundledCatalogTests: XCTestCase {
-    func testPackagedAppResourceContainsFiveUsableOfflineLessons() throws {
+    func testPackagedAppResourceContainsEightGoLessonsAndFourOtherUsableTopics() throws {
         // The hosted test loads the app bundle, not a source-tree fixture or test copy.
         let appBundle = Bundle.main
         XCTAssertNotNil(appBundle.url(forResource: "starter-catalog", withExtension: "json"))
         let catalog = try BundledCatalogLoader.load(from: appBundle).value
         XCTAssertEqual(catalog.catalogID, "kontrol.starter")
-        XCTAssertEqual(catalog.version, 1)
+        XCTAssertEqual(catalog.version, 2)
         XCTAssertEqual(Set(catalog.topics.map(\.name)),
                        Set(["Go", "Java", "System Design", "Performance", "Security"]))
-        XCTAssertEqual(catalog.lessons.count, 5)
+        XCTAssertEqual(catalog.lessons.count, 12)
+        XCTAssertEqual(catalog.topics.map(\.id), ["go", "java", "design", "perf", "security"])
+        let goKeys: Set<String> = [
+            "go.concurrency.cancel-work", "go.testing.case-design",
+            "go.interfaces.consumer-contract", "go.performance.comparable-benchmarks",
+            "go.concurrency.leak-diagnosis", "go.concurrency.channel-close-owner",
+            "go.errors.preserve-context", "go.network.deadline-boundaries"
+        ]
+        XCTAssertEqual(Set(catalog.lessons.filter { $0.topicID == "go" }.map(\.objectiveKey)), goKeys)
+        XCTAssertTrue(catalog.lessons.contains { $0.id == "go.concurrency.cancel-work.v1" })
         for topic in catalog.topics {
             let lessons = catalog.lessons.filter { $0.topicID == topic.id }
-            XCTAssertFalse(lessons.isEmpty, "No offline lesson for \(topic.id)")
+            XCTAssertEqual(lessons.count, topic.id == "go" ? 8 : 1, "Unexpected inventory for \(topic.id)")
             for lesson in lessons {
                 XCTAssertEqual(lesson.source, "seed")
                 XCTAssertEqual(lesson.contentVersion, 1)
@@ -30,7 +39,10 @@ final class BundledCatalogTests: XCTestCase {
                 XCTAssertGreaterThanOrEqual(lesson.selfCheckCriteria.count, 3)
             }
         }
-        XCTAssertEqual(Set(catalog.lessons.map(\.objectiveKey)).count, 5)
+        XCTAssertEqual(Set(catalog.lessons.map(\.objectiveKey)).count, 12)
+        // All eight Go lessons are initially eligible; reserve inventory remains
+        // after four choices are selected by the later slot implementation.
+        XCTAssertEqual(catalog.lessons.filter { $0.topicID == "go" && $0.prerequisiteConceptIDs.isEmpty }.count, 8)
     }
 
     func testPackagedResourceHasOnlyDefinitionsNotPersonalRecords() throws {

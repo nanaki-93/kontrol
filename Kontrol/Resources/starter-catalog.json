@@ -1,6 +1,6 @@
 {
   "catalogID": "kontrol.starter",
-  "version": 1,
+  "version": 2,
   "topics": [
     {
       "id": "go",
@@ -48,6 +48,31 @@
       "id": "security.api",
       "topicID": "security",
       "name": "API authorization"
+    },
+    {
+      "id": "go.testing",
+      "topicID": "go",
+      "name": "Testing"
+    },
+    {
+      "id": "go.interfaces",
+      "topicID": "go",
+      "name": "Interfaces"
+    },
+    {
+      "id": "go.performance",
+      "topicID": "go",
+      "name": "Measurement"
+    },
+    {
+      "id": "go.errors",
+      "topicID": "go",
+      "name": "Errors"
+    },
+    {
+      "id": "go.network",
+      "topicID": "go",
+      "name": "HTTP boundaries"
     }
   ],
   "concepts": [
@@ -80,6 +105,48 @@
       "subtopicID": "security.api",
       "name": "Per-object authorization",
       "prerequisiteConceptIDs": []
+    },
+    {
+      "id": "go.testing.case-design",
+      "subtopicID": "go.testing",
+      "name": "Table-driven cases",
+      "prerequisiteConceptIDs": []
+    },
+    {
+      "id": "go.interfaces.consumer-contract",
+      "subtopicID": "go.interfaces",
+      "name": "Consumer-owned interfaces",
+      "prerequisiteConceptIDs": []
+    },
+    {
+      "id": "go.performance.comparable-benchmarks",
+      "subtopicID": "go.performance",
+      "name": "Comparable benchmarks",
+      "prerequisiteConceptIDs": []
+    },
+    {
+      "id": "go.concurrency.leak-diagnosis",
+      "subtopicID": "go.concurrency",
+      "name": "Goroutine leak diagnosis",
+      "prerequisiteConceptIDs": []
+    },
+    {
+      "id": "go.concurrency.channel-close-owner",
+      "subtopicID": "go.concurrency",
+      "name": "Channel close ownership",
+      "prerequisiteConceptIDs": []
+    },
+    {
+      "id": "go.errors.preserve-context",
+      "subtopicID": "go.errors",
+      "name": "Error wrapping and matching",
+      "prerequisiteConceptIDs": []
+    },
+    {
+      "id": "go.network.deadline-boundaries",
+      "subtopicID": "go.network",
+      "name": "HTTP deadline boundaries",
+      "prerequisiteConceptIDs": []
     }
   ],
   "lessons": [
@@ -110,6 +177,202 @@
       "normalizedContentHash": "sha256:e752c4c155eb0a0f7b546726ff2e2f706c1e13ef77ceb0c81ded95df913b5ef7",
       "source": "seed",
       "provenance": "Original Kontrol starter lesson; docs/learning-curriculum.md: Go / Context cancellation; Go standard library context package semantics"
+    },
+    {
+      "id": "go.testing.case-design.v1",
+      "objectiveKey": "go.testing.case-design",
+      "objective": "Express independent normal, boundary, and failure cases as a table with precise expected outcomes.",
+      "title": "Design table-driven tests for boundary cases",
+      "topicID": "go",
+      "subtopicID": "go.testing",
+      "conceptIDs": [
+        "go.testing.case-design"
+      ],
+      "difficulty": "basic",
+      "format": "code",
+      "estimatedMinutes": 15,
+      "prerequisiteConceptIDs": [],
+      "explanation": "In Go 1.22+, a table of named inputs and expected outputs keeps related cases visible without duplicating test setup. Iterate over the table and use t.Run to report a distinct subtest for each case. Compare the actual result with the expected result and report both, rather than only checking that an error occurred. Include a zero or empty input and an invalid input alongside the happy path. Do not share mutable fixtures between cases; subtests may eventually run in parallel. With Go 1.22 loop variables are per iteration, but use explicit captures if supporting older Go releases.",
+      "workedExample": "For a ParsePort(string) (int, error) function, cases named valid, zero, too-large, and not-a-number specify inputs \"8080\", \"0\", \"65536\", and \"oops\". The valid case expects 8080 and no error; the others expect an error. t.Run(tc.name, ...) reports which input failed. A separate test verifies whether surrounding whitespace is accepted, rather than assuming behavior not promised by the parser contract.",
+      "exercise": "Write a Go test for a function clamp(n, lo, hi int) int, assuming lo <= hi. Cover n below lo, at lo, inside, at hi, and above hi; name each case. Show the loop, subtest, and failure message. What additional test would you add if lo > hi is part of the function contract?",
+      "referenceAnswer": "func TestClamp(t *testing.T) { cases := []struct { name string; n, lo, hi, want int }{{\"below\", -2, 0, 10, 0}, {\"lower\", 0, 0, 10, 0}, {\"inside\", 6, 0, 10, 6}, {\"upper\", 10, 0, 10, 10}, {\"above\", 12, 0, 10, 10}}; for _, tc := range cases { t.Run(tc.name, func(t *testing.T) { if got := clamp(tc.n, tc.lo, tc.hi); got != tc.want { t.Errorf(\"clamp(%d,%d,%d) = %d, want %d\", tc.n, tc.lo, tc.hi, got, tc.want) } }) } }. If inverted bounds are supported, add an explicit inverted-bounds case with an expected result defined by the API; do not guess its behavior.",
+      "selfCheckCriteria": [
+        "Names all five boundary partitions and their expected values.",
+        "Uses t.Run and reports got and want for the failing case.",
+        "Does not claim behavior for inverted bounds without a contract."
+      ],
+      "contentVersion": 1,
+      "normalizedContentHash": "sha256:30a2a626774166d81a1b68a5ed3dbeb7082d34cde30dae5ec93b4ad83961f563",
+      "source": "seed",
+      "provenance": "Go 1.22+; reviewed against Go testing package (pkg.go.dev/testing), subtests and loopvar change (go.dev/blog/subtests; go.dev/blog/loopvar-preview); docs/learning-curriculum.md"
+    },
+    {
+      "id": "go.interfaces.consumer-contract.v1",
+      "objectiveKey": "go.interfaces.consumer-contract",
+      "objective": "Design a consumer-owned Go interface containing only the methods needed by that consumer.",
+      "title": "Specify the small contract at the consumer",
+      "topicID": "go",
+      "subtopicID": "go.interfaces",
+      "conceptIDs": [
+        "go.interfaces.consumer-contract"
+      ],
+      "difficulty": "intermediate",
+      "format": "design",
+      "estimatedMinutes": 14,
+      "prerequisiteConceptIDs": [],
+      "explanation": "Go interfaces are satisfied implicitly by a type that implements their method set. A consumer can declare the minimal behavior it needs without requiring every producer to depend on a shared broad interface. This supports substitution in tests and reduces accidental coupling. Return a concrete type from a constructor unless callers genuinely need an abstraction. An interface with one method is not automatically better: when the consumer has only one implementation and no boundary to replace, a concrete parameter may be clearer. Assume Go 1.22 standard library interfaces and method-set rules.",
+      "workedExample": "A report renderer needs to send its output, not administer a whole mail service. It declares type Sender interface { Send(context.Context, []byte) error } and accepts a Sender in RenderAndSend. A production SMTP adapter and a recording test sender each implement Send; neither needs a no-op DeleteMailbox method. The handler checks and returns send errors, while the caller owns adapter lifetime.",
+      "exercise": "Design the dependency boundary for a handler that must fetch a customer by ID, then format a receipt. The existing Storage type also has DeleteAll and Migrate. Specify the smallest interface, where to declare it, and how to test a missing customer and a storage failure. State when you would instead pass a concrete storage value.",
+      "referenceAnswer": "Declare type CustomerFinder interface { FindCustomer(ctx context.Context, id string) (Customer, error) } beside the handler that consumes it. Accept CustomerFinder in the handler; the existing storage implements the method without importing the consumer package. Use a stub returning a not-found error to check the handler response and a second stub returning an unexpected failure to check error propagation. Do not add DeleteAll or Migrate. If the handler has no alternative implementation or test seam, accepting the concrete storage type is also reasonable; abstract at an actual boundary.",
+      "selfCheckCriteria": [
+        "Keeps only FindCustomer in the consumer contract, without destructive storage methods.",
+        "Locates the interface near the consumer and exercises two distinct error cases.",
+        "Explains when a concrete dependency is simpler and does not invent an explicit implements declaration."
+      ],
+      "contentVersion": 1,
+      "normalizedContentHash": "sha256:92780a5e4d9ceef9e9ecf4a2f141142949c3b672e2dc9779a0c91a394ab41b0b",
+      "source": "seed",
+      "provenance": "Go 1.22+; reviewed against Go language specification Interface types and Method sets (go.dev/ref/spec#Interface_types; go.dev/ref/spec#Method_sets), Go Code Review Comments Interfaces (go.dev/wiki/CodeReviewComments#interfaces); docs/learning-curriculum.md"
+    },
+    {
+      "id": "go.performance.comparable-benchmarks.v1",
+      "objectiveKey": "go.performance.comparable-benchmarks",
+      "objective": "Interpret Go benchmark comparisons using controlled work, allocation metrics, and repeated measurements.",
+      "title": "Compare benchmarks without fooling yourself",
+      "topicID": "go",
+      "subtopicID": "go.performance",
+      "conceptIDs": [
+        "go.performance.comparable-benchmarks"
+      ],
+      "difficulty": "intermediate",
+      "format": "question",
+      "estimatedMinutes": 13,
+      "prerequisiteConceptIDs": [],
+      "explanation": "Go testing benchmarks execute b.N iterations and the harness calibrates N to obtain useful timing. Run with go test -bench=. -benchmem and compare the same operation, input, environment, and compiler settings. Report ns/op and B/op or allocs/op as distinct quantities; lower allocations do not by themselves prove lower latency. Initialize expensive test data outside the timed loop and call b.ResetTimer when setup should be excluded. For noisy results, repeat runs and analyze variation rather than announcing a win from one measurement. Assume Go 1.22+ testing benchmarks.",
+      "workedExample": "Two JSON encoders receive the same 10 KiB payload on the same machine. A: 42000 ns/op, 11000 B/op; B: 39000 ns/op, 18000 B/op. B appears faster in this run but allocates more bytes. If B had a cached input while A rebuilt it inside its timed loop, these numbers would not compare the same work. Re-run both with identical input preparation and repeated samples before recommending a replacement.",
+      "exercise": "A report claims a new serializer is 20% faster from a single go test -bench run, but the old benchmark builds a fixture inside b.N while the new one reuses a fixture. Explain two flaws, how to restructure the benchmark loop, and which metrics and repetitions to collect before deciding.",
+      "referenceAnswer": "The timed operations differ because only one includes fixture construction; a single run may also reflect scheduling, GC, or machine load. Construct the same fixture outside both loops, then b.ResetTimer(), and perform one serialize operation per iteration while keeping the result observable when necessary. Run go test -bench=Serialize -benchmem -count=10 for each comparable implementation under the same toolchain and machine conditions; compare distributions of ns/op and allocs/op or B/op. If setup or cache behavior is part of production use, benchmark that separately and label it.",
+      "selfCheckCriteria": [
+        "Identifies unequal timed work and single-run noise rather than asserting a 20% win.",
+        "Places equivalent setup outside both timed loops and retains the result when needed.",
+        "Compares repeated timings and allocation metrics under the same environment."
+      ],
+      "contentVersion": 1,
+      "normalizedContentHash": "sha256:b6a0a1bcaca14673ef17c300f3da6cec23f4e5fe26adc22573f458c5adb11823",
+      "source": "seed",
+      "provenance": "Go 1.22+; reviewed against Go testing package benchmark API (pkg.go.dev/testing#hdr-Benchmarks), go test flags (pkg.go.dev/cmd/go#hdr-Testing_flags); benchstat (pkg.go.dev/golang.org/x/perf/cmd/benchstat); docs/learning-curriculum.md"
+    },
+    {
+      "id": "go.concurrency.leak-diagnosis.v1",
+      "objectiveKey": "go.concurrency.leak-diagnosis",
+      "objective": "Diagnose a blocked goroutine and make a result send safe when its receiver abandons the work.",
+      "title": "Find a goroutine blocked on a send",
+      "topicID": "go",
+      "subtopicID": "go.concurrency",
+      "conceptIDs": [
+        "go.concurrency.leak-diagnosis"
+      ],
+      "difficulty": "intermediate",
+      "format": "code",
+      "estimatedMinutes": 16,
+      "prerequisiteConceptIDs": [],
+      "explanation": "A goroutine that blocks on a channel send after its receiver returns can stay alive indefinitely. A context does not interrupt an unconditional send: the goroutine must select on ctx.Done() at that boundary. Use a goroutine profile or a bounded test that repeatedly cancels requests to find persistent blocked stacks; a single runtime.NumGoroutine value is noisy and not proof by itself. Avoid closing a results channel from a receiver merely to unblock a sender, since sending to a closed channel panics. Assume Go 1.22 and standard context and runtime/pprof behavior.",
+      "workedExample": "A search worker computes a result and executes results <- value on an unbuffered channel, but the handler returned after a timeout. The goroutine profile shows it waiting in a channel send. Changing the send to select { case results <- value: case <-ctx.Done(): return } lets it exit when the handler cancels its derived context. Downstream blocking calls must also receive ctx; the select alone cannot interrupt an earlier non-cancellable call.",
+      "exercise": "Given func worker(ctx context.Context, out chan<- int) { n := slow(ctx); out <- n }, write a cancellation-aware send and show how the caller cancels on exit. Explain how you would check for persistent leaks without asserting an exact global goroutine count.",
+      "referenceAnswer": "func worker(ctx context.Context, out chan<- int) { n := slow(ctx); select { case out <- n: return; case <-ctx.Done(): return } }. The caller uses ctx, cancel := context.WithCancel(parent); defer cancel(); go worker(ctx, results) and passes the same ctx into slow if it supports cancellation. A test can cancel many requests, wait within a bounded deadline for workers to signal exit via a WaitGroup, and inspect goroutine profiles if workers remain; do not depend on one exact runtime.NumGoroutine() value.",
+      "selfCheckCriteria": [
+        "Selects between the send and ctx.Done() instead of closing the channel from the receiver.",
+        "Shows caller-owned cancellation and propagation into slow work.",
+        "Uses a bounded worker-exit test or profile, not a brittle exact global count."
+      ],
+      "contentVersion": 1,
+      "normalizedContentHash": "sha256:a99e242173632e83178e4b169ed38079ef2dcdb88ae3ac32924d72fb860bfe78",
+      "source": "seed",
+      "provenance": "Go 1.22+; reviewed against Go context package (pkg.go.dev/context), runtime/pprof goroutine profiles (pkg.go.dev/runtime/pprof), Go blog Pipelines and cancellation (go.dev/blog/pipelines); docs/learning-curriculum.md"
+    },
+    {
+      "id": "go.concurrency.channel-close-owner.v1",
+      "objectiveKey": "go.concurrency.channel-close-owner",
+      "objective": "Choose the channel-close owner so consumers can range safely without racing a send.",
+      "title": "Close a channel only when producers are done",
+      "topicID": "go",
+      "subtopicID": "go.concurrency",
+      "conceptIDs": [
+        "go.concurrency.channel-close-owner"
+      ],
+      "difficulty": "basic",
+      "format": "learn",
+      "estimatedMinutes": 12,
+      "prerequisiteConceptIDs": [],
+      "explanation": "Closing a Go channel signals that no more values will be sent; it is not a broadcast command to stop arbitrary senders. A send on a closed channel panics, and closing a closed channel also panics. The sending side must coordinate completion before close, often via a WaitGroup when there are multiple producers. A receiving side should not close a channel it does not own. Cancellation can be signalled separately with a context, while channel closure means end of values. Assume Go 1.22 standard channels and sync.WaitGroup.",
+      "workedExample": "Three producers write jobs to one output channel. A coordinator starts them with wg.Add(3), each defers wg.Done(), and a separate goroutine calls wg.Wait(); close(out). The consumer uses for job := range out; the range finishes only after all sends and the close. If the consumer stops early, producers need a selectable cancellation path too; simply closing out from the consumer would race active sends.",
+      "exercise": "A consumer wants to stop reading an unbuffered stream while two producers may still send. Who may close the stream, when should that happen, and how can the consumer ask producers to stop? Explain what happens if the consumer closes the stream immediately.",
+      "referenceAnswer": "The producer coordinator closes the stream after both producers return, e.g. via wg.Wait(); close(stream) in a coordinator goroutine. The consumer cancels a shared context; each producer selects on ctx.Done() while sending, exits, and signals Done. The consumer must not close stream while producers may send: a later send would panic. Cancellation and closure have different meanings; close is the final end-of-stream signal, not the request to stop producers.",
+      "selfCheckCriteria": [
+        "Identifies the sending coordinator as closer after all producers have exited.",
+        "Uses context cancellation to request early stop and accounts for blocked sends.",
+        "Explains the panic risk of consumer-initiated close while senders run."
+      ],
+      "contentVersion": 1,
+      "normalizedContentHash": "sha256:1b176d25121cf22218bbe742a4963a3cb1a6654a0b111061b0f280681bff9fca",
+      "source": "seed",
+      "provenance": "Go 1.22+; reviewed against Go language specification Close and Send statements (go.dev/ref/spec#Close; go.dev/ref/spec#Send_statements), Go blog Pipelines and cancellation (go.dev/blog/pipelines), sync.WaitGroup (pkg.go.dev/sync#WaitGroup); docs/learning-curriculum.md"
+    },
+    {
+      "id": "go.errors.preserve-context.v1",
+      "objectiveKey": "go.errors.preserve-context",
+      "objective": "Add operation context to a Go error without losing errors.Is matching or inventing success.",
+      "title": "Wrap errors while preserving their identity",
+      "topicID": "go",
+      "subtopicID": "go.errors",
+      "conceptIDs": [
+        "go.errors.preserve-context"
+      ],
+      "difficulty": "basic",
+      "format": "code",
+      "estimatedMinutes": 14,
+      "prerequisiteConceptIDs": [],
+      "explanation": "In Go 1.22+, fmt.Errorf with %w wraps an error so callers can inspect its identity with errors.Is or errors.As. %v formats an error as text but does not preserve its chain. Add a useful operation and input identifier without leaking credentials or sensitive payloads. Return nil only when work succeeded; do not replace a concrete failure with a generic string. errors.Is compares against sentinel errors, including those wrapped through several layers. An error can be handled at one layer or propagated, but avoid logging and returning the same failure repeatedly.",
+      "workedExample": "A read helper gets os.ErrNotExist from a file open. Returning fmt.Errorf(\"read configuration: %w\", err) lets the caller use errors.Is(err, os.ErrNotExist) to offer a missing-file message. Returning fmt.Errorf(\"read configuration: %v\", err) prints the same words but loses that matching relationship. Do not include file contents or tokens in the wrapping message.",
+      "exercise": "Implement loadSettings(path string) ([]byte, error) using os.ReadFile. Return data on success; on failure add operation context so the caller can still match os.ErrNotExist. Show the caller check, and say what you would avoid including in the error message.",
+      "referenceAnswer": "func loadSettings(path string) ([]byte, error) { data, err := os.ReadFile(path); if err != nil { return nil, fmt.Errorf(\"load settings: %w\", err) }; return data, nil }. The caller uses if errors.Is(err, os.ErrNotExist) { /* offer setup guidance */ }. Import errors, fmt, and os as needed. Avoid embedding the contents, secrets, or untrusted payloads in the error; an appropriate non-sensitive path can be logged at a controlled boundary if policy permits.",
+      "selfCheckCriteria": [
+        "Uses %w to retain the underlying error and tests with errors.Is.",
+        "Returns data and nil only on successful os.ReadFile.",
+        "Adds operation context without copying secret data into errors."
+      ],
+      "contentVersion": 1,
+      "normalizedContentHash": "sha256:120ea7a203573e4d2431a33e082b2f3c4f9e640be55fcaf8bbe98d0b4af8a911",
+      "source": "seed",
+      "provenance": "Go 1.22+; reviewed against Go errors package (pkg.go.dev/errors#Is), fmt.Errorf wrapping (pkg.go.dev/fmt#Errorf), os.ReadFile (pkg.go.dev/os#ReadFile); docs/learning-curriculum.md"
+    },
+    {
+      "id": "go.network.deadline-boundaries.v1",
+      "objectiveKey": "go.network.deadline-boundaries",
+      "objective": "Design HTTP request deadlines that bound downstream waits while preserving caller cancellation.",
+      "title": "Budget HTTP client and server work",
+      "topicID": "go",
+      "subtopicID": "go.network",
+      "conceptIDs": [
+        "go.network.deadline-boundaries"
+      ],
+      "difficulty": "intermediate",
+      "format": "design",
+      "estimatedMinutes": 17,
+      "prerequisiteConceptIDs": [],
+      "explanation": "Go net/http client requests carry a context; canceling it cancels an in-flight request and its response read. An http.Client.Timeout bounds the whole exchange including reading the response body; a Transport has more specific phase limits such as ResponseHeaderTimeout. On the server, r.Context() is canceled when a client connection closes, a request is canceled, or ServeHTTP returns. Derive a shorter deadline from that context for a downstream call and defer cancel; never replace it with Background. A deadline is not a guarantee that non-cooperative external work stops. Assume Go 1.22 net/http and context.",
+      "workedExample": "An API handler has an upstream request with a 3-second deadline and a downstream HTTP service that should receive at most 800 ms. It creates child, cancel := context.WithTimeout(r.Context(), 800*time.Millisecond), defers cancel(), and builds the outgoing request with http.NewRequestWithContext(child, http.MethodGet, url, nil). The configured client and transport phase limits also protect connections. On success it closes resp.Body; on deadline error it returns a bounded failure instead of waiting indefinitely.",
+      "exercise": "Design a handler that calls a slow downstream HTTP endpoint. State which context to derive from, where to set an 800 ms per-call deadline, when to close the response body, and how an upstream disconnect changes the behavior. Distinguish the deadline from connection and header-phase limits.",
+      "referenceAnswer": "Derive child, cancel := context.WithTimeout(r.Context(), 800*time.Millisecond); defer cancel(). Use http.NewRequestWithContext(child, http.MethodGet, target, nil) and client.Do(req), then defer resp.Body.Close() only after Do succeeds and a non-nil response is available. Consume a bounded body before replying. If the client disconnects, r.Context() cancels child early. Configure transport dial/TLS/header phase limits where needed; http.Client.Timeout, if used, caps the entire exchange, not only dial time. Neither timeout forcibly terminates a non-cooperative external side effect.",
+      "selfCheckCriteria": [
+        "Derives from r.Context() and defers cancel, preserving disconnect propagation.",
+        "Closes a successful response body and bounds downstream waiting.",
+        "Separates whole-exchange and transport-phase limits without claiming remote work stops."
+      ],
+      "contentVersion": 1,
+      "normalizedContentHash": "sha256:77ee08e9d08929719620c9f4d3b7437fe01eefcef9154bcd617153e0fb269b91",
+      "source": "seed",
+      "provenance": "Go 1.22+; reviewed against Go net/http Client.Timeout, NewRequestWithContext and Request.Context (pkg.go.dev/net/http#Client; pkg.go.dev/net/http#NewRequestWithContext; pkg.go.dev/net/http#Request.Context), context.WithTimeout (pkg.go.dev/context#WithTimeout); docs/learning-curriculum.md"
     },
     {
       "id": "java.io.resource-ownership.v1",
