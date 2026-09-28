@@ -36,7 +36,7 @@ final class SwiftDataFocusRepository: FocusRepository {
     func fetchAll() throws -> [FocusSessionSnapshot] {
         let context = privateContext()
         let rows = try persistedSessions(in: context)
-        return try rows.map(FocusSessionSnapshot.init).sorted {
+        return try checkedSnapshots(rows).sorted {
             if $0.startedAt != $1.startedAt { return $0.startedAt > $1.startedAt }
             return $0.id.uuidString < $1.id.uuidString
         }
@@ -48,7 +48,7 @@ final class SwiftDataFocusRepository: FocusRepository {
         let context = privateContext()
         // Validate *all* rows, not just those that happen to have a recognized active
         // state. An unknown/corrupt row must not authorize another Start.
-        let existing = try persistedSessions(in: context).map(FocusSessionSnapshot.init)
+        let existing = try checkedSnapshots(persistedSessions(in: context))
         guard !existing.contains(where: { $0.state.isActive }) else {
             throw FocusError.activeSessionConflict
         }
@@ -97,32 +97,54 @@ final class SwiftDataFocusRepository: FocusRepository {
                     effectiveEndedAt: Date? = nil) throws -> FocusSessionSnapshot {
         let context = privateContext()
         let rows = try persistedSessions(in: context)
+        // Inspect the entire store before changing even a valid target. Another active
+        // row or a corrupt history row makes the active status untrustworthy.
+        let snapshots = try checkedSnapshots(rows)
         let matches = rows.filter { $0.id == id }
-        guard !matches.isEmpty else { throw FocusError.missingSession }
-        guard matches.count == 1 else { throw FocusError.activeSessionConflict }
-        let row = matches[0]
-        let current = try FocusSessionSnapshot(row)
-        // Idempotency precedes payload validation: even a delayed duplicate terminal
-        // callback must not change a committed finish time or attempt another save.
+        guard let row = matches.first else { throw FocusError.missingSession }
+        // Duplicate IDs are rejected by checkedSnapshots.
+        guard let current = snapshots.first(where: { $0.id == id }) else {
+            throw FocusError.missingSession
+        }
+        // Idempotency precedes payload validation: delayed duplicate terminal callbacks
+        // and recovery decisions must not replace the original finish timestamp.
         if !current.state.isActive {
             switch command {
-            case .end, .complete: return current
+            case .end, .complete, .reconcile: return current
+            case .recover(.end, _) where current.state == .ended: return current
             default: throw FocusError.invalidTransition
             }
         }
         let payload: FocusTransitionPayload
         switch command {
         case .pause(let value), .resume(let value), .checkpoint(let value),
-             .end(let value), .complete(let value): payload = value
-        case .reconcile, .recover: throw FocusError.invalidTransition // Step 2.3
+             .end(let value), .complete(let value), .reconcile(let value),
+             .recover(_, let value): payload = value
         }
+        if case .reconcile = command, current.state == .paused { return current }
         _ = try payload.validated(plannedSeconds: current.plannedSeconds)
+        // A second Resume decision may arrive after the first one committed. It
+        // returns the stored row, without replaying the old segment or saving again.
+        if case .recover(.resume, _) = command, current.state == .running,
+           payload.expectedCheckpointAt < current.checkpointAt,
+           payload.sampledAt <= current.checkpointAt,
+           payload.accumulatedActiveSeconds <= current.accumulatedActiveSeconds {
+            return current
+        }
         guard payload.expectedCheckpointAt == current.checkpointAt else {
             throw FocusError.staleBaseline
         }
         guard payload.sampledAt >= current.checkpointAt,
               payload.accumulatedActiveSeconds >= current.accumulatedActiveSeconds else {
             throw FocusError.invalidTransition
+        }
+        // The repository verifies the calculation against the latest stored anchors;
+        // a caller cannot manufacture a completion or count the closed interval twice.
+        if case .reconcile = command {
+            guard effectiveEndedAt == nil, current.state == .running,
+                  case .changed(let calculated) = try FocusTiming.reconcileOnRelaunch(
+                    current, at: payload.sampledAt),
+                  calculated.transition == command else { throw FocusError.invalidTransition }
         }
         // A rollback may leave the wall timestamp unchanged across pause/resume.
         // Advance this durable logical watermark on every write so old baselines
@@ -142,6 +164,7 @@ final class SwiftDataFocusRepository: FocusRepository {
         var deadline: Date?
         var pausedAt: Date?
         var endedAt: Date?
+        var recoveryRequired = false
         switch command {
         case .pause:
             guard current.state == .running, elapsed < plan else {
@@ -184,8 +207,28 @@ final class SwiftDataFocusRepository: FocusRepository {
                   endedAt >= current.startedAt, endedAt <= payload.sampledAt else {
                 throw FocusError.invalidTransition
             }
-        case .reconcile, .recover:
-            throw FocusError.invalidTransition
+        case .reconcile:
+            // The pure calculation above is already checked against the submitted
+            // payload. Recompute only its outcome; do not use stale link metadata.
+            let result = try FocusTiming.reconcileOnRelaunch(current, at: payload.sampledAt)
+            guard case .changed(let change) = result else { throw FocusError.invalidTransition }
+            newState = change.snapshot.state
+            pausedAt = newState == .paused ? stamp : nil
+            endedAt = change.snapshot.endedAt
+            recoveryRequired = newState == .paused
+        case .recover(let choice, _):
+            guard current.state == .paused, current.recoveryRequired,
+                  elapsed == current.accumulatedActiveSeconds,
+                  effectiveEndedAt == nil else { throw FocusError.invalidTransition }
+            switch choice {
+            case .resume:
+                newState = .running
+                anchor = stamp
+                deadline = stamp.addingTimeInterval(plan - elapsed)
+            case .end:
+                newState = .ended
+                endedAt = stamp
+            }
         }
         // Construct before mutation: rejects unrepresentable deadlines and any
         // inconsistent anchors. Link fields come exclusively from the latest row,
@@ -196,7 +239,7 @@ final class SwiftDataFocusRepository: FocusRepository {
                 id: current.id, state: newState, plannedSeconds: current.plannedSeconds,
                 accumulatedActiveSeconds: elapsed, activeSegmentStartedAt: anchor,
                 deadline: deadline, pausedAt: pausedAt, startedAt: current.startedAt,
-                endedAt: endedAt, checkpointAt: stamp,
+                endedAt: endedAt, checkpointAt: stamp, recoveryRequired: recoveryRequired,
                 linkedTaskID: current.linkedTaskID, linkedLessonID: current.linkedLessonID,
                 linkedTitleSnapshot: current.linkedTitleSnapshot)
         } catch { throw FocusError.invalidTransition }
@@ -211,6 +254,15 @@ final class SwiftDataFocusRepository: FocusRepository {
         do { try save(context) }
         catch { throw FocusError.persistenceFailure }
         return receipt
+    }
+
+    private func checkedSnapshots(_ rows: [FocusSession]) throws -> [FocusSessionSnapshot] {
+        let values = try rows.map(FocusSessionSnapshot.init)
+        guard values.filter({ $0.state.isActive }).count <= 1,
+              Set(values.map(\.id)).count == values.count else {
+            throw FocusError.activeSessionConflict
+        }
+        return values
     }
 
     private func privateContext() -> ModelContext {

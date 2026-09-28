@@ -233,13 +233,19 @@ final class FocusRepositoryTests: XCTestCase {
                                        deadline: start.addingTimeInterval(1500), startedAt: start,
                                        checkpointAt: start))
         try secondSeed.save()
-        let both = try rows(container)
+        let both = try ModelContext(container).fetch(FetchDescriptor<FocusSession>())
+            .map(FocusSessionSnapshot.init)
         XCTAssertEqual(both.count, 2)
+        XCTAssertThrowsError(try writer.fetchAll()) {
+            XCTAssertEqual($0 as? FocusError, .activeSessionConflict)
+        }
         XCTAssertThrowsError(try writer.create(input: input())) {
             XCTAssertEqual($0 as? FocusError, .activeSessionConflict)
         }
         XCTAssertEqual(ids, 0)
-        XCTAssertEqual(try rows(container), both)
+        XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<FocusSession>())
+            .map(FocusSessionSnapshot.init).sorted { $0.id.uuidString < $1.id.uuidString },
+            both.sorted { $0.id.uuidString < $1.id.uuidString })
     }
 
     private func payload(_ baseline: FocusSessionSnapshot, seconds: Double,
@@ -527,6 +533,268 @@ final class FocusRepositoryTests: XCTestCase {
         XCTAssertNil(updated.linkedTaskID)
         XCTAssertEqual(updated.linkedTitleSnapshot, "Retained title")
         XCTAssertNil(try rows(container).first?.linkedTaskID)
+    }
+
+    func testRelaunchReconciliationIsDurableOnceAndRecoveryResumeKeepsIdentity() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "KontrolFocusRecovery-\(UUID().uuidString)", isDirectory: true)
+        let url = directory.appendingPathComponent("Kontrol.store")
+        var original: FocusSessionSnapshot!
+        var reconciliation: FocusTransition!
+        var pending: FocusSessionSnapshot!
+        var resumed: FocusSessionSnapshot!
+        try autoreleasepool {
+            let writer = SwiftDataFocusRepository(container:
+                try ModelContainerFactory().makeContainer(mode: .persistent(url)),
+                makeID: { self.first })
+            original = try writer.create(input: input(seconds: 30))
+            let change = try FocusTiming.reconcileOnRelaunch(original,
+                at: start.addingTimeInterval(7.25))
+            guard case .changed(let calculation) = change else { return XCTFail("expected change") }
+            reconciliation = calculation.transition
+            let failing = SwiftDataFocusRepository(container:
+                try ModelContainerFactory().makeContainer(mode: .persistent(url)),
+                save: { _ in throw Injected.failed })
+            XCTAssertThrowsError(try failing.transition(id: first, command: calculation.transition)) {
+                XCTAssertEqual($0 as? FocusError, .persistenceFailure)
+            }
+            XCTAssertEqual(try writer.fetchAll(), [original])
+            XCTAssertThrowsError(try writer.create(input: input())) {
+                XCTAssertEqual($0 as? FocusError, .activeSessionConflict)
+            }
+            pending = try writer.transition(id: first, command: calculation.transition)
+            XCTAssertEqual(pending.id, first)
+            XCTAssertEqual(pending.state, .paused)
+            XCTAssertTrue(pending.recoveryRequired)
+            XCTAssertEqual(pending.actualSeconds, 7.25)
+            XCTAssertNil(pending.deadline)
+            XCTAssertEqual(try writer.transition(id: first, command: calculation.transition), pending)
+        }
+        try autoreleasepool {
+            let writer = SwiftDataFocusRepository(container:
+                try ModelContainerFactory().makeContainer(mode: .persistent(url)))
+            XCTAssertEqual(try writer.fetchAll(), [pending])
+            XCTAssertEqual(try FocusTiming.reconcileOnRelaunch(pending,
+                at: start.addingTimeInterval(600)), .unchanged(pending))
+            let decision = FocusTransition.recover(.resume,
+                payload(pending, seconds: 7.25, offset: 600))
+            var saves = 0
+            let failing = SwiftDataFocusRepository(container:
+                try ModelContainerFactory().makeContainer(mode: .persistent(url)),
+                save: { _ in saves += 1; throw Injected.failed })
+            XCTAssertThrowsError(try failing.transition(id: first, command: decision)) {
+                XCTAssertEqual($0 as? FocusError, .persistenceFailure)
+            }
+            XCTAssertEqual(saves, 1)
+            XCTAssertEqual(try writer.fetchAll(), [pending])
+            resumed = try writer.transition(id: first, command: decision)
+            XCTAssertEqual(resumed.id, first)
+            XCTAssertEqual(resumed.state, .running)
+            XCTAssertFalse(resumed.recoveryRequired)
+            XCTAssertEqual(resumed.actualSeconds, 7.25)
+            XCTAssertEqual(resumed.deadline, resumed.activeSegmentStartedAt?.addingTimeInterval(22.75))
+            XCTAssertEqual(try failing.transition(id: first, command: decision), resumed)
+            XCTAssertEqual(saves, 1)
+            XCTAssertThrowsError(try writer.transition(id: first, command: .recover(.end,
+                payload(pending, seconds: 7.25, offset: 601)))) {
+                XCTAssertEqual($0 as? FocusError, .staleBaseline)
+            }
+            XCTAssertThrowsError(try writer.transition(id: first, command: reconciliation)) {
+                XCTAssertEqual($0 as? FocusError, .staleBaseline)
+            }
+        }
+        try autoreleasepool {
+            let writer = SwiftDataFocusRepository(container:
+                try ModelContainerFactory().makeContainer(mode: .persistent(url)))
+            XCTAssertEqual(try writer.fetchAll(), [resumed])
+        }
+    }
+
+    func testRecoveryEndAndDeadlineCompletionAreOneTimeAndKeepEffectiveFinish() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let writer = SwiftDataFocusRepository(container: container, makeID: { self.first })
+        let running = try writer.create(input: input(seconds: 30))
+        guard case .changed(let calculation) = try FocusTiming.reconcileOnRelaunch(
+            running, at: start.addingTimeInterval(4.5)) else { return XCTFail("expected change") }
+        let pending = try writer.transition(id: first, command: calculation.transition)
+        let end = FocusTransition.recover(.end, payload(pending, seconds: 4.5, offset: 300))
+        let ended = try writer.transition(id: first, command: end)
+        XCTAssertEqual(ended.id, first)
+        XCTAssertEqual(ended.state, .ended)
+        XCTAssertEqual(ended.actualSeconds, 4.5)
+        XCTAssertEqual(ended.endedAt, start.addingTimeInterval(300))
+        XCTAssertFalse(ended.recoveryRequired)
+        var saves = 0
+        let guarded = SwiftDataFocusRepository(container: container,
+            save: { _ in saves += 1; throw Injected.failed })
+        XCTAssertEqual(try guarded.transition(id: first, command: end), ended)
+        XCTAssertEqual(saves, 0)
+        let next = SwiftDataFocusRepository(container: container, makeID: { self.second })
+        let other = try next.create(input: input(seconds: 30))
+        guard case .changed(let deadline) = try FocusTiming.reconcileOnRelaunch(
+            other, at: start.addingTimeInterval(800)) else { return XCTFail("expected finish") }
+        let failingCompletion = SwiftDataFocusRepository(container: container,
+            save: { _ in throw Injected.failed })
+        XCTAssertThrowsError(try failingCompletion.transition(id: second,
+            command: deadline.transition)) {
+            XCTAssertEqual($0 as? FocusError, .persistenceFailure)
+        }
+        XCTAssertEqual(try rows(container).first { $0.id == second }, other)
+        XCTAssertThrowsError(try next.create(input: input())) {
+            XCTAssertEqual($0 as? FocusError, .activeSessionConflict)
+        }
+        let finished = try next.transition(id: second, command: deadline.transition)
+        XCTAssertEqual(finished.id, second)
+        XCTAssertEqual(finished.state, .completed)
+        XCTAssertEqual(finished.actualSeconds, 30)
+        XCTAssertEqual(finished.endedAt, start.addingTimeInterval(30))
+        XCTAssertEqual(try guarded.transition(id: second, command: deadline.transition), finished)
+        XCTAssertEqual(saves, 0)
+    }
+
+    func testInvalidRecoveryPayloadAndCorruptRowsRejectWithoutMutation() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let writer = SwiftDataFocusRepository(container: container, makeID: { self.first })
+        let running = try writer.create(input: input(seconds: 30))
+        var saves = 0
+        let guarded = SwiftDataFocusRepository(container: container,
+            save: { _ in saves += 1; throw Injected.failed })
+        for command in [
+            FocusTransition.reconcile(payload(running, seconds: 30, offset: 1)),
+            .reconcile(payload(running, seconds: 5, offset: 4)),
+            .recover(.resume, payload(running, seconds: 0, offset: 1))
+        ] {
+            XCTAssertThrowsError(try guarded.transition(id: first, command: command)) {
+                XCTAssertEqual($0 as? FocusError, .invalidTransition)
+            }
+        }
+        XCTAssertThrowsError(try guarded.transition(id: second, command: .reconcile(
+            payload(running, seconds: 0, offset: 1)))) {
+            XCTAssertEqual($0 as? FocusError, .missingSession)
+        }
+        guard case .changed(let calculation) = try FocusTiming.reconcileOnRelaunch(
+            running, at: start.addingTimeInterval(5)) else { return XCTFail("expected change") }
+        let pending = try writer.transition(id: first, command: calculation.transition)
+        XCTAssertThrowsError(try guarded.transition(id: first, command: .recover(.end,
+            payload(running, seconds: 0, offset: 6)))) {
+            XCTAssertEqual($0 as? FocusError, .staleBaseline)
+        }
+        XCTAssertThrowsError(try guarded.transition(id: first, command: .resume(
+            payload(pending, seconds: 5, offset: 6)))) {
+            XCTAssertEqual($0 as? FocusError, .invalidTransition)
+        }
+        XCTAssertEqual(saves, 0)
+        XCTAssertEqual(try writer.fetchAll(), [pending])
+        let corrupt = ModelContext(container)
+        corrupt.autosaveEnabled = false
+        corrupt.insert(FocusSession(id: second, state: "unknown", plannedSeconds: 30,
+            accumulatedActiveSeconds: 0, startedAt: start, checkpointAt: start))
+        try corrupt.save()
+        XCTAssertThrowsError(try writer.fetchAll()) {
+            XCTAssertEqual($0 as? FocusError, .invalidStoredData)
+        }
+        XCTAssertThrowsError(try guarded.transition(id: first, command: .recover(.end,
+            payload(pending, seconds: 5, offset: 6)))) {
+            XCTAssertEqual($0 as? FocusError, .invalidStoredData)
+        }
+        XCTAssertEqual(saves, 0)
+    }
+
+    func testMultipleActiveRecordsBlockReconciliationAndDecisionsWithoutAutomaticWrites() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let seed = ModelContext(container)
+        seed.autosaveEnabled = false
+        seed.insert(FocusSession(id: first, state: "running", plannedSeconds: 30,
+            accumulatedActiveSeconds: 0, activeSegmentStartedAt: start,
+            deadline: start.addingTimeInterval(30), startedAt: start, checkpointAt: start))
+        seed.insert(FocusSession(id: second, state: "paused", plannedSeconds: 30,
+            accumulatedActiveSeconds: 2, pausedAt: start.addingTimeInterval(2),
+            startedAt: start, checkpointAt: start.addingTimeInterval(2), recoveryRequired: true))
+        try seed.save()
+        let before = try seed.fetch(FetchDescriptor<FocusSession>())
+            .map(FocusSessionSnapshot.init).sorted { $0.id.uuidString < $1.id.uuidString }
+        var saves = 0
+        let writer = SwiftDataFocusRepository(container: container,
+            save: { _ in saves += 1; throw Injected.failed })
+        for (id, command) in [
+            (first, FocusTransition.reconcile(payload(before[0], seconds: 30, offset: 500))),
+            (second, .recover(.end, payload(before[1], seconds: 2, offset: 500)))
+        ] {
+            XCTAssertThrowsError(try writer.transition(id: id, command: command)) {
+                XCTAssertEqual($0 as? FocusError, .activeSessionConflict)
+            }
+        }
+        XCTAssertThrowsError(try writer.fetchAll()) {
+            XCTAssertEqual($0 as? FocusError, .activeSessionConflict)
+        }
+        XCTAssertEqual(saves, 0)
+        XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<FocusSession>())
+            .map(FocusSessionSnapshot.init).sorted { $0.id.uuidString < $1.id.uuidString }, before)
+    }
+
+    func testBackwardAndInconsistentWallRecoveryFreezesTrustedTime() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let writer = SwiftDataFocusRepository(container: container, makeID: { self.first })
+        let original = try writer.create(input: input(seconds: 30))
+        let running = try writer.transition(id: first, command: .checkpoint(
+            payload(original, seconds: 3.5, offset: 4)))
+        guard case .changed(let calculation) = try FocusTiming.reconcileOnRelaunch(
+            running, at: start.addingTimeInterval(-10)) else { return XCTFail("expected recovery") }
+        let pending = try writer.transition(id: first, command: calculation.transition)
+        XCTAssertEqual(pending.id, first)
+        XCTAssertEqual(pending.actualSeconds, 3.5)
+        XCTAssertEqual(pending.state, .paused)
+        XCTAssertTrue(pending.recoveryRequired)
+        XCTAssertEqual(try writer.transition(id: first, command: calculation.transition), pending)
+
+        // A structurally valid row may have a checkpoint later than its segment
+        // anchor (an interrupted or inconsistent wall timestamp). Do not turn a
+        // passed deadline into a completed row in this case.
+        let other = ModelContext(container)
+        other.autosaveEnabled = false
+        other.insert(FocusSession(id: second, state: "running", plannedSeconds: 30,
+            accumulatedActiveSeconds: 3.5, activeSegmentStartedAt: start.addingTimeInterval(4),
+            deadline: start.addingTimeInterval(30.5), startedAt: start,
+            checkpointAt: start.addingTimeInterval(5)))
+        // Resolve the first active row before installing a second one.
+        let ended = try writer.transition(id: first, command: .recover(.end,
+            payload(pending, seconds: 3.5, offset: 6)))
+        XCTAssertEqual(ended.state, .ended)
+        try other.save()
+        let inconsistent = try XCTUnwrap(writer.fetchAll().first { $0.id == second })
+        guard case .changed(let cautious) = try FocusTiming.reconcileOnRelaunch(
+            inconsistent, at: start.addingTimeInterval(100)) else { return XCTFail("expected recovery") }
+        let recovered = try writer.transition(id: second, command: cautious.transition)
+        XCTAssertEqual(recovered.state, .paused)
+        XCTAssertTrue(recovered.recoveryRequired)
+        XCTAssertEqual(recovered.actualSeconds, 3.5)
+        XCTAssertNil(recovered.endedAt)
+    }
+
+    func testInvalidStoredTerminalAndNonfiniteTimeBlockStartAndRecovery() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let seed = ModelContext(container)
+        seed.autosaveEnabled = false
+        seed.insert(FocusSession(id: first, state: "running", plannedSeconds: 30,
+            accumulatedActiveSeconds: 0, activeSegmentStartedAt: start,
+            deadline: start.addingTimeInterval(30), startedAt: start, checkpointAt: start))
+        seed.insert(FocusSession(id: second, state: "completed", plannedSeconds: 30,
+            accumulatedActiveSeconds: .nan, startedAt: start,
+            endedAt: start.addingTimeInterval(20), checkpointAt: start.addingTimeInterval(20)))
+        try seed.save()
+        let writer = SwiftDataFocusRepository(container: container)
+        XCTAssertThrowsError(try writer.create(input: input())) {
+            XCTAssertEqual($0 as? FocusError, .invalidStoredData)
+        }
+        XCTAssertThrowsError(try writer.fetchAll()) {
+            XCTAssertEqual($0 as? FocusError, .invalidStoredData)
+        }
+        XCTAssertThrowsError(try writer.transition(id: first, command: .reconcile(
+            FocusTransitionPayload(expectedCheckpointAt: start,
+                sampledAt: start.addingTimeInterval(40), accumulatedActiveSeconds: 30)))) {
+            XCTAssertEqual($0 as? FocusError, .invalidStoredData)
+        }
+        XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<FocusSession>()).count, 2)
     }
 
     func testStartSurvivesSeparateDiskOpenAndFailedStartDoesNotReachDisk() throws {
