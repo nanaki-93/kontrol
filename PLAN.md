@@ -83,7 +83,7 @@ Kontrol/
 | M3 — Project loop | F09, F10, F11 | Open a local project, choose among next features, mark one complete |
 | M4 — Companion + release | F12, F13 | Topic news, resilient offline behavior, packaged V1 |
 
-Implement one vertical slice at a time. Each feature below has observable acceptance checks. The release gate at the end covers interactions between features.
+Implement one vertical slice at a time. Each feature below has observable acceptance checks. For F00–F12, compile and run non-GUI checks per feature; defer hosted/interactive GUI acceptance, mockup screenshot comparison, keyboard/VoiceOver and live accessibility checks to the final F13 release gate in `docs/qa.md`. This is not a pass or a waiver of previously failed GUI tests. Keep a per-feature deferred-check ledger and reserve an uncontended GUI session for F13. The release gate also covers interactions between features.
 
 ---
 
@@ -382,7 +382,7 @@ Allowed feature states are `planned`, `ready`, `active`, `blocked`, `completed`;
 **Build**
 
 - Settings: the fixed Black / Red Terminal theme, focus default duration, news topics/feeds, optional AI provider credential and generation opt-in, project folder management, and local data export.
-- Support VoiceOver labels, full keyboard navigation, visible focus, dynamic type where practical on macOS, reduced motion, and text plus color for status. Check text and focus contrast in the selected palette.
+- Support VoiceOver labels, full keyboard navigation, visible focus, dynamic type where practical on macOS, reduced motion, and text plus color for status. Check text and focus contrast in the selected palette. Run and document all deferred F00–F12 hosted/interactive GUI tests and live acceptance (including outstanding failures), as specified in `docs/qa.md`.
 - Add a simple export of user-owned app data (tasks, schedule, lesson progress, focus history, feed preferences) with a versioned format. Project files are already in their folders and are not included in that export.
 - Package/notarize the Mac app after validating entitlements and bookmarks in a sandboxed build; write installation and local `.kontrol` authoring instructions.
 
@@ -431,6 +431,6 @@ Use familiar icons: house for Today, book for Learning, folder for Projects, tim
 
 ## Required implementation handoff
 
-For each feature, read its linked specification, inspect every linked mockup, implement the checklist, and run its acceptance checks. Record completion only after the behavior and visual state agree. Reuse shared components; do not hard-code sample dates, counts, article headlines or lesson content from the pictures. When a behavior needs a new visible state, add its mockup and update the function index in the same change.
+For each feature, read its linked specification, inspect every linked mockup, implement the checklist, and run non-GUI acceptance checks. Record the implementation gate separately from **deferred** interactive GUI acceptance; do not claim visual/keyboard/VoiceOver checks passed before F13. The final F13 task must run all deferred hosted tests and live GUI checks against every feature's mockups, resolve outstanding failures, and record evidence before release approval. Reuse shared components; do not hard-code sample dates, counts, article headlines or lesson content from the pictures. When a behavior needs a new visible state, add its mockup and update the function index in the same change.
 
 Keep changes in one feature at a time. F03 can be delivered with tasks and blocks before F06; integrate lesson links after F06. F04 can initially link tasks only. F08 stays optional at runtime but is included in the full V1 build. No deadline estimates are promises; assess each vertical slice after its acceptance checks pass.

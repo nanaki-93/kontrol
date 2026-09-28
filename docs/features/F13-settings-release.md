@@ -26,13 +26,15 @@
 - [ ] Export schemaVersion, exportedAt, appVersion, tasks, blocks, learning definitions/progress, sessions, feed preferences and general preferences.
 - [ ] Exclude Keychain data, bookmark blobs, diagnostics with sensitive paths, and external project contents.
 - [ ] Write export to a temp file, validate JSON and then save; canceled export creates no artifact. Import/restore is deferred and must not be advertised.
-- [ ] Run the release matrix in qa.md on a real Mac; signed/notarized distribution is a release step, not evidence this planning package is an app.
+- [ ] Reserve an active, uncontended GUI session and run the consolidated F00–F13 interactive GUI acceptance ledger in [qa.md](../qa.md): full/hosted suites, previously failed or skipped checks, keyboard and VoiceOver, enlarged text/reduced motion, live sandbox journeys/relaunch, and screenshot comparisons against all linked feature mockups. Fix failures rather than treating deferral as approval.
+- [ ] Run the remaining release matrix in qa.md on a real Mac; signed/notarized distribution is a release step, not evidence this planning package is an app.
 
 ## Acceptance checks
 
 - [ ] JSON export parses and contains the required fields with no credentials/bookmarks.
 - [ ] Disconnecting a project changes no project files.
 - [ ] The packaged sandboxed build can reopen and complete a feature in a selected folder.
+- [ ] Every deferred F00–F12 GUI check has recorded results and evidence; full hosted test suites pass, including F02's outstanding AX visibility, sheet dismissal, and native alert keyboard confirmation; live keyboard/VoiceOver, reduced motion, text sizes, mockup comparisons, and macOS 14 runtime (if available) are independently recorded. Unavailable manual observations are labeled unavailable, never passed, and automatable failures remain release blockers.
 
 ## Visual references
 
