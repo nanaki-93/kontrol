@@ -195,6 +195,54 @@ final class LessonExperienceTests: XCTestCase {
         }
     }
 
+    func testRevealAndAcknowledgementOnlyMutateTheirGateAndRequireFreshRevisionForChanges() throws {
+        let initial = try attempt("design")
+        let answered = try LessonExperience.edit(initial, status: .started,
+                                                 expectedRevision: 0, answer: "  🧪\n\n")
+        let revealed = try LessonExperience.reveal(answered, status: .started,
+                                                   expectedRevision: 1, now: time)
+        XCTAssertEqual(revealed.answerDraft, answered.answerDraft)
+        XCTAssertEqual(revealed.pinnedContentData, answered.pinnedContentData)
+        XCTAssertEqual(revealed.solutionRevealedAt, time)
+        XCTAssertNil(revealed.selfCheckAcknowledgedAt)
+        XCTAssertEqual(revealed.revision, 2)
+        let invalidTime = Date(timeIntervalSince1970: .infinity)
+        XCTAssertEqual(try LessonExperience.reveal(revealed, status: .started,
+                                                   expectedRevision: -1, now: invalidTime), revealed)
+        XCTAssertThrowsError(try LessonExperience.acknowledge(revealed, status: .started,
+            expectedRevision: 1, acknowledged: true, now: time)) {
+            XCTAssertEqual($0 as? LessonExperienceError, .staleRevision)
+        }
+        XCTAssertThrowsError(try LessonExperience.acknowledge(revealed, status: .started,
+            expectedRevision: 2, acknowledged: true, now: invalidTime)) {
+            XCTAssertEqual($0 as? LessonExperienceError, .invalidTransition)
+        }
+        let checked = try LessonExperience.acknowledge(revealed, status: .started,
+            expectedRevision: 2, acknowledged: true, now: time.addingTimeInterval(1))
+        XCTAssertEqual(checked.revision, 3)
+        XCTAssertEqual(checked.answerDraft, revealed.answerDraft)
+        XCTAssertEqual(checked.solutionRevealedAt, time)
+        XCTAssertEqual(checked.selfCheckAcknowledgedAt, time.addingTimeInterval(1))
+        XCTAssertEqual(try LessonExperience.acknowledge(checked, status: .started,
+            expectedRevision: -1, acknowledged: true, now: invalidTime), checked)
+        XCTAssertThrowsError(try LessonExperience.acknowledge(checked, status: .started,
+            expectedRevision: 2, acknowledged: false, now: time)) {
+            XCTAssertEqual($0 as? LessonExperienceError, .staleRevision)
+        }
+        let cleared = try LessonExperience.acknowledge(checked, status: .started,
+            expectedRevision: 3, acknowledged: false, now: invalidTime)
+        XCTAssertEqual(cleared.revision, 4)
+        XCTAssertNil(cleared.selfCheckAcknowledgedAt)
+        XCTAssertEqual(cleared.solutionRevealedAt, time)
+        XCTAssertEqual(cleared.answerDraft, checked.answerDraft)
+        XCTAssertEqual(try LessonExperience.acknowledge(cleared, status: .started,
+            expectedRevision: -1, acknowledged: false, now: invalidTime), cleared)
+        XCTAssertThrowsError(try LessonExperience.complete(cleared, progress: progress(initial),
+            expectedRevision: 4, now: time)) {
+            XCTAssertEqual($0 as? LessonExperienceError, .completionRequirementsMissing)
+        }
+    }
+
     func testRepeatedTransitionsStillValidateActiveStateAndPinBeforeIdempotence() throws {
         let a = try attempt()
         let revealed = try LessonExperience.reveal(a, status: .started, expectedRevision: 0, now: time)

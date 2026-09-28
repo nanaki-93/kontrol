@@ -9,6 +9,9 @@ protocol CatalogRepository {
     func openLesson(lessonID: String, now: Date) throws -> LessonMutationResult
     func loadLesson(lessonID: String) throws -> LessonDetailSnapshot
     func saveAnswer(attemptID: UUID, expectedRevision: Int, answer: String) throws -> LessonMutationResult
+    func revealSolution(attemptID: UUID, expectedRevision: Int, now: Date) throws -> LessonMutationResult
+    func setSelfCheckAcknowledged(attemptID: UUID, expectedRevision: Int,
+                                  acknowledged: Bool, now: Date) throws -> LessonMutationResult
 }
 
 enum CatalogImportResult: Equatable {
@@ -296,6 +299,46 @@ final class SwiftDataCatalogRepository: CatalogRepository {
         row.revision = edited.revision
         // Project the complete receipt in the write context before the commit;
         // a failed save cannot publish speculative text or a bumped revision.
+        let updated = try detail(lessonID: row.lessonID, in: context)
+        let receipt = try result(.changed, detail: updated, in: context)
+        try beforeSave()
+        try save(context)
+        return receipt
+    }
+
+    func revealSolution(attemptID: UUID, expectedRevision: Int, now: Date) throws -> LessonMutationResult {
+        try transition(attemptID: attemptID) { attempt, status in
+            try LessonExperience.reveal(attempt, status: status, expectedRevision: expectedRevision, now: now)
+        }
+    }
+
+    func setSelfCheckAcknowledged(attemptID: UUID, expectedRevision: Int,
+                                  acknowledged: Bool, now: Date) throws -> LessonMutationResult {
+        try transition(attemptID: attemptID) { attempt, status in
+            try LessonExperience.acknowledge(attempt, status: status, expectedRevision: expectedRevision,
+                                             acknowledged: acknowledged, now: now)
+        }
+    }
+
+    private func transition(attemptID: UUID,
+                            apply: (LessonAttemptSnapshot, LessonProgressStatus) throws -> LessonAttemptSnapshot
+    ) throws -> LessonMutationResult {
+        let context = ModelContext(container)
+        context.autosaveEnabled = false
+        let matches = try context.fetch(FetchDescriptor<LessonAttempt>()).filter { $0.id == attemptID }
+        guard matches.count <= 1 else { throw LessonExperienceError.invalidStoredData }
+        guard let row = matches.first else { throw LessonExperienceError.attemptNotFound }
+        // Validate the unique progress/attempt pairing and pin even for no-ops.
+        let current = try detail(lessonID: row.lessonID, in: context)
+        guard let attempt = current.attempt, attempt.id == attemptID,
+              let progress = current.progress else { throw LessonExperienceError.invalidStoredData }
+        let next = try apply(attempt, progress.status)
+        if next == attempt { return try result(.unchanged, detail: current, in: context) }
+        row.solutionRevealedAt = next.solutionRevealedAt
+        row.selfCheckAcknowledgedAt = next.selfCheckAcknowledgedAt
+        row.revision = next.revision
+        // Validate every receipt projection before committing; never report a
+        // successful save as failed due to a later read.
         let updated = try detail(lessonID: row.lessonID, in: context)
         let receipt = try result(.changed, detail: updated, in: context)
         try beforeSave()

@@ -43,6 +43,17 @@ private final class ReadingCatalogRepository: CatalogRepository {
         writes += 1
         throw ReadError.unavailable
     }
+
+    func revealSolution(attemptID: UUID, expectedRevision: Int, now: Date) throws -> LessonMutationResult {
+        writes += 1
+        throw ReadError.unavailable
+    }
+
+    func setSelfCheckAcknowledged(attemptID: UUID, expectedRevision: Int,
+                                  acknowledged: Bool, now: Date) throws -> LessonMutationResult {
+        writes += 1
+        throw ReadError.unavailable
+    }
 }
 
 @MainActor

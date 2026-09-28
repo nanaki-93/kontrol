@@ -393,5 +393,12 @@ private final class FailingCatalogReader: CatalogRepository {
     func saveAnswer(attemptID: UUID, expectedRevision: Int, answer: String) throws -> LessonMutationResult {
         throw ReadError.injected
     }
+    func revealSolution(attemptID: UUID, expectedRevision: Int, now: Date) throws -> LessonMutationResult {
+        throw ReadError.injected
+    }
+    func setSelfCheckAcknowledged(attemptID: UUID, expectedRevision: Int,
+                                  acknowledged: Bool, now: Date) throws -> LessonMutationResult {
+        throw ReadError.injected
+    }
     func importIfNeeded(_ catalog: ValidatedCatalog) throws -> CatalogImportResult { .unchanged }
 }

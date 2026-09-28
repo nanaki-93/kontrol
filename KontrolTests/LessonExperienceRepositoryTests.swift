@@ -417,6 +417,176 @@ final class LessonExperienceRepositoryTests: XCTestCase {
         }
     }
 
+    func testRevealAndSelfCheckPersistExactAnswerAndIdempotentTimestamps() throws {
+        let (container, writer, id) = try setup()
+        let second = SwiftDataCatalogRepository(container: container)
+        let opened = try writer.openLesson(lessonID: id, now: first)
+        let attemptID = try XCTUnwrap(opened.detail.attempt?.id)
+        let exact = "  🧪\n    answer\n\n"
+        let saved = try writer.saveAnswer(attemptID: attemptID, expectedRevision: 0, answer: exact)
+        let originalSlots = saved.catalog.slots
+        let originalProgress = saved.detail.progress
+        let originalPin = saved.detail.attempt?.pinnedContentData
+        XCTAssertThrowsError(try second.setSelfCheckAcknowledged(attemptID: attemptID,
+            expectedRevision: 1, acknowledged: true, now: first)) {
+            XCTAssertEqual($0 as? LessonExperienceError, .invalidTransition)
+        }
+        XCTAssertThrowsError(try second.setSelfCheckAcknowledged(attemptID: attemptID,
+            expectedRevision: 1, acknowledged: false, now: first)) {
+            XCTAssertEqual($0 as? LessonExperienceError, .invalidTransition)
+        }
+        let revealed = try second.revealSolution(attemptID: attemptID, expectedRevision: 1, now: first)
+        XCTAssertEqual(revealed.outcome, .changed)
+        XCTAssertEqual(revealed.detail.attempt?.answerDraft, exact)
+        XCTAssertEqual(revealed.detail.attempt?.revision, 2)
+        XCTAssertEqual(revealed.detail.attempt?.solutionRevealedAt, first)
+        XCTAssertNil(revealed.detail.attempt?.selfCheckAcknowledgedAt)
+        XCTAssertEqual(revealed.detail.attempt?.pinnedContentData, originalPin)
+        XCTAssertEqual(revealed.detail.progress, originalProgress)
+        XCTAssertEqual(revealed.catalog.slots, originalSlots)
+        XCTAssertTrue(revealed.history.isEmpty)
+        XCTAssertNil(revealed.replacedSlot)
+        XCTAssertEqual(try writer.loadLesson(lessonID: id), revealed.detail)
+
+        enum Injected: Error { case unexpectedSave }
+        let noSave = SwiftDataCatalogRepository(container: container,
+            beforeSave: { throw Injected.unexpectedSave })
+        let repeatReveal = try noSave.revealSolution(attemptID: attemptID, expectedRevision: 0, now: later)
+        XCTAssertEqual(repeatReveal.outcome, .unchanged)
+        XCTAssertEqual(repeatReveal.detail, revealed.detail)
+        let checked = try writer.setSelfCheckAcknowledged(attemptID: attemptID,
+            expectedRevision: 2, acknowledged: true, now: later)
+        XCTAssertEqual(checked.outcome, .changed)
+        XCTAssertEqual(checked.detail.attempt?.revision, 3)
+        XCTAssertEqual(checked.detail.attempt?.solutionRevealedAt, first)
+        XCTAssertEqual(checked.detail.attempt?.selfCheckAcknowledgedAt, later)
+        XCTAssertEqual(checked.detail.attempt?.answerDraft, exact)
+        XCTAssertEqual(checked.detail.progress, originalProgress)
+        XCTAssertEqual(checked.catalog.slots, originalSlots)
+        XCTAssertEqual(try noSave.setSelfCheckAcknowledged(attemptID: attemptID,
+            expectedRevision: 0, acknowledged: true, now: Date.distantFuture).outcome, .unchanged)
+        XCTAssertEqual(try second.loadLesson(lessonID: id), checked.detail)
+        XCTAssertThrowsError(try writer.setSelfCheckAcknowledged(attemptID: attemptID,
+            expectedRevision: 2, acknowledged: false, now: later)) {
+            XCTAssertEqual($0 as? LessonExperienceError, .staleRevision)
+        }
+        let cleared = try second.setSelfCheckAcknowledged(attemptID: attemptID,
+            expectedRevision: 3, acknowledged: false, now: later)
+        XCTAssertEqual(cleared.outcome, .changed)
+        XCTAssertEqual(cleared.detail.attempt?.revision, 4)
+        XCTAssertNil(cleared.detail.attempt?.selfCheckAcknowledgedAt)
+        XCTAssertEqual(cleared.detail.attempt?.solutionRevealedAt, first)
+        XCTAssertEqual(cleared.detail.attempt?.answerDraft, exact)
+        XCTAssertEqual(try noSave.setSelfCheckAcknowledged(attemptID: attemptID,
+            expectedRevision: 0, acknowledged: false, now: later).detail, cleared.detail)
+        let rechecked = try writer.setSelfCheckAcknowledged(attemptID: attemptID,
+            expectedRevision: 4, acknowledged: true, now: later)
+        let edited = try second.saveAnswer(attemptID: attemptID, expectedRevision: 5, answer: "updated\n")
+        XCTAssertEqual(rechecked.detail.attempt?.selfCheckAcknowledgedAt, later)
+        XCTAssertEqual(edited.detail.attempt?.revision, 6)
+        XCTAssertNil(edited.detail.attempt?.selfCheckAcknowledgedAt)
+        XCTAssertEqual(edited.detail.attempt?.solutionRevealedAt, first)
+        XCTAssertThrowsError(try writer.setSelfCheckAcknowledged(attemptID: attemptID,
+            expectedRevision: 5, acknowledged: true, now: later)) {
+            XCTAssertEqual($0 as? LessonExperienceError, .staleRevision)
+        }
+        let acknowledgedAgain = try writer.setSelfCheckAcknowledged(attemptID: attemptID,
+            expectedRevision: 6, acknowledged: true, now: later)
+        XCTAssertEqual(acknowledgedAgain.detail.attempt?.answerDraft, "updated\n")
+        XCTAssertEqual(acknowledgedAgain.detail.attempt?.revision, 7)
+    }
+
+    func testRevealAndSelfCheckFailuresLeaveDurableStateAcrossReopen() throws {
+        enum Injected: Error { case failure }
+        for failBefore in [true, false] {
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "KontrolGateFailure-\(UUID().uuidString)/Kontrol.store")
+            var id = ""
+            var attemptID = UUID()
+            var expected: LessonDetailSnapshot?
+            try autoreleasepool {
+                let container = try ModelContainerFactory().makeContainer(mode: .persistent(url))
+                let writer = SwiftDataCatalogRepository(container: container)
+                _ = try writer.importIfNeeded(BundledCatalogLoader.load())
+                id = try XCTUnwrap(writer.loadSnapshot().slots.first?.lessonID)
+                expected = try writer.openLesson(lessonID: id, now: first).detail
+                attemptID = try XCTUnwrap(expected?.attempt?.id)
+                let failing = SwiftDataCatalogRepository(container: container,
+                    beforeSave: { if failBefore { throw Injected.failure } },
+                    save: { _ in if !failBefore { throw Injected.failure } })
+                XCTAssertThrowsError(try failing.revealSolution(attemptID: attemptID,
+                    expectedRevision: 0, now: first)) { XCTAssertTrue($0 is Injected) }
+                XCTAssertEqual(try writer.loadLesson(lessonID: id), expected)
+                expected = try writer.revealSolution(attemptID: attemptID,
+                    expectedRevision: 0, now: first).detail
+                XCTAssertThrowsError(try failing.setSelfCheckAcknowledged(attemptID: attemptID,
+                    expectedRevision: 1, acknowledged: true, now: later)) { XCTAssertTrue($0 is Injected) }
+                XCTAssertEqual(try writer.loadLesson(lessonID: id), expected)
+                expected = try writer.setSelfCheckAcknowledged(attemptID: attemptID,
+                    expectedRevision: 1, acknowledged: true, now: later).detail
+                XCTAssertThrowsError(try failing.setSelfCheckAcknowledged(attemptID: attemptID,
+                    expectedRevision: 2, acknowledged: false, now: later)) { XCTAssertTrue($0 is Injected) }
+                XCTAssertEqual(try writer.loadLesson(lessonID: id), expected)
+            }
+            try autoreleasepool {
+                let reopened = try ModelContainerFactory().makeContainer(mode: .persistent(url))
+                let reader = SwiftDataCatalogRepository(container: reopened)
+                XCTAssertEqual(try reader.loadLesson(lessonID: id), expected)
+                XCTAssertEqual(expected?.attempt?.solutionRevealedAt, first)
+                XCTAssertEqual(expected?.attempt?.selfCheckAcknowledgedAt, later)
+                XCTAssertEqual(expected?.attempt?.revision, 2)
+                let cleared = try reader.setSelfCheckAcknowledged(attemptID: attemptID,
+                    expectedRevision: 2, acknowledged: false, now: later)
+                XCTAssertNil(cleared.detail.attempt?.selfCheckAcknowledgedAt)
+                XCTAssertEqual(cleared.detail.attempt?.solutionRevealedAt, first)
+                XCTAssertEqual(cleared.detail.attempt?.revision, 3)
+            }
+        }
+    }
+
+    func testGateCommandsRejectInvalidStateAndFailedReceiptWithoutWriting() throws {
+        let (container, writer, id) = try setup()
+        let attemptID = try XCTUnwrap(writer.openLesson(lessonID: id, now: first).detail.attempt?.id)
+        XCTAssertThrowsError(try writer.revealSolution(attemptID: attemptID, expectedRevision: 1, now: first)) {
+            XCTAssertEqual($0 as? LessonExperienceError, .staleRevision)
+        }
+        XCTAssertThrowsError(try writer.revealSolution(attemptID: attemptID,
+            expectedRevision: 0, now: Date(timeIntervalSince1970: .infinity))) {
+            XCTAssertEqual($0 as? LessonExperienceError, .invalidTransition)
+        }
+        XCTAssertThrowsError(try writer.revealSolution(attemptID: UUID(), expectedRevision: 0, now: first)) {
+            XCTAssertEqual($0 as? LessonExperienceError, .attemptNotFound)
+        }
+        let invalid = ModelContext(container)
+        invalid.insert(LessonProgress(lessonID: "broken-history", status: .completed, completedAt: later))
+        try invalid.save()
+        XCTAssertThrowsError(try writer.revealSolution(attemptID: attemptID, expectedRevision: 0, now: first)) {
+            XCTAssertEqual($0 as? LessonExperienceError, .invalidStoredData)
+        }
+        XCTAssertNil(try XCTUnwrap(rows(LessonAttempt.self, in: container).first).solutionRevealedAt)
+        let repair = ModelContext(container)
+        repair.delete(try XCTUnwrap(repair.fetch(FetchDescriptor<LessonProgress>()).first {
+            $0.lessonID == "broken-history"
+        }))
+        try repair.save()
+        _ = try writer.revealSolution(attemptID: attemptID, expectedRevision: 0, now: first)
+        let dismissed = ModelContext(container)
+        let progress = try XCTUnwrap(dismissed.fetch(FetchDescriptor<LessonProgress>()).first { $0.lessonID == id })
+        progress.status = .dismissed
+        progress.dismissedAt = later
+        try dismissed.save()
+        for operation in [
+            { try writer.revealSolution(attemptID: attemptID, expectedRevision: 0, now: self.later) },
+            { try writer.setSelfCheckAcknowledged(attemptID: attemptID,
+                expectedRevision: 1, acknowledged: true, now: self.later) }
+        ] {
+            XCTAssertThrowsError(try operation()) {
+                XCTAssertEqual($0 as? LessonExperienceError, .invalidTransition)
+            }
+        }
+        XCTAssertEqual(try writer.loadLesson(lessonID: id).attempt?.revision, 1)
+    }
+
     func testPreSaveAndSaveFailureLeaveNoAttemptProgressOrReceipt() throws {
         for failBefore in [true, false] {
             let (container, writer, id) = try setup()
