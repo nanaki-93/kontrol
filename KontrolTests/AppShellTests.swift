@@ -70,7 +70,7 @@ final class AppShellTests: XCTestCase {
         XCTAssertEqual(navigation.learningRoute, .choices)
     }
 
-    func testNavigationMetadataAndRouting() {
+    func testNavigationMetadataAndRouting() throws {
         let destinations = AppDestination.allCases
         XCTAssertEqual(destinations.map(\.title), ["Today", "Learning", "Projects", "Focus", "Tasks", "News", "Settings"])
         XCTAssertEqual(destinations.map(\.symbol), ["house", "book", "folder", "timer", "checkmark.square", "newspaper", "gearshape"])
@@ -93,6 +93,23 @@ final class AppShellTests: XCTestCase {
                 XCTAssertFalse(destination.foundationMessage.isEmpty)
             }
         }
+        // The shell consumes the same coherent destination + ID route published
+        // by the guarded entry operation. Rendering the detail only reads it.
+        let dependencies = try makeDependencies()
+        _ = try dependencies.catalogRepository.importIfNeeded(BundledCatalogLoader.load())
+        dependencies.learningCatalogStore.loadIfNeeded()
+        let id = try XCTUnwrap(dependencies.learningCatalogStore.state.snapshot?.slots.first?.lessonID)
+        let suite = "AppShellRouting.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let navigation = NavigationStore(preferences: UserDefaultsDestinationPreferences(defaults: defaults))
+        let shell = AppShell(navigation: navigation, dependencies: dependencies)
+        navigation.attachDrafts(shell.dependencies.lessonDraftStore)
+        XCTAssertEqual(AppShell.contentKind(for: navigation.selectedDestination), .today)
+        navigation.enterLesson(id: id)
+        XCTAssertEqual(AppShell.contentKind(for: navigation.selectedDestination), .learning)
+        XCTAssertEqual(navigation.learningRoute, .detail(id))
+        XCTAssertNil(try dependencies.catalogRepository.loadLesson(lessonID: id).attempt)
     }
 
     func testRenderedNavigationAccessibilityAndKeyboardOrder() throws {

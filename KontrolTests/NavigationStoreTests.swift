@@ -1,3 +1,5 @@
+import AppKit
+import Combine
 import Foundation
 import SwiftData
 import XCTest
@@ -82,6 +84,7 @@ final class NavigationStoreTests: XCTestCase {
         let navigation = NavigationStore(preferences: preferences)
         navigation.attachDrafts(graph.lessonDraftStore)
         navigation.showLesson(id: lessonID)
+        XCTAssertEqual(navigation.selectedDestination, .learning)
         XCTAssertEqual(navigation.learningRoute, .detail(lessonID))
         graph.lessonDraftStore.edit("  answer 🧪\n", attemptID: attemptID)
         fail = true
@@ -96,8 +99,8 @@ final class NavigationStoreTests: XCTestCase {
         navigation.showLesson(id: "another-stable-id")
         XCTAssertEqual(navigation.learningRoute, .detail(lessonID))
         navigation.select(.focus)
-        XCTAssertEqual(navigation.selectedDestination, .today)
-        XCTAssertEqual(preferences.writes, 0)
+        XCTAssertEqual(navigation.selectedDestination, .learning)
+        XCTAssertEqual(preferences.writes, 1)
         navigation.cancelTransition()
         XCTAssertEqual(navigation.learningRoute, .detail(lessonID))
         navigation.backToChoices()
@@ -113,7 +116,105 @@ final class NavigationStoreTests: XCTestCase {
         XCTAssertEqual(navigation.learningRoute, .choices)
         navigation.select(.focus)
         XCTAssertEqual(navigation.selectedDestination, .focus)
-        XCTAssertEqual(preferences.writes, 1)
+        XCTAssertEqual(preferences.writes, 2)
+    }
+
+    func testCrossDestinationEntryFailsWithoutPartialRouteThenCancelAndRetryByStableID() throws {
+        enum Injected: Error { case save }
+        var fail = false
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataCatalogRepository(container: container, beforeSave: {
+            if fail { throw Injected.save }
+        })
+        _ = try repository.importIfNeeded(BundledCatalogLoader.load())
+        let graph = AppDependencies(container: container, catalogRepository: repository)
+        graph.learningCatalogStore.loadIfNeeded()
+        let ids = try XCTUnwrap(graph.learningCatalogStore.state.snapshot?.slots.prefix(2).map(\.lessonID))
+        XCTAssertEqual(ids.count, 2)
+        let opened = try graph.learningCatalogStore.openLesson(lessonID: ids[0])
+        let attemptID = try XCTUnwrap(opened.detail.attempt?.id)
+        graph.lessonDraftStore.observe(opened.detail)
+        let preferences = CountingPreferences()
+        let navigation = NavigationStore(preferences: preferences)
+        navigation.attachDrafts(graph.lessonDraftStore)
+        navigation.select(.learning)
+        navigation.showHistory()
+        navigation.select(.today)
+        XCTAssertEqual(navigation.learningRoute, .history)
+        XCTAssertEqual(preferences.savedDestination, AppDestination.today.rawValue)
+        graph.lessonDraftStore.edit("  Today → schedule 🧪\n", attemptID: attemptID)
+        var publishedPending: [NavigationStore.Transition?] = []
+        let subscription = navigation.$pendingTransition.dropFirst().sink { publishedPending.append($0) }
+        defer { subscription.cancel() }
+        fail = true
+        navigation.enterLesson(id: ids[1])
+        XCTAssertEqual(navigation.selectedDestination, .today)
+        XCTAssertEqual(navigation.learningRoute, .history)
+        XCTAssertEqual(navigation.pendingTransition, .lessonEntry(ids[1]))
+        XCTAssertEqual(navigation.saveError, .persistenceFailure)
+        XCTAssertEqual(preferences.savedDestination, AppDestination.today.rawValue)
+        XCTAssertEqual(preferences.writes, 2)
+        XCTAssertTrue(try XCTUnwrap(graph.lessonDraftStore.buffers[attemptID]).isDirty)
+        XCTAssertTrue(AppShell.showsStayHere(for: navigation))
+        navigation.cancelTransition()
+        XCTAssertEqual(publishedPending, [.lessonEntry(ids[1]), nil], "Cancel must notify the shell")
+        XCTAssertFalse(AppShell.showsStayHere(for: navigation), "Stay here disappears on cancellation")
+        XCTAssertNil(navigation.pendingTransition)
+        XCTAssertEqual(navigation.saveError, .persistenceFailure)
+        XCTAssertEqual(graph.lessonDraftStore.buffers[attemptID]?.text, "  Today → schedule 🧪\n")
+        XCTAssertTrue(try XCTUnwrap(graph.lessonDraftStore.buffers[attemptID]).isDirty)
+        XCTAssertEqual(preferences.savedDestination, AppDestination.today.rawValue)
+        XCTAssertEqual(navigation.selectedDestination, .today)
+        XCTAssertEqual(navigation.learningRoute, .history)
+        navigation.enterLesson(id: ids[1]) // schedule link requests the same stable ID
+        XCTAssertEqual(navigation.pendingTransition, .lessonEntry(ids[1]))
+        fail = false
+        navigation.retryTransition()
+        XCTAssertNil(navigation.pendingTransition)
+        XCTAssertNil(navigation.saveError)
+        XCTAssertEqual(navigation.selectedDestination, .learning)
+        XCTAssertEqual(navigation.learningRoute, .detail(ids[1]))
+        XCTAssertEqual(preferences.savedDestination, AppDestination.learning.rawValue)
+        XCTAssertEqual(preferences.writes, 3)
+        XCTAssertEqual(try repository.loadLesson(lessonID: ids[0]).attempt?.answerDraft, "  Today → schedule 🧪\n")
+        XCTAssertEqual(graph.lessonDraftStore.buffers[attemptID]?.status, .saved)
+        navigation.enterLesson(id: ids[1])
+        XCTAssertEqual(preferences.writes, 3)
+        // Routing never opens an attempt; the explicit Open/Resume action owns that mutation.
+        XCTAssertNil(try repository.loadLesson(lessonID: ids[1]).attempt)
+    }
+
+    func testFailedLifecycleFlushKeepsDraftAndErrorVisibleUntilReturnAndQuitRetry() throws {
+        enum Injected: Error { case save }
+        var fail = false
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataCatalogRepository(container: container, beforeSave: {
+            if fail { throw Injected.save }
+        })
+        _ = try repository.importIfNeeded(BundledCatalogLoader.load())
+        let graph = AppDependencies(container: container, catalogRepository: repository)
+        graph.learningCatalogStore.loadIfNeeded()
+        let id = try XCTUnwrap(graph.learningCatalogStore.state.snapshot?.slots.first?.lessonID)
+        let attempt = try XCTUnwrap(graph.learningCatalogStore.openLesson(lessonID: id).detail.attempt)
+        graph.lessonDraftStore.observe(try repository.loadLesson(lessonID: id))
+        let navigation = NavigationStore(preferences: CountingPreferences())
+        navigation.attachDrafts(graph.lessonDraftStore)
+        navigation.enterLesson(id: id)
+        graph.lessonDraftStore.edit("recover me", attemptID: attempt.id)
+        let lifecycle = KontrolLifecycleDelegate()
+        lifecycle.navigation = navigation
+        fail = true
+        lifecycle.applicationDidResignActive(Notification(name: NSApplication.didResignActiveNotification))
+        XCTAssertEqual(navigation.saveError, .persistenceFailure)
+        XCTAssertEqual(navigation.learningRoute, .detail(id))
+        XCTAssertTrue(try XCTUnwrap(graph.lessonDraftStore.buffers[attempt.id]).isDirty)
+        XCTAssertFalse(lifecycle.flushBeforeTermination())
+        XCTAssertFalse(WindowCloseGuard(flush: { navigation.flushForLifecycle() }).makeCoordinator().flush())
+        XCTAssertEqual(navigation.saveError, .persistenceFailure)
+        fail = false
+        XCTAssertTrue(lifecycle.flushBeforeTermination())
+        XCTAssertNil(navigation.saveError)
+        XCTAssertEqual(try repository.loadLesson(lessonID: id).attempt?.answerDraft, "recover me")
     }
 
     func testUnknownValueFallsBackWithoutChangingPreferencesOrSwiftDataStore() throws {

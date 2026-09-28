@@ -25,7 +25,16 @@ struct UserDefaultsDestinationPreferences: DestinationPreferences {
 
 @MainActor
 final class NavigationStore: ObservableObject {
-    @Published private(set) var selectedDestination: AppDestination
+    /// Destination and route publish as one state change. A cross-destination entry
+    /// can never expose Learning with the previous lesson (or a placeholder route).
+    private struct Location {
+        var destination: AppDestination
+        var route: LearningRoute
+    }
+    @Published private var location: Location
+    var selectedDestination: AppDestination { location.destination }
+    var learningRoute: LearningRoute { location.route }
+
     /// Window navigation uses identities, never positions in the rotating choice list.
     enum LearningRoute: Equatable {
         case choices
@@ -37,12 +46,12 @@ final class NavigationStore: ObservableObject {
         case destination(AppDestination)
         case topic(String?)
         case learning(LearningRoute)
+        case lessonEntry(String)
     }
 
-    @Published private(set) var learningRoute: LearningRoute = .choices
     @Published private(set) var selectedTopicID: String?
     @Published private(set) var saveError: LessonExperienceError?
-    private(set) var pendingTransition: Transition?
+    @Published private(set) var pendingTransition: Transition?
     private weak var drafts: LessonDraftStore?
     private var preferences: any DestinationPreferences
 
@@ -53,7 +62,8 @@ final class NavigationStore: ObservableObject {
     init(preferences: (any DestinationPreferences)? = nil) {
         let preferences = preferences ?? UserDefaultsDestinationPreferences()
         self.preferences = preferences
-        selectedDestination = preferences.savedDestination.flatMap(AppDestination.init(rawValue:)) ?? .today
+        location = Location(destination: preferences.savedDestination.flatMap(AppDestination.init(rawValue:)) ?? .today,
+                            route: .choices)
     }
 
     func select(_ destination: AppDestination) {
@@ -64,8 +74,14 @@ final class NavigationStore: ObservableObject {
         transition(to: .topic(id))
     }
 
+    /// Stable-ID entry from Today, a schedule block, or Learning. Flush first;
+    /// retry replays the entire destination + route request, never half of it.
+    func enterLesson(id: String) {
+        transition(to: .lessonEntry(id))
+    }
+
     func showLesson(id: String) {
-        transition(to: .learning(.detail(id)))
+        enterLesson(id: id)
     }
 
     func showHistory() {
@@ -106,6 +122,7 @@ final class NavigationStore: ObservableObject {
         case .destination(let value): unchanged = value == selectedDestination
         case .topic(let value): unchanged = value == selectedTopicID && learningRoute == .choices
         case .learning(let value): unchanged = value == learningRoute
+        case .lessonEntry(let id): unchanged = selectedDestination == .learning && learningRoute == .detail(id)
         }
         guard !unchanged else { return }
         guard flushForLifecycle() else {
@@ -115,12 +132,17 @@ final class NavigationStore: ObservableObject {
         pendingTransition = nil
         switch next {
         case .destination(let value):
-            selectedDestination = value
+            location.destination = value
             preferences.savedDestination = value.rawValue
         case .topic(let value):
             selectedTopicID = value
-            learningRoute = .choices
-        case .learning(let value): learningRoute = value
+            location.route = .choices
+        case .learning(let value): location.route = value
+        case .lessonEntry(let id):
+            // Assign the whole location once so SwiftUI sees one coherent route.
+            let changesDestination = selectedDestination != .learning
+            location = Location(destination: .learning, route: .detail(id))
+            if changesDestination { preferences.savedDestination = AppDestination.learning.rawValue }
         }
     }
 }

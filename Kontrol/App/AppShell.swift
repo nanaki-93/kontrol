@@ -63,6 +63,10 @@ struct AppShell: View {
         destination == selected ? .isSelected : []
     }
 
+    static func showsStayHere(for navigation: NavigationStore) -> Bool {
+        navigation.saveError != nil && navigation.pendingTransition != nil
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             navigationBar
@@ -75,8 +79,10 @@ struct AppShell: View {
                     }
                 }
                 .padding(.horizontal, AppMetrics.contentInset)
-                Button("Stay here") { navigation.cancelTransition() }
-                    .padding(.horizontal, AppMetrics.contentInset)
+                if Self.showsStayHere(for: navigation) {
+                    Button("Stay here") { navigation.cancelTransition() }
+                        .padding(.horizontal, AppMetrics.contentInset)
+                }
             }
             ScrollView {
                 Group {
@@ -112,8 +118,8 @@ struct AppShell: View {
         .background(WindowCloseGuard { navigation.flushForLifecycle() })
     }
 
-    // Step 3.4 adds the exercise UI. Read by stable ID here, never by the
-    // rotating slot index or a possibly updated installed definition.
+    // Reading a route does not start an attempt. Resolve by stable ID here,
+    // never by a rotating slot index or a possibly updated definition.
     private func lessonRoute(id: String) -> some View {
         VStack(alignment: .leading, spacing: AppMetrics.space4) {
             Button("Back to choices") { navigation.backToChoices() }
