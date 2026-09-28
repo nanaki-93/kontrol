@@ -1,3 +1,4 @@
+import Foundation
 import SwiftData
 
 /// Created only after the store is open and its bundled catalog is initialized.
@@ -8,13 +9,20 @@ final class AppDependencies {
     let catalogRepository: any CatalogRepository
     let taskStore: TaskStore
     let scheduleStore: ScheduleStore
+    let focusService: FocusService
 
     init(container: ModelContainer, catalogRepository: any CatalogRepository,
          taskRepository: (any TaskRepository)? = nil,
-         scheduleRepository: (any ScheduleRepository)? = nil) {
+         scheduleRepository: (any ScheduleRepository)? = nil,
+         focusRepository: (any FocusRepository)? = nil,
+         focusWallClock: @escaping () -> Date = Date.init,
+         focusMonotonicClock: @escaping () -> ContinuousClock.Instant = { ContinuousClock().now }) {
         self.container = container
         self.catalogRepository = catalogRepository
         taskStore = TaskStore(repository: taskRepository ?? SwiftDataTaskRepository(container: container))
         scheduleStore = ScheduleStore(repository: scheduleRepository ?? SwiftDataScheduleRepository(container: container))
+        focusService = FocusService(repository: focusRepository ?? SwiftDataFocusRepository(container: container),
+                                    wallClock: focusWallClock, monotonicClock: focusMonotonicClock)
+        focusService.loadIfNeeded()
     }
 }
