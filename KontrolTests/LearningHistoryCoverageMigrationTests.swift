@@ -50,6 +50,97 @@ final class LearningHistoryCoverageMigrationTests: XCTestCase {
         return (ids[0], ids[1], ids[2], pin)
     }
 
+    func testCompletedJourneyFiltersArchivedHistoryAndCoverageAcrossUpgradeAndDiskReopen() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "KontrolF07Journey-\(UUID())/Kontrol.store")
+        let catalog = try BundledCatalogLoader.load()
+        let completedAt = date.addingTimeInterval(120)
+        var originalSlots: [LessonSlotSnapshot] = []
+        var finalSlots: [LessonSlotSnapshot] = []
+        var originalPin = Data()
+        var archived: LessonHistorySnapshot?
+        var expectedCoverage: LearningCoverageSnapshot?
+        var completedID = ""
+        var completedAttemptID = UUID()
+        try autoreleasepool {
+            let container = try ModelContainerFactory().makeContainer(mode: .persistent(url))
+            let repository = SwiftDataCatalogRepository(container: container)
+            _ = try repository.importIfNeeded(catalog)
+            let initial = try repository.loadSnapshot()
+            originalSlots = initial.slots
+            let slot = try XCTUnwrap(originalSlots.first)
+            completedID = slot.lessonID
+            let studied = try XCTUnwrap(initial.definitions.first { $0.id == completedID })
+            let opened = try repository.openLesson(lessonID: completedID, now: date)
+            completedAttemptID = try XCTUnwrap(opened.detail.attempt?.id)
+            originalPin = try XCTUnwrap(opened.detail.attempt?.pinnedContentData)
+            let saved = try repository.saveAnswer(attemptID: completedAttemptID, expectedRevision: 0,
+                                                  answer: "  saved answer 🧪\n")
+            let revealed = try repository.revealSolution(attemptID: completedAttemptID,
+                expectedRevision: try XCTUnwrap(saved.detail.attempt?.revision), now: date)
+            let acknowledged = try repository.setSelfCheckAcknowledged(attemptID: completedAttemptID,
+                expectedRevision: try XCTUnwrap(revealed.detail.attempt?.revision),
+                acknowledged: true, now: date)
+            let receipt = try repository.complete(attemptID: completedAttemptID,
+                expectedRevision: try XCTUnwrap(acknowledged.detail.attempt?.revision), now: completedAt)
+            XCTAssertEqual(receipt.replacedSlot, slot)
+            XCTAssertEqual(receipt.catalog.slots.count, originalSlots.count)
+            XCTAssertEqual(Set(receipt.catalog.slots.map(\.key)), Set(originalSlots.map(\.key)))
+            XCTAssertEqual(receipt.catalog.slots.filter { $0.key != slot.key },
+                           originalSlots.filter { $0.key != slot.key })
+            let replacement = try XCTUnwrap(receipt.catalog.slots.first { $0.key == slot.key })
+            XCTAssertNotEqual(replacement.lessonID, completedID)
+            finalSlots = receipt.catalog.slots
+            XCTAssertEqual(receipt.coverage, try repository.loadCoverage())
+            let history = try repository.loadHistory()
+            var filters = LearningHistoryFilters()
+            filters.topic = .topic(studied.topicID)
+            filters.status = .completed
+            filters.date = .custom(start: HistoryLocalDate(completedAt, calendar: .current,
+                                                          timeZone: TimeZone(secondsFromGMT: 0)!),
+                                   end: HistoryLocalDate(completedAt, calendar: .current,
+                                                        timeZone: TimeZone(secondsFromGMT: 0)!))
+            let groups = try LearningHistorySelection.select(history, filters: filters,
+                now: completedAt, calendar: .current, timeZone: TimeZone(secondsFromGMT: 0)!,
+                locale: Locale(identifier: "en_US_POSIX")).get()
+            XCTAssertEqual(groups.flatMap(\.rows).map(\.lessonID), [completedID])
+            archived = try XCTUnwrap(groups.first?.rows.first)
+            XCTAssertEqual(archived?.attempt?.answerDraft, "  saved answer 🧪\n")
+            XCTAssertEqual(archived?.metadata?.title, studied.title)
+            XCTAssertEqual(archived?.metadata?.conceptIDs, studied.conceptIDs.sorted())
+            guard case let .available(_, _, subtopics, .complete) = receipt.coverage else {
+                return XCTFail("Completion must publish complete current coverage")
+            }
+            XCTAssertEqual(Set(subtopics.flatMap(\.concepts).filter { $0.latestCompletion != nil }.map(\.id)),
+                           Set(studied.conceptIDs))
+            XCTAssertTrue(subtopics.flatMap(\.concepts).allSatisfy {
+                $0.latestCompletion == nil || $0.latestCompletion == completedAt
+            })
+            _ = try repository.importIfNeeded(upgraded(catalog, id: completedID))
+            expectedCoverage = try repository.loadCoverage()
+            XCTAssertEqual(try repository.loadHistory().first, archived)
+            XCTAssertEqual(try repository.loadSnapshot().slots, finalSlots)
+            guard case let .available(catalogID, version, upgradedSubtopics, upgradedEvidence) =
+                    try XCTUnwrap(expectedCoverage) else { return XCTFail("Membership lost on upgrade") }
+            XCTAssertEqual(catalogID, catalog.value.catalogID)
+            XCTAssertEqual(version, catalog.value.version + 1)
+            XCTAssertEqual(upgradedSubtopics, subtopics) // definition-only upgrade retains direct practice
+            XCTAssertEqual(upgradedEvidence, .complete)
+        }
+        try autoreleasepool {
+            let container = try ModelContainerFactory().makeContainer(mode: .persistent(url))
+            let repository = SwiftDataCatalogRepository(container: container)
+            XCTAssertEqual(try repository.loadHistory().first, archived)
+            XCTAssertEqual(try repository.loadCoverage(), expectedCoverage)
+            XCTAssertEqual(try repository.loadSnapshot().slots, finalSlots)
+            let attempt = try XCTUnwrap(ModelContext(container).fetch(FetchDescriptor<LessonAttempt>())
+                .first { $0.id == completedAttemptID })
+            XCTAssertEqual(attempt.pinnedContentData, originalPin)
+            XCTAssertEqual(attempt.answerDraft, "  saved answer 🧪\n")
+            XCTAssertEqual(try repository.loadLesson(lessonID: completedID).progress?.status, .completed)
+        }
+    }
+
     func testMatchingVersionBackfillsMissingMembershipButMismatchedCatalogCannot() throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         let catalog = try BundledCatalogLoader.load()

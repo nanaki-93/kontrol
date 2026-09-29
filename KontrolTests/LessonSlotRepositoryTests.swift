@@ -169,7 +169,7 @@ final class LessonSlotRepositoryTests: XCTestCase {
             try autoreleasepool {
                 let container = try ModelContainerFactory().makeContainer(mode: .persistent(url))
                 let repository = SwiftDataCatalogRepository(container: container)
-                try repository.importIfNeeded(catalog)
+                _ = try repository.importIfNeeded(catalog)
                 previous = try repository.loadSnapshot().slots
                 let victim = try XCTUnwrap(previous.first { $0.topicID == "go" })
                 let personal = ModelContext(container)
