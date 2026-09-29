@@ -306,6 +306,7 @@ struct LessonMutationResult: Equatable {
     let catalog: LearningCatalogSnapshot
     let detail: LessonDetailSnapshot
     let history: [LessonHistorySnapshot]
+    let coverage: LearningCoverageSnapshot
     let replacedSlot: LessonSlotSnapshot?
 }
 

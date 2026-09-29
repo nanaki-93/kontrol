@@ -637,6 +637,13 @@ final class LessonExperienceRepositoryTests: XCTestCase {
         XCTAssertEqual(completed.history.first?.metadata?.topicID, pinned.topicID)
         XCTAssertEqual(completed.history.first?.metadata?.conceptIDs, pinned.conceptIDs.sorted())
         XCTAssertEqual(completed.history.first?.contentVersion, pinned.contentVersion)
+        XCTAssertEqual(completed.coverage, try completionRepository.loadCoverage())
+        guard case let .available(_, _, coveredSubtopics, .complete) = completed.coverage else {
+            return XCTFail("Completion must publish current, complete coverage")
+        }
+        for conceptID in Set(pinned.conceptIDs) {
+            XCTAssertEqual(coveredSubtopics.flatMap(\.concepts).first { $0.id == conceptID }?.latestCompletion, later)
+        }
         let terminalBytes = try XCTUnwrap(rows(LessonTerminalRecord.self, in: container).first).payload
         let archived = try XCTUnwrap(completed.detail.attempt?.completedContentSnapshot)
         XCTAssertEqual(archived, PinnedLessonContent(definition: pinned).completedSnapshot)
@@ -654,6 +661,7 @@ final class LessonExperienceRepositoryTests: XCTestCase {
         XCTAssertEqual(repeated.detail, completed.detail)
         XCTAssertEqual(repeated.catalog, completed.catalog)
         XCTAssertEqual(repeated.history, completed.history)
+        XCTAssertEqual(repeated.coverage, completed.coverage)
         XCTAssertEqual(try XCTUnwrap(rows(LessonTerminalRecord.self, in: container).first).payload, terminalBytes)
         XCTAssertEqual(try other.loadSnapshot(), completed.catalog)
         XCTAssertThrowsError(try writer.saveAnswer(attemptID: attempt.id,
@@ -734,6 +742,7 @@ final class LessonExperienceRepositoryTests: XCTestCase {
             var revision = 0
             var baseline: LearningCatalogSnapshot?
             var detail: LessonDetailSnapshot?
+            var originalCoverage: LearningCoverageSnapshot?
             try autoreleasepool {
                 let container = try ModelContainerFactory().makeContainer(mode: .persistent(url))
                 let writer = SwiftDataCatalogRepository(container: container)
@@ -744,6 +753,7 @@ final class LessonExperienceRepositoryTests: XCTestCase {
                 revision = try XCTUnwrap(prepared.detail.attempt?.revision)
                 baseline = prepared.catalog
                 detail = prepared.detail
+                originalCoverage = prepared.coverage
                 let failing = SwiftDataCatalogRepository(container: container,
                     beforeSave: { if failBefore { throw Injected.failure } },
                     save: { _ in if !failBefore { throw Injected.failure } })
@@ -751,6 +761,7 @@ final class LessonExperienceRepositoryTests: XCTestCase {
                     expectedRevision: revision, now: later)) { XCTAssertTrue($0 is Injected) }
                 XCTAssertEqual(try writer.loadSnapshot(), baseline)
                 XCTAssertEqual(try writer.loadLesson(lessonID: id), detail)
+                XCTAssertEqual(try writer.loadCoverage(), originalCoverage)
                 XCTAssertTrue(try rows(LessonTerminalRecord.self, in: container).isEmpty)
             }
             try autoreleasepool {
@@ -758,6 +769,7 @@ final class LessonExperienceRepositoryTests: XCTestCase {
                 let writer = SwiftDataCatalogRepository(container: reopened)
                 let id = try XCTUnwrap(detail?.id)
                 XCTAssertTrue(try rows(LessonTerminalRecord.self, in: reopened).isEmpty)
+                XCTAssertEqual(try writer.loadCoverage(), originalCoverage)
                 XCTAssertEqual(try writer.loadSnapshot(), baseline)
                 XCTAssertEqual(try writer.loadLesson(lessonID: id), detail)
                 XCTAssertNil(try XCTUnwrap(rows(LessonAttempt.self, in: reopened).first {
@@ -766,6 +778,8 @@ final class LessonExperienceRepositoryTests: XCTestCase {
                 let retry = try writer.complete(attemptID: attemptID, expectedRevision: revision, now: later)
                 XCTAssertEqual(retry.outcome, .changed)
                 XCTAssertEqual(retry.history.first?.lessonID, id)
+                XCTAssertEqual(retry.coverage, try writer.loadCoverage())
+                XCTAssertNotEqual(retry.coverage, originalCoverage)
             }
         }
     }
@@ -881,6 +895,8 @@ final class LessonExperienceRepositoryTests: XCTestCase {
         XCTAssertEqual(dismissed.history.first?.attempt, retained)
         XCTAssertEqual(dismissed.history.first?.provenance, .dismissalPin)
         XCTAssertEqual(dismissed.history.first?.metadata?.contentVersion, retained.contentVersion)
+        XCTAssertEqual(dismissed.coverage, revealed.coverage)
+        XCTAssertEqual(dismissed.coverage, try boundary.loadCoverage())
         let terminalBytes = try XCTUnwrap(rows(LessonTerminalRecord.self, in: container).first).payload
         XCTAssertEqual(dismissed.catalog.slots.filter { $0.key != slot.key },
                        before.slots.filter { $0.key != slot.key })
@@ -897,6 +913,7 @@ final class LessonExperienceRepositoryTests: XCTestCase {
         XCTAssertEqual(repeated.detail, dismissed.detail)
         XCTAssertEqual(repeated.catalog, dismissed.catalog)
         XCTAssertEqual(repeated.history, dismissed.history)
+        XCTAssertEqual(repeated.coverage, dismissed.coverage)
         XCTAssertEqual(try XCTUnwrap(rows(LessonTerminalRecord.self, in: container).first).payload, terminalBytes)
         XCTAssertThrowsError(try writer.saveAnswer(attemptID: attemptID,
             expectedRevision: retained.revision, answer: "late")) {
@@ -1093,6 +1110,97 @@ final class LessonExperienceRepositoryTests: XCTestCase {
         XCTAssertNil(try writer.loadLesson(lessonID: id).progress)
         XCTAssertTrue(try rows(LessonAttempt.self, in: container).isEmpty)
         XCTAssertEqual(try writer.loadSnapshot().slots.first { $0.key == slot.key }, slot)
+    }
+
+    func testHistoryAndCoverageReadsLeaveCommittedLearningRowsUntouchedAfterReopen() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "KontrolCoverageRead-\(UUID().uuidString)/Kontrol.store")
+        var expectedCoverage: LearningCoverageSnapshot?
+        var expectedHistory: [LessonHistorySnapshot] = []
+        var expectedCatalog: LearningCatalogSnapshot?
+        var expectedAttempts: [LessonAttemptSnapshot] = []
+        try autoreleasepool {
+            let container = try ModelContainerFactory().makeContainer(mode: .persistent(url))
+            let writer = SwiftDataCatalogRepository(container: container)
+            _ = try writer.importIfNeeded(BundledCatalogLoader.load())
+            let id = try XCTUnwrap(writer.loadSnapshot().slots.first?.lessonID)
+            let prepared = try ready(writer, id: id)
+            let attempt = try XCTUnwrap(prepared.detail.attempt)
+            let saved = try writer.saveAnswer(attemptID: attempt.id, expectedRevision: attempt.revision,
+                                              answer: "  keep 🧪\n")
+            let checked = try writer.setSelfCheckAcknowledged(attemptID: attempt.id,
+                expectedRevision: try XCTUnwrap(saved.detail.attempt?.revision), acknowledged: true, now: later)
+            let completed = try writer.complete(attemptID: attempt.id,
+                expectedRevision: try XCTUnwrap(checked.detail.attempt?.revision), now: later)
+            expectedCoverage = completed.coverage
+            expectedHistory = completed.history
+            expectedCatalog = completed.catalog
+            expectedAttempts = expectedHistory.compactMap(\.attempt)
+        }
+        try autoreleasepool {
+            let container = try ModelContainerFactory().makeContainer(mode: .persistent(url))
+            let reader: any CatalogRepository = SwiftDataCatalogRepository(container: container,
+                beforeSave: { XCTFail("Reads must not save") })
+            for _ in 0..<3 {
+                XCTAssertEqual(try reader.loadHistory(), expectedHistory)
+                XCTAssertEqual(try reader.loadCoverage(), expectedCoverage)
+                XCTAssertEqual(try reader.loadSnapshot(), expectedCatalog)
+            }
+            XCTAssertEqual(try rows(LessonAttempt.self, in: container).count, expectedAttempts.count)
+            for attempt in expectedAttempts {
+                let row = try XCTUnwrap(rows(LessonAttempt.self, in: container).first { $0.id == attempt.id })
+                XCTAssertEqual(row.answerDraft, attempt.answerDraft)
+                XCTAssertEqual(row.revision, attempt.revision)
+                XCTAssertEqual(row.pinnedContentData, attempt.pinnedContentData)
+            }
+            XCTAssertEqual(try reader.loadSnapshot(), expectedCatalog)
+            XCTAssertEqual(try reader.loadHistory(), expectedHistory)
+        }
+    }
+
+    func testCoverageReadDistinguishesMissingMembershipFromIncompleteLegacyEvidence() throws {
+        let (container, writer, id) = try setup()
+        let context = ModelContext(container)
+        context.insert(LessonProgress(lessonID: id, status: .completed, completedAt: later))
+        try context.save()
+        guard case let .available(_, _, coverageRows, evidence) = try writer.loadCoverage() else {
+            return XCTFail("Expected current membership")
+        }
+        XCTAssertEqual(evidence, .incomplete(completedLessonIDs: [id]))
+        XCTAssertEqual(coverageRows.flatMap(\.concepts).filter { $0.latestCompletion != nil }.count, 0)
+        let missing = ModelContext(container)
+        for row in try missing.fetch(FetchDescriptor<CatalogMembership>()) { missing.delete(row) }
+        try missing.save()
+        XCTAssertEqual(try writer.loadCoverage(), .membershipUnavailable)
+        XCTAssertEqual(try rows(LessonProgress.self, in: container).first?.completedAt, later)
+        XCTAssertTrue(try rows(LessonAttempt.self, in: container).isEmpty)
+    }
+
+    func testFailedCoverageProjectionCannotCommitAnswer() throws {
+        let (container, writer, id) = try setup()
+        let attempt = try XCTUnwrap(writer.openLesson(lessonID: id, now: first).detail.attempt)
+        let context = ModelContext(container)
+        let membershipRow = try XCTUnwrap(context.fetch(FetchDescriptor<CatalogMembership>()).first)
+        let membership = try membershipRow.membership()
+        // A valid payload with a missing current concept is a projection error,
+        // not a reason to publish a speculative answer or false 0 of 0.
+        let broken = CurrentCatalogMembership(catalogID: membership.catalogID,
+            catalogVersion: membership.catalogVersion, topicIDs: membership.topicIDs,
+            subtopicIDs: membership.subtopicIDs,
+            conceptIDs: (membership.conceptIDs + ["missing-concept"]).sorted(),
+            seededLessonIDs: membership.seededLessonIDs)
+        membershipRow.payload = try CatalogMembership(membership: broken).payload
+        try context.save()
+        XCTAssertThrowsError(try writer.loadCoverage()) {
+            XCTAssertEqual($0 as? LearningEvidenceError, .invalidPayload)
+        }
+        XCTAssertThrowsError(try writer.saveAnswer(attemptID: attempt.id,
+            expectedRevision: 0, answer: "unsaved")) {
+            XCTAssertEqual($0 as? LearningEvidenceError, .invalidPayload)
+        }
+        let stored = try XCTUnwrap(rows(LessonAttempt.self, in: container).first { $0.id == attempt.id })
+        XCTAssertEqual(stored.answerDraft, "")
+        XCTAssertEqual(stored.revision, 0)
     }
 
     func testPreSaveAndSaveFailureLeaveNoAttemptProgressOrReceipt() throws {

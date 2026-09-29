@@ -9,6 +9,7 @@ protocol CatalogRepository {
     func openLesson(lessonID: String, now: Date) throws -> LessonMutationResult
     func loadLesson(lessonID: String) throws -> LessonDetailSnapshot
     func loadHistory() throws -> [LessonHistorySnapshot]
+    func loadCoverage() throws -> LearningCoverageSnapshot
     func restoreDismissed(lessonID: String, now: Date) throws -> LessonMutationResult
     func saveAnswer(attemptID: UUID, expectedRevision: Int, answer: String) throws -> LessonMutationResult
     func revealSolution(attemptID: UUID, expectedRevision: Int, now: Date) throws -> LessonMutationResult
@@ -16,6 +17,15 @@ protocol CatalogRepository {
                                   acknowledged: Bool, now: Date) throws -> LessonMutationResult
     func complete(attemptID: UUID, expectedRevision: Int, now: Date) throws -> LessonMutationResult
     func dismiss(lessonID: String, expectedSlot: LessonSlotSnapshot, now: Date) throws -> LessonMutationResult
+}
+
+// Test doubles that have not implemented the new read cannot accidentally
+// present an empty or authoritative coverage projection. The production
+// repository overrides this requirement with a detached, read-only projection.
+extension CatalogRepository {
+    func loadCoverage() throws -> LearningCoverageSnapshot {
+        throw LessonExperienceError.persistenceFailure
+    }
 }
 
 enum CatalogImportResult: Equatable {
@@ -265,6 +275,11 @@ final class SwiftDataCatalogRepository: CatalogRepository {
     func loadHistory() throws -> [LessonHistorySnapshot] {
         let context = ModelContext(container)
         return try history(in: context)
+    }
+
+    func loadCoverage() throws -> LearningCoverageSnapshot {
+        let context = ModelContext(container)
+        return try coverage(in: context, catalog: snapshot(in: context))
     }
 
     func restoreDismissed(lessonID: String, now: Date) throws -> LessonMutationResult {
@@ -602,8 +617,9 @@ final class SwiftDataCatalogRepository: CatalogRepository {
         // Project History before commit; never turn a committed save into a
         // reported failure because of a fallible post-commit read.
         let history = try self.history(in: context, catalog: catalog)
+        let coverage = try self.coverage(in: context, catalog: catalog)
         return LessonMutationResult(outcome: outcome, catalog: catalog, detail: detail,
-                                    history: history, replacedSlot: replacedSlot)
+                                    history: history, coverage: coverage, replacedSlot: replacedSlot)
     }
 
     private func history(in context: ModelContext,
@@ -645,6 +661,22 @@ final class SwiftDataCatalogRepository: CatalogRepository {
         return entries.sorted { lhs, rhs in
             lhs.date == rhs.date ? lhs.lessonID < rhs.lessonID : lhs.date > rhs.date
         }
+    }
+
+    // This is a detached projection only: neither the read nor receipt creation
+    // reconciles slots or edits attempts/progress. Reads use a fresh context;
+    // receipts use the caller's private write context before its single save.
+    private func coverage(in context: ModelContext,
+                          catalog: LearningCatalogSnapshot) throws -> LearningCoverageSnapshot {
+        let archives = try EvidenceIdentity.terminalMetadata(
+            context.fetch(FetchDescriptor<LessonTerminalRecord>()))
+        let completions = catalog.progress.filter { $0.status == .completed }.map { row in
+            CoverageCompletionEvidence(lessonID: row.lessonID, status: row.status,
+                completedAt: row.completedAt, metadata: archives[row.lessonID])
+        }
+        return try LearningCoverage.aggregate(membership: membership(in: context),
+            topics: catalog.topics, subtopics: catalog.subtopics, concepts: catalog.concepts,
+            completions: completions)
     }
 
     // Legacy terminal recovery precedes every definition update, including a
@@ -849,18 +881,7 @@ final class SwiftDataCatalogRepository: CatalogRepository {
             }
         let completed = Set(catalog.progress.filter { $0.status == .completed }
             .flatMap { archives[$0.lessonID]?.conceptIDs ?? [] })
-        let states = try EvidenceIdentity.requireUnique(
-            context.fetch(FetchDescriptor<CatalogImportState>()), id: { $0.catalogID })
-        let memberships = try context.fetch(FetchDescriptor<CatalogMembership>())
-        let membership: CatalogMembershipAvailability
-        if let state = states.values.first {
-            membership = try EvidenceIdentity.membership(memberships, catalogID: state.catalogID,
-                                                         installedVersion: state.lastImportedVersion)
-        } else {
-            let unique = try EvidenceIdentity.requireUnique(memberships, id: { $0.catalogID })
-            for row in unique.values { _ = try row.membership() }
-            membership = .unavailable
-        }
+        let membership = try membership(in: context)
         var activePins: [StartedLessonEvidence] = []
         for attempt in try context.fetch(FetchDescriptor<LessonAttempt>())
             where progress[attempt.lessonID] == .started && attempt.completedAt == nil {
@@ -870,6 +891,22 @@ final class SwiftDataCatalogRepository: CatalogRepository {
             activePins.append(StartedLessonEvidence(pin.definition))
         }
         return (terminal, completed, membership, activePins)
+    }
+
+    private func membership(in context: ModelContext) throws -> CatalogMembershipAvailability {
+        let states = try EvidenceIdentity.requireUnique(
+            context.fetch(FetchDescriptor<CatalogImportState>()), id: { $0.catalogID })
+        let memberships = try context.fetch(FetchDescriptor<CatalogMembership>())
+        guard let state = states.values.first else {
+            let unique = try EvidenceIdentity.requireUnique(memberships, id: { $0.catalogID })
+            for row in unique.values { _ = try row.membership() }
+            return .unavailable
+        }
+        // There is only one installed learning catalog. Multiple distinct import
+        // markers cannot identify an authoritative denominator for this read.
+        guard states.count == 1 else { throw LearningEvidenceError.duplicateIdentity }
+        return try EvidenceIdentity.membership(memberships, catalogID: state.catalogID,
+                                               installedVersion: state.lastImportedVersion)
     }
 
     private func reconcile(in context: ModelContext, now: Date, commit: Bool = true) throws {
