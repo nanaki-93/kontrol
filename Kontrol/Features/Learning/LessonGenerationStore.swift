@@ -119,7 +119,7 @@ final class LessonGenerationStore: ObservableObject {
             state = .generating(owner: owner)
             let work = Task { try await generator(model, reference).generate(request) }
             gate.attach(lease) { work.cancel() }
-            let candidate = try await withTaskCancellationHandler {
+            let response = try await withTaskCancellationHandler {
                 try await work.value
             } onCancel: {
                 Task { @MainActor in gate.invalidate(lease) }
@@ -127,8 +127,9 @@ final class LessonGenerationStore: ObservableObject {
             // No await between the last authorization and synchronous commit.
             try authorize(lease, revision: configuration.revision)
             let fresh = try repository.generationContext(topicID: selection.topicID)
-            let validated = try GeneratedLessonValidator.validate(candidate, request: request,
-                context: fresh, registry: registry, requestedModel: model, now: Date())
+            let validated = try GeneratedLessonValidator.validate(response.candidate, request: request,
+                context: fresh, registry: registry, requestedModel: model,
+                returnedModel: response.returnedModel, now: Date())
             try authorize(lease, revision: configuration.revision)
             let receipt = try learning.acceptGeneratedLesson(validated)
             state = .added(receipt)

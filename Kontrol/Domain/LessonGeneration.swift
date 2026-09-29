@@ -109,8 +109,15 @@ struct CandidateLesson: Codable, Equatable {
     let selfCheckCriteria: [String]
 }
 
+// The response model is envelope metadata, never part of the untrusted candidate.
+// It is validated again before being written into local provenance.
+struct GeneratedLessonResponse {
+    let candidate: CandidateLesson
+    let returnedModel: String?
+}
+
 protocol LessonGenerator {
-    func generate(_ request: LessonGenerationRequest) async throws -> CandidateLesson
+    func generate(_ request: LessonGenerationRequest) async throws -> GeneratedLessonResponse
 }
 
 // Finite, payload-free failure codes. No raw provider errors or personal data.

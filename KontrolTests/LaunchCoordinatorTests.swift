@@ -40,7 +40,7 @@ private final class LaunchCredentials: CredentialStore {
 private actor LaunchProvider: LessonGenerator, OpenAIConnectionTesting {
     private(set) var generations = 0
     private(set) var connections = 0
-    func generate(_ request: LessonGenerationRequest) async throws -> CandidateLesson {
+    func generate(_ request: LessonGenerationRequest) async throws -> GeneratedLessonResponse {
         generations += 1
         throw LessonGenerationError.providerFailure
     }

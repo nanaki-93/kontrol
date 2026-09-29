@@ -35,6 +35,12 @@ struct ValidatedGeneratedLesson {
 
 enum GeneratedLessonValidator {
     static let maximumResponseBytes = 256 * 1024
+    static func safeModel(_ value: String) -> Bool {
+        !value.isEmpty && value.utf8.count <= 128 && value.utf8.allSatisfy {
+            (48...57).contains($0) || (65...90).contains($0) ||
+                (97...122).contains($0) || [45, 46, 58, 95].contains($0)
+        }
+    }
     private static let fields: Set<String> = [
         "title", "objectiveKey", "objective", "topicID", "subtopicID", "conceptIDs",
         "difficulty", "format", "estimatedMinutes", "prerequisiteConceptIDs",
@@ -123,12 +129,6 @@ enum GeneratedLessonValidator {
             referenceAnswer: candidate.referenceAnswer, selfCheckCriteria: candidate.selfCheckCriteria)
         // The requested model is local configuration. A returned model, if any,
         // is only bounded nonsecret metadata; never accept an arbitrary payload.
-        func safeModel(_ value: String) -> Bool {
-            !value.isEmpty && value.utf8.count <= 128 && value.utf8.allSatisfy {
-                (48...57).contains($0) || (65...90).contains($0) ||
-                    (97...122).contains($0) || [45, 46, 58, 95].contains($0)
-            }
-        }
         guard safeModel(requestedModel), returnedModel.map(safeModel) ?? true else {
             throw LessonGenerationError.invalidCandidate
         }

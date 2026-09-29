@@ -77,7 +77,7 @@ final class OpenAILessonGenerator: LessonGenerator, OpenAIConnectionTesting {
         self.transport = transport
     }
 
-    func generate(_ request: LessonGenerationRequest) async throws -> CandidateLesson {
+    func generate(_ request: LessonGenerationRequest) async throws -> GeneratedLessonResponse {
         guard Self.supportedModels.contains(model) else { throw LessonGenerationError.unsupportedModel }
         if Task.isCancelled { throw LessonGenerationError.cancelled }
         let scope = try request.encodedData()
@@ -192,10 +192,19 @@ final class OpenAILessonGenerator: LessonGenerator, OpenAIConnectionTesting {
         return .providerFailure
     }
 
-    private static func decodeResponse(_ data: Data) throws -> CandidateLesson {
+    private static func decodeResponse(_ data: Data) throws -> GeneratedLessonResponse {
         guard let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let status = envelope["status"] as? String else { throw LessonGenerationError.malformedResponse }
         if status == "incomplete" { throw LessonGenerationError.incompleteResponse }
+        // The provider may omit model metadata, but a supplied value must be a
+        // bounded identifier, never arbitrary text or an unbounded response field.
+        let returnedModel: String?
+        if let raw = envelope["model"] {
+            guard let value = raw as? String, GeneratedLessonValidator.safeModel(value) else {
+                throw LessonGenerationError.malformedResponse
+            }
+            returnedModel = value
+        } else { returnedModel = nil }
         guard status == "completed", envelope["incomplete_details"] == nil || envelope["incomplete_details"] is NSNull,
               envelope["error"] == nil || envelope["error"] is NSNull,
               let output = envelope["output"] as? [[String: Any]], output.count == 1,
@@ -211,7 +220,8 @@ final class OpenAILessonGenerator: LessonGenerator, OpenAIConnectionTesting {
               let text = part["text"] as? String, let candidate = text.data(using: .utf8) else {
             throw LessonGenerationError.malformedResponse
         }
-        return try GeneratedLessonValidator.decode(candidate)
+        return GeneratedLessonResponse(candidate: try GeneratedLessonValidator.decode(candidate),
+            returnedModel: returnedModel)
     }
 
     private static let candidateSchema: [String: Any] = {

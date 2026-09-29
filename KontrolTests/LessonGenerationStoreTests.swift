@@ -30,11 +30,11 @@ private final class GateCredentials: CredentialStore {
     func remove(reference: String) throws { items.removeValue(forKey: reference) }
 }
 private actor PausedGenerator: LessonGenerator, OpenAIConnectionTesting {
-    private var continuation: CheckedContinuation<CandidateLesson, Error>?
+    private var continuation: CheckedContinuation<GeneratedLessonResponse, Error>?
     private var connection: CheckedContinuation<Void, Error>?
     private(set) var calls = 0
     private(set) var tests = 0
-    func generate(_ request: LessonGenerationRequest) async throws -> CandidateLesson {
+    func generate(_ request: LessonGenerationRequest) async throws -> GeneratedLessonResponse {
         calls += 1
         return try await withCheckedThrowingContinuation { continuation = $0 }
     }
@@ -42,7 +42,10 @@ private actor PausedGenerator: LessonGenerator, OpenAIConnectionTesting {
         tests += 1
         try await withCheckedThrowingContinuation { connection = $0 }
     }
-    func finish(_ candidate: CandidateLesson) { continuation?.resume(returning: candidate); continuation = nil }
+    func finish(_ candidate: CandidateLesson, returnedModel: String? = nil) {
+        continuation?.resume(returning: GeneratedLessonResponse(candidate: candidate, returnedModel: returnedModel))
+        continuation = nil
+    }
     func fail(_ error: Error) { continuation?.resume(throwing: error); continuation = nil }
     func finishTest() { connection?.resume(); connection = nil }
 }
@@ -275,6 +278,22 @@ final class LessonGenerationStoreTests: XCTestCase {
         XCTAssertEqual(settings.connectionStatus, .notTested)
         XCTAssertFalse(settings.operationGate.isBusy)
         XCTAssertEqual(try repository.loadSnapshot().definitions.filter { $0.source == "generated" }.count, 0)
+    }
+
+    func testReturnedModelIsPersistedWithRequestedModel() async throws {
+        let (_, repository, _, _, provider, store, _, _) = try fixture()
+        let context = try repository.generationContext(topicID: "go")
+        let registry = try GenerationObjectivesLoader.load(catalog: context.catalog, membership: context.membership)
+        let request = try LessonGenerationRequestBuilder.make(selection: selection, operationID: UUID(),
+            context: context, registry: registry)
+        let task = Task { try await store.generate(selection: selection, owner: UUID()) }
+        await wait(provider)
+        await provider.finish(candidate(request), returnedModel: "gpt-4o-mini-2024-07-18")
+        let receipt = try await task.value
+        let saved = try XCTUnwrap(repository.loadSnapshot().definitions.first { $0.id == receipt.lessonID })
+        let provenance = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(saved.provenance.utf8)) as? [String: Any])
+        XCTAssertEqual(provenance["requestedModel"] as? String, "gpt-4o-mini")
+        XCTAssertEqual(provenance["returnedModel"] as? String, "gpt-4o-mini-2024-07-18")
     }
 
     func testCommitIsNotUndoneAndNoWorkResumesAfterNewStore() async throws {

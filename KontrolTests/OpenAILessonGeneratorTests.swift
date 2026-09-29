@@ -83,11 +83,14 @@ final class OpenAILessonGeneratorTests: XCTestCase {
          "exercise": "Exercise", "referenceAnswer": "Answer", "selfCheckCriteria": ["Check"]]
     }
 
-    private func envelope(_ candidate: [String: Any], status: String = "completed", type: String = "output_text") -> Data {
+    private func envelope(_ candidate: [String: Any], status: String = "completed", type: String = "output_text",
+                          model: Any? = nil) -> Data {
         let text = String(data: try! JSONSerialization.data(withJSONObject: candidate), encoding: .utf8)!
-        return try! JSONSerialization.data(withJSONObject: ["status": status,
+        var body: [String: Any] = ["status": status,
             "output": [["type": "message", "role": "assistant", "status": "completed",
-                        "content": [["type": type, "text": text]]]]])
+                        "content": [["type": type, "text": text]]]]]
+        if let model { body["model"] = model }
+        return try! JSONSerialization.data(withJSONObject: body)
     }
 
     private func generator(_ intercept: Intercept, model: String = "gpt-4o-mini") -> OpenAILessonGenerator {
@@ -171,7 +174,8 @@ final class OpenAILessonGeneratorTests: XCTestCase {
         let intercept = Intercept()
         intercept.body = envelope(candidate())
         let result = try await generator(intercept).generate(request())
-        XCTAssertEqual(result.title, "One")
+        XCTAssertEqual(result.candidate.title, "One")
+        XCTAssertNil(result.returnedModel)
         XCTAssertEqual(intercept.calls, 1)
         XCTAssertEqual(intercept.limit, 256 * 1024)
         let sent = try XCTUnwrap(intercept.request)
@@ -195,6 +199,22 @@ final class OpenAILessonGeneratorTests: XCTestCase {
             XCTAssertFalse(remote.contains(forbidden))
         }
         XCTAssertLessThanOrEqual(try XCTUnwrap(sent.httpBody).count, 32 * 1024)
+    }
+
+    func testResponseEnvelopeCarriesOnlyBoundedModelMetadata() async throws {
+        let intercept = Intercept()
+        let adapter = generator(intercept)
+        let returned = "gpt-4o-mini-2024-07-18"
+        intercept.body = envelope(candidate(), model: returned)
+        let result = try await adapter.generate(request())
+        XCTAssertEqual(result.returnedModel, returned)
+        XCTAssertEqual(result.candidate.title, "One")
+        XCTAssertEqual(intercept.calls, 1)
+        for invalid: Any in ["", String(repeating: "a", count: 129), "key with spaces", "evil\nline", 42, NSNull()] {
+            intercept.body = envelope(candidate(), model: invalid)
+            await assertError(.malformedResponse) { try await adapter.generate(self.request()) }
+        }
+        XCTAssertEqual(intercept.calls, 7)
     }
 
     func testProductionTransportEnforcesStreamingCapWithLocalURLProtocol() async {
@@ -331,7 +351,7 @@ final class OpenAILessonGeneratorTests: XCTestCase {
         catch { XCTFail("Unclassified error", file: file, line: line) }
     }
 
-    private func assertError(_ expected: LessonGenerationError, _ action: () async throws -> CandidateLesson,
+    private func assertError(_ expected: LessonGenerationError, _ action: () async throws -> GeneratedLessonResponse,
                              file: StaticString = #filePath, line: UInt = #line) async {
         do { _ = try await action(); XCTFail("Expected \(expected)", file: file, line: line) }
         catch let error as LessonGenerationError { XCTAssertEqual(error, expected, file: file, line: line) }
