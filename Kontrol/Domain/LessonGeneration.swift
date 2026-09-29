@@ -54,12 +54,22 @@ struct LessonGenerationRequest: Encodable, Equatable {
 // all terminal evidence, definitions and pinned active content, not the truncated
 // hints in LessonGenerationRequest. No model, context, answer or attempt is encoded.
 struct LessonGenerationContext {
+    // The catalog contains only currently installed taxonomy and seeded lessons.
+    // Definitions and terminal evidence also include retained historical records
+    // for full local duplicate validation; slots carry exact assignment identity.
     let catalog: ValidatedCatalog
     let membership: CurrentCatalogMembership
     let completedConceptIDs: Set<String>
     let terminal: [TerminalLessonMatch]
     let definitions: [LessonDefinitionSnapshot]
     let startedPins: [LessonDefinitionSnapshot]
+    var slots: [LessonSlotSnapshot] = []
+}
+
+// Scope availability is not an ordinary Learning catalog read failure. Never
+// manufacture a catalog from retained rows when membership is absent or stale.
+enum GenerationContextError: Error, Equatable {
+    case invalidScope, unavailable, invalidEvidence, readFailure
 }
 
 struct LessonGenerationSelection {

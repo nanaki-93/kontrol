@@ -5,6 +5,7 @@ import SwiftData
 protocol CatalogRepository {
     func importIfNeeded(_ catalog: ValidatedCatalog) throws -> CatalogImportResult
     func loadSnapshot() throws -> LearningCatalogSnapshot
+    func generationContext(topicID: String) throws -> LessonGenerationContext
     func reconcileSlots(now: Date) throws -> LearningCatalogSnapshot
     func openLesson(lessonID: String, now: Date) throws -> LessonMutationResult
     func openConceptLesson(lessonID: String, expectedSlot: LessonSlotSnapshot?, expectedConceptID: String, now: Date) throws -> LessonMutationResult
@@ -26,6 +27,10 @@ protocol CatalogRepository {
 // present an empty or authoritative coverage projection. The production
 // repository overrides this requirement with a detached, read-only projection.
 extension CatalogRepository {
+    func generationContext(topicID: String) throws -> LessonGenerationContext {
+        throw GenerationContextError.unavailable
+    }
+
     func loadCoverage() throws -> LearningCoverageSnapshot {
         throw LessonExperienceError.persistenceFailure
     }
@@ -267,6 +272,68 @@ final class SwiftDataCatalogRepository: CatalogRepository {
     func loadSnapshot() throws -> LearningCatalogSnapshot {
         let context = ModelContext(container)
         return try snapshot(in: context)
+    }
+
+    func generationContext(topicID: String) throws -> LessonGenerationContext {
+        // Never call import, backfill, reconcile, or save from this read. The
+        // same private context supplies all membership and personal evidence.
+        let context = ModelContext(container)
+        context.autosaveEnabled = false
+        do {
+            let projection = try snapshot(in: context)
+            let evidence = try selectionEvidence(in: context, catalog: projection)
+            guard case .available(let membership) = evidence.membership else {
+                throw GenerationContextError.unavailable
+            }
+            guard membership.topicIDs.contains(topicID) else {
+                throw GenerationContextError.invalidScope
+            }
+            // A retained taxonomy row or former seeded lesson cannot authorize
+            // a request. Missing/contradictory current rows fail closed instead.
+            let topics = projection.topics.filter { membership.topicIDs.contains($0.id) }
+            let subtopics = projection.subtopics.filter { membership.subtopicIDs.contains($0.id) }
+            let concepts = projection.concepts.filter { membership.conceptIDs.contains($0.id) }
+            let seeded = projection.definitions.filter { membership.seededLessonIDs.contains($0.id) }
+            guard topics.count == membership.topicIDs.count,
+                  subtopics.count == membership.subtopicIDs.count,
+                  concepts.count == membership.conceptIDs.count,
+                  seeded.count == membership.seededLessonIDs.count,
+                  seeded.allSatisfy({ $0.source == "seed" }) else {
+                throw GenerationContextError.invalidEvidence
+            }
+            let installed = CatalogDTO(catalogID: membership.catalogID, version: membership.catalogVersion,
+                topics: topics.map { TopicDTO(id: $0.id, name: $0.name) },
+                subtopics: subtopics.map { SubtopicDTO(id: $0.id, topicID: $0.topicID, name: $0.name) },
+                concepts: concepts.map { ConceptDTO(id: $0.id, subtopicID: $0.subtopicID,
+                    name: $0.name, prerequisiteConceptIDs: $0.prerequisiteConceptIDs) },
+                lessons: seeded.map { LessonDTO(id: $0.id, objectiveKey: $0.objectiveKey,
+                    objective: $0.objective, title: $0.title, topicID: $0.topicID,
+                    subtopicID: $0.subtopicID, conceptIDs: $0.conceptIDs,
+                    difficulty: $0.difficulty, format: $0.format,
+                    estimatedMinutes: $0.estimatedMinutes,
+                    prerequisiteConceptIDs: $0.prerequisiteConceptIDs,
+                    explanation: $0.explanation, workedExample: $0.workedExample,
+                    exercise: $0.exercise, referenceAnswer: $0.referenceAnswer,
+                    selfCheckCriteria: $0.selfCheckCriteria, contentVersion: $0.contentVersion,
+                    normalizedContentHash: $0.normalizedContentHash, source: $0.source,
+                    provenance: $0.provenance) })
+            return LessonGenerationContext(catalog: try ValidatedCatalog.validating(installed),
+                membership: membership, completedConceptIDs: evidence.completed,
+                terminal: evidence.terminal, definitions: projection.definitions,
+                startedPins: projection.startedPins, slots: projection.slots)
+        } catch let error as GenerationContextError {
+            throw error
+        } catch is CatalogValidationError {
+            throw GenerationContextError.invalidEvidence
+        } catch is LearningEvidenceError {
+            throw GenerationContextError.invalidEvidence
+        } catch is LessonSelectionError {
+            throw GenerationContextError.invalidEvidence
+        } catch is LessonExperienceError {
+            throw GenerationContextError.invalidEvidence
+        } catch {
+            throw GenerationContextError.readFailure
+        }
     }
 
     func reconcileSlots(now: Date) throws -> LearningCatalogSnapshot {
