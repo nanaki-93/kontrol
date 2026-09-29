@@ -44,5 +44,6 @@ struct FeatureUndoRequest {
 enum FeatureMutationFailure: Error, Equatable {
     case conflict, undoConflict, missingTarget, changedIdentity, unpatchableSource
     case accessDenied, manifestMismatch, unsafePath, writeFailed, unverifiedWrite
+    case coordinationFailed, temporaryFileFailed, temporaryWriteFailed, diskFull, flushFailed
     case canceled
 }

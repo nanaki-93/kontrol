@@ -18,20 +18,45 @@ final class FeatureFileWriterTests: XCTestCase {
     }
     private struct Coordinator: FeatureWriteCoordinating {
         var relocate = false
+        var fail = false
+        var failAfterBody = false
         func coordinate(_ target: URL, _ body: (URL) throws -> FeatureMutationReceipt) throws -> FeatureMutationReceipt {
-            try body(relocate ? target.deletingLastPathComponent() : target)
+            if fail { throw NSError(domain: "injected", code: 1) }
+            let receipt = try body(relocate ? target.deletingLastPathComponent() : target)
+            if failAfterBody { throw NSError(domain: "injected", code: 2) }
+            return receipt
         }
     }
     private final class IO: FeatureWriteIO {
         var before: (() -> Void)?
         var verify: (() -> Void)?
+        var failCreate = false
+        var failWrite = false
+        var diskFull = false
+        var failFlush = false
+        var failReplace = false
+        var replaceThenFail = false
+        var shortWrite = false
+        var writes = 0
         func create(_ parent: Int32, _ name: String) -> Int32 {
-            openat(parent, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+            if failCreate { errno = EACCES; return -1 }
+            return openat(parent, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
         }
-        func write(_ fd: Int32, _ buffer: UnsafeRawPointer, _ count: Int) -> Int { Darwin.write(fd, buffer, count) }
-        func flush(_ fd: Int32) -> Int32 { fsync(fd) }
+        func write(_ fd: Int32, _ buffer: UnsafeRawPointer, _ count: Int) -> Int {
+            writes += 1
+            if diskFull && writes > 1 { errno = ENOSPC; return -1 }
+            if failWrite && writes > 1 { errno = EIO; return -1 }
+            return Darwin.write(fd, buffer, shortWrite ? min(count, 3) : count)
+        }
+        func flush(_ fd: Int32) -> Int32 {
+            if failFlush { errno = EIO; return -1 }
+            return fsync(fd)
+        }
         func replace(_ parent: Int32, _ temporary: String, _ target: String) -> Int32 {
-            renameat(parent, temporary, parent, target)
+            if failReplace { errno = EIO; return -1 }
+            let result = renameat(parent, temporary, parent, target)
+            if replaceThenFail { errno = EIO; return -1 }
+            return result
         }
         func beforeReplacement() { before?() }
         func beforeVerification() { verify?() }
@@ -180,6 +205,90 @@ final class FeatureFileWriterTests: XCTestCase {
         let target = root.appendingPathComponent(source.relativePath)
         XCTAssertEqual(try Data(contentsOf: target), source.bytes)
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: target.deletingLastPathComponent().path), ["feature.md"])
+    }
+    func testInjectedPreCommitFailuresLeaveExactBytesAndNoOwnedTemp() async throws {
+        for (expected, configure) in [
+            (FeatureMutationFailure.temporaryFileFailed, { (io: IO) in io.failCreate = true }),
+            (.temporaryWriteFailed, { (io: IO) in io.failWrite = true; io.shortWrite = true }),
+            (.diskFull, { (io: IO) in io.diskFull = true; io.shortWrite = true }),
+            (.flushFailed, { (io: IO) in io.failFlush = true }),
+        ] {
+            let (root, grant, ref, source) = try fixture()
+            let io = IO()
+            configure(io)
+            await assertFailure(expected) { _ = try await writer(grant, io: io).complete(request(ref, source)) }
+            let target = root.appendingPathComponent(source.relativePath)
+            XCTAssertEqual(try Data(contentsOf: target), source.bytes)
+            XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: target.deletingLastPathComponent().path), ["feature.md"])
+            XCTAssertEqual(grant.starts, grant.stops)
+        }
+        let (root, grant, ref, source) = try fixture()
+        let target = root.appendingPathComponent(source.relativePath)
+        await assertFailure(.coordinationFailed) {
+            _ = try await writer(grant, coordinator: Coordinator(fail: true)).complete(request(ref, source))
+        }
+        XCTAssertEqual(try Data(contentsOf: target), source.bytes)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: target.deletingLastPathComponent().path), ["feature.md"])
+    }
+    func testShortWritesCompleteAndAmbiguousReplacementNeverIssuesReceipt() async throws {
+        let (root, grant, ref, source) = try fixture()
+        let io = IO()
+        io.shortWrite = true
+        let receipt = try await writer(grant, io: io).complete(request(ref, source))
+        XCTAssertGreaterThan(io.writes, 1)
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(source.relativePath)), receipt.verifiedSource.bytes)
+        for afterRename in [false, true] {
+            let (root, grant, ref, source) = try fixture()
+            let io = IO()
+            io.failReplace = !afterRename
+            io.replaceThenFail = afterRename
+            await assertFailure(.unverifiedWrite) { _ = try await writer(grant, io: io).complete(request(ref, source)) }
+            let target = root.appendingPathComponent(source.relativePath)
+            XCTAssertEqual(try Data(contentsOf: target), afterRename ? receipt.verifiedSource.bytes : source.bytes)
+            XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: target.deletingLastPathComponent().path), ["feature.md"])
+        }
+    }
+    func testVerificationMismatchAndReadFailureAreUnverifiedWithoutCompensation() async throws {
+        for remove in [false, true] {
+            let (root, grant, ref, source) = try fixture()
+            let target = root.appendingPathComponent(source.relativePath)
+            let external = Data("external editor\n".utf8)
+            let io = IO()
+            io.verify = {
+                if remove { try? FileManager.default.removeItem(at: target) }
+                else { try? external.write(to: target) }
+            }
+            await assertFailure(.unverifiedWrite) { _ = try await writer(grant, io: io).complete(request(ref, source)) }
+            if remove { XCTAssertFalse(FileManager.default.fileExists(atPath: target.path)) }
+            else { XCTAssertEqual(try Data(contentsOf: target), external) }
+            XCTAssertEqual(grant.starts, grant.stops)
+        }
+    }
+    func testCancellationBeforeAndAfterCommit() async throws {
+        let (root, grant, ref, source) = try fixture()
+        let target = root.appendingPathComponent(source.relativePath)
+        let io = IO()
+        let operation = Task {
+            await assertFailure(.canceled) { _ = try await writer(grant, io: io).complete(request(ref, source)) }
+        }
+        io.before = { operation.cancel() }
+        await operation.value
+        XCTAssertEqual(try Data(contentsOf: target), source.bytes)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: target.deletingLastPathComponent().path), ["feature.md"])
+
+        let (root2, grant2, ref2, source2) = try fixture()
+        let io2 = IO()
+        let committed = Task { try await writer(grant2, io: io2).complete(request(ref2, source2)) }
+        io2.verify = { committed.cancel() }
+        let receipt = try await committed.value
+        XCTAssertEqual(try Data(contentsOf: root2.appendingPathComponent(source2.relativePath)), receipt.verifiedSource.bytes)
+    }
+    func testCoordinatorFailureAfterBodyCannotReturnVerifiedReceipt() async throws {
+        let (_, grant, ref, source) = try fixture()
+        await assertFailure(.unverifiedWrite) {
+            _ = try await writer(grant, coordinator: Coordinator(failAfterBody: true)).complete(request(ref, source))
+        }
+        XCTAssertEqual(grant.starts, grant.stops)
     }
     func testRevokedGrantAndSubstitutionBeforeReplace() async throws {
         let (root, grant, ref, source) = try fixture()

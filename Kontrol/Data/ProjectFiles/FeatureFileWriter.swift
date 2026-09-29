@@ -20,8 +20,13 @@ struct SystemFeatureWriteCoordinator: FeatureWriteCoordinating {
         coordinator.coordinate(writingItemAt: target, options: .forReplacing, error: &error) { url in
             result = Result { try body(url) }
         }
-        if error != nil { throw FeatureMutationFailure.writeFailed }
-        guard let result else { throw FeatureMutationFailure.writeFailed }
+        if error != nil {
+            // Coordination may fail after invoking the accessor. Its return value is not
+            // proof that the coordinated transaction was accepted.
+            if let result { _ = try result.get(); throw FeatureMutationFailure.unverifiedWrite }
+            throw FeatureMutationFailure.coordinationFailed
+        }
+        guard let result else { throw FeatureMutationFailure.coordinationFailed }
         return try result.get()
     }
 }
@@ -73,11 +78,26 @@ struct FeatureFileWriter: FeatureFileWriting {
             return try await access.withMutationBookmark(request.reference.bookmarkData) { root in
                 try Task.checkCancellation()
                 let target = root.appendingPathComponent(request.source.relativePath)
-                return try coordinator.coordinate(target) { coordinated in
-                    guard coordinated.standardizedFileURL == target.standardizedFileURL else {
-                        throw FeatureMutationFailure.unsafePath
+                var replacementBegan = false
+                do {
+                    return try coordinator.coordinate(target) { coordinated in
+                        guard coordinated.standardizedFileURL == target.standardizedFileURL else {
+                            throw FeatureMutationFailure.unsafePath
+                        }
+                        return try completeAnchored(root, name: name, request: request) {
+                            replacementBegan = true
+                        }
                     }
-                    return try completeAnchored(root, name: name, request: request)
+                } catch let failure as FeatureMutationFailure {
+                    // A coordinator that fails after the accessor has entered replacement
+                    // cannot turn an ambiguous outcome into a pre-commit error.
+                    throw replacementBegan ? FeatureMutationFailure.unverifiedWrite : failure
+                }
+                  catch is CancellationError {
+                    if replacementBegan { throw FeatureMutationFailure.unverifiedWrite }
+                    throw CancellationError()
+                } catch {
+                    throw replacementBegan ? FeatureMutationFailure.unverifiedWrite : .coordinationFailed
                 }
             }
         } catch let failure as FeatureMutationFailure { throw failure }
@@ -171,7 +191,8 @@ struct FeatureFileWriter: FeatureFileWriting {
         return output
     }
     private func completeAnchored(_ folder: URL, name: String,
-                                  request: FeatureCompletionRequest) throws -> FeatureMutationReceipt {
+                                  request: FeatureCompletionRequest,
+                                  replacementBegan: () -> Void) throws -> FeatureMutationReceipt {
         try Task.checkCancellation()
         let root = open(folder.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard root >= 0 else { throw FeatureMutationFailure.unsafePath }
@@ -215,9 +236,11 @@ struct FeatureFileWriter: FeatureFileWriting {
         }
         let temporary = ".kontrol-write-\(UUID().uuidString).tmp"
         let temp = io.create(features, temporary)
-        guard temp >= 0 else { throw FeatureMutationFailure.writeFailed }
+        guard temp >= 0 else {
+            throw errno == ENOSPC ? FeatureMutationFailure.diskFull : .temporaryFileFailed
+        }
         let tempID = try? info(temp)
-        guard let tempID else { close(temp); throw FeatureMutationFailure.writeFailed }
+        guard let tempID else { close(temp); throw FeatureMutationFailure.temporaryFileFailed }
         var owned = true
         defer {
             // Never unlink a substituted entry under our temporary name.
@@ -238,11 +261,15 @@ struct FeatureFileWriter: FeatureFileWriting {
                 try Task.checkCancellation()
                 let count = io.write(temp, base.advanced(by: offset), raw.count - offset)
                 if count < 0 && errno == EINTR { continue }
-                guard count > 0, count <= raw.count - offset else { throw FeatureMutationFailure.writeFailed }
+                guard count > 0, count <= raw.count - offset else {
+                    throw count < 0 && errno == ENOSPC ? FeatureMutationFailure.diskFull : .temporaryWriteFailed
+                }
                 offset += count
             }
         }
-        guard io.flush(temp) == 0 else { throw FeatureMutationFailure.writeFailed }
+        guard io.flush(temp) == 0 else {
+            throw errno == ENOSPC ? FeatureMutationFailure.diskFull : .flushFailed
+        }
         io.beforeReplacement()
         try Task.checkCancellation()
         let currentRoot = open(folder.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
@@ -263,8 +290,19 @@ struct FeatureFileWriter: FeatureFileWriting {
               try info(temp).sameFile(tempID) else {
             throw FeatureMutationFailure.changedIdentity
         }
-        guard io.replace(features, temporary, name) == 0 else { throw FeatureMutationFailure.writeFailed }
-        owned = false
+        // Metadata alone cannot detect an editor that restores the timestamps. Reread the
+        // target at the last pre-commit checkpoint without substituting a newer revision.
+        guard lseek(target, 0, SEEK_SET) == 0,
+              try bytes(target, originalID.size) == originalBytes,
+              try info(target) == originalID, entry(features, name, originalID) else {
+            throw FeatureMutationFailure.conflict
+        }
+        try Task.checkCancellation()
+        replacementBegan()
+        let replaced = io.replace(features, temporary, name) == 0
+        if replaced { owned = false }
+        // Even a failing injected replacement may have changed the destination. Verify it
+        // exactly once, without retrying or compensating for an ambiguous syscall result.
         // From here on cancellation cannot disguise a committed write. Verification reads
         // the actual destination; no fallback to intended bytes or compensating overwrite.
         io.beforeVerification()
@@ -287,6 +325,7 @@ struct FeatureFileWriter: FeatureFileWriting {
                   verified.id == request.featureID, verified.status == .completed else {
                 throw FeatureMutationFailure.unverifiedWrite
             }
+            guard replaced else { throw FeatureMutationFailure.unverifiedWrite }
             let source = ProjectSourceDocument(relativePath: current.relativePath, bytes: written)
             return FeatureMutationReceipt(projectID: request.reference.id, featureID: request.featureID,
                                           verifiedSource: source, inverse: patched.inverse)
