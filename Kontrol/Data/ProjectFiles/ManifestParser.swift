@@ -51,6 +51,118 @@ struct ManifestParser {
         return .supported(ProjectRoadmap(schemaVersion: version, milestones: milestones))
     }
 
+    /// Parse only the YAML region; the source and Markdown suffix remain untouched.
+    /// Delimiters must occupy complete lines, starting at byte zero (no preamble/BOM).
+    func feature(_ source: ProjectSourceDocument) throws -> ProjectDocumentResult<ProjectFeature> {
+        guard source.bytes.count <= 1_048_576 else { throw failure(.sizeLimit, "document", source) }
+        guard let text = source.text else { throw failure(.invalidUTF8, "document", source) }
+        // Foundation's UTF-8 decoder can discard a leading BOM; delimiters are byte-exact.
+        guard source.bytes.starts(with: [0x2d, 0x2d, 0x2d, 0x0a]) ||
+              source.bytes.starts(with: [0x2d, 0x2d, 0x2d, 0x0d, 0x0a]) else {
+            throw failure(.invalidFrontmatter, "opening delimiter", source)
+        }
+        var cursor = text.startIndex
+        guard let opening = nextLine(in: text, from: &cursor), opening.utf8.elementsEqual("---".utf8) else {
+            throw failure(.invalidFrontmatter, "opening delimiter", source)
+        }
+        let yamlStart = cursor
+        var yamlEnd: String.Index?
+        while cursor < text.endIndex {
+            let start = cursor
+            guard let line = nextLine(in: text, from: &cursor) else { break }
+            if line.utf8.elementsEqual("---".utf8) {
+                yamlEnd = start
+                break
+            }
+        }
+        guard let yamlEnd else { throw failure(.invalidFrontmatter, "closing delimiter", source) }
+        let yaml = ProjectSourceDocument(relativePath: source.relativePath,
+                                         bytes: Data(text[yamlStart..<yamlEnd].utf8))
+        do {
+            let fields = try mapping(yaml)
+            // Feature files inherit V1 unless they explicitly declare another schema.
+            let version = fields["schema_version"] == nil ? 1 : try schemaVersion(fields, yaml)
+            guard version == 1 else { return .unsupported(version: version, rawText: text) }
+            let id = try requiredString("id", fields, yaml, nonempty: true)
+            let title = try requiredString("title", fields, yaml, nonempty: true)
+            let status: ProjectFeatureStatus = try featureEnum("status", fields, yaml)
+            let priority: ProjectFeaturePriority = try featureEnum("priority", fields, yaml)
+            let effort: ProjectFeatureEffort = try featureEnum("effort", fields, yaml)
+            let completedAt = try completionDate(fields, yaml)
+            return .supported(ProjectFeature(id: id, title: title, status: status, priority: priority,
+                                             effort: effort, dependsOn: try optionalStrings("depends_on", fields, yaml),
+                                             areas: try optionalStrings("areas", fields, yaml),
+                                             completedAt: completedAt, body: String(text[cursor...]),
+                                             sourcePath: source.relativePath))
+        } catch let error as ProjectParseError {
+            // Yams' marks are zero-based within the extracted YAML, after the opening line.
+            throw ProjectParseError(code: error.code, path: source.relativePath,
+                                    line: error.line.map { $0 + 1 }, column: error.column, field: error.field)
+        }
+    }
+
+    /// Returns nil for a final unterminated line, which cannot be an opening delimiter.
+    /// A closing delimiter at EOF is handled separately below by the line scanner.
+    private func nextLine(in text: String, from cursor: inout String.Index) -> String? {
+        let start = cursor
+        // String.Character combines CRLF into one grapheme. Inspect Unicode scalars so
+        // LF and CRLF have identical delimiter semantics without normalizing the body.
+        let scalars = text.unicodeScalars
+        if let newline = scalars[cursor...].firstIndex(of: "\n") {
+            cursor = scalars.index(after: newline)
+            let end = newline > start && scalars[scalars.index(before: newline)] == "\r"
+                ? scalars.index(before: newline) : newline
+            return String(text[start..<end])
+        }
+        cursor = text.endIndex
+        return start == text.endIndex ? nil : String(text[start...])
+    }
+
+    private func featureEnum<T: RawRepresentable>(_ key: String, _ fields: [String: Node],
+                                                   _ source: ProjectSourceDocument) throws -> T where T.RawValue == String {
+        let value = try requiredString(key, fields, source)
+        guard let result = T(rawValue: value) else { throw failure(.invalidField, key, source, fields[key]) }
+        return result
+    }
+
+    private func completionDate(_ fields: [String: Node], _ source: ProjectSourceDocument) throws -> Date? {
+        guard let node = fields["completed_at"] else { return nil }
+        if case let .scalar(scalar) = node, node.tag.rawValue == Tag.Name.null.rawValue,
+           ["", "null", "Null", "NULL", "~"].contains(scalar.string) { return nil }
+        let value = try requiredString("completed_at", fields, source)
+        // Require a full, explicit RFC 3339-style ISO 8601 instant (not a date-only value,
+        // local time, YAML implicit timestamp, or a formatter-accepted prefix).
+        let pattern = #"^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$"#
+        let regex = try! NSRegularExpression(pattern: pattern)
+        let range = NSRange(value.startIndex..<value.endIndex, in: value)
+        guard let match = regex.firstMatch(in: value, range: range), match.range == range else {
+            throw failure(.invalidField, "completed_at", source, node)
+        }
+        let ns = value as NSString
+        let numbers = (1...6).compactMap { Int(ns.substring(with: match.range(at: $0))) }
+        guard numbers.count == 6, numbers[0] >= 1, (0...23).contains(numbers[3]),
+              (0...59).contains(numbers[4]), (0...59).contains(numbers[5]) else {
+            throw failure(.invalidField, "completed_at", source, node)
+        }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let parts = DateComponents(year: numbers[0], month: numbers[1], day: numbers[2])
+        guard let day = calendar.date(from: parts),
+              calendar.dateComponents([.year, .month, .day], from: day) == parts else {
+            throw failure(.invalidField, "completed_at", source, node)
+        }
+        let zone = ns.substring(with: match.range(at: 7))
+        if zone != "Z" {
+            let components = zone.dropFirst().split(separator: ":")
+            guard components.count == 2, let hours = Int(components[0]), let minutes = Int(components[1]),
+                  hours <= 23, minutes <= 59 else { throw failure(.invalidField, "completed_at", source, node) }
+        }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = value.contains(".") ? [.withInternetDateTime, .withFractionalSeconds] : [.withInternetDateTime]
+        guard let date = formatter.date(from: value) else { throw failure(.invalidField, "completed_at", source, node) }
+        return date
+    }
+
     private func mapping(_ source: ProjectSourceDocument) throws -> [String: Node] {
         guard source.bytes.count <= 1_048_576 else { throw failure(.sizeLimit, "document", source) }
         guard let text = source.text else { throw failure(.invalidUTF8, "document", source) }

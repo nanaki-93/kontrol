@@ -113,6 +113,133 @@ final class ProjectManifestParserTests: XCTestCase {
         }
     }
 
+    private func featureSource(_ text: String, path: String = ".kontrol/features/different-name.md") -> ProjectSourceDocument {
+        source(text, path: path)
+    }
+
+    private func assertFeatureError(_ text: String, _ code: ProjectDiagnosticCode,
+                                    field: String? = nil, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertThrowsError(try parser.feature(featureSource(text)), "Input: \(String(reflecting: text))", file: file, line: line) { error in
+            guard let error = error as? ProjectParseError else {
+                return XCTFail("Expected classified feature error", file: file, line: line)
+            }
+            XCTAssertEqual(error.code, code, file: file, line: line)
+            XCTAssertEqual(error.path, ".kontrol/features/different-name.md", file: file, line: line)
+            if let field { XCTAssertEqual(error.field, field, file: file, line: line) }
+        }
+    }
+
+    private let featureYAML = "id: actual-id\ntitle: 東京 🧭\nstatus: ready\npriority: high\neffort: medium\n"
+
+    func testFeatureFixturesAndVerbatimBodyWithBothLineEndings() throws {
+        let base = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent("../docs/examples/.kontrol/features").standardizedFileURL
+        for name in ["foundation", "project-reader", "feature-history"] {
+            let bytes = try Data(contentsOf: base.appendingPathComponent("\(name).md"))
+            let source = ProjectSourceDocument(relativePath: ".kontrol/features/\(name).md", bytes: bytes)
+            guard case let .supported(feature) = try parser.feature(source) else { return XCTFail() }
+            XCTAssertEqual(feature.id, name)
+            XCTAssertEqual(feature.sourcePath, source.relativePath)
+            XCTAssertEqual(source.bytes, bytes)
+            XCTAssertTrue(feature.body.contains("Acceptance:") || name == "foundation")
+            if name == "foundation" { XCTAssertNotNil(feature.completedAt) }
+            else { XCTAssertNil(feature.completedAt) }
+        }
+        let body = "# Markdown 🌙\r\n\r\n---\r\nkeep  spaces  \r\n"
+        let raw = "---\r\n" + featureYAML.replacingOccurrences(of: "\n", with: "\r\n")
+            + "unknown: {keep: 'yes'}\r\n---\r\n" + body
+        let original = featureSource(raw)
+        guard case let .supported(feature) = try parser.feature(original) else { return XCTFail() }
+        XCTAssertEqual(feature.id, "actual-id") // The filename is not the ID.
+        XCTAssertEqual(feature.body, body)
+        XCTAssertEqual(feature.dependsOn, [])
+        XCTAssertEqual(feature.areas, [])
+        XCTAssertNil(feature.completedAt)
+        XCTAssertEqual(original.bytes, Data(raw.utf8))
+        XCTAssertEqual(original.text, raw)
+        let noTrailingNewline = "---\n" + featureYAML + "---"
+        guard case let .supported(emptyBody) = try parser.feature(featureSource(noTrailingNewline)) else {
+            return XCTFail("Closing delimiter at EOF is valid")
+        }
+        XCTAssertEqual(emptyBody.body, "")
+    }
+
+    func testFeatureEnumsArraysAndTimestamps() throws {
+        for status in ["planned", "ready", "active", "blocked", "completed"] {
+            for priority in ["high", "medium", "low"] {
+                for effort in ["small", "medium", "large"] {
+                    let yaml = "id: x\ntitle: X\nstatus: \(status)\npriority: \(priority)\neffort: \(effort)\n"
+                    guard case let .supported(feature) = try parser.feature(featureSource("---\n" + yaml + "---\n")) else {
+                        return XCTFail()
+                    }
+                    XCTAssertEqual(feature.status.rawValue, status)
+                    XCTAssertEqual(feature.priority.rawValue, priority)
+                    XCTAssertEqual(feature.effort.rawValue, effort)
+                    XCTAssertNil(feature.completedAt) // Even completed does not invent a timestamp.
+                }
+            }
+        }
+        for timestamp in ["'2026-09-26T10:00:00Z'", "'2024-02-29T23:59:59.123+02:30'"] {
+            let raw = "---\n" + featureYAML + "depends_on: [one, two]\nareas: [ui]\ncompleted_at: \(timestamp)\n---\n"
+            guard case let .supported(feature) = try parser.feature(featureSource(raw)) else { return XCTFail() }
+            XCTAssertNotNil(feature.completedAt)
+            XCTAssertEqual(feature.dependsOn, ["one", "two"])
+            XCTAssertEqual(feature.areas, ["ui"])
+        }
+        for null in ["", "null", "~"] {
+            let raw = "---\n" + featureYAML + "completed_at: \(null)\n---\n"
+            guard case let .supported(feature) = try parser.feature(featureSource(raw)) else { return XCTFail() }
+            XCTAssertNil(feature.completedAt)
+        }
+        for bad in ["'2026-02-30T10:00:00Z'", "'2026-01-01'", "'2026-01-01T10:00:00'",
+                    "'2026-01-01T25:00:00Z'", "'2026-01-01T10:00:00+25:00'", "yesterday", "123", "[]"] {
+            assertFeatureError("---\n" + featureYAML + "completed_at: \(bad)\n---\n", .invalidField, field: "completed_at")
+        }
+    }
+
+    func testInvalidFrontmatterFieldsAndDelimiters() {
+        for raw in ["", featureYAML + "---\n", " ---\n" + featureYAML + "---\n",
+                    "--- suffix\n" + featureYAML + "---\n", "---\n" + featureYAML,
+                    "---\n" + featureYAML + " ---\n", "---\n" + featureYAML + "--- trailing\n",
+                    "---\r" + featureYAML + "---\r", "\u{FEFF}---\n" + featureYAML + "---\n",
+                    "---\n" + featureYAML + "\u{FEFF}---\n"] {
+            assertFeatureError(raw, .invalidFrontmatter)
+        }
+        for yaml in [featureYAML.replacingOccurrences(of: "id: actual-id\n", with: ""),
+                     featureYAML.replacingOccurrences(of: "id: actual-id", with: "id: '  '"),
+                     featureYAML.replacingOccurrences(of: "title: 東京 🧭", with: "title: 42"),
+                     featureYAML.replacingOccurrences(of: "status: ready", with: "status: done"),
+                     featureYAML.replacingOccurrences(of: "priority: high", with: "priority: urgent"),
+                     featureYAML.replacingOccurrences(of: "effort: medium", with: "effort: huge"),
+                     featureYAML + "depends_on: [valid, 12]\n", featureYAML + "areas: null\n"] {
+            XCTAssertThrowsError(try parser.feature(featureSource("---\n" + yaml + "---\n"))) {
+                XCTAssertEqual(($0 as? ProjectParseError)?.code, .invalidField)
+            }
+        }
+        assertFeatureError("---\n" + featureYAML + "id: duplicate\n---\n", .duplicateKey)
+        XCTAssertThrowsError(try parser.feature(featureSource("---\nid: x\nid: y\n---\n"))) {
+            XCTAssertEqual(($0 as? ProjectParseError)?.line, 2) // Physical line, zero-based.
+        }
+        assertFeatureError("---\n" + featureYAML + "unknown: &x abc\n---\n", .malformedYAML)
+        assertFeatureError("---\n" + featureYAML + "unknown: !custom foo\n---\n", .invalidField)
+        let invalid = ProjectSourceDocument(relativePath: ".kontrol/features/different-name.md", bytes: Data([0xff]))
+        XCTAssertThrowsError(try parser.feature(invalid)) { XCTAssertEqual(($0 as? ProjectParseError)?.code, .invalidUTF8) }
+        let utf16 = ProjectSourceDocument(relativePath: ".kontrol/features/different-name.md",
+                                          bytes: "---\n".data(using: .utf16LittleEndian)!)
+        XCTAssertThrowsError(try parser.feature(utf16)) // Delimiters are not decoded via another encoding.
+    }
+
+    func testFeatureUnsupportedVersionPreservesRawSourceButRejectsUnsafeYAML() throws {
+        let raw = "---\r\nschema_version: 7\r\nunknown: ☀️\r\n ---\r\nbody"
+        // An indented delimiter cannot end frontmatter.
+        assertFeatureError(raw, .invalidFrontmatter)
+        let valid = raw.replacingOccurrences(of: "\r\n ---", with: "\r\n---")
+        XCTAssertEqual(try parser.feature(featureSource(valid)), .unsupported(version: 7, rawText: valid))
+        assertFeatureError("---\nschema_version: '2'\n" + featureYAML + "---\n", .invalidField, field: "schema_version")
+        assertFeatureError("---\nschema_version: 2\nid: x\nid: y\n---\n", .duplicateKey)
+        assertFeatureError("---\nschema_version: 2\nunknown: *alias\n---\n", .malformedYAML)
+    }
+
     func testRoadmapOrderStatusesAndInvalidMilestones() throws {
         let path = ".kontrol/roadmap.yaml"
         let valid = source("schema_version: 1\nmilestones:\n  - id: second\n    title: Étape\n    status: custom-state\n  - id: first\n    title: Start\n    status: active\n", path: path)
