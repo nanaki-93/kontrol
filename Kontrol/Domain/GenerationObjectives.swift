@@ -54,8 +54,18 @@ enum GenerationObjectivesLoader {
     static func decodeAndValidate(_ data: Data, catalog: ValidatedCatalog,
                                   membership: CurrentCatalogMembership) throws -> GenerationObjectives {
         guard !data.isEmpty, data.count <= maximumBytes,
-              let registry = try? JSONDecoder().decode(GenerationObjectives.self, from: data),
-              registry.version == 1, !registry.objectives.isEmpty, registry.objectives.count <= 1000,
+              let registry = try? JSONDecoder().decode(GenerationObjectives.self, from: data) else {
+            throw GenerationObjectivesError.corrupt
+        }
+        try validate(registry, catalog: catalog, membership: membership)
+        return registry
+    }
+
+    // Also check a supplied detached registry at request time; decoding alone does
+    // not authorize scope when current catalog membership has changed.
+    static func validate(_ registry: GenerationObjectives, catalog: ValidatedCatalog,
+                         membership: CurrentCatalogMembership) throws {
+        guard registry.version == 1, !registry.objectives.isEmpty, registry.objectives.count <= 1000,
               (try? membership.validate()) != nil,
               membership.catalogID == catalog.value.catalogID,
               membership.catalogVersion == catalog.value.version else {
@@ -95,6 +105,5 @@ enum GenerationObjectivesLoader {
               }), Set(registry.objectives.map(\.topicID)) == topics else {
             throw GenerationObjectivesError.corrupt
         }
-        return registry
     }
 }

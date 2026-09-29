@@ -84,6 +84,190 @@ final class GenerationObjectiveTests: XCTestCase {
         }
     }
 
+    private func generationContext(_ seed: ValidatedCatalog, completed: Set<String> = [],
+                                   terminal: [TerminalLessonMatch] = []) -> LessonGenerationContext {
+        LessonGenerationContext(catalog: seed, membership: membership(seed),
+            completedConceptIDs: completed, terminal: terminal, definitions: [], startedPins: [])
+    }
+
+    private func terminal(_ key: String, topic: String = "go", status: LessonProgressStatus = .completed,
+                          concepts: [String] = ["go.concurrency.cancel-work"], date: Date? = nil) -> TerminalLessonMatch {
+        TerminalLessonMatch(status: status,
+            metadata: LessonMatchMetadata(id: UUID().uuidString, objectiveKey: key,
+                conceptIDs: concepts, contentHash: nil), topicID: topic, format: "code", date: date)
+    }
+
+    private func selection(_ key: String? = "expansion.go.concurrency.cancellation-race",
+                           format: String = "code", difficulty: String = "intermediate") -> LessonGenerationSelection {
+        LessonGenerationSelection(topicID: "go", objectiveKey: key, format: format, difficulty: difficulty)
+    }
+
+    func testRequestIsCanonicalDetachedAndPrivacyAllowlisted() throws {
+        let seed = try catalog()
+        let registry = try GenerationObjectivesLoader.load(catalog: seed, membership: membership(seed))
+        let completed: Set<String> = ["go.concurrency.cancel-work", "java.concurrency.shutdown", "retired.concept"]
+        let evidence = [terminal("old.go", date: Date(timeIntervalSince1970: 123)),
+                        terminal("old.java", topic: "java", concepts: ["java.concurrency.shutdown"])]
+        let context = generationContext(seed, completed: completed, terminal: evidence)
+        let id = UUID()
+        let request = try LessonGenerationRequestBuilder.make(selection: selection(), operationID: id,
+            context: context, registry: registry)
+        let canonical = try XCTUnwrap(registry.objectives.first { $0.key == request.objectiveKey })
+        XCTAssertEqual(request.operationID, id)
+        XCTAssertEqual(request.requestSchemaVersion, 1)
+        XCTAssertEqual(request.catalogID, seed.value.catalogID)
+        XCTAssertEqual(request.catalogVersion, seed.value.version)
+        XCTAssertEqual(request.objectiveRegistryVersion, registry.version)
+        XCTAssertEqual(request.objective, canonical.text)
+        XCTAssertEqual(request.conceptIDs, canonical.conceptIDs)
+        XCTAssertEqual(request.prerequisiteConceptIDs, canonical.prerequisiteConceptIDs)
+        XCTAssertEqual(request.completedConceptIDs, ["go.concurrency.cancel-work"])
+        XCTAssertEqual(request.excludedObjectives.map(\.key), ["old.go"])
+        XCTAssertEqual(context.terminal.count, 2) // full local evidence not truncated or sent
+        let bytes = try request.encodedData()
+        XCTAssertLessThanOrEqual(bytes.count, LessonGenerationRequest.maximumBytes)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        XCTAssertEqual(Set(object.keys), ["operationID", "requestSchemaVersion", "catalogID", "catalogVersion",
+            "objectiveRegistryVersion", "topicID", "subtopicID", "conceptIDs", "objectiveKey", "objective",
+            "difficulty", "format", "prerequisiteConceptIDs", "completedConceptIDs", "excludedObjectives"])
+        let wire = try XCTUnwrap(String(data: bytes, encoding: .utf8))
+        for forbidden in ["referenceAnswer", "answerDraft", "attempt", "completedAt", "date", "task", "project",
+                          "schedule", "focus", "credential", "old.java", "retired.concept", "java.concurrency.shutdown"] {
+            XCTAssertFalse(wire.lowercased().contains(forbidden.lowercased()), forbidden)
+        }
+    }
+
+    func testSiblingSubtopicEvidenceStaysLocalAndRelevantPrerequisitesRemainRemote() throws {
+        let seed = try catalog()
+        let registry = try GenerationObjectivesLoader.load(catalog: seed, membership: membership(seed))
+        let network = "go.network.deadline-boundaries"
+        let records = [terminal(network, concepts: [network]),
+                       terminal("historical.network", concepts: [network]),
+                       terminal("historical.mixed", concepts: [network, "go.concurrency.cancel-work"]),
+                       terminal("legacy.empty", concepts: []),
+                       terminal("historical.prerequisite", concepts: ["go.concurrency.cancel-work"])]
+        let context = generationContext(seed, completed: [network, "go.concurrency.cancel-work"], terminal: records)
+        let request = try LessonGenerationRequestBuilder.make(selection: selection(), operationID: UUID(),
+            context: context, registry: registry)
+        let wire = try XCTUnwrap(String(data: request.encodedData(), encoding: .utf8))
+        XCTAssertFalse(wire.contains("go.network"))
+        XCTAssertFalse(wire.contains("historical.network"))
+        XCTAssertFalse(wire.contains("legacy.empty"))
+        XCTAssertEqual(request.completedConceptIDs, ["go.concurrency.cancel-work"])
+        XCTAssertEqual(request.excludedObjectives.map(\.key), ["historical.mixed", "historical.prerequisite"])
+        XCTAssertEqual(request.excludedObjectives.first?.conceptIDs, ["go.concurrency.cancel-work"])
+        XCTAssertEqual(context.terminal.count, records.count)
+        XCTAssertTrue(context.completedConceptIDs.contains(network))
+        XCTAssertEqual(LessonDeduplication.decide(candidate: LessonMatchMetadata(id: "generated.fixture",
+            objectiveKey: network, conceptIDs: [network],
+            contentHash: "sha256:" + String(repeating: "a", count: 64)), terminal: context.terminal),
+            .rejected(.objectiveConceptOverlap))
+    }
+
+    func testCompleteProviderEnvelopeMustFitAtSerializationBoundary() throws {
+        struct ProviderBody: Encodable {
+            let request: LessonGenerationRequest
+            let instructions: String
+        }
+        let seed = try catalog()
+        let registry = try GenerationObjectivesLoader.load(catalog: seed, membership: membership(seed))
+        let request = try LessonGenerationRequestBuilder.make(selection: selection(), operationID: UUID(),
+            context: generationContext(seed, completed: ["go.concurrency.cancel-work"]), registry: registry)
+        let baseline = try LessonGenerationRequest.encodedProviderBody(
+            ProviderBody(request: request, instructions: ""))
+        let remaining = LessonGenerationRequest.maximumBytes - baseline.count
+        let exact = try LessonGenerationRequest.encodedProviderBody(
+            ProviderBody(request: request, instructions: String(repeating: "x", count: remaining)))
+        XCTAssertEqual(exact.count, LessonGenerationRequest.maximumBytes)
+        XCTAssertThrowsError(try LessonGenerationRequest.encodedProviderBody(
+            ProviderBody(request: request, instructions: String(repeating: "x", count: remaining + 1)))) {
+            XCTAssertEqual($0 as? LessonGenerationError, .oversizedRequest)
+        }
+        XCTAssertLessThanOrEqual(try request.encodedData().count, LessonGenerationRequest.maximumDomainBytes)
+    }
+
+    func testScopeAndPrerequisitesFailBeforeAnyProviderCall() throws {
+        let seed = try catalog()
+        let registry = try GenerationObjectivesLoader.load(catalog: seed, membership: membership(seed))
+        let empty = generationContext(seed)
+        func failure(_ selected: LessonGenerationSelection, _ context: LessonGenerationContext,
+                     _ expected: LessonGenerationError, registry: GenerationObjectives? = nil,
+                     file: StaticString = #filePath, line: UInt = #line) {
+            XCTAssertThrowsError(try LessonGenerationRequestBuilder.make(selection: selected,
+                operationID: UUID(), context: context, registry: registry ?? registryValue), file: file, line: line) {
+                XCTAssertEqual($0 as? LessonGenerationError, expected, file: file, line: line)
+            }
+        }
+        let registryValue = registry
+        failure(selection(), empty, .unmetPrerequisites)
+        let ready = generationContext(seed, completed: ["go.concurrency.cancel-work"])
+        failure(selection(format: "design"), ready, .invalidScope)
+        failure(selection(difficulty: "advanced"), ready, .invalidScope)
+        failure(selection("not-authored"), ready, .invalidScope)
+        failure(LessonGenerationSelection(topicID: "retired", objectiveKey: nil,
+            format: "code", difficulty: "intermediate"), ready, .invalidScope)
+        failure(selection(), generationContext(seed, completed: ["go.concurrency.cancel-work"],
+            terminal: [terminal("expansion.go.concurrency.cancellation-race", status: .dismissed)]),
+            .exhaustedObjectives)
+        let wrong = CurrentCatalogMembership(catalogID: "other", catalogVersion: empty.membership.catalogVersion,
+            topicIDs: empty.membership.topicIDs, subtopicIDs: empty.membership.subtopicIDs,
+            conceptIDs: empty.membership.conceptIDs, seededLessonIDs: empty.membership.seededLessonIDs)
+        let stale = LessonGenerationContext(catalog: seed, membership: wrong, completedConceptIDs: [],
+            terminal: [], definitions: [], startedPins: [])
+        failure(selection(), stale, .staleContext)
+        let corrupt = try JSONDecoder().decode(GenerationObjectives.self, from: altered { object, _ in object["version"] = 9 })
+        failure(selection(), ready, .corruptObjectives, registry: corrupt)
+        // A provider receives only successfully constructed requests.
+        XCTAssertNoThrow(try LessonGenerationRequestBuilder.make(selection: selection(),
+            operationID: UUID(), context: ready, registry: registry))
+    }
+
+    func testRemoteExclusionsAreDeterministicallyBoundedWithoutDroppingLocalEvidence() throws {
+        let seed = try catalog()
+        let registry = try GenerationObjectivesLoader.load(catalog: seed, membership: membership(seed))
+        let records = (0..<80).map { terminal(String(format: "prior.%03d", $0)) } +
+            [terminal("unrelated", topic: "java")]
+        let context = generationContext(seed, completed: ["go.concurrency.cancel-work"], terminal: records)
+        let one = try LessonGenerationRequestBuilder.make(selection: selection(), operationID: UUID(uuidString:
+            "00000000-0000-0000-0000-000000000001")!, context: context, registry: registry)
+        let two = try LessonGenerationRequestBuilder.make(selection: selection(), operationID: one.operationID,
+            context: generationContext(seed, completed: context.completedConceptIDs, terminal: records.reversed()),
+            registry: registry)
+        XCTAssertEqual(try one.encodedData(), try two.encodedData())
+        XCTAssertEqual(one.excludedObjectives.count + one.completedConceptIDs.count, 50)
+        XCTAssertEqual(one.excludedObjectives.first?.key, "prior.000")
+        XCTAssertEqual(one.excludedObjectives.last?.key, "prior.049")
+        XCTAssertEqual(context.terminal.count, 81)
+        XCTAssertTrue(context.terminal.contains { $0.metadata.objectiveKey == "prior.079" })
+        // Truncated remote hints never replace the full local acceptance evidence.
+        let localCandidate = LessonMatchMetadata(id: "generated.fixture", objectiveKey: "prior.079",
+            conceptIDs: ["go.concurrency.cancel-work"], contentHash: "sha256:" + String(repeating: "a", count: 64))
+        XCTAssertEqual(LessonDeduplication.decide(candidate: localCandidate, terminal: context.terminal),
+            .rejected(.objectiveConceptOverlap))
+        let huge = generationContext(seed, completed: ["go.concurrency.cancel-work"],
+            terminal: [terminal(String(repeating: "z", count: 40_000)), terminal("small")])
+        let bounded = try LessonGenerationRequestBuilder.make(selection: selection(), operationID: one.operationID,
+            context: huge, registry: registry)
+        XCTAssertLessThanOrEqual(try bounded.encodedData().count, 32 * 1024)
+        XCTAssertEqual(bounded.excludedObjectives.map(\.key), ["small"])
+        XCTAssertEqual(huge.terminal.count, 2)
+    }
+
+    func testOversizedCanonicalScopeFailsRatherThanSendingAnUnboundedRequest() throws {
+        let seed = try catalog()
+        let key = String(repeating: "x", count: 33_000)
+        let data = try altered { _, entries in entries[0]["key"] = key }
+        let registry = try GenerationObjectivesLoader.decodeAndValidate(data,
+            catalog: seed, membership: membership(seed))
+        let selected = LessonGenerationSelection(topicID: "go", objectiveKey: key,
+            format: "code", difficulty: "intermediate")
+        XCTAssertThrowsError(try LessonGenerationRequestBuilder.make(selection: selected,
+            operationID: UUID(), context: generationContext(seed,
+                completed: ["go.concurrency.cancel-work"]), registry: registry)) {
+            XCTAssertEqual($0 as? LessonGenerationError, .oversizedRequest)
+        }
+    }
+
     func testLoadingAndFailureNeverWriteLearningState() throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         let seed = try catalog()
