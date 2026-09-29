@@ -8,6 +8,9 @@ final class AppDependencies {
     let container: ModelContainer
     let catalogRepository: any CatalogRepository
     let learningCatalogStore: LearningCatalogStore
+    let aiSettingsStore: AISettingsStore
+    let credentialStore: any CredentialStore
+    let lessonGenerationStore: LessonGenerationStore
     let lessonDraftStore: LessonDraftStore
     let taskStore: TaskStore
     let scheduleStore: ScheduleStore
@@ -20,10 +23,26 @@ final class AppDependencies {
          focusWallClock: @escaping () -> Date = Date.init,
          focusMonotonicClock: @escaping () -> ContinuousClock.Instant = { ContinuousClock().now },
          draftClock: @escaping () -> Date = Date.init,
-         draftScheduler: LessonDraftStore.Scheduler? = nil) {
+         draftScheduler: LessonDraftStore.Scheduler? = nil,
+         aiSettingsRepository: (any AISettingsRepository)? = nil,
+         credentialStore: (any CredentialStore)? = nil,
+         aiGenerator: ((String, String, any CredentialStore) -> any LessonGenerator)? = nil,
+         aiConnectionTester: ((String, String, any CredentialStore) -> any OpenAIConnectionTesting)? = nil) {
         self.container = container
         self.catalogRepository = catalogRepository
         learningCatalogStore = LearningCatalogStore(repository: catalogRepository)
+        let credentials = credentialStore ?? KeychainCredentialStore()
+        self.credentialStore = credentials
+        aiSettingsStore = AISettingsStore(repository: aiSettingsRepository ?? SwiftDataAISettingsRepository(container: container),
+            credentials: credentials, connectionTester: { model, reference in
+                if let aiConnectionTester { return aiConnectionTester(model, reference, credentials) }
+                return OpenAILessonGenerator(model: model, credentialReference: reference, credentials: credentials)
+            })
+        lessonGenerationStore = LessonGenerationStore(settings: aiSettingsStore, repository: catalogRepository,
+            learning: learningCatalogStore, generator: { model, reference in
+                if let aiGenerator { return aiGenerator(model, reference, credentials) }
+                return OpenAILessonGenerator(model: model, credentialReference: reference, credentials: credentials)
+            })
         if let draftScheduler {
             lessonDraftStore = LessonDraftStore(learning: learningCatalogStore, clock: draftClock,
                                                 schedule: draftScheduler)

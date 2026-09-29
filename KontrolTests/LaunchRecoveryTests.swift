@@ -17,6 +17,30 @@ private actor RecoveryGate {
 }
 
 @MainActor
+private final class UnavailableAISettings: AISettingsRepository {
+    func load() throws -> AISettingsSnapshot { throw AISettingsPersistenceError.invalidSettings }
+    func save(_ settings: AISettingsSnapshot, expectedRevision: UUID?) throws -> AISettingsSnapshot {
+        throw AISettingsPersistenceError.invalidSettings
+    }
+}
+
+private final class UnavailableCredentials: CredentialStore {
+    func read(reference: String) throws -> Data { throw CredentialStoreError.inaccessible }
+    func save(_ credential: Data, reference: String) throws { throw CredentialStoreError.inaccessible }
+    func remove(reference: String) throws { throw CredentialStoreError.inaccessible }
+}
+
+@MainActor
+private final class EnabledAISettings: AISettingsRepository {
+    private let snapshot = AISettingsSnapshot(enabled: true, providerID: "openai", modelID: "gpt-4o-mini",
+        credentialReference: UUID().uuidString, revision: UUID())
+    func load() throws -> AISettingsSnapshot { snapshot }
+    func save(_ settings: AISettingsSnapshot, expectedRevision: UUID?) throws -> AISettingsSnapshot {
+        throw AISettingsPersistenceError.staleRevision
+    }
+}
+
+@MainActor
 final class LaunchRecoveryTests: XCTestCase {
     private enum Injected: Error { case store, catalog }
 
@@ -281,6 +305,48 @@ final class LaunchRecoveryTests: XCTestCase {
         XCTAssertEqual(attempts, 2, "equal-version retry needs no second commit")
         XCTAssertEqual(saves, 1, "equal-version retry must recognize the completed commit")
         XCTAssertEqual(try SwiftDataCatalogRepository(container: container).loadSnapshot(), persisted)
+    }
+
+    func testOptionalSettingsReadFailureDoesNotBlockCatalogOrDraftOwnership() async throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let coordinator = LaunchCoordinator(open: { container }, makeDependencies: { container, repository in
+            AppDependencies(container: container, catalogRepository: repository,
+                aiSettingsRepository: UnavailableAISettings(), credentialStore: UnavailableCredentials())
+        })
+        await coordinator.start()
+        XCTAssertEqual(coordinator.state, .ready)
+        let graph = try XCTUnwrap(coordinator.dependencies)
+        XCTAssertEqual(graph.aiSettingsStore.error, .storageFailure)
+        XCTAssertFalse(graph.aiSettingsStore.presentation.enabled)
+        XCTAssertEqual(graph.aiSettingsStore.credentialStatus, .notConfigured)
+        XCTAssertEqual(graph.learningCatalogStore.state, .notLoaded)
+        graph.learningCatalogStore.loadIfNeeded()
+        let choice = try XCTUnwrap(graph.learningCatalogStore.state.snapshot?.slots.first?.lessonID)
+        _ = try graph.learningCatalogStore.openLesson(lessonID: choice)
+        XCTAssertNotNil(graph.learningCatalogStore.state.snapshot)
+        XCTAssertTrue(graph.lessonDraftStore === coordinator.dependencies?.lessonDraftStore)
+        XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).count, 1)
+        XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<LessonDefinition>()).count, 40)
+    }
+
+    func testInaccessibleKeychainCannotAuthorizeGenerationButOfflineLessonsStillOpen() async throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let coordinator = LaunchCoordinator(open: { container }, makeDependencies: { container, repository in
+            AppDependencies(container: container, catalogRepository: repository,
+                aiSettingsRepository: EnabledAISettings(), credentialStore: UnavailableCredentials())
+        })
+        await coordinator.start()
+        XCTAssertEqual(coordinator.state, .ready)
+        let graph = try XCTUnwrap(coordinator.dependencies)
+        XCTAssertEqual(graph.aiSettingsStore.credentialStatus, .inaccessible)
+        XCTAssertThrowsError(try graph.aiSettingsStore.generationConfiguration()) { error in
+            XCTAssertEqual(error as? AISettingsStoreError, .inaccessibleCredential)
+        }
+        graph.learningCatalogStore.loadIfNeeded()
+        let choice = try XCTUnwrap(graph.learningCatalogStore.state.snapshot?.slots.first?.lessonID)
+        _ = try graph.learningCatalogStore.openLesson(lessonID: choice)
+        XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).count, 1)
+        XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<LessonDefinition>()).count, 40)
     }
 
     func testDiagnosticsNeverIncludeUntrustedDomainOrDescription() {

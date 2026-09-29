@@ -101,6 +101,36 @@ final class LessonGenerationStoreTests: XCTestCase {
         while await provider.calls < calls { await Task.yield() }
     }
 
+    func testAppGraphSharesOneOperationGateAcrossWindowConsumers() async throws {
+        let (container, repository, _, _, provider, _, config, credentials) = try fixture()
+        let graph = AppDependencies(container: container, catalogRepository: repository,
+            aiSettingsRepository: config, credentialStore: credentials,
+            aiGenerator: { _, _, _ in provider }, aiConnectionTester: { _, _, _ in provider })
+        let mainSettings = graph.aiSettingsStore
+        let nativeSettings = graph.aiSettingsStore
+        XCTAssertTrue(mainSettings === nativeSettings)
+        let before = try repository.loadSnapshot()
+        let owner = UUID()
+        let task = Task { try await graph.lessonGenerationStore.generate(selection: selection, owner: owner) }
+        await wait(provider)
+        XCTAssertTrue(nativeSettings.operationGate.isBusy)
+        do { try await nativeSettings.testConnection(); XCTFail("Parallel connection started") }
+        catch let error as AISettingsStoreError { XCTAssertEqual(error, .connectionInProgress) }
+        do { _ = try await graph.lessonGenerationStore.generate(selection: selection, owner: UUID()); XCTFail("Repeat queued") }
+        catch let error as LessonGenerationStoreError { XCTAssertEqual(error, .operationInProgress) }
+        try nativeSettings.disable(expectedRevision: mainSettings.presentation.revision)
+        let context = try repository.generationContext(topicID: "go")
+        let registry = try GenerationObjectivesLoader.load(catalog: context.catalog, membership: context.membership)
+        let request = try LessonGenerationRequestBuilder.make(selection: selection, operationID: UUID(), context: context, registry: registry)
+        await provider.finish(candidate(request))
+        do { _ = try await task.value; XCTFail("Revoked operation committed") }
+        catch let error as LessonGenerationError { XCTAssertEqual(error, .cancelled) }
+        XCTAssertEqual(try repository.loadSnapshot(), before)
+        XCTAssertFalse(nativeSettings.operationGate.isBusy)
+        let connectionCalls = await provider.tests
+        XCTAssertEqual(connectionCalls, 0)
+    }
+
     func testOneGateRejectsSecondWindowAndConnectionWhileGenerationRuns() async throws {
         let (container, repository, settings, _, provider, store, _, _) = try fixture()
         let before = try repository.loadSnapshot()

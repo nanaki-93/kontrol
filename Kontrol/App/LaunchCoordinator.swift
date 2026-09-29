@@ -16,6 +16,7 @@ final class LaunchCoordinator: ObservableObject {
     private let open: () throws -> ModelContainer
     private let loadCatalog: @Sendable () async throws -> ValidatedCatalog
     private let makeRepository: (ModelContainer) -> any CatalogRepository
+    private let makeDependencies: ((ModelContainer, any CatalogRepository) -> AppDependencies)?
     // Keep a successfully opened store if catalog loading/import fails. Retry
     // must never open a competing container against that store.
     private var openedContainer: ModelContainer?
@@ -26,10 +27,12 @@ final class LaunchCoordinator: ObservableObject {
         try await Task.detached(priority: .userInitiated) {
             try BundledCatalogLoader.load()
         }.value
-    }, makeRepository: ((ModelContainer) -> any CatalogRepository)? = nil) {
+    }, makeRepository: ((ModelContainer) -> any CatalogRepository)? = nil,
+       makeDependencies: ((ModelContainer, any CatalogRepository) -> AppDependencies)? = nil) {
         self.open = open
         self.loadCatalog = loadCatalog
         self.makeRepository = makeRepository ?? { SwiftDataCatalogRepository(container: $0) }
+        self.makeDependencies = makeDependencies
     }
 
     /// Multiple window or scene requests during an attempt share that attempt.
@@ -83,7 +86,10 @@ final class LaunchCoordinator: ObservableObject {
             let repository = makeRepository(container)
             _ = try repository.importIfNeeded(catalog)
             try Task.checkCancellation() // do not publish a stale result
-            dependencies = AppDependencies(container: container, catalogRepository: repository)
+            // AI settings are optional: their store handles read/credential failures
+            // locally, never as a catalog launch prerequisite.
+            dependencies = makeDependencies?(container, repository) ??
+                AppDependencies(container: container, catalogRepository: repository)
             state = .ready
         } catch {
             if Task.isCancelled {

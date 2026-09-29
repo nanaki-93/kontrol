@@ -16,6 +16,38 @@ private actor CatalogGate {
 }
 
 @MainActor
+private final class LaunchAISettingsRepository: AISettingsRepository {
+    var value: AISettingsSnapshot = .disabled
+    func load() throws -> AISettingsSnapshot { value }
+    func save(_ snapshot: AISettingsSnapshot, expectedRevision: UUID?) throws -> AISettingsSnapshot {
+        guard value.revision == expectedRevision else { throw AISettingsPersistenceError.staleRevision }
+        value = AISettingsSnapshot(enabled: snapshot.enabled, providerID: snapshot.providerID,
+            modelID: snapshot.modelID, credentialReference: snapshot.credentialReference, revision: UUID())
+        return value
+    }
+}
+
+private final class LaunchCredentials: CredentialStore {
+    var keys: [String: Data] = [:]
+    func read(reference: String) throws -> Data {
+        guard let key = keys[reference] else { throw CredentialStoreError.missing }
+        return key
+    }
+    func save(_ credential: Data, reference: String) throws { keys[reference] = credential }
+    func remove(reference: String) throws { keys.removeValue(forKey: reference) }
+}
+
+private actor LaunchProvider: LessonGenerator, OpenAIConnectionTesting {
+    private(set) var generations = 0
+    private(set) var connections = 0
+    func generate(_ request: LessonGenerationRequest) async throws -> CandidateLesson {
+        generations += 1
+        throw LessonGenerationError.providerFailure
+    }
+    func testConnection() async throws { connections += 1 }
+}
+
+@MainActor
 final class LaunchCoordinatorTests: XCTestCase {
     private enum Injected: Error { case failed }
 
@@ -75,6 +107,53 @@ final class LaunchCoordinatorTests: XCTestCase {
         XCTAssertTrue(coordinator.dependencies === graph)
         XCTAssertEqual(opens, 1)
         XCTAssertEqual(imports, 1)
+    }
+
+    func testSharedAIConfigurationIsOptInAndOrdinaryLearningNeverContactsProvider() async throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let config = LaunchAISettingsRepository()
+        let credentials = LaunchCredentials()
+        let provider = LaunchProvider()
+        let coordinator = LaunchCoordinator(open: { container }, makeDependencies: { container, repository in
+            AppDependencies(container: container, catalogRepository: repository,
+                aiSettingsRepository: config, credentialStore: credentials,
+                aiGenerator: { _, _, _ in provider }, aiConnectionTester: { _, _, _ in provider })
+        })
+        await coordinator.start()
+        XCTAssertEqual(coordinator.state, .ready)
+        let graph = try XCTUnwrap(coordinator.dependencies)
+        XCTAssertFalse(graph.aiSettingsStore.presentation.enabled)
+        XCTAssertNil(graph.aiSettingsStore.presentation.revision)
+        XCTAssertFalse(graph.aiSettingsStore.operationGate.isBusy)
+        graph.learningCatalogStore.loadIfNeeded()
+        let before = try graph.catalogRepository.loadSnapshot()
+        let choice = try XCTUnwrap(before.slots.first?.lessonID)
+        _ = try graph.learningCatalogStore.openLesson(lessonID: choice)
+        let initialGenerations = await provider.generations
+        let initialConnections = await provider.connections
+        XCTAssertEqual(initialGenerations, 0)
+        XCTAssertEqual(initialConnections, 0)
+        try graph.aiSettingsStore.saveConfiguration(modelID: "gpt-4o-mini", credential: Data([1, 2, 3]),
+            expectedRevision: nil)
+        XCTAssertFalse(graph.aiSettingsStore.presentation.enabled, "Saving a key does not opt in")
+        let savedGenerations = await provider.generations
+        let savedConnections = await provider.connections
+        XCTAssertEqual(savedGenerations, 0)
+        XCTAssertEqual(savedConnections, 0)
+        let settingsFromMain = graph.aiSettingsStore
+        let settingsFromNativeScene = coordinator.dependencies!.aiSettingsStore
+        XCTAssertTrue(settingsFromMain === settingsFromNativeScene)
+        XCTAssertTrue(graph.lessonGenerationStore === coordinator.dependencies!.lessonGenerationStore)
+        XCTAssertTrue((graph.credentialStore as AnyObject) === credentials)
+        try settingsFromNativeScene.enable(expectedRevision: settingsFromMain.presentation.revision)
+        XCTAssertEqual(settingsFromMain.presentation.revision, settingsFromNativeScene.presentation.revision)
+        XCTAssertTrue(settingsFromMain.presentation.enabled)
+        let enabledGenerations = await provider.generations
+        let enabledConnections = await provider.connections
+        XCTAssertEqual(enabledGenerations, 0)
+        XCTAssertEqual(enabledConnections, 0)
+        await coordinator.start()
+        XCTAssertTrue(coordinator.dependencies === graph)
     }
 
     func testCatalogFailureDoesNotPublishGraphAndExplicitRetryKeepsStore() async throws {
