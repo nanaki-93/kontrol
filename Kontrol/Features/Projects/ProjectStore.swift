@@ -39,9 +39,28 @@ struct ScopedProjectFolderIdentifier: ProjectFolderIdentifying {
     }
 }
 
+/// Inspection, identity, and local persistence failures require different explanations.
+/// All are retryable via refresh(id); only grant failures direct the user to Reconnect.
+enum ProjectRefreshFailure: Equatable {
+    case inspection(ProjectInspectionFailure)
+    case manifestMismatch
+    case persistence
+
+    var recovery: ProjectRecovery {
+        switch self {
+        case let .inspection(failure): return failure.recovery
+        case .manifestMismatch, .persistence: return .refresh
+        }
+    }
+}
+
 struct ProjectRowState {
-    let reference: ProjectReferenceSnapshot
+    var reference: ProjectReferenceSnapshot
     var inspection: ProjectInspection?
+    var isRefreshing = false
+    var isStale = false
+    var lastReadAt: Date? // Last displayed inspection, distinct from lastSuccessfulReadAt.
+    var refreshFailure: ProjectRefreshFailure?
 }
 
 struct ProjectAddPreview {
@@ -77,6 +96,16 @@ final class ProjectStore: ObservableObject {
     private let identifier: any ProjectFolderIdentifying
     private var previewGeneration = 0
     private var adding = false
+    private struct RefreshOperation {
+        var generation = 0
+        var task: Task<Void, Never>?
+        var followUp = false
+        var queued = false
+    }
+    private var refreshOperations: [UUID: RefreshOperation] = [:]
+    private var refreshQueue: [UUID] = []
+    private var activeRefreshes = 0
+    private let maxConcurrentRefreshes = 3
 
     init(inspector: any ProjectInspecting, repository: any ProjectReferenceRepository,
          identifier: any ProjectFolderIdentifying = ScopedProjectFolderIdentifier()) {
@@ -92,10 +121,138 @@ final class ProjectStore: ObservableObject {
             rows = try repository.fetchAll().map { ProjectRowState(reference: $0, inspection: nil) }
             isLoaded = true
             loadFailed = false
+            refreshAll()
         } catch {
             loadFailed = true
             throw error
         }
+    }
+
+    /// Requests for a waiting row merge; a running row gets just one follow-up.
+    /// A failure in one row never prevents other queued rows from starting.
+    func refreshAll() {
+        for row in rows { refresh(row.reference.id) }
+    }
+
+    func refresh(_ id: UUID) {
+        guard rows.contains(where: { $0.reference.id == id }) else { return }
+        var operation = refreshOperations[id] ?? RefreshOperation()
+        if operation.task != nil {
+            operation.followUp = true
+        } else if !operation.queued {
+            operation.queued = true
+            refreshQueue.append(id)
+            if let index = rows.firstIndex(where: { $0.reference.id == id }) {
+                rows[index].isRefreshing = true
+            }
+        }
+        refreshOperations[id] = operation
+        drainRefreshQueue()
+    }
+
+    /// Cancel without freeing a slot until the underlying IO actually finishes. A reader
+    /// that ignores cancellation still cannot publish its result or start extra work.
+    func cancelRefresh(_ id: UUID) {
+        guard var operation = refreshOperations[id] else { return }
+        operation.task?.cancel()
+        operation.followUp = false
+        if operation.queued {
+            refreshQueue.removeAll { $0 == id }
+            operation.queued = false
+        }
+        refreshOperations[id] = operation
+        if operation.task == nil, let index = rows.firstIndex(where: { $0.reference.id == id }) {
+            rows[index].isRefreshing = false
+        }
+    }
+
+    private func drainRefreshQueue() {
+        while activeRefreshes < maxConcurrentRefreshes && !refreshQueue.isEmpty {
+            let id = refreshQueue.removeFirst()
+            guard let index = rows.firstIndex(where: { $0.reference.id == id }),
+                  var operation = refreshOperations[id], operation.queued else { continue }
+            operation.queued = false
+            operation.generation += 1
+            let generation = operation.generation
+            let reference = rows[index].reference
+            activeRefreshes += 1
+            operation.task = Task { [inspector] in
+                let result: Result<ProjectInspection, Error>
+                do {
+                    let inspection = try await inspector.inspect(bookmarkData: reference.bookmarkData)
+                    try Task.checkCancellation()
+                    result = .success(inspection)
+                } catch {
+                    result = .failure(error)
+                }
+                self.finishRefresh(id: id, revision: reference.revision,
+                                   generation: generation, result: result)
+            }
+            refreshOperations[id] = operation
+        }
+    }
+
+    private func finishRefresh(id: UUID, revision: UUID, generation: Int,
+                               result: Result<ProjectInspection, Error>) {
+        guard var operation = refreshOperations[id], operation.generation == generation,
+              operation.task != nil else { return }
+        operation.task = nil
+        activeRefreshes -= 1
+        // A replaced bookmark, canceled task, or removed row owns no publication rights.
+        if let index = rows.firstIndex(where: { $0.reference.id == id }),
+           rows[index].reference.revision == revision {
+            switch result {
+            case let .success(inspection):
+                // A bookmark can still resolve after the selected folder's manifest was
+                // replaced. Never publish content belonging to a different project ID.
+                if let manifest = inspection.manifest, manifest.id != rows[index].reference.manifestID {
+                    rows[index].isStale = true
+                    rows[index].refreshFailure = .manifestMismatch
+                } else if Self.isComplete(inspection), let manifest = inspection.manifest {
+                    do {
+                        let receipt = try repository.recordSuccessfulRead(id: id,
+                            expectedRevision: revision, nameHint: manifest.name, readAt: inspection.readAt)
+                        rows[index].reference = receipt
+                        rows[index].inspection = inspection
+                        rows[index].lastReadAt = inspection.readAt
+                        rows[index].isStale = false
+                        rows[index].refreshFailure = nil
+                    } catch {
+                        // Do not claim a fresh successful read when its durable receipt failed.
+                        rows[index].isStale = true
+                        rows[index].refreshFailure = .persistence
+                    }
+                } else {
+                    rows[index].inspection = inspection
+                    rows[index].lastReadAt = inspection.readAt
+                    rows[index].isStale = true
+                    rows[index].refreshFailure = nil
+                }
+            case let .failure(error):
+                if !(error is CancellationError) {
+                    rows[index].isStale = true
+                    rows[index].refreshFailure = .inspection((error as? ProjectInspectionFailure) ?? .unreadableFolder)
+                }
+            }
+            rows[index].isRefreshing = operation.followUp
+        }
+        let followUp = operation.followUp
+        operation.followUp = false
+        refreshOperations[id] = operation
+        if followUp { refresh(id) }
+        drainRefreshQueue()
+    }
+
+    private static func isComplete(_ inspection: ProjectInspection) -> Bool {
+        guard inspection.manifest?.schemaVersion == 1,
+              inspection.featureEnumeration == .complete,
+              inspection.excludedFeaturePaths.isEmpty,
+              !inspection.diagnostics.contains(where: { $0.severity == .error }) else { return false }
+        if case .failed = inspection.roadmap { return false }
+        if case .failed = inspection.context { return false }
+        if case .failed = inspection.rules { return false }
+        if case .failed = inspection.history { return false }
+        return true
     }
 
     func cancelAdd() {

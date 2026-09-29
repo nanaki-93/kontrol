@@ -40,6 +40,8 @@ private final class StubRepository: ProjectReferenceRepository {
     var fetches = 0
     var inserts = 0
     var failInsert = false
+    var failReadSave = false
+    var successfulReads = 0
     func fetchAll() throws -> [ProjectReferenceSnapshot] { fetches += 1; return saved }
     func insert(_ input: NewProjectReference) throws -> ProjectReferenceSnapshot {
         inserts += 1
@@ -56,7 +58,51 @@ private final class StubRepository: ProjectReferenceRepository {
     }
     func recordSuccessfulRead(id: UUID, expectedRevision: UUID, nameHint: String,
                               readAt: Date) throws -> ProjectReferenceSnapshot {
-        throw ProjectReferencePersistenceError.notFound
+        guard let index = saved.firstIndex(where: { $0.id == id }) else {
+            throw ProjectReferencePersistenceError.notFound
+        }
+        guard saved[index].revision == expectedRevision else {
+            throw ProjectReferencePersistenceError.staleRevision
+        }
+        if failReadSave { throw ProjectReferencePersistenceError.invalidReference }
+        successfulReads += 1
+        let old = saved[index]
+        let receipt = ProjectReferenceSnapshot(id: old.id, manifestID: old.manifestID,
+            bookmarkData: old.bookmarkData, displayOrder: old.displayOrder,
+            displayNameHint: nameHint, lastSuccessfulReadAt: readAt, revision: UUID())
+        saved[index] = receipt
+        return receipt
+    }
+}
+
+/// Each request remains suspended until explicitly released, making scheduling and late
+/// publication observable without a sandbox grant or filesystem timing assumptions.
+private actor DeferredInspector: ProjectInspecting {
+    let selectedInspection: ProjectInspection?
+    init(selectedInspection: ProjectInspection? = nil) { self.selectedInspection = selectedInspection }
+    private var waiting: [(Data, CheckedContinuation<ProjectInspection, Error>)] = []
+    private var started: [Data] = []
+    private var active = 0
+    private var peak = 0
+
+    func inspect(selectedFolder: URL) async throws -> ProjectInspection {
+        guard let selectedInspection else { throw CancellationError() }
+        return selectedInspection
+    }
+    func inspect(bookmarkData: Data) async throws -> ProjectInspection {
+        started.append(bookmarkData)
+        active += 1
+        peak = max(peak, active)
+        defer { active -= 1 }
+        return try await withCheckedThrowingContinuation { waiting.append((bookmarkData, $0)) }
+    }
+    func makeBookmark(selectedFolder: URL) async throws -> Data { throw CancellationError() }
+    func counts() -> (Int, Int, Int) { (started.count, active, peak) }
+    func starts(for data: Data) -> Int { started.filter { $0 == data }.count }
+    func release(_ data: Data, result: Result<ProjectInspection, Error>) {
+        guard let index = waiting.firstIndex(where: { $0.0 == data }) else { return }
+        let continuation = waiting.remove(at: index).1
+        continuation.resume(with: result)
     }
 }
 
@@ -76,6 +122,233 @@ final class ProjectStoreTests: XCTestCase {
                        saved: [Data: ProjectFolderIdentity] = [:]) -> ProjectStore {
         ProjectStore(inspector: inspector, repository: repository,
             identifier: StubIdentity(selectedIdentity: identity, saved: saved))
+    }
+
+    private func reference(_ number: UInt8, lastSuccess: Date? = nil) -> ProjectReferenceSnapshot {
+        ProjectReferenceSnapshot(id: UUID(), manifestID: "shared", bookmarkData: Data([number]),
+            displayOrder: Int(number), displayNameHint: "Old", lastSuccessfulReadAt: lastSuccess,
+            revision: UUID())
+    }
+
+    private func eventually(_ condition: @escaping () async -> Bool,
+                            file: StaticString = #filePath, line: UInt = #line) async {
+        for _ in 0..<500 {
+            if await condition() { return }
+            try? await Task.sleep(nanoseconds: 2_000_000)
+        }
+        XCTFail("Timed out waiting for refresh", file: file, line: line)
+    }
+
+    func testInitialRefreshIsBoundedIndependentAndCoalescesRequests() async throws {
+        let io = DeferredInspector(), repo = StubRepository()
+        let refs = (1...5).map { reference(UInt8($0)) }
+        repo.saved = refs
+        let subject = ProjectStore(inspector: io, repository: repo)
+        try subject.enterProjects()
+        await eventually { await io.counts().0 == 3 }
+        let initialPeak = await io.counts().2
+        XCTAssertEqual(initialPeak, 3)
+        for _ in 0..<10 { subject.refresh(refs[0].id); subject.refresh(refs[4].id) }
+        let initialStarts = await io.counts().0
+        XCTAssertEqual(initialStarts, 3) // Waiting requests merge.
+        await io.release(refs[0].bookmarkData, result: .failure(ProjectInspectionFailure.access(.staleBookmark)))
+        await eventually { await io.counts().0 == 4 }
+        XCTAssertTrue(subject.rows[0].isStale)
+        XCTAssertEqual(subject.rows[0].refreshFailure, .inspection(.access(.staleBookmark)))
+        // The healthy peer completes even while other grants are suspended.
+        await io.release(refs[1].bookmarkData, result: .success(inspection(id: "shared")))
+        await eventually { repo.successfulReads == 1 }
+        XCTAssertNotNil(subject.rows[1].reference.lastSuccessfulReadAt)
+        await eventually { await io.counts().0 == 5 }
+        await io.release(refs[2].bookmarkData, result: .success(inspection()))
+        await eventually { await io.starts(for: refs[0].bookmarkData) == 2 }
+        await io.release(refs[0].bookmarkData, result: .success(inspection()))
+        await io.release(refs[3].bookmarkData, result: .success(inspection()))
+        await io.release(refs[4].bookmarkData, result: .success(inspection()))
+        await eventually { await io.counts().1 == 0 }
+        let firstStarts = await io.starts(for: refs[0].bookmarkData)
+        let lastStarts = await io.starts(for: refs[4].bookmarkData)
+        let peak = await io.counts().2
+        XCTAssertEqual(firstStarts, 2)
+        XCTAssertEqual(lastStarts, 1) // Requests merged while queued, before first read.
+        XCTAssertEqual(peak, 3)
+        XCTAssertEqual(repo.successfulReads, 5)
+        XCTAssertFalse(subject.rows[0].isStale)
+    }
+
+    func testPartialAndFailedReadsRetainSuccessTimestampAndStaleSnapshot() async throws {
+        let io = DeferredInspector(), repo = StubRepository()
+        let ref = reference(7)
+        repo.saved = [ref]
+        let subject = ProjectStore(inspector: io, repository: repo)
+        try subject.enterProjects()
+        await eventually { await io.counts().0 == 1 }
+        let good = inspection()
+        await io.release(ref.bookmarkData, result: .success(good))
+        await eventually { repo.successfulReads == 1 }
+        let date = subject.rows[0].reference.lastSuccessfulReadAt
+        let partial = ProjectInspection(manifest: good.manifest, roadmap: .absent, features: [],
+            excludedFeaturePaths: [".kontrol/features/bad.md"], featureEnumeration: .complete,
+            context: .absent, rules: .absent, history: .absent, diagnostics: [], sources: [], readAt: Date())
+        subject.refresh(ref.id)
+        await eventually { await io.counts().0 == 2 }
+        await io.release(ref.bookmarkData, result: .success(partial))
+        await eventually { subject.rows[0].inspection?.readAt == partial.readAt }
+        XCTAssertTrue(subject.rows[0].isStale)
+        XCTAssertEqual(subject.rows[0].reference.lastSuccessfulReadAt, date)
+        XCTAssertEqual(repo.successfulReads, 1)
+        subject.refresh(ref.id)
+        await eventually { await io.counts().0 == 3 }
+        await io.release(ref.bookmarkData, result: .failure(ProjectInspectionFailure.inconsistentRead))
+        await eventually { subject.rows[0].refreshFailure == .inspection(.inconsistentRead) }
+        XCTAssertEqual(subject.rows[0].inspection?.readAt, partial.readAt)
+        XCTAssertEqual(subject.rows[0].lastReadAt, partial.readAt)
+        XCTAssertEqual(subject.rows[0].reference.lastSuccessfulReadAt, date)
+    }
+
+    func testLatePeerResultNeverChangesSelectedProject() async throws {
+        let io = DeferredInspector(selectedInspection: inspection()), repo = StubRepository()
+        let first = reference(11), second = reference(12)
+        repo.saved = [first, second]
+        let subject = ProjectStore(inspector: io, repository: repo,
+            identifier: StubIdentity(selectedIdentity: identity,
+                saved: [first.bookmarkData: identity,
+                        second.bookmarkData: ProjectFolderIdentity(device: 1, inode: 3)]))
+        try subject.enterProjects()
+        await eventually { await io.counts().0 == 2 }
+        _ = try await subject.previewFolder(folder)
+        let selected = try await subject.addPreviewedProject()
+        XCTAssertEqual(selected, .selectedExisting(first.id))
+        let peerInspection = inspection(id: "shared")
+        await io.release(second.bookmarkData, result: .success(peerInspection))
+        await eventually { repo.successfulReads == 1 }
+        XCTAssertEqual(subject.selectedID, first.id)
+        XCTAssertNil(subject.rows[0].inspection)
+        XCTAssertEqual(subject.rows[1].inspection?.manifest?.id, "shared")
+        await io.release(first.bookmarkData, result: .failure(ProjectInspectionFailure.access(.staleBookmark)))
+        await eventually { !subject.rows[0].isRefreshing }
+        XCTAssertEqual(subject.selectedID, first.id)
+        XCTAssertNil(subject.rows[0].inspection)
+    }
+
+    func testCanceledRefreshKeepsLastSnapshotAndFollowUpOwnsFinalResult() async throws {
+        let io = DeferredInspector(), repo = StubRepository()
+        let ref = reference(9)
+        repo.saved = [ref]
+        let subject = ProjectStore(inspector: io, repository: repo)
+        try subject.enterProjects()
+        await eventually { await io.counts().0 == 1 }
+        let original = inspection()
+        await io.release(ref.bookmarkData, result: .success(original))
+        await eventually { repo.successfulReads == 1 }
+        subject.refresh(ref.id)
+        await eventually { await io.counts().0 == 2 }
+        for _ in 0..<20 { subject.refresh(ref.id) }
+        await io.release(ref.bookmarkData, result: .failure(CancellationError()))
+        await eventually { await io.counts().0 == 3 }
+        XCTAssertEqual(subject.rows[0].inspection?.readAt, original.readAt)
+        XCTAssertEqual(repo.successfulReads, 1)
+        let newer = inspection()
+        await io.release(ref.bookmarkData, result: .success(newer))
+        await eventually { repo.successfulReads == 2 }
+        XCTAssertEqual(subject.rows[0].inspection?.readAt, newer.readAt)
+        XCTAssertFalse(subject.rows[0].isStale)
+        let starts = await io.starts(for: ref.bookmarkData)
+        XCTAssertEqual(starts, 3)
+    }
+
+    func testCanceledNoncooperativeInspectionCannotPublishOrEscapeConcurrencyLimit() async throws {
+        let io = DeferredInspector(), repo = StubRepository()
+        let refs = (20...23).map { reference(UInt8($0)) }
+        repo.saved = refs
+        let subject = ProjectStore(inspector: io, repository: repo)
+        try subject.enterProjects()
+        await eventually { await io.counts().0 == 3 }
+        subject.refresh(refs[0].id)
+        subject.cancelRefresh(refs[0].id)
+        let tooLate = inspection()
+        // This test double returns success even after its caller was canceled.
+        await io.release(refs[0].bookmarkData, result: .success(tooLate))
+        await eventually { await io.counts().0 == 4 }
+        XCTAssertNil(subject.rows[0].inspection)
+        XCTAssertNil(subject.rows[0].reference.lastSuccessfulReadAt)
+        let starts = await io.starts(for: refs[0].bookmarkData)
+        XCTAssertEqual(starts, 1)
+        await io.release(refs[1].bookmarkData, result: .failure(CancellationError()))
+        await io.release(refs[2].bookmarkData, result: .failure(CancellationError()))
+        await io.release(refs[3].bookmarkData, result: .failure(CancellationError()))
+        await eventually { await io.counts().1 == 0 }
+        let peak = await io.counts().2
+        XCTAssertEqual(peak, 3)
+    }
+
+    func testChangedManifestIdentityRetainsTrustedSnapshotUntilRepairAndRetry() async throws {
+        let io = DeferredInspector(), repo = StubRepository()
+        let ref = reference(6)
+        repo.saved = [ref]
+        let subject = ProjectStore(inspector: io, repository: repo)
+        try subject.enterProjects()
+        await eventually { await io.counts().0 == 1 }
+        let original = inspection()
+        await io.release(ref.bookmarkData, result: .success(original))
+        await eventually { repo.successfulReads == 1 }
+        let receipt = subject.rows[0].reference
+        subject.refresh(ref.id)
+        await eventually { await io.counts().0 == 2 }
+        await io.release(ref.bookmarkData, result: .success(inspection(id: "different")))
+        await eventually { !subject.rows[0].isRefreshing }
+        XCTAssertEqual(subject.rows[0].refreshFailure, .manifestMismatch)
+        XCTAssertEqual(subject.rows[0].refreshFailure?.recovery, .refresh)
+        XCTAssertTrue(subject.rows[0].isStale)
+        XCTAssertEqual(subject.rows[0].inspection, original)
+        XCTAssertEqual(subject.rows[0].lastReadAt, original.readAt)
+        XCTAssertEqual(subject.rows[0].reference, receipt)
+        XCTAssertEqual(repo.saved[0], receipt)
+        XCTAssertEqual(repo.successfulReads, 1)
+        subject.refresh(ref.id)
+        await eventually { await io.counts().0 == 3 }
+        let repaired = inspection()
+        await io.release(ref.bookmarkData, result: .success(repaired))
+        await eventually { repo.successfulReads == 2 }
+        XCTAssertEqual(subject.rows[0].inspection, repaired)
+        XCTAssertFalse(subject.rows[0].isStale)
+        XCTAssertNil(subject.rows[0].refreshFailure)
+    }
+
+    func testReadReceiptFailureIsPersistenceFailureAndRetryDoesNotClaimFreshSuccessEarly() async throws {
+        let io = DeferredInspector(), repo = StubRepository()
+        let ref = reference(8)
+        repo.saved = [ref]
+        let subject = ProjectStore(inspector: io, repository: repo)
+        try subject.enterProjects()
+        await eventually { await io.counts().0 == 1 }
+        let first = inspection()
+        await io.release(ref.bookmarkData, result: .success(first))
+        await eventually { repo.successfulReads == 1 }
+        let receipt = subject.rows[0].reference
+        repo.failReadSave = true
+        subject.refresh(ref.id)
+        await eventually { await io.counts().0 == 2 }
+        await io.release(ref.bookmarkData, result: .success(inspection()))
+        await eventually { !subject.rows[0].isRefreshing }
+        XCTAssertEqual(subject.rows[0].refreshFailure, .persistence)
+        XCTAssertEqual(subject.rows[0].refreshFailure?.recovery, .refresh)
+        XCTAssertTrue(subject.rows[0].isStale)
+        XCTAssertEqual(subject.rows[0].inspection, first)
+        XCTAssertEqual(subject.rows[0].lastReadAt, first.readAt)
+        XCTAssertEqual(subject.rows[0].reference, receipt)
+        XCTAssertEqual(repo.saved[0], receipt)
+        XCTAssertEqual(repo.successfulReads, 1)
+        repo.failReadSave = false
+        subject.refresh(ref.id)
+        await eventually { await io.counts().0 == 3 }
+        let retried = inspection()
+        await io.release(ref.bookmarkData, result: .success(retried))
+        await eventually { repo.successfulReads == 2 }
+        XCTAssertEqual(subject.rows[0].inspection, retried)
+        XCTAssertFalse(subject.rows[0].isStale)
+        XCTAssertNil(subject.rows[0].refreshFailure)
+        XCTAssertEqual(subject.rows[0].reference.lastSuccessfulReadAt, retried.readAt)
     }
 
     func testLazyFetchPreviewAndCommittedAddWithRevalidation() async throws {
