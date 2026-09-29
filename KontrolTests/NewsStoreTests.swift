@@ -10,6 +10,8 @@ private final class StubNewsRepository: NewsRepository {
     var failRead = false
     var failSave = false
     var applied: [[FeedRefreshOutcome]] = []
+    var savedDrafts: [FeedDraft] = []
+    var savedReceipts: [ValidatedFeed?] = []
 
     init(_ value: NewsSnapshot) { self.value = value }
     func loadOrInitialize(_ catalog: DefaultFeedCatalog) throws -> NewsSnapshot {
@@ -25,7 +27,31 @@ private final class StubNewsRepository: NewsRepository {
                 revision: UUID(), lastRefreshAt: value.preferences.lastRefreshAt))
         return value
     }
-    func saveFeed(_ draft: FeedDraft, validation: ValidatedFeed?) throws -> NewsSnapshot { value }
+    func saveFeed(_ draft: FeedDraft, validation: ValidatedFeed?) throws -> NewsSnapshot {
+        if failSave { throw Failure.injected }
+        let old = value.feeds.first { $0.id == draft.id }
+        if draft.id != nil && (old == nil || old?.configurationRevision != draft.expectedRevision) {
+            throw NewsRepositoryError.staleRevision
+        }
+        let endpoint = try NewsURLPolicy.feedURL(draft.urlText.trimmingCharacters(in: .whitespacesAndNewlines))
+        let changedEndpoint = old?.url != endpoint
+        let needsValidation = draft.isEnabled && (old == nil || changedEndpoint ||
+            (old?.isEnabled == false && old?.lastSuccessAt == nil))
+        if needsValidation && (validation?.draftRevision != draft.draftRevision || validation?.url != endpoint) {
+            throw NewsRepositoryError.validationRequired
+        }
+        savedDrafts.append(draft)
+        savedReceipts.append(validation)
+        let feed = FeedSourceSnapshot(id: old?.id ?? UUID(), name: draft.name, url: endpoint,
+            topicIDs: draft.topicIDs, isEnabled: draft.isEnabled, configurationRevision: UUID(),
+            etag: changedEndpoint ? nil : old?.etag, lastModified: changedEndpoint ? nil : old?.lastModified,
+            lastAttemptAt: changedEndpoint ? nil : old?.lastAttemptAt,
+            lastSuccessAt: needsValidation ? validation?.validatedAt : (changedEndpoint ? nil : old?.lastSuccessAt),
+            lastError: nil, retryNotBefore: nil)
+        value = NewsSnapshot(topics: value.topics, feeds: value.feeds.filter { $0.id != old?.id } + [feed],
+            articleStates: value.articleStates, preferences: value.preferences)
+        return value
+    }
     func removeFeed(id: UUID, expectedRevision: UUID) throws -> NewsSnapshot {
         if failSave { throw Failure.injected }
         guard value.feeds.contains(where: { $0.id == id && $0.configurationRevision == expectedRevision }) else {
@@ -70,6 +96,9 @@ private final class StubNewsRepository: NewsRepository {
 }
 
 private actor HeldNewsService: NewsRefreshing {
+    func validate(_ draft: FeedDraft) async throws -> ValidatedFeed {
+        throw FeedServiceError(code: .offline, retryNotBefore: nil)
+    }
     private(set) var requests: [FeedSourceSnapshot] = []
     private var pending: [UUID: CheckedContinuation<[FeedRefreshOutcome], Never>] = [:]
     func refresh(_ feeds: [FeedSourceSnapshot]) async -> [FeedRefreshOutcome] {
@@ -89,6 +118,9 @@ private actor HeldNewsService: NewsRefreshing {
 
 /// Unlike HeldNewsService, this seam actually terminates obsolete requests on cancellation.
 private actor CancelingNewsService: NewsRefreshing {
+    func validate(_ draft: FeedDraft) async throws -> ValidatedFeed {
+        throw FeedServiceError(code: .offline, retryNotBefore: nil)
+    }
     private var pending: [UUID: CheckedContinuation<[FeedRefreshOutcome], Never>] = [:]
     private(set) var requested = Set<UUID>()
     private(set) var canceled = Set<UUID>()
@@ -130,6 +162,27 @@ private actor CancelingNewsService: NewsRefreshing {
     func canceledIDs() -> Set<UUID> { canceled }
 }
 
+private actor EditorNewsService: NewsRefreshing {
+    private(set) var requests: [FeedDraft] = []
+    private var pending: [UUID: CheckedContinuation<ValidatedFeed, Error>] = [:]
+    func refresh(_ feeds: [FeedSourceSnapshot]) async -> [FeedRefreshOutcome] { [] }
+    func validate(_ draft: FeedDraft) async throws -> ValidatedFeed {
+        requests.append(draft)
+        return try await withCheckedThrowingContinuation { pending[draft.draftRevision] = $0 }
+    }
+    func count() -> Int { requests.count }
+    func succeed(_ revision: UUID, at date: Date) {
+        guard let draft = requests.first(where: { $0.draftRevision == revision }),
+              let continuation = pending.removeValue(forKey: revision) else { return }
+        continuation.resume(returning: ValidatedFeed(draftRevision: revision,
+            url: URL(string: draft.urlText)!, validatedAt: date, etag: nil, lastModified: nil))
+    }
+    func fail(_ revision: UUID) {
+        pending.removeValue(forKey: revision)?.resume(throwing:
+            FeedServiceError(code: .malformedFeed, retryNotBefore: nil))
+    }
+}
+
 @MainActor
 final class NewsStoreTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_750_000_000)
@@ -156,6 +209,21 @@ final class NewsStoreTests: XCTestCase {
             preferences: NewsPreferences(catalogVersion: 1, selectedTopicIDs: ["go", "ai"],
                 revision: UUID(), lastRefreshAt: nil))
         return (catalog, snapshot)
+    }
+
+    private func waitFor(_ service: EditorNewsService, count: Int,
+                         file: StaticString = #filePath, line: UInt = #line) async {
+        for _ in 0..<10_000 {
+            if await service.count() == count { return }
+            await Task.yield()
+        }
+        XCTFail("Expected \(count) validations", file: file, line: line)
+    }
+
+    private func draft(_ feed: FeedSourceSnapshot?, url: String = "https://new.example.com/rss",
+                       enabled: Bool = true) -> FeedDraft {
+        FeedDraft(id: feed?.id, name: " Edited ", urlText: url, topicIDs: ["go"],
+                  isEnabled: enabled, expectedRevision: feed?.configurationRevision, draftRevision: UUID())
     }
 
     private func waitFor(_ service: HeldNewsService, count: Int, file: StaticString = #filePath, line: UInt = #line) async {
@@ -402,6 +470,223 @@ final class NewsStoreTests: XCTestCase {
                 XCTAssertEqual(repo.applied[0].first(where: { $0.feedID == secondID })?.result, .notModified)
             }
         }
+    }
+
+    func testEditorSkipsNetworkForDisabledDraftAndNameTopicOnlyEdit() async throws {
+        let (catalog, cached) = fixture()
+        let repo = StubNewsRepository(cached)
+        let service = EditorNewsService()
+        let store = NewsStore(repository: repo, service: service, catalog: catalog)
+        let disabled = draft(nil, enabled: false)
+        try await store.saveFeed(disabled, editorID: UUID())
+        XCTAssertEqual(repo.savedReceipts.count, 1)
+        XCTAssertNil(repo.savedReceipts[0])
+        let unchanged = draft(cached.feeds[0], url: cached.feeds[0].url.absoluteString)
+        try await store.saveFeed(unchanged)
+        let validations = await service.count()
+        XCTAssertEqual(validations, 0)
+        XCTAssertEqual(repo.savedDrafts, [disabled, unchanged])
+    }
+
+    func testEditorValidatesEnabledEmptyFeedAndUnvalidatedEnable() async throws {
+        let (catalog, cached) = fixture()
+        let repo = StubNewsRepository(cached)
+        let service = EditorNewsService()
+        let store = NewsStore(repository: repo, service: service, catalog: catalog)
+        let new = draft(nil)
+        let saving = Task { try await store.saveFeed(new, editorID: UUID()) }
+        await waitFor(service, count: 1)
+        XCTAssertEqual(repo.savedDrafts.count, 0)
+        await service.succeed(new.draftRevision, at: now) // empty recognized XML is valid to the service
+        try await saving.value
+        XCTAssertEqual(repo.savedReceipts[0]?.draftRevision, new.draftRevision)
+        let disabled = draft(cached.feeds[0], url: cached.feeds[0].url.absoluteString, enabled: false)
+        try await store.saveFeed(disabled)
+        let enabling = draft(store.snapshot!.feeds.first { $0.id == firstID }!,
+            url: cached.feeds[0].url.absoluteString)
+        let second = Task { try await store.saveFeed(enabling) }
+        await waitFor(service, count: 2)
+        await service.succeed(enabling.draftRevision, at: now)
+        try await second.value
+        XCTAssertEqual(repo.savedReceipts.last.flatMap { $0 }?.draftRevision, enabling.draftRevision)
+    }
+
+    func testEndpointChangesValidateButDisabledChangesAndInvalidDraftsDoNotRequest() async throws {
+        let (catalog, cached) = fixture()
+        let repo = StubNewsRepository(cached)
+        let service = EditorNewsService()
+        let store = NewsStore(repository: repo, service: service, catalog: catalog)
+        store.loadIfNeeded()
+        let invalid = FeedDraft(id: firstID, name: "  ", urlText: "http://unsafe.example/rss",
+            topicIDs: ["go"], isEnabled: true,
+            expectedRevision: cached.feeds[0].configurationRevision, draftRevision: UUID())
+        do { try await store.saveFeed(invalid); XCTFail("Invalid draft saved") }
+        catch { XCTAssertEqual(error as? NewsRepositoryError, .invalidFeed) }
+        let disabled = draft(cached.feeds[0], enabled: false)
+        try await store.saveFeed(disabled)
+        let count = await service.count()
+        XCTAssertEqual(count, 0)
+        let beforeEnable = store.snapshot
+        let changed = draft(store.snapshot!.feeds.first { $0.id == firstID }!)
+        let task = Task { try await store.saveFeed(changed) }
+        await waitFor(service, count: 1)
+        XCTAssertEqual(store.snapshot, beforeEnable)
+        await service.succeed(changed.draftRevision, at: now)
+        try await task.value
+        XCTAssertEqual(repo.savedReceipts.last.flatMap { $0 }?.draftRevision, changed.draftRevision)
+        XCTAssertEqual(store.snapshot?.feeds.first { $0.id == firstID }?.url.absoluteString,
+                       changed.urlText)
+        let endpoint = draft(store.snapshot!.feeds.first { $0.id == firstID }!,
+                             url: "https://new.example.com/changed")
+        let endpointSave = Task { try await store.saveFeed(endpoint) }
+        await waitFor(service, count: 2)
+        await service.succeed(endpoint.draftRevision, at: now)
+        try await endpointSave.value
+        XCTAssertEqual(repo.savedReceipts.last.flatMap { $0 }?.draftRevision, endpoint.draftRevision)
+    }
+
+    func testNewFeedEditorSessionCancelAndNewRevisionFence() async throws {
+        let (catalog, cached) = fixture()
+        let repo = StubNewsRepository(cached)
+        let service = EditorNewsService()
+        let store = NewsStore(repository: repo, service: service, catalog: catalog)
+        let session = UUID()
+        let first = draft(nil)
+        // The default path cannot use the changing draft revision as a session key.
+        for unkeyed in [first, draft(nil, enabled: false)] {
+            do { try await store.saveFeed(unkeyed); XCTFail("Unkeyed new feed saved") }
+            catch { XCTAssertEqual(error as? NewsEditorError, .sessionRequired) }
+        }
+        XCTAssertEqual(repo.savedDrafts.count, 0)
+        let validationCount = await service.count()
+        XCTAssertEqual(validationCount, 0)
+        let prior = Task { try await store.saveFeed(first, editorID: session) }
+        await waitFor(service, count: 1)
+        let newer = draft(nil, url: "https://new.example.com/other")
+        do { try await store.saveFeed(newer); XCTFail("Unkeyed revision saved") }
+        catch { XCTAssertEqual(error as? NewsEditorError, .sessionRequired) }
+        let latest = Task { try await store.saveFeed(newer, editorID: session) }
+        await waitFor(service, count: 2)
+        await service.succeed(first.draftRevision, at: now)
+        do { try await prior.value; XCTFail("Old new-feed draft saved") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        store.cancelFeedEdit(id: session)
+        await service.succeed(newer.draftRevision, at: now)
+        do { try await latest.value; XCTFail("Canceled new-feed editor saved") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(repo.savedDrafts.count, 0)
+        XCTAssertEqual(store.snapshot, cached)
+        let pending = draft(nil, url: "https://new.example.com/failure")
+        let failedAfterCancel = Task { try await store.saveFeed(pending, editorID: session) }
+        await waitFor(service, count: 3)
+        store.cancelFeedEdit(id: session)
+        await service.fail(pending.draftRevision)
+        do { try await failedAfterCancel.value; XCTFail("Canceled editor surfaced transport failure") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(store.snapshot, cached)
+    }
+
+    func testNewFeedSupersessionUsesStableSessionInsteadOfDraftRevision() async throws {
+        let (catalog, cached) = fixture()
+        let repo = StubNewsRepository(cached)
+        let service = EditorNewsService()
+        let store = NewsStore(repository: repo, service: service, catalog: catalog)
+        let session = UUID()
+        let first = draft(nil)
+        let pending = Task { try await store.saveFeed(first, editorID: session) }
+        await waitFor(service, count: 1)
+        let newer = draft(nil, url: "https://new.example.com/other")
+        // The no-ID overload must not silently create another session for this revision.
+        do { try await store.saveFeed(newer); XCTFail("Unkeyed revision saved") }
+        catch { XCTAssertEqual(error as? NewsEditorError, .sessionRequired) }
+        let latest = Task { try await store.saveFeed(newer, editorID: session) }
+        await waitFor(service, count: 2)
+        await service.succeed(first.draftRevision, at: now)
+        do { try await pending.value; XCTFail("Superseded validation committed") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(repo.savedDrafts.count, 0)
+        XCTAssertEqual(store.snapshot, cached)
+        await service.succeed(newer.draftRevision, at: now)
+        try await latest.value
+        XCTAssertEqual(repo.savedDrafts, [newer])
+        XCTAssertEqual(store.snapshot?.feeds.last?.url.absoluteString, newer.urlText)
+    }
+
+    func testEditorValidationFailureAndSaveFailurePreserveDraftAndCache() async {
+        let (catalog, cached) = fixture()
+        let repo = StubNewsRepository(cached)
+        let service = EditorNewsService()
+        let store = NewsStore(repository: repo, service: service, catalog: catalog)
+        store.loadIfNeeded()
+        let edit = draft(cached.feeds[0])
+        let before = store.snapshot
+        let failing = Task { try await store.saveFeed(edit) }
+        await waitFor(service, count: 1)
+        await service.fail(edit.draftRevision)
+        do { try await failing.value; XCTFail("Expected validation failure") }
+        catch { XCTAssertTrue(error is FeedServiceError) }
+        XCTAssertEqual(store.snapshot, before)
+        XCTAssertEqual(repo.savedDrafts.count, 0)
+        repo.failSave = true
+        let retry = Task { try await store.saveFeed(edit) }
+        await waitFor(service, count: 2)
+        await service.succeed(edit.draftRevision, at: now)
+        do { try await retry.value; XCTFail("Expected save failure") }
+        catch { XCTAssertTrue(error is StubNewsRepository.Failure) }
+        XCTAssertEqual(store.localFailure, .save)
+        XCTAssertEqual(store.snapshot, before)
+        XCTAssertEqual(repo.value, before)
+        XCTAssertEqual(edit.urlText, "https://new.example.com/rss")
+    }
+
+    func testCancelAndNewerDraftFenceLateValidation() async throws {
+        let (catalog, cached) = fixture()
+        let repo = StubNewsRepository(cached)
+        let service = EditorNewsService()
+        let store = NewsStore(repository: repo, service: service, catalog: catalog)
+        store.loadIfNeeded()
+        let first = draft(cached.feeds[0])
+        let canceled = Task { try await store.saveFeed(first) }
+        await waitFor(service, count: 1)
+        store.cancelFeedEdit(id: firstID)
+        await service.succeed(first.draftRevision, at: now)
+        do { try await canceled.value; XCTFail("Canceled editor committed") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(store.snapshot, cached)
+        let previous = draft(cached.feeds[0])
+        let earlier = Task { try await store.saveFeed(previous) }
+        await waitFor(service, count: 2)
+        let newest = draft(cached.feeds[0], url: "https://new.example.com/other")
+        let later = Task { try await store.saveFeed(newest) }
+        await waitFor(service, count: 3)
+        await service.succeed(previous.draftRevision, at: now)
+        do { try await earlier.value; XCTFail("Superseded draft committed") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        await service.succeed(newest.draftRevision, at: now)
+        try await later.value
+        XCTAssertEqual(repo.savedDrafts, [newest])
+        XCTAssertEqual(store.snapshot?.feeds.first { $0.id == firstID }?.url.absoluteString,
+                       newest.urlText)
+    }
+
+    func testConcurrentEditRejectsStaleValidatedDraftWithoutReplacingCache() async {
+        let (catalog, cached) = fixture()
+        let repo = StubNewsRepository(cached)
+        let service = EditorNewsService()
+        let store = NewsStore(repository: repo, service: service, catalog: catalog)
+        store.loadIfNeeded()
+        let edit = draft(cached.feeds[0])
+        let saving = Task { try await store.saveFeed(edit) }
+        await waitFor(service, count: 1)
+        let other = draft(cached.feeds[0], url: cached.feeds[0].url.absoluteString)
+        _ = try? repo.saveFeed(other, validation: nil) // another window's Settings edit
+        await service.succeed(edit.draftRevision, at: now)
+        do { try await saving.value; XCTFail("Stale edit committed") }
+        catch { XCTAssertEqual(error as? NewsRepositoryError, .staleRevision) }
+        XCTAssertEqual(repo.savedDrafts, [other])
+        XCTAssertEqual(store.snapshot, cached) // editor can reload and review its retained draft
+        store.reload()
+        XCTAssertEqual(store.snapshot, repo.value)
     }
 
     func testRemovalCancelsObsoleteWorkAndKeepsCommittedOtherFeed() async throws {

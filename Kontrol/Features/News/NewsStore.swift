@@ -4,6 +4,7 @@ import Combine
 /// The transport stays behind an actor; a store never owns a URLSession or parses XML.
 protocol NewsRefreshing {
     func refresh(_ feeds: [FeedSourceSnapshot]) async -> [FeedRefreshOutcome]
+    func validate(_ draft: FeedDraft) async throws -> ValidatedFeed
 }
 
 extension FeedService: NewsRefreshing {}
@@ -16,6 +17,10 @@ enum NewsRefreshTrigger {
 enum NewsLocalFailure: Equatable {
     case read
     case save
+}
+
+enum NewsEditorError: Error, Equatable {
+    case sessionRequired
 }
 
 /// One app-owned instance can be observed by any number of windows. Visibility is counted
@@ -41,6 +46,9 @@ final class NewsStore: ObservableObject {
     private var scheduleGeneration = 0
     private var inFlight: Task<Void, Never>?
     private var feedTasks: [UUID: Task<[FeedRefreshOutcome], Never>] = [:]
+    // Use the caller's stable editor ID for new feeds, or the feed ID for existing ones.
+    // Never store the draft here: the editor retains it through validation/save failures.
+    private var editorAttempts: [UUID: UUID] = [:]
 
     init(repository: NewsRepository, service: NewsRefreshing, catalog: DefaultFeedCatalog,
          clock: @escaping () -> Date = Date.init,
@@ -228,6 +236,87 @@ final class NewsStore: ObservableObject {
                 NewsPreferencesEdit(selectedTopicIDs: ids), expectedRevision: snapshot.preferences.revision))
             localFailure = nil
         } catch { localFailure = .save; throw error }
+    }
+
+    /// Pass the same editor ID to each new-feed save attempt and to Cancel. Existing
+    /// feeds can use their feed ID when no separate editor ID is supplied.
+    func cancelFeedEdit(id: UUID) {
+        editorAttempts.removeValue(forKey: id)
+    }
+
+    func saveFeed(_ draft: FeedDraft, editorID: UUID? = nil) async throws {
+        loadIfNeeded()
+        guard let snapshot, localFailure != .read else { throw NewsRepositoryError.invalidStoredData }
+        // A draft revision identifies one validation, not the editor session. Never
+        // allow the default path to save a new feed without a stable cancellation key.
+        guard let key = editorID ?? draft.id else { throw NewsEditorError.sessionRequired }
+        let attempt = UUID()
+        editorAttempts[key] = attempt
+        defer {
+            if editorAttempts[key] == attempt { editorAttempts.removeValue(forKey: key) }
+        }
+
+        // Reject malformed or stale drafts before doing IO. The repository repeats these
+        // checks against authoritative state at commit time (including uniqueness/limits).
+        let name = draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let endpointText = draft.urlText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name.utf8.count <= 256,
+              !draft.topicIDs.isEmpty,
+              draft.topicIDs.isSubset(of: Set(snapshot.topics.map(\.id))),
+              let endpoint = try? NewsURLPolicy.feedURL(endpointText),
+              let normalized = try? NewsURLPolicy.normalizedFeedURL(endpoint.absoluteString) else {
+            throw NewsRepositoryError.invalidFeed
+        }
+        let original: FeedSourceSnapshot?
+        if let id = draft.id {
+            guard let feed = snapshot.feeds.first(where: { $0.id == id }),
+                  feed.configurationRevision == draft.expectedRevision else {
+                throw NewsRepositoryError.staleRevision
+            }
+            original = feed
+        } else {
+            guard draft.expectedRevision == nil else { throw NewsRepositoryError.staleRevision }
+            guard snapshot.feeds.count < 32 else { throw NewsRepositoryError.feedLimitReached }
+            original = nil
+        }
+        guard !snapshot.feeds.contains(where: {
+            $0.id != original?.id &&
+                (try? NewsURLPolicy.normalizedFeedURL($0.url.absoluteString)) == normalized
+        }) else { throw NewsRepositoryError.duplicateEndpoint }
+
+        let oldEndpoint = original.flatMap { try? NewsURLPolicy.normalizedFeedURL($0.url.absoluteString) }
+        let needsValidation = draft.isEnabled && (original == nil || oldEndpoint != normalized ||
+            (original?.isEnabled == false && original?.lastSuccessAt == nil))
+        let receipt: ValidatedFeed?
+        if needsValidation {
+            do { receipt = try await service.validate(draft) }
+            catch {
+                // A canceled editor must not surface a late transport failure as its own.
+                guard editorAttempts[key] == attempt else { throw CancellationError() }
+                throw error
+            }
+            // A service seam may ignore cancellation or return a receipt for another draft.
+            guard editorAttempts[key] == attempt else { throw CancellationError() }
+            guard receipt?.draftRevision == draft.draftRevision, receipt?.url == endpoint else {
+                throw NewsRepositoryError.validationRequired
+            }
+        } else { receipt = nil }
+        guard editorAttempts[key] == attempt else { throw CancellationError() }
+        do {
+            let updated = try repository.saveFeed(draft, validation: receipt)
+            publishConfiguration(updated)
+            localFailure = nil
+        } catch {
+            if let failure = error as? NewsRepositoryError {
+                switch failure {
+                case .staleRevision, .invalidFeed, .duplicateEndpoint,
+                     .feedLimitReached, .validationRequired:
+                    break // Recover in the editor, without replacing its draft.
+                default: localFailure = .save
+                }
+            } else { localFailure = .save }
+            throw error
+        }
     }
 
     func removeFeed(id: UUID) throws {
