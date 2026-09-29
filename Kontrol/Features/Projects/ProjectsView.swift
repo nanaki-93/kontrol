@@ -41,6 +41,35 @@ struct ProjectsView: View {
         "\(feature.priority.rawValue) priority · \(feature.effort.rawValue) effort · \(Self.reason(reason, dependencies: feature.dependsOn.count))"
     }
 
+    static func statusSummary(_ counts: FeatureStatusCounts) -> String {
+        "Inspected valid features · planned: \(counts.planned) · active: \(counts.active) · blocked: \(counts.blocked) · ready awaiting prerequisites: \(counts.ready) · completed: \(counts.completed)"
+    }
+
+    static func unresolvedLabels(_ selection: FeatureSelection, inspection: ProjectInspection) -> [String] {
+        let features = Dictionary(uniqueKeysWithValues: inspection.features.map { ($0.id, $0) })
+        func label(_ id: String) -> String {
+            guard let feature = features[id] else { return ProjectDetailsView.safeLabel(id) }
+            return "\(ProjectDetailsView.safeLabel(feature.title)) (\(ProjectDetailsView.safeLabel(id)))"
+        }
+        return selection.unresolvedDependencies.map { entry in
+            let dependencies = entry.dependencyIDs.map { id in
+                "\(label(id)) · \(features[id]?.status.rawValue ?? "unavailable")"
+            }
+            return "\(label(entry.featureID)) awaits: \(dependencies.joined(separator: ", "))"
+        }
+    }
+
+    static func unavailableGuidance(_ inspection: ProjectInspection?, recovery: ProjectRecovery = .refresh) -> String {
+        if recovery == .reconnect {
+            return "Folder access is unavailable. Reconnect the saved project folder, then view project details for validation."
+        }
+        guard let inspection else { return "No current inspection. Refresh to read this folder." }
+        if inspection.manifest?.schemaVersion != 1 {
+            return "Project manifest missing or unsupported. View project details for validation; repair or upgrade externally, then Refresh."
+        }
+        return "Feature listing could not be completed. Progress and suggestions are unavailable; view project details for validation, then Refresh."
+    }
+
     static func location(_ row: ProjectRowState) -> String {
         guard let hint = row.locationHint, !hint.isEmpty else {
             return "Location unavailable · reference \(row.reference.id.uuidString)"
@@ -184,47 +213,104 @@ struct ProjectsView: View {
                     .appTypography(.body)
                     .accessibilityIdentifier("projects-workspace-stale")
             }
-            if let inspection = row.inspection {
-                SectionHeader("Progress")
-                Text(ProjectDetailsView.progress(inspection))
-                    .appTypography(.body)
-                    .accessibilityIdentifier("projects-workspace-progress")
-                if case let .partial(_, _, excluded) = inspection.featureCount {
+            if row.isRetainedInspection {
+                ErrorBanner(.readFailed, recoveryTitle: recoveryTitle(for: row)) { recover(row) }
+                    .accessibilityIdentifier("projects-workspace-unavailable")
+            } else if let inspection = row.inspection {
+                let selection = FeatureSelector().select(from: inspection)
+                if selection.state != .unavailable {
+                    SectionHeader("Progress")
+                    Text(ProjectDetailsView.progress(inspection))
+                        .appTypography(.body)
+                        .accessibilityIdentifier("projects-workspace-progress")
+                }
+                if case let .partial(_, _, excluded) = selection.progress {
                     Text("Partial results · \(excluded) \(excluded == 1 ? "feature file" : "feature files") excluded from counts and suggestions. View project details for validation; repair externally, then Refresh.")
                         .appTypography(.body)
                         .accessibilityIdentifier("projects-workspace-partial")
                 }
-                if !row.isRetainedInspection {
-                    let candidates = Self.recommendations(row)
-                    if !candidates.isEmpty {
-                        SectionHeader("Next features")
-                        ForEach(candidates, id: \.id) { candidate in
-                            if let feature = inspection.features.first(where: { $0.id == candidate.id }) {
-                                NextActionCard(feature.title,
-                                               metadata: Self.cardMetadata(feature, reason: candidate.reason),
-                                               status: StatusPill(feature.status.rawValue.capitalized, kind: .success)) {
-                                    ActionButton("View feature", variant: .primary) {
-                                        // Recheck freshness at activation, not just when the card was built.
-                                        guard let current = store.rows.first(where: { $0.reference.id == row.reference.id }),
-                                              !current.isRetainedInspection else { return }
-                                        store.selectFeature(candidate.id, in: row.reference.id)
-                                    }
-                                    .accessibilityIdentifier("project-feature-open-\(candidate.id)")
+                switch selection.state {
+                case .unavailable:
+                    unavailableState(row, guidance: Self.unavailableGuidance(inspection))
+                case .candidatesAvailable:
+                    SectionHeader("Next features")
+                    ForEach(selection.candidates, id: \.id) { candidate in
+                        if let feature = inspection.features.first(where: { $0.id == candidate.id }) {
+                            NextActionCard(feature.title,
+                                           metadata: Self.cardMetadata(feature, reason: candidate.reason),
+                                           status: StatusPill(feature.status.rawValue.capitalized, kind: .success)) {
+                                ActionButton("View feature", variant: .primary) {
+                                    // Recheck freshness at activation, not just when the card was built.
+                                    guard let current = store.rows.first(where: { $0.reference.id == row.reference.id }),
+                                          !current.isRetainedInspection else { return }
+                                    store.selectFeature(candidate.id, in: row.reference.id)
                                 }
-                                .accessibilityIdentifier("project-feature-card-\(candidate.id)")
+                                .accessibilityIdentifier("project-feature-open-\(candidate.id)")
                             }
+                            .accessibilityIdentifier("project-feature-card-\(candidate.id)")
                         }
                     }
+                case .validationExclusions:
+                    EmptyState("No validated next features",
+                               guidance: "\(inspection.excludedFeaturePaths.count) invalid feature \(inspection.excludedFeaturePaths.count == 1 ? "file was" : "files were") excluded. Excluded files have unknown status and are not counted as completed; view project details for validation, repair externally, then Refresh.")
+                        .accessibilityIdentifier("projects-workspace-exclusions")
+                case .noFeatures:
+                    EmptyState("No features in this project",
+                               guidance: "Feature listing completed with no files. Add features externally, then Refresh.")
+                        .accessibilityIdentifier("projects-workspace-empty")
+                case .allComplete:
+                    EmptyState("All features completed",
+                               guidance: "Every validated feature is complete. View project details to review the roadmap.")
+                        .accessibilityIdentifier("projects-workspace-complete")
+                case .noReadyFeatures:
+                    noReadyState(selection, inspection: inspection)
                 }
             } else if row.isRefreshing {
                 LoadingState("Loading selected project")
             } else {
-                Text("Project inspection unavailable · Refresh or Reconnect to read the folder.")
-                    .appTypography(.body)
+                unavailableState(row, guidance: Self.unavailableGuidance(nil, recovery: row.refreshFailure?.recovery ?? .refresh))
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityIdentifier("projects-workspace")
+    }
+
+    private func noReadyState(_ selection: FeatureSelection, inspection: ProjectInspection) -> some View {
+        VStack(alignment: .leading, spacing: AppMetrics.space3) {
+            EmptyState("No ready next features",
+                       guidance: "Planned and active work is not suggested; blocked status is an explicit blocker. Any ready work awaiting prerequisites is listed below. View project details for validation and the roadmap.")
+            if let counts = selection.statusCounts {
+                Text(Self.statusSummary(counts))
+                    .appTypography(.body)
+                    .accessibilityIdentifier("projects-workspace-status-counts")
+            }
+            ForEach(Self.unresolvedLabels(selection, inspection: inspection), id: \.self) { label in
+                Text(label).appTypography(.body).textSelection(.enabled)
+            }
+        }
+        .accessibilityIdentifier("projects-workspace-no-ready")
+    }
+
+    private func unavailableState(_ row: ProjectRowState, guidance: String) -> some View {
+        VStack(alignment: .leading, spacing: AppMetrics.space3) {
+            ErrorBanner(.readFailed, recoveryTitle: recoveryTitle(for: row)) { recover(row) }
+            Text(guidance).appTypography(.body)
+            Text("Progress unavailable · View project details for validation and recovery information.")
+                .appTypography(.body)
+        }
+        .accessibilityIdentifier("projects-workspace-unavailable")
+    }
+
+    private func recoveryTitle(for row: ProjectRowState) -> String {
+        row.refreshFailure?.recovery == .reconnect ? "Reconnect project" : "Refresh project"
+    }
+
+    private func recover(_ row: ProjectRowState) {
+        if row.refreshFailure?.recovery == .reconnect {
+            chooseReconnectFolder(for: row.reference.id)
+        } else {
+            store.refresh(row.reference.id)
+        }
     }
 
     private func workspaceActions(for row: ProjectRowState) -> some View {

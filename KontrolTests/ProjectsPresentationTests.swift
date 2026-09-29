@@ -136,6 +136,100 @@ final class ProjectsPresentationTests: XCTestCase {
                        "Old detail remains accessible only as a stale reference")
     }
 
+    func testWorkspaceClassificationsCompileWithTruthfulProgressAndRecovery() async throws {
+        let done = card("done", status: .completed)
+        let waiting = card("waiting", dependencies: ["done", "active"])
+        let mixed = cardInspection([card("planned", status: .planned), card("active", status: .active),
+                                    card("blocked", status: .blocked), done, waiting])
+        let excluded = cardInspection([done], excluded: [".kontrol/features/bad.md"])
+        let empty = cardInspection([])
+        let complete = cardInspection([done])
+        let planned = cardInspection([card("planned", status: .planned)])
+        let active = cardInspection([card("active", status: .active)])
+        let blocked = cardInspection([card("blocked", status: .blocked)])
+        let awaiting = cardInspection([done, waiting, card("active", status: .active)])
+        func unavailable(manifest: ProjectManifest?, enumeration: ProjectFeatureEnumeration,
+                         diagnostic: ProjectDiagnostic) -> ProjectInspection {
+            ProjectInspection(manifest: manifest, roadmap: .absent, features: [],
+                excludedFeaturePaths: [], featureEnumeration: enumeration, context: .absent,
+                rules: .absent, history: .absent, diagnostics: [diagnostic], sources: [], readAt: Date())
+        }
+        let failed = unavailable(manifest: empty.manifest, enumeration: .failed,
+            diagnostic: ProjectDiagnostic(code: .enumerationFailed, severity: .error,
+                relativePath: ".kontrol/features", recovery: .refresh))
+        let unsupported = unavailable(manifest: nil, enumeration: .complete,
+            diagnostic: ProjectDiagnostic(code: .unsupportedVersion, severity: .error,
+                relativePath: ".kontrol/project.yaml", recovery: .upgradeSource))
+        let fixtures: [(ProjectInspection, FeatureSelectionState)] = [
+            (excluded, .validationExclusions), (empty, .noFeatures), (complete, .allComplete),
+            (planned, .noReadyFeatures), (active, .noReadyFeatures), (blocked, .noReadyFeatures),
+            (awaiting, .noReadyFeatures), (mixed, .noReadyFeatures),
+            (failed, .unavailable), (unsupported, .unavailable)
+        ]
+        let ids = fixtures.indices.map { _ in UUID() }
+        let inspector = CardInspector(Dictionary(uniqueKeysWithValues: fixtures.enumerated().map {
+            (UInt8($0.offset + 1), $0.element.0)
+        }))
+        let store = ProjectStore(inspector: inspector, repository: ListRepository(
+            ids.enumerated().map { reference($0.element, order: $0.offset) }))
+        try store.enterProjects()
+        for _ in 0..<200 where store.rows.contains(where: { $0.isRefreshing }) {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertFalse(store.rows.contains(where: { $0.isRefreshing }), "All fixtures must publish")
+        for (index, fixture) in fixtures.enumerated() {
+            let row = try XCTUnwrap(store.rows.first { $0.reference.id == ids[index] })
+            let selection = FeatureSelector().select(from: try XCTUnwrap(row.inspection))
+            XCTAssertEqual(selection.state, fixture.1)
+            XCTAssertTrue(ProjectsView.recommendations(row).isEmpty)
+            store.select(ids[index])
+            let host = NSHostingView(rootView: ProjectsView(store: store))
+            XCTAssertTrue(host.rootView.store === store)
+            XCTAssertEqual(host.rootView.store.selectedID, ids[index])
+        }
+        XCTAssertEqual(ProjectDetailsView.progress(failed),
+                       "Feature progress unavailable; enumeration or manifest is incomplete")
+        XCTAssertEqual(ProjectDetailsView.progress(unsupported),
+                       "Feature progress unavailable; enumeration or manifest is incomplete")
+        XCTAssertTrue(ProjectsView.unavailableGuidance(failed).contains("listing could not be completed"))
+        XCTAssertTrue(ProjectsView.unavailableGuidance(unsupported).contains("manifest missing or unsupported"))
+        XCTAssertEqual(ProjectDetailsView.progress(excluded),
+                       "1 of 1 valid features completed (partial; 1 file excluded)")
+        XCTAssertEqual(ProjectDetailsView.progress(empty), "0 of 0 features completed (complete enumeration)")
+        let counts = try XCTUnwrap(FeatureSelector().select(from: mixed).statusCounts)
+        XCTAssertEqual(ProjectsView.statusSummary(counts),
+                       "Inspected valid features · planned: 1 · active: 1 · blocked: 1 · ready awaiting prerequisites: 1 · completed: 1")
+        XCTAssertEqual(ProjectsView.unresolvedLabels(FeatureSelector().select(from: mixed), inspection: mixed),
+                       ["Disk title waiting (waiting) awaits: Disk title active (active) · active"])
+        XCTAssertEqual(ProjectsView.unresolvedLabels(FeatureSelector().select(from: awaiting), inspection: awaiting),
+                       ["Disk title waiting (waiting) awaits: Disk title active (active) · active"])
+        XCTAssertEqual(FeatureSelector().select(from: planned).statusCounts?.planned, 1)
+        XCTAssertEqual(FeatureSelector().select(from: active).statusCounts?.active, 1)
+        XCTAssertEqual(FeatureSelector().select(from: blocked).statusCounts?.blocked, 1)
+        XCTAssertNil(FeatureSelector().select(from: failed).statusCounts)
+
+        // A retained inspection is not a current complete or empty result; access failures reconnect.
+        await inspector.fail(2)
+        store.refresh(ids[1])
+        for _ in 0..<100 where store.rows.first(where: { $0.reference.id == ids[1] })?.isRefreshing == true {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let stale = try XCTUnwrap(store.rows.first { $0.reference.id == ids[1] })
+        XCTAssertTrue(stale.isRetainedInspection)
+        XCTAssertTrue(ProjectsView.recommendations(stale).isEmpty)
+        store.select(ids[1])
+        let staleHost = NSHostingView(rootView: ProjectsView(store: store))
+        XCTAssertTrue(staleHost.rootView.store === store)
+        XCTAssertTrue(ProjectsView.status(stale).contains("Refresh needed"))
+        var revoked = stale
+        revoked.refreshFailure = .inspection(.access(.staleBookmark))
+        XCTAssertEqual(revoked.refreshFailure?.recovery, .reconnect)
+        XCTAssertTrue(ProjectsView.unavailableGuidance(nil, recovery: .reconnect).contains("Reconnect"))
+        let noInspection = ProjectRowState(reference: reference(UUID(), order: 11), inspection: nil,
+                                           refreshFailure: .inspection(.access(.staleBookmark)))
+        XCTAssertTrue(ProjectsView.status(noInspection).contains("Reconnect required"))
+    }
+
     func testFolderOnlyPickerAndPreviewHostCompile() {
         let panel = ProjectAddView.configuredPicker()
         XCTAssertTrue(panel.canChooseDirectories)
