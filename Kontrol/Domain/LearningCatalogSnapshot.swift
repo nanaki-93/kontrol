@@ -127,6 +127,88 @@ struct LessonSlotSnapshot: Equatable, Identifiable {
     }
 }
 
+// V6 evidence is detached from SwiftData and from mutable installed definitions.
+// Nil fields are known gaps in legacy evidence, not permission to fill from today's catalog.
+enum TerminalMetadataProvenance: String, Codable, Equatable {
+    case studiedPin, dismissalPin, dismissalReference, legacyCompletedPartial, legacyRecoveredReference
+}
+
+struct LessonTerminalMetadata: Codable, Equatable {
+    let lessonID: String
+    let provenance: TerminalMetadataProvenance
+    let title: String?
+    let topicID: String?
+    let subtopicID: String?
+    let contentVersion: Int?
+    let objectiveKey: String?
+    let conceptIDs: [String]?
+    let normalizedContentHash: String?
+    let format: String?
+    // Only a pre-study dismissal may retain a definition as reference material.
+    // A studied pin remains owned by LessonAttempt.pinnedContentData.
+    let dismissalTimeDefinition: LessonDefinitionSnapshot?
+
+    func validate() throws {
+        // Unknown legacy fields are nil. A present matching field must still be
+        // usable evidence; in particular an empty set or malformed digest cannot
+        // masquerade as full archival metadata.
+        func canonicalID(_ id: String) -> Bool {
+            !id.isEmpty && id == id.trimmingCharacters(in: .whitespacesAndNewlines)
+                .precomposedStringWithCanonicalMapping
+        }
+        func validHash(_ hash: String) -> Bool {
+            let bytes = Array(hash.utf8)
+            return bytes.count == 71 && bytes.starts(with: Array("sha256:".utf8)) &&
+                bytes.dropFirst(7).allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+        }
+        guard canonicalID(lessonID), contentVersion.map({ $0 > 0 }) ?? true,
+              objectiveKey.map({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) ?? true,
+              conceptIDs.map({ !$0.isEmpty && $0.allSatisfy(canonicalID) &&
+                  $0 == Array(Set($0)).sorted() }) ?? true,
+              normalizedContentHash.map(validHash) ?? true,
+              dismissalTimeDefinition.map({ $0.id == lessonID }) ?? true,
+              (provenance == .dismissalReference || provenance == .legacyRecoveredReference ||
+               dismissalTimeDefinition == nil),
+              // Full evidence must be complete; legacy partial fields may be unknown.
+              ([TerminalMetadataProvenance.legacyCompletedPartial, .legacyRecoveredReference]
+                  .contains(provenance) ||
+               (title != nil && topicID != nil && subtopicID != nil &&
+                contentVersion != nil && objectiveKey != nil && conceptIDs != nil &&
+                normalizedContentHash != nil && format != nil)) else {
+            throw LearningEvidenceError.invalidPayload
+        }
+    }
+}
+
+struct CurrentCatalogMembership: Codable, Equatable {
+    let catalogID: String
+    let catalogVersion: Int
+    let topicIDs: [String]
+    let subtopicIDs: [String]
+    let conceptIDs: [String]
+    let seededLessonIDs: [String]
+
+    func validate() throws {
+        guard !catalogID.isEmpty, catalogVersion > 0,
+              [topicIDs, subtopicIDs, conceptIDs, seededLessonIDs].allSatisfy({
+                  !$0.contains("") && $0 == Array(Set($0)).sorted()
+              }) else { throw LearningEvidenceError.invalidPayload }
+    }
+}
+
+enum CatalogMembershipAvailability: Equatable {
+    case available(CurrentCatalogMembership)
+    case unavailable // no matching validated catalog established current membership
+}
+
+enum LearningEvidenceError: Error, Equatable {
+    case unsupportedVersion(Int)
+    case corruptPayload
+    case invalidPayload
+    case identityMismatch
+    case duplicateIdentity
+}
+
 // These projections are detached values. In particular, a historical detail must
 // never silently fall back to the current catalog definition.
 enum LessonStudiedContent: Equatable {

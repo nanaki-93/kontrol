@@ -8,19 +8,21 @@ final class SchemaTests: XCTestCase {
         try ModelContainerFactory().makeContainer(mode: .inMemory)
     }
 
-    func testReleasedIdentitiesRemainAndV4ReplacesOnlyDefinitionAndAddsSlot() {
+    func testReleasedIdentitiesRemainAndV6OnlyAddsEvidence() {
         XCTAssertEqual(KontrolSchemaV1.versionIdentifier, Schema.Version(1, 0, 0))
         XCTAssertEqual(KontrolSchemaV2.versionIdentifier, Schema.Version(2, 0, 0))
         XCTAssertEqual(KontrolSchemaV3.versionIdentifier, Schema.Version(3, 0, 0))
         XCTAssertEqual(KontrolSchemaV4.versionIdentifier, Schema.Version(4, 0, 0))
         XCTAssertEqual(KontrolSchemaV5.versionIdentifier, Schema.Version(5, 0, 0))
-        XCTAssertEqual(KontrolMigrationPlan.schemas.count, 5)
+        XCTAssertEqual(KontrolSchemaV6.versionIdentifier, Schema.Version(6, 0, 0))
+        XCTAssertEqual(KontrolMigrationPlan.schemas.count, 6)
         XCTAssertTrue(KontrolMigrationPlan.schemas[0] == KontrolSchemaV1.self)
         XCTAssertTrue(KontrolMigrationPlan.schemas[1] == KontrolSchemaV2.self)
         XCTAssertTrue(KontrolMigrationPlan.schemas[2] == KontrolSchemaV3.self)
         XCTAssertTrue(KontrolMigrationPlan.schemas[3] == KontrolSchemaV4.self)
         XCTAssertTrue(KontrolMigrationPlan.schemas[4] == KontrolSchemaV5.self)
-        XCTAssertEqual(KontrolMigrationPlan.stages.count, 4)
+        XCTAssertTrue(KontrolMigrationPlan.schemas[5] == KontrolSchemaV6.self)
+        XCTAssertEqual(KontrolMigrationPlan.stages.count, 5)
         let v1 = KontrolSchemaV1.models
         XCTAssertEqual(Set(v1.map { String(describing: $0) }),
                        Set(["TaskItem", "Topic", "Subtopic", "Concept",
@@ -54,6 +56,158 @@ final class SchemaTests: XCTestCase {
         }
         XCTAssertFalse(v5.contains { $0 == KontrolSchemaV1.LessonAttempt.self })
         XCTAssertTrue(v5.contains { $0 == LessonAttempt.self })
+        let v6 = KontrolSchemaV6.models
+        XCTAssertEqual(v6.count, v5.count + 2)
+        for (original, retained) in zip(v5, v6) { XCTAssertTrue(original == retained) }
+        XCTAssertTrue(v6.contains { $0 == LessonTerminalRecord.self })
+        XCTAssertTrue(v6.contains { $0 == CatalogMembership.self })
+    }
+
+    func testEvidencePayloadValidationClassificationAndIdentity() throws {
+        let metadata = LessonTerminalMetadata(
+            lessonID: "lesson", provenance: .legacyCompletedPartial, title: "Original",
+            topicID: nil, subtopicID: nil, contentVersion: 1, objectiveKey: "goal",
+            conceptIDs: ["a"], normalizedContentHash: nil, format: nil,
+            dismissalTimeDefinition: nil)
+        let row = try LessonTerminalRecord(metadata: metadata)
+        XCTAssertEqual(try row.metadata(), metadata)
+        XCTAssertNil(try row.metadata().topicID) // known unknown, not a current definition
+        row.lessonID = "different"
+        XCTAssertThrowsError(try row.metadata()) { XCTAssertEqual($0 as? LearningEvidenceError, .identityMismatch) }
+        row.lessonID = "lesson"
+        row.payload = Data(#"{"version":9,"value":{}}"#.utf8)
+        XCTAssertThrowsError(try row.metadata()) { XCTAssertEqual($0 as? LearningEvidenceError, .unsupportedVersion(9)) }
+        row.payload = Data(#"{"version":1,"value":{}}"#.utf8)
+        XCTAssertThrowsError(try row.metadata()) { XCTAssertEqual($0 as? LearningEvidenceError, .corruptPayload) }
+        row.payload = Data("garbage".utf8)
+        XCTAssertThrowsError(try row.metadata()) { XCTAssertEqual($0 as? LearningEvidenceError, .corruptPayload) }
+        XCTAssertThrowsError(try LessonTerminalRecord(metadata: LessonTerminalMetadata(
+            lessonID: "lesson", provenance: .studiedPin, title: nil, topicID: nil,
+            subtopicID: nil, contentVersion: nil, objectiveKey: nil, conceptIDs: nil,
+            normalizedContentHash: nil, format: nil, dismissalTimeDefinition: nil))) {
+            XCTAssertEqual($0 as? LearningEvidenceError, .invalidPayload)
+        }
+        let duplicate = try LessonTerminalRecord(metadata: metadata)
+        XCTAssertThrowsError(try EvidenceIdentity.terminalMetadata([row, duplicate])) {
+            XCTAssertEqual($0 as? LearningEvidenceError, .duplicateIdentity)
+        }
+        XCTAssertThrowsError(try EvidenceIdentity.requireUnique(["a", "a"], id: { $0 })) {
+            XCTAssertEqual($0 as? LearningEvidenceError, .duplicateIdentity)
+        }
+    }
+
+    func testFullTerminalMatchingFieldsRejectInvalidWritesAndReads() throws {
+        let hash = CatalogValidator.fingerprint(explanation: "Explanation", workedExample: "Example",
+            exercise: "Exercise", referenceAnswer: "Answer", selfCheckCriteria: ["Check"])
+        func metadata(objective: String = "Goal", concepts: [String] = ["a", "b"],
+                      hash: String) -> LessonTerminalMetadata {
+            LessonTerminalMetadata(lessonID: "lesson", provenance: .studiedPin,
+                title: "Title", topicID: "topic", subtopicID: "subtopic",
+                contentVersion: 1, objectiveKey: objective, conceptIDs: concepts,
+                normalizedContentHash: hash, format: "learn", dismissalTimeDefinition: nil)
+        }
+        let valid = metadata(hash: hash)
+        XCTAssertEqual(try LessonTerminalRecord(metadata: valid).metadata(), valid)
+        let invalid = [
+            metadata(objective: " \n ", hash: hash),
+            metadata(concepts: [], hash: hash),
+            metadata(concepts: ["a", " a"], hash: hash),
+            metadata(concepts: ["a", "a"], hash: hash),
+            metadata(concepts: ["b", "a"], hash: hash),
+            metadata(hash: "sha256:old"),
+            metadata(hash: "sha256:" + String(repeating: "G", count: 64)),
+            metadata(hash: "sha256:" + String(repeating: "A", count: 64))
+        ]
+        struct Envelope: Encodable {
+            let version: Int
+            let value: LessonTerminalMetadata
+        }
+        for value in invalid {
+            XCTAssertThrowsError(try LessonTerminalRecord(metadata: value)) {
+                XCTAssertEqual($0 as? LearningEvidenceError, .invalidPayload)
+            }
+            // A raw persisted payload must be classified on read, too; validation
+            // cannot rely on the convenience initializer having run previously.
+            let row = LessonTerminalRecord(lessonID: value.lessonID,
+                payload: try JSONEncoder().encode(Envelope(version: 1, value: value)))
+            XCTAssertThrowsError(try row.metadata()) {
+                XCTAssertEqual($0 as? LearningEvidenceError, .invalidPayload)
+            }
+        }
+        XCTAssertThrowsError(try LessonTerminalRecord(metadata: LessonTerminalMetadata(
+            lessonID: "lesson", provenance: .legacyCompletedPartial, title: "Old",
+            topicID: nil, subtopicID: nil, contentVersion: 1, objectiveKey: nil,
+            conceptIDs: [], normalizedContentHash: nil, format: nil,
+            dismissalTimeDefinition: nil))) {
+            XCTAssertEqual($0 as? LearningEvidenceError, .invalidPayload)
+        }
+    }
+
+    func testDismissalReferenceIsDetachedAndNotStudiedContent() throws {
+        let reference = LessonDefinitionSnapshot(
+            id: "lesson", objectiveKey: "goal", objective: "Goal", title: "Dismissed title",
+            topicID: "topic", subtopicID: "subtopic", conceptIDs: ["concept"],
+            difficulty: "basic", format: "learn", estimatedMinutes: 5,
+            prerequisiteConceptIDs: [], explanation: "Old explanation", workedExample: "Old example",
+            exercise: "Old exercise", referenceAnswer: "Old answer", selfCheckCriteria: ["Old criterion"],
+            contentVersion: 1, normalizedContentHash: CatalogValidator.fingerprint(
+                explanation: "Old explanation", workedExample: "Old example", exercise: "Old exercise",
+                referenceAnswer: "Old answer", selfCheckCriteria: ["Old criterion"]), source: "seed",
+            provenance: "starter")
+        let metadata = LessonTerminalMetadata(
+            lessonID: "lesson", provenance: .dismissalReference, title: reference.title,
+            topicID: reference.topicID, subtopicID: reference.subtopicID,
+            contentVersion: reference.contentVersion, objectiveKey: reference.objectiveKey,
+            conceptIDs: reference.conceptIDs, normalizedContentHash: reference.normalizedContentHash,
+            format: reference.format, dismissalTimeDefinition: reference)
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        context.insert(try LessonTerminalRecord(metadata: metadata))
+        try context.save()
+        let reopened = try XCTUnwrap(ModelContext(container).fetch(FetchDescriptor<LessonTerminalRecord>()).first)
+        XCTAssertEqual(try reopened.metadata(), metadata)
+        XCTAssertEqual(try reopened.metadata().dismissalTimeDefinition?.explanation, "Old explanation")
+        XCTAssertThrowsError(try LessonTerminalRecord(metadata: LessonTerminalMetadata(
+            lessonID: "lesson", provenance: .studiedPin, title: reference.title,
+            topicID: reference.topicID, subtopicID: reference.subtopicID,
+            contentVersion: 1, objectiveKey: reference.objectiveKey, conceptIDs: reference.conceptIDs,
+            normalizedContentHash: reference.normalizedContentHash, format: reference.format,
+            dismissalTimeDefinition: reference))) {
+            XCTAssertEqual($0 as? LearningEvidenceError, .invalidPayload)
+        }
+    }
+
+    func testMembershipAvailabilityAndVersionedPersistence() throws {
+        let container = try makeContainer()
+        let membership = CurrentCatalogMembership(catalogID: "starter", catalogVersion: 2,
+            topicIDs: ["go"], subtopicIDs: ["go.basic"], conceptIDs: [], seededLessonIDs: [])
+        XCTAssertEqual(CatalogMembershipAvailability.unavailable, .unavailable)
+        let context = ModelContext(container)
+        context.insert(try CatalogMembership(membership: membership))
+        try context.save()
+        let saved = try XCTUnwrap(ModelContext(container).fetch(FetchDescriptor<CatalogMembership>()).first)
+        XCTAssertEqual(try saved.membership(), membership)
+        XCTAssertEqual(try EvidenceIdentity.membership([saved], catalogID: "starter", installedVersion: 2),
+                       .available(membership))
+        XCTAssertEqual(try EvidenceIdentity.membership([saved], catalogID: "starter", installedVersion: 1),
+                       .unavailable)
+        XCTAssertEqual(try EvidenceIdentity.membership([saved], catalogID: "other", installedVersion: 2),
+                       .unavailable)
+        let duplicate = try CatalogMembership(membership: membership)
+        XCTAssertThrowsError(try EvidenceIdentity.membership([saved, duplicate], catalogID: "starter",
+                                                          installedVersion: 2)) {
+            XCTAssertEqual($0 as? LearningEvidenceError, .duplicateIdentity)
+        }
+        saved.payload = Data(#"{"version":2,"value":{}}"#.utf8)
+        XCTAssertThrowsError(try saved.membership()) { XCTAssertEqual($0 as? LearningEvidenceError, .unsupportedVersion(2)) }
+        saved.catalogID = "wrong"
+        saved.payload = try CatalogMembership(membership: membership).payload
+        XCTAssertThrowsError(try saved.membership()) { XCTAssertEqual($0 as? LearningEvidenceError, .identityMismatch) }
+        XCTAssertThrowsError(try CatalogMembership(membership: CurrentCatalogMembership(
+            catalogID: "starter", catalogVersion: 2, topicIDs: ["go", "go"],
+            subtopicIDs: [], conceptIDs: [], seededLessonIDs: []))) {
+            XCTAssertEqual($0 as? LearningEvidenceError, .invalidPayload)
+        }
     }
 
     func testV4SlotScalarKeysAndDefinitionObjectiveSurviveReopen() throws {

@@ -1,5 +1,6 @@
 import Foundation
 import SwiftData
+import SQLite3
 import XCTest
 @testable import Kontrol
 
@@ -15,6 +16,49 @@ final class ContainerFactoryTests: XCTestCase {
 
     private func taskIDs(in container: ModelContainer) throws -> [UUID] {
         try ModelContext(container).fetch(FetchDescriptor<TaskItem>()).map(\.id)
+    }
+
+    func testV5DiskMigratesAdditivelyAndV6EvidenceSurvivesReopen() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("Kontrol.store")
+        let attemptID = UUID()
+        func createV5() throws {
+            let schema = Schema(versionedSchema: KontrolSchemaV5.self)
+            let configuration = ModelConfiguration(schema: schema, url: url, cloudKitDatabase: .none)
+            let container = try ModelContainer(for: schema, configurations: [configuration])
+            let context = ModelContext(container)
+            context.insert(LessonProgress(lessonID: "old", status: .completed,
+                                          completedAt: Date(timeIntervalSince1970: 123)))
+            context.insert(LessonAttempt(id: attemptID, lessonID: "old", contentVersion: 1,
+                                         answerDraft: "unchanged answer"))
+            try context.save()
+        }
+        try createV5()
+        func migrateAndWrite() throws {
+            let container = try factory.makeContainer(mode: .persistent(url))
+            let context = ModelContext(container)
+            XCTAssertTrue(try context.fetch(FetchDescriptor<LessonTerminalRecord>()).isEmpty)
+            XCTAssertTrue(try context.fetch(FetchDescriptor<CatalogMembership>()).isEmpty)
+            context.insert(try LessonTerminalRecord(metadata: LessonTerminalMetadata(
+                lessonID: "old", provenance: .legacyCompletedPartial, title: "Past",
+                topicID: nil, subtopicID: nil, contentVersion: 1, objectiveKey: nil,
+                conceptIDs: nil, normalizedContentHash: nil, format: nil,
+                dismissalTimeDefinition: nil)))
+            context.insert(try CatalogMembership(membership: CurrentCatalogMembership(
+                catalogID: "starter", catalogVersion: 1, topicIDs: ["go"],
+                subtopicIDs: [], conceptIDs: [], seededLessonIDs: [])))
+            try context.save()
+        }
+        try migrateAndWrite()
+        let reopened = try factory.makeContainer(mode: .persistent(url))
+        let context = ModelContext(reopened)
+        XCTAssertEqual(try context.fetch(FetchDescriptor<LessonTerminalRecord>()).count, 1)
+        XCTAssertNil(try context.fetch(FetchDescriptor<LessonTerminalRecord>()).first?.metadata().topicID)
+        XCTAssertEqual(try context.fetch(FetchDescriptor<CatalogMembership>()).first?.membership().topicIDs, ["go"])
+        XCTAssertEqual(try context.fetch(FetchDescriptor<LessonProgress>()).first?.status, .completed)
+        XCTAssertEqual(try context.fetch(FetchDescriptor<LessonAttempt>()).first?.id, attemptID)
+        XCTAssertEqual(try context.fetch(FetchDescriptor<LessonAttempt>()).first?.answerDraft, "unchanged answer")
     }
 
     func testInMemoryContainersAreIndependent() throws {
@@ -132,6 +176,16 @@ final class ContainerFactoryTests: XCTestCase {
             return historical.persistentModelID
         }
         let originalIdentity = try writeV3AndClose()
+        // Drain the source WAL before snapshotting fixture bytes. Core Data can
+        // checkpoint asynchronously after releasing the writing container; a
+        // live WAL copy otherwise races the source's own normal close.
+        var database: OpaquePointer?
+        XCTAssertEqual(sqlite3_open_v2(sourceURL.path, &database, SQLITE_OPEN_READWRITE, nil), SQLITE_OK)
+        defer { if database != nil { sqlite3_close(database) } }
+        XCTAssertEqual(sqlite3_wal_checkpoint_v2(database, nil, SQLITE_CHECKPOINT_TRUNCATE, nil, nil),
+                       SQLITE_OK)
+        XCTAssertEqual(sqlite3_close(database), SQLITE_OK)
+        database = nil
         let originals = try FileManager.default.contentsOfDirectory(at: source,
             includingPropertiesForKeys: [.isRegularFileKey]).filter {
                 try $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true
