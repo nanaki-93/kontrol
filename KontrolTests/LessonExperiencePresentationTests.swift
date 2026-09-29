@@ -87,6 +87,85 @@ final class LessonExperiencePresentationTests: XCTestCase {
         }
     }
 
+    func testHistoryFiltersAreNamedGroupedAndFilteringDoesNotStartOrRestoreWork() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataCatalogRepository(container: container)
+        _ = try repository.importIfNeeded(BundledCatalogLoader.load(from: Bundle.main))
+        let graph = AppDependencies(container: container, catalogRepository: repository)
+        let store = graph.learningCatalogStore
+        store.loadIfNeeded()
+        let slot = try XCTUnwrap(repository.loadSnapshot().slots.first)
+        let date = Date(timeIntervalSince1970: 1_700_000_000)
+        _ = try store.dismiss(lessonID: slot.lessonID, expectedSlot: slot, now: date)
+        let before = try repository.loadSnapshot()
+        let history = try repository.loadHistory()
+        try inspect(LearningHistoryView(store: store, navigation: NavigationStore())) { elements, currentElements in
+            let ids = elements.compactMap { attribute($0, kAXIdentifierAttribute) as? String }
+            for name in ["topic", "status", "date"] {
+                let control = try XCTUnwrap(elements.first {
+                    attribute($0, kAXIdentifierAttribute) as? String == "learning-history-\(name)-filter"
+                })
+                XCTAssertEqual(attribute(control, kAXEnabledAttribute) as? Bool, true)
+                let labels = [kAXTitleAttribute, kAXDescriptionAttribute]
+                    .compactMap { attribute(control, $0) as? String }.joined(separator: " ")
+                XCTAssertTrue(labels.localizedCaseInsensitiveContains(name), "Missing \(name) label")
+            }
+            XCTAssertTrue(ids.contains("learning-history-row-\(slot.lessonID)"))
+            XCTAssertTrue(ids.contains { $0.hasPrefix("learning-history-day-") })
+            // Opening a menu is navigation, not a lesson command. A native Picker
+            // remains keyboard/AX actionable; no attempt is created by browsing.
+            let status = try XCTUnwrap(elements.first {
+                attribute($0, kAXIdentifierAttribute) as? String == "learning-history-status-filter"
+            })
+            XCTAssertEqual(AXUIElementPerformAction(status, kAXPressAction as CFString), .success)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+            XCTAssertTrue(currentElements().contains {
+                attribute($0, kAXIdentifierAttribute) as? String == "learning-history-row-\(slot.lessonID)"
+            })
+            XCTAssertEqual(try repository.loadSnapshot(), before)
+            XCTAssertEqual(try repository.loadHistory(), history)
+            XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).isEmpty)
+        }
+    }
+
+    func testHistoryNoMatchClearFiltersAndReversedDatesStayVisibleWithoutWriting() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataCatalogRepository(container: container)
+        _ = try repository.importIfNeeded(BundledCatalogLoader.load(from: Bundle.main))
+        let graph = AppDependencies(container: container, catalogRepository: repository)
+        let store = graph.learningCatalogStore
+        store.loadIfNeeded()
+        let slot = try XCTUnwrap(repository.loadSnapshot().slots.first)
+        _ = try store.dismiss(lessonID: slot.lessonID, expectedSlot: slot)
+        let baseline = try repository.loadSnapshot()
+        let navigation = NavigationStore()
+        let noMatch = LearningHistoryFilters(status: .completed)
+        try inspect(LearningHistoryView(store: store, navigation: navigation, initialFilters: noMatch)) { elements, currentElements in
+            XCTAssertTrue(elements.contains { attribute($0, kAXIdentifierAttribute) as? String == "learning-history-no-match" })
+            XCTAssertFalse(elements.contains { attribute($0, kAXIdentifierAttribute) as? String == "learning-history-empty" })
+            let clear = try XCTUnwrap(elements.first {
+                attribute($0, kAXIdentifierAttribute) as? String == "learning-history-clear-filters"
+            })
+            XCTAssertEqual(AXUIElementPerformAction(clear, kAXPressAction as CFString), .success)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+            XCTAssertTrue(currentElements().contains {
+                attribute($0, kAXIdentifierAttribute) as? String == "learning-history-row-\(slot.lessonID)"
+            })
+        }
+        let reversed = LearningHistoryFilters(date: .custom(
+            start: HistoryLocalDate(year: 2026, month: 5, day: 4),
+            end: HistoryLocalDate(year: 2026, month: 5, day: 3)))
+        try inspect(LearningHistoryView(store: store, navigation: navigation, initialFilters: reversed)) { elements, _ in
+            let ids = elements.compactMap { attribute($0, kAXIdentifierAttribute) as? String }
+            XCTAssertTrue(ids.contains("learning-history-range-error"))
+            XCTAssertTrue(ids.contains("learning-history-start-date"))
+            XCTAssertTrue(ids.contains("learning-history-end-date"))
+            XCTAssertFalse(ids.contains("learning-history-row-\(slot.lessonID)"))
+        }
+        XCTAssertEqual(try repository.loadSnapshot(), baseline)
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).isEmpty)
+    }
+
     func testCompletedHistoryShowsStudiedSectionsWithoutRestoreAfterCatalogUpgrade() throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         let repository = SwiftDataCatalogRepository(container: container)

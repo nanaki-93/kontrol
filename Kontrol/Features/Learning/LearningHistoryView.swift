@@ -7,6 +7,35 @@ struct LearningHistoryView: View {
     @ObservedObject var navigation: NavigationStore
     @State private var selectedID: String?
     @State private var actionError: LessonExperienceError?
+    @State private var filters = LearningHistoryFilters()
+    @State private var customStart = HistoryLocalDate(Date(), calendar: .current, timeZone: .current)
+    @State private var customEnd = HistoryLocalDate(Date(), calendar: .current, timeZone: .current)
+    @State private var hasChosenCustom = false
+    @Environment(\.calendar) private var calendar
+    @Environment(\.timeZone) private var timeZone
+    @Environment(\.locale) private var locale
+
+    init(store: LearningCatalogStore, navigation: NavigationStore,
+         initialFilters: LearningHistoryFilters = .init()) {
+        self.store = store
+        self.navigation = navigation
+        _filters = State(initialValue: initialFilters)
+        if case .custom(let start, let end) = initialFilters.date {
+            _customStart = State(initialValue: start)
+            _customEnd = State(initialValue: end)
+            _hasChosenCustom = State(initialValue: true)
+        }
+    }
+
+    // Selection is derived from the authoritative History read, not from a stale
+    // detail or installed definition. The same projection drives rows and detail.
+    static func visibleEntry(_ id: String?, in state: LessonHistoryReadState,
+                             groups: [LearningHistoryDayGroup]) -> LessonHistorySnapshot? {
+        guard let entry = entry(id, in: state),
+              groups.contains(where: { $0.rows.contains(where: { $0.lessonID == entry.lessonID && $0.status == entry.status }) })
+        else { return nil }
+        return entry
+    }
 
     static func entry(_ id: String?, in state: LessonHistoryReadState) -> LessonHistorySnapshot? {
         guard let id, case .current(let rows) = state else { return nil }
@@ -61,20 +90,39 @@ struct LearningHistoryView: View {
                     .appTypography(.body)
                     .accessibilityIdentifier("learning-history-unavailable")
             } else if case .current(let rows) = store.historyState {
-                if rows.isEmpty {
-                    EmptyState("No completed or dismissed lessons yet.",
-                               guidance: "Completed and dismissed lessons will appear here.")
-                        .accessibilityIdentifier("learning-history-empty")
-                } else {
-                    ViewThatFits(in: .horizontal) {
-                        HStack(alignment: .top, spacing: AppMetrics.space6) {
-                            rowsPanel(rows).frame(maxWidth: .infinity, alignment: .leading)
-                            detailPanel.frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .frame(minWidth: 720)
+                filterControls(rows)
+                switch selection(for: rows) {
+                case .failure(let error):
+                    Text(error == .reversedCustomRange
+                         ? "End date must be on or after start date. Adjust the range to see saved lessons."
+                         : "Choose valid local dates to see saved lessons.")
+                        .appTypography(.body)
+                        .foregroundStyle(AppColors.error)
+                        .accessibilityIdentifier("learning-history-range-error")
+                    Button("Clear filters") { clearFilters() }
+                        .accessibilityIdentifier("learning-history-clear-invalid-range")
+                case .success(let groups):
+                    if rows.isEmpty {
+                        EmptyState("No history yet", guidance: "Completed and dismissed lessons will appear here.")
+                            .accessibilityIdentifier("learning-history-empty")
+                    } else if groups.isEmpty {
                         VStack(alignment: .leading, spacing: AppMetrics.space4) {
-                            rowsPanel(rows)
-                            detailPanel
+                            EmptyState("No matching lessons", guidance: "Try a wider date or clear filters to see saved lessons.")
+                                .accessibilityIdentifier("learning-history-no-match")
+                            Button("Clear filters") { clearFilters() }
+                                .accessibilityIdentifier("learning-history-clear-filters")
+                        }
+                    } else {
+                        ViewThatFits(in: .horizontal) {
+                            HStack(alignment: .top, spacing: AppMetrics.space6) {
+                                rowsPanel(groups).frame(maxWidth: .infinity, alignment: .leading)
+                                detailPanel(groups: groups).frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .frame(minWidth: 720)
+                            VStack(alignment: .leading, spacing: AppMetrics.space4) {
+                                rowsPanel(groups)
+                                detailPanel(groups: groups)
+                            }
                         }
                     }
                 }
@@ -87,29 +135,180 @@ struct LearningHistoryView: View {
         .onAppear {
             store.loadIfNeeded()
             if case .notLoaded = store.historyState { _ = try? store.loadHistory() }
+            reconcileSelection()
+        }
+        .onChange(of: store.historyState) { _, _ in reconcileSelection() }
+        .onChange(of: filters) { _, _ in reconcileSelection() }
+        .onChange(of: timeZone) { _, _ in reconcileSelection() }
+        .onChange(of: calendar) { _, _ in reconcileSelection() }
+    }
+
+    private func selection(for rows: [LessonHistorySnapshot]) -> Result<[LearningHistoryDayGroup], LearningHistorySelectionError> {
+        LearningHistorySelection.select(rows, filters: filters, now: Date(), calendar: calendar,
+                                        timeZone: timeZone, locale: locale)
+    }
+
+    private func reconcileSelection() {
+        guard let selectedID, case .current(let rows) = store.historyState else { return }
+        guard case .success(let groups) = selection(for: rows),
+              Self.visibleEntry(selectedID, in: store.historyState, groups: groups) != nil else {
+            self.selectedID = nil
+            actionError = nil
+            return
         }
     }
 
-    private func rowsPanel(_ rows: [LessonHistorySnapshot]) -> some View {
+    private func clearFilters() {
+        filters = LearningHistoryFilters()
+    }
+
+    private func pickerDate(_ day: HistoryLocalDate) -> Date {
+        var local = calendar
+        local.timeZone = timeZone
+        return local.date(from: DateComponents(year: day.year, month: day.month, day: day.day, hour: 12)) ?? Date()
+    }
+
+    private var startDate: Binding<Date> {
+        Binding(get: { pickerDate(customStart) }, set: {
+            customStart = HistoryLocalDate($0, calendar: calendar, timeZone: timeZone)
+            filters.date = .custom(start: customStart, end: customEnd)
+        })
+    }
+
+    private var endDate: Binding<Date> {
+        Binding(get: { pickerDate(customEnd) }, set: {
+            customEnd = HistoryLocalDate($0, calendar: calendar, timeZone: timeZone)
+            filters.date = .custom(start: customStart, end: customEnd)
+        })
+    }
+
+    private func filterControls(_ rows: [LessonHistorySnapshot]) -> some View {
+        let names = Dictionary(uniqueKeysWithValues: (store.state.snapshot?.topics ?? []).map { ($0.id, $0.name) })
+        var available = Set(rows.compactMap(\.topicID).filter { !$0.isEmpty })
+        available.formUnion(names.keys) // current topics with no saved work remain filterable
+        if case .topic(let id) = filters.topic { available.insert(id) } // retain a selected topic after a refresh
+        let topicIDs = available.sorted()
+        let hasUnknown = rows.contains { $0.topicID == nil || $0.topicID == "" } || filters.topic == .unknown
+        return VStack(alignment: .leading, spacing: AppMetrics.space2) {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: AppMetrics.space4) { pickers(topicIDs: topicIDs, names: names, hasUnknown: hasUnknown) }
+                VStack(alignment: .leading, spacing: AppMetrics.space2) {
+                    pickers(topicIDs: topicIDs, names: names, hasUnknown: hasUnknown)
+                }
+            }
+            if case .custom = filters.date {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: AppMetrics.space4) { customDates }
+                    VStack(alignment: .leading, spacing: AppMetrics.space2) { customDates }
+                }
+            }
+            if filters != LearningHistoryFilters(),
+               case .success(let groups) = selection(for: rows), !groups.isEmpty {
+                Button("Clear filters") { clearFilters() }
+                    .accessibilityIdentifier("learning-history-clear-filters-active")
+            }
+        }
+        .accessibilityIdentifier("learning-history-filters")
+    }
+
+    @ViewBuilder private func pickers(topicIDs: [String], names: [String: String], hasUnknown: Bool) -> some View {
+        Picker("Topic", selection: Binding(get: {
+            switch filters.topic {
+            case .all: return 0
+            case .unknown: return 1
+            case .topic(let id): return topicIDs.firstIndex(of: id).map { $0 + 2 } ?? 0
+            }
+        }, set: { index in
+            if index == 0 { filters.topic = .all }
+            else if index == 1 { filters.topic = .unknown }
+            else if topicIDs.indices.contains(index - 2) { filters.topic = .topic(topicIDs[index - 2]) }
+        })) {
+            Text("All topics").tag(0)
+            if hasUnknown { Text("Unknown topic").tag(1) }
+            ForEach(topicIDs.indices, id: \.self) { index in
+                Text(names[topicIDs[index]] ?? topicIDs[index]).tag(index + 2)
+            }
+        }
+        .accessibilityIdentifier("learning-history-topic-filter")
+        Picker("Status", selection: Binding(get: {
+            switch filters.status { case .all: return 0; case .completed: return 1; case .dismissed: return 2 }
+        }, set: { filters.status = $0 == 1 ? .completed : $0 == 2 ? .dismissed : .all })) {
+            Text("All statuses").tag(0)
+            Text("Completed").tag(1)
+            Text("Dismissed").tag(2)
+        }
+        .accessibilityIdentifier("learning-history-status-filter")
+        Picker("Date", selection: Binding(get: {
+            switch filters.date {
+            case .allTime: return 0
+            case .today: return 1
+            case .lastSevenDays: return 2
+            case .custom: return 3
+            }
+        }, set: { choice in
+            switch choice {
+            case 1: filters.date = .today
+            case 2: filters.date = .lastSevenDays
+            case 3:
+                if !hasChosenCustom {
+                    let today = HistoryLocalDate(Date(), calendar: calendar, timeZone: timeZone)
+                    customStart = today
+                    customEnd = today
+                    hasChosenCustom = true
+                }
+                filters.date = .custom(start: customStart, end: customEnd)
+            default: filters.date = .allTime
+            }
+        })) {
+            Text("All time").tag(0)
+            Text("Today").tag(1)
+            Text("Last 7 days").tag(2)
+            Text("Custom range").tag(3)
+        }
+        .accessibilityIdentifier("learning-history-date-filter")
+    }
+
+    @ViewBuilder private var customDates: some View {
+        DatePicker("Start date", selection: startDate, displayedComponents: .date)
+            .accessibilityIdentifier("learning-history-start-date")
+        DatePicker("End date", selection: endDate, displayedComponents: .date)
+            .accessibilityIdentifier("learning-history-end-date")
+    }
+
+    private func formattedDate(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.timeZone = timeZone
+        formatter.locale = locale
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
+    }
+
+    private func rowsPanel(_ groups: [LearningHistoryDayGroup]) -> some View {
         VStack(alignment: .leading, spacing: AppMetrics.space2) {
             SectionHeader("Saved lessons")
-            ForEach(rows) { entry in
-                Button {
-                    selectedID = entry.lessonID
-                    actionError = nil
-                    _ = try? store.loadDetail(lessonID: entry.lessonID)
-                } label: {
-                    AppListRow(entry.title, metadata: "\(entry.status == .completed ? "Completed" : "Dismissed") · \(entry.topicID ?? "Topic unavailable") · \(entry.date.formatted(date: .abbreviated, time: .omitted))")
+            ForEach(groups, id: \.day.start) { group in
+                SectionHeader(group.label)
+                    .accessibilityIdentifier("learning-history-day-\(Int(group.day.start.timeIntervalSince1970))")
+                ForEach(group.rows) { entry in
+                    Button {
+                        selectedID = entry.lessonID
+                        actionError = nil
+                        _ = try? store.loadDetail(lessonID: entry.lessonID)
+                    } label: {
+                        AppListRow(entry.title, metadata: "\(entry.status == .completed ? "Completed" : "Dismissed") · \(entry.topicID.flatMap { $0.isEmpty ? nil : $0 } ?? "Topic unavailable") · \(formattedDate(entry.date))")
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("learning-history-row-\(entry.lessonID)")
                 }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("learning-history-row-\(entry.lessonID)")
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    @ViewBuilder private var detailPanel: some View {
-        if let selectedID {
+    @ViewBuilder private func detailPanel(groups: [LearningHistoryDayGroup]) -> some View {
+        if let selectedID, let visible = Self.visibleEntry(selectedID, in: store.historyState, groups: groups) {
             if case .failed(let id, _) = store.detailState, id == selectedID {
                 ErrorBanner(.readFailed, recoveryTitle: "Retry lesson read") {
                     _ = try? store.retryDetail(lessonID: id)
@@ -117,16 +316,13 @@ struct LearningHistoryView: View {
                 .accessibilityIdentifier("learning-history-detail-error")
                 Text("Saved lesson detail unavailable. Retry; no current lesson is substituted.")
                     .appTypography(.body)
-            } else if let entry = Self.entry(selectedID, in: store.historyState),
-                      let detail = Self.matchedDetail(entry, state: store.detailState) {
-                archivedDetail(entry, detail: detail)
+            } else if let detail = Self.matchedDetail(visible, state: store.detailState) {
+                archivedDetail(visible, detail: detail)
             } else {
                 Text("Saved lesson detail unavailable. Select the lesson again to retry its read.")
                     .appTypography(.body)
                     .accessibilityIdentifier("learning-history-detail-unavailable")
-                if Self.entry(selectedID, in: store.historyState) != nil {
-                    Button("Retry lesson read") { _ = try? store.loadDetail(lessonID: selectedID) }
-                }
+                Button("Retry lesson read") { _ = try? store.loadDetail(lessonID: selectedID) }
             }
         } else {
             Text("Select a saved lesson to read its history.")
@@ -138,7 +334,7 @@ struct LearningHistoryView: View {
     private func archivedDetail(_ entry: LessonHistorySnapshot, detail: LessonDetailSnapshot) -> some View {
         VStack(alignment: .leading, spacing: AppMetrics.space4) {
             SectionHeader(entry.title)
-            Text("\(entry.status == .completed ? "Completed" : "Dismissed") · \(entry.date.formatted(date: .abbreviated, time: .shortened))")
+            Text("\(entry.status == .completed ? "Completed" : "Dismissed") · \(formattedDate(entry.date))")
                 .appTypography(.metadata)
             if entry.status == .dismissed && entry.attempt == nil {
                 Text("Dismissed before study. No studied version was archived.")

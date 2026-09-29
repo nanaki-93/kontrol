@@ -355,6 +355,64 @@ final class LearningHistoryTests: XCTestCase {
         XCTAssertEqual(try repository.loadSnapshot().slots, dismissed.catalog.slots)
     }
 
+    func testFilteredGroupsKeepDetailIdentityAndNeverWriteLearningRecords() throws {
+        let (container, repository) = try setup()
+        let store = LearningCatalogStore(repository: repository)
+        store.loadIfNeeded()
+        let choices = try repository.loadSnapshot()
+        let one = try XCTUnwrap(choices.slots.first)
+        let other = try XCTUnwrap(choices.slots.first { $0.topicID != one.topicID })
+        _ = try store.dismiss(lessonID: one.lessonID, expectedSlot: one, now: first)
+        let opened = try store.openLesson(lessonID: other.lessonID, now: first)
+        let attempt = try XCTUnwrap(opened.detail.attempt)
+        _ = try store.saveAnswer(attemptID: attempt.id, expectedRevision: 0, answer: "untouched")
+        _ = try store.revealSolution(attemptID: attempt.id, expectedRevision: 1, now: first)
+        _ = try store.setSelfCheckAcknowledged(attemptID: attempt.id, expectedRevision: 2,
+                                                acknowledged: true, now: first)
+        _ = try store.complete(attemptID: attempt.id, expectedRevision: 3, now: later)
+        let history = try store.loadHistory()
+        let detail = try store.loadDetail(lessonID: one.lessonID)
+        let snapshot = try repository.loadSnapshot()
+        let attempts = try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>())
+            .map { ($0.id, $0.answerDraft, $0.revision) }
+        let zone = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = zone
+        let day = HistoryLocalDate(later, calendar: calendar, timeZone: zone)
+        var filters = LearningHistoryFilters(topic: .topic(one.topicID), status: .dismissed,
+                                             date: .custom(start: day, end: day))
+        func groups() throws -> [LearningHistoryDayGroup] {
+            try LearningHistorySelection.select(history, filters: filters, now: later,
+                                                calendar: calendar, timeZone: zone,
+                                                locale: Locale(identifier: "en_US")).get()
+        }
+        let matching = try groups()
+        XCTAssertEqual(matching.flatMap(\.rows).map(\.lessonID), [one.lessonID])
+        XCTAssertEqual(matching.count, 1)
+        XCTAssertEqual(matching[0].day.start, calendar.startOfDay(for: later))
+        XCTAssertEqual(LearningHistoryView.visibleEntry(one.lessonID, in: store.historyState,
+                                                        groups: matching)?.lessonID, one.lessonID)
+        XCTAssertEqual(LearningHistoryView.matchedDetail(matching[0].rows.first, state: store.detailState), detail)
+        filters.status = .completed
+        let empty = try groups()
+        XCTAssertTrue(empty.isEmpty) // saved History exists, but this intersection does not match
+        XCTAssertNil(LearningHistoryView.visibleEntry(one.lessonID, in: store.historyState, groups: empty))
+        filters.topic = .all
+        XCTAssertEqual(try groups().flatMap(\.rows).map(\.lessonID), [other.lessonID])
+        XCTAssertNil(LearningHistoryView.visibleEntry(one.lessonID, in: store.historyState, groups: try groups()))
+        filters.date = .custom(start: HistoryLocalDate(year: day.year + 1, month: day.month, day: day.day), end: day)
+        XCTAssertEqual(LearningHistorySelection.select(history, filters: filters, now: later,
+            calendar: calendar, timeZone: zone, locale: Locale(identifier: "en_US")),
+                       .failure(.reversedCustomRange))
+        XCTAssertEqual(try repository.loadHistory(), history)
+        XCTAssertEqual(try repository.loadSnapshot(), snapshot)
+        let after = try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>())
+            .map { ($0.id, $0.answerDraft, $0.revision) }
+        XCTAssertEqual(after.map(\.0), attempts.map(\.0))
+        XCTAssertEqual(after.map(\.1), attempts.map(\.1))
+        XCTAssertEqual(after.map(\.2), attempts.map(\.2))
+    }
+
     func testCompletedCannotRestoreAndMissingHistoryContentIsNotSubstituted() throws {
         let (container, writer) = try setup()
         let slot = try XCTUnwrap(writer.loadSnapshot().slots.first)
