@@ -307,6 +307,49 @@ final class LaunchRecoveryTests: XCTestCase {
         XCTAssertEqual(try SwiftDataCatalogRepository(container: container).loadSnapshot(), persisted)
     }
 
+    func testFailedProjectGrantDoesNotBecomeLaunchFailureOrDisableOfflineFeatures() async throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let inspector = LaunchProjectInspector()
+        let projects = LaunchProjectRepository()
+        let id = UUID()
+        projects.references = [ProjectReferenceSnapshot(id: id, manifestID: "offline",
+            bookmarkData: Data([1]), displayOrder: 0, displayNameHint: "Unavailable",
+            lastSuccessfulReadAt: nil, revision: UUID())]
+        let coordinator = LaunchCoordinator(open: { container }, makeDependencies: { container, catalog in
+            AppDependencies(container: container, catalogRepository: catalog,
+                projectInspector: inspector, projectRepository: projects)
+        })
+        await coordinator.start()
+        XCTAssertEqual(coordinator.state, .ready)
+        let graph = try XCTUnwrap(coordinator.dependencies)
+        XCTAssertEqual(projects.fetches, 0)
+        let readsBeforeEntry = await inspector.reads
+        XCTAssertEqual(readsBeforeEntry, 0)
+        XCTAssertFalse(graph.projectStore.isLoaded)
+        XCTAssertEqual(graph.focusService.readState, .loaded)
+        graph.learningCatalogStore.loadIfNeeded()
+        let lesson = try XCTUnwrap(graph.learningCatalogStore.state.snapshot?.slots.first?.lessonID)
+        _ = try graph.learningCatalogStore.openLesson(lessonID: lesson)
+        let task = try graph.taskStore.create(input: TaskInput(title: "Offline task"))
+        XCTAssertEqual(graph.taskStore.snapshots.map(\.id), [task.id])
+        try graph.projectStore.enterProjects()
+        for _ in 0..<500 {
+            if graph.projectStore.rows.first?.refreshFailure == .inspection(.access(.staleBookmark)) { break }
+            try await Task.sleep(nanoseconds: 2_000_000)
+        }
+        XCTAssertEqual(graph.projectStore.rows.first?.refreshFailure,
+                       .inspection(.access(.staleBookmark)))
+        XCTAssertEqual(graph.projectStore.rows.map(\.reference.id), [id])
+        XCTAssertEqual(projects.fetches, 1)
+        let readsAfterEntry = await inspector.reads
+        XCTAssertEqual(readsAfterEntry, 1)
+        XCTAssertEqual(coordinator.state, .ready)
+        XCTAssertTrue(coordinator.dependencies?.projectStore === graph.projectStore)
+        XCTAssertEqual(graph.focusService.readState, .loaded)
+        XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<TaskItem>()).map(\.id), [task.id])
+        XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).count, 1)
+    }
+
     func testOptionalSettingsReadFailureDoesNotBlockCatalogOrDraftOwnership() async throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         let coordinator = LaunchCoordinator(open: { container }, makeDependencies: { container, repository in

@@ -1,4 +1,5 @@
 import Foundation
+import SwiftData
 import XCTest
 @testable import Kontrol
 
@@ -167,6 +168,46 @@ final class ProjectStoreTests: XCTestCase {
             try? await Task.sleep(nanoseconds: 2_000_000)
         }
         XCTFail("Timed out waiting for refresh", file: file, line: line)
+    }
+
+    func testAppDependencyGraphOwnsLazyStoreAndInjectedBoundaries() async throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let inspector = StubInspector(), repository = StubRepository()
+        let graph = AppDependencies(container: container,
+            catalogRepository: SwiftDataCatalogRepository(container: container),
+            projectInspector: inspector, projectRepository: repository,
+            projectIdentifier: StubIdentity(selectedIdentity: identity, saved: [:]))
+        let store = graph.projectStore
+        XCTAssertFalse(store.isLoaded)
+        XCTAssertEqual(repository.fetches, 0)
+        XCTAssertEqual(inspector.inspectionCount, 0)
+        XCTAssertTrue(graph.projectStore === store)
+        try store.enterProjects()
+        XCTAssertEqual(repository.fetches, 1)
+        inspector.inspections = [inspection(), inspection()]
+        _ = try await store.previewFolder(folder)
+        guard case let .added(id) = try await store.addPreviewedProject() else {
+            return XCTFail("Expected committed reference")
+        }
+        XCTAssertEqual(graph.projectStore.rows.map(\.reference.id), [id])
+        XCTAssertEqual(repository.saved.map(\.id), [id])
+        XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<ProjectReference>()).count, 0,
+                       "Injected repository owns the reference boundary; no model crosses into inspector")
+    }
+
+    func testDefaultProjectRepositoryUsesAppContainerAndReturnsDetachedRows() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let persisted = try SwiftDataProjectReferenceRepository(container: container).insert(
+            NewProjectReference(id: UUID(), manifestID: "shared", bookmarkData: Data([4]),
+                displayOrder: 0, displayNameHint: "Saved"))
+        let graph = AppDependencies(container: container,
+            catalogRepository: SwiftDataCatalogRepository(container: container),
+            projectInspector: StubInspector())
+        XCTAssertFalse(graph.projectStore.isLoaded)
+        XCTAssertTrue(graph.projectStore.rows.isEmpty)
+        try graph.projectStore.enterProjects()
+        XCTAssertEqual(graph.projectStore.rows.map(\.reference), [persisted])
+        XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<ProjectReference>()).count, 1)
     }
 
     func testInitialRefreshIsBoundedIndependentAndCoalescesRequests() async throws {

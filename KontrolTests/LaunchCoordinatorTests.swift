@@ -47,6 +47,42 @@ private actor LaunchProvider: LessonGenerator, OpenAIConnectionTesting {
     func testConnection() async throws { connections += 1 }
 }
 
+// Shared launch test seams: a bookmark grant fails only after Projects is entered.
+actor LaunchProjectInspector: ProjectInspecting {
+    private(set) var reads = 0
+    func inspect(selectedFolder: URL) async throws -> ProjectInspection {
+        throw ProjectInspectionFailure.selectedAccess(.accessDenied)
+    }
+    func inspect(bookmarkData: Data) async throws -> ProjectInspection {
+        reads += 1
+        throw ProjectInspectionFailure.access(.staleBookmark)
+    }
+    func makeBookmark(selectedFolder: URL) async throws -> Data {
+        throw ProjectFolderAccessError.bookmarkCreationFailed
+    }
+}
+
+@MainActor
+final class LaunchProjectRepository: ProjectReferenceRepository {
+    var references: [ProjectReferenceSnapshot] = []
+    private(set) var fetches = 0
+    func fetchAll() throws -> [ProjectReferenceSnapshot] {
+        fetches += 1
+        return references
+    }
+    func insert(_ input: NewProjectReference) throws -> ProjectReferenceSnapshot {
+        throw ProjectReferencePersistenceError.invalidReference
+    }
+    func reconnect(id: UUID, expectedRevision: UUID,
+                   input: ReconnectedProjectReference) throws -> ProjectReferenceSnapshot {
+        throw ProjectReferencePersistenceError.invalidReference
+    }
+    func recordSuccessfulRead(id: UUID, expectedRevision: UUID,
+                              nameHint: String, readAt: Date) throws -> ProjectReferenceSnapshot {
+        throw ProjectReferencePersistenceError.invalidReference
+    }
+}
+
 @MainActor
 final class LaunchCoordinatorTests: XCTestCase {
     private enum Injected: Error { case failed }
@@ -107,6 +143,30 @@ final class LaunchCoordinatorTests: XCTestCase {
         XCTAssertTrue(coordinator.dependencies === graph)
         XCTAssertEqual(opens, 1)
         XCTAssertEqual(imports, 1)
+    }
+
+    func testLaunchSharesOneLazyProjectStoreAcrossConsumers() async throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let inspector = LaunchProjectInspector()
+        let projectRepository = LaunchProjectRepository()
+        let coordinator = LaunchCoordinator(open: { container }, makeDependencies: { container, catalog in
+            AppDependencies(container: container, catalogRepository: catalog,
+                projectInspector: inspector, projectRepository: projectRepository)
+        })
+        await coordinator.start()
+        XCTAssertEqual(coordinator.state, .ready)
+        let graph = try XCTUnwrap(coordinator.dependencies)
+        let firstWindowStore = graph.projectStore
+        let secondWindowStore = try XCTUnwrap(coordinator.dependencies).projectStore
+        XCTAssertTrue(firstWindowStore === secondWindowStore)
+        XCTAssertFalse(firstWindowStore.isLoaded)
+        XCTAssertEqual(projectRepository.fetches, 0)
+        let reads = await inspector.reads
+        XCTAssertEqual(reads, 0)
+        await coordinator.start()
+        XCTAssertTrue(coordinator.dependencies === graph)
+        XCTAssertTrue(coordinator.dependencies?.projectStore === firstWindowStore)
+        XCTAssertEqual(projectRepository.fetches, 0)
     }
 
     func testSharedAIConfigurationIsOptInAndOrdinaryLearningNeverContactsProvider() async throws {

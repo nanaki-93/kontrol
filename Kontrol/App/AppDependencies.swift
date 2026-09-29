@@ -15,11 +15,15 @@ final class AppDependencies {
     let taskStore: TaskStore
     let scheduleStore: ScheduleStore
     let focusService: FocusService
+    let projectStore: ProjectStore
 
     init(container: ModelContainer, catalogRepository: any CatalogRepository,
          taskRepository: (any TaskRepository)? = nil,
          scheduleRepository: (any ScheduleRepository)? = nil,
          focusRepository: (any FocusRepository)? = nil,
+         projectInspector: any ProjectInspecting = ProjectInspector(),
+         projectRepository: (any ProjectReferenceRepository)? = nil,
+         projectIdentifier: any ProjectFolderIdentifying = ScopedProjectFolderIdentifier(),
          focusWallClock: @escaping () -> Date = Date.init,
          focusMonotonicClock: @escaping () -> ContinuousClock.Instant = { ContinuousClock().now },
          draftClock: @escaping () -> Date = Date.init,
@@ -30,6 +34,11 @@ final class AppDependencies {
          aiConnectionTester: ((String, String, any CredentialStore) -> any OpenAIConnectionTesting)? = nil) {
         self.container = container
         self.catalogRepository = catalogRepository
+        // Assemble the project boundary without fetching references or resolving grants.
+        // SwiftData stays on the main actor; only detached snapshots cross into IO.
+        projectStore = ProjectStore(inspector: projectInspector,
+            repository: projectRepository ?? SwiftDataProjectReferenceRepository(container: container),
+            identifier: projectIdentifier)
         learningCatalogStore = LearningCatalogStore(repository: catalogRepository)
         let credentials = credentialStore ?? KeychainCredentialStore()
         self.credentialStore = credentials
