@@ -6,6 +6,8 @@ struct LearningCoverageView: View {
     @ObservedObject var store: LearningCatalogStore
     @ObservedObject var navigation: NavigationStore
     let selectedSubtopicID: String?
+    @State private var expandedConceptID: String?
+    @State private var entryError: LessonExperienceError?
     @Environment(\.locale) private var locale
     @Environment(\.calendar) private var calendar
     @Environment(\.timeZone) private var timeZone
@@ -81,6 +83,7 @@ struct LearningCoverageView: View {
                     if let row = subtopics.first(where: { $0.id == selectedSubtopicID }) {
                         SectionHeader("\(row.topicName) · \(row.name)")
                         subtopicCard(row, evidence: evidence, selected: true)
+                        conceptList(row, evidence: evidence)
                     } else {
                         EmptyState("Subtopic no longer in the current catalog",
                                    guidance: "Return to Coverage to see current subtopics.")
@@ -107,8 +110,135 @@ struct LearningCoverageView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(AppMetrics.horizontalInset)
         .onAppear {
-            // No catalog reconciliation, slot assignment, attempt, or progress write.
+            // These are independent read-only projections. Never infer empty
+            // references from a failed History read.
             if case .notLoaded = store.coverageState { _ = try? store.loadCoverage() }
+            if case .notLoaded = store.historyState { _ = try? store.loadHistory() }
+        }
+        .onChange(of: selectedSubtopicID) { _, _ in
+            expandedConceptID = nil
+            entryError = nil
+        }
+    }
+
+    @ViewBuilder private func conceptList(_ row: SubtopicCoverageSnapshot,
+                                          evidence: CoverageEvidenceState) -> some View {
+        if row.concepts.isEmpty {
+            EmptyState("No current concepts", guidance: "There are no concepts to inspect in this subtopic.")
+                .accessibilityIdentifier("learning-coverage-no-concepts")
+        } else {
+            SectionHeader("Concepts")
+            if let entryError {
+                Text("Lesson could not be opened (\(String(describing: entryError))). Your choices and unfinished work are retained. Retry from the current list.")
+                    .appTypography(.body)
+                    .foregroundStyle(AppColors.error)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("learning-coverage-entry-error")
+            }
+            ForEach(row.concepts) { concept in
+                VStack(alignment: .leading, spacing: AppMetrics.space2) {
+                    SectionHeader(concept.name)
+                    Text(concept.latestCompletion == nil ?
+                         (evidence == .complete ? "Not yet practiced" : "No known recorded practice") : "Practiced")
+                        .appTypography(.body)
+                        .accessibilityIdentifier("learning-coverage-practice-\(concept.id)")
+                    if concept.latestCompletion != nil {
+                        Text(recentLabel(concept.latestCompletion, evidence: .complete))
+                            .appTypography(.metadata)
+                            .accessibilityIdentifier("learning-coverage-concept-recent-\(concept.id)")
+                    }
+                    Button("View lessons for \(concept.name)") {
+                        expandedConceptID = expandedConceptID == concept.id ? nil : concept.id
+                        entryError = nil
+                    }
+                    .focusable()
+                    .accessibilityIdentifier("learning-coverage-view-lessons-\(concept.id)")
+                    if expandedConceptID == concept.id {
+                        conceptLessons(concept, in: row)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(AppMetrics.space4)
+                .background(AppColors.surface)
+                .clipShape(RoundedRectangle(cornerRadius: AppMetrics.smallRadius))
+                .accessibilityIdentifier("learning-coverage-concept-\(concept.id)")
+            }
+        }
+    }
+
+    @ViewBuilder private func conceptLessons(_ concept: ConceptCoverageSnapshot,
+                                              in row: SubtopicCoverageSnapshot) -> some View {
+        if case .failed = store.historyState {
+            ErrorBanner(.readFailed, recoveryTitle: "Retry History read") {
+                _ = try? store.retryHistory()
+            }
+            Text("Saved lesson references and eligibility are unavailable until History can be read.")
+                .appTypography(.body)
+        } else if case .current(let history) = store.historyState,
+                  let snapshot = store.state.isAuthoritative ? store.state.snapshot : nil,
+                  case .current(.available(_, _, let subtopics, _)) = store.coverageState,
+                  subtopics.contains(where: { $0.id == row.id && $0.concepts.contains(concept) }) {
+            let choices = LearningCoverage.lessons(for: concept.id, in: snapshot, history: history)
+            SectionHeader("Available lessons")
+            if choices.isEmpty {
+                EmptyState("No eligible lessons for this concept",
+                           guidance: "No current choice or restored work is available. Browsing will not restore dismissed lessons or repeat completed content.")
+                    .accessibilityIdentifier("learning-coverage-no-eligible-\(concept.id)")
+            } else {
+                ForEach(choices) { choice in
+                    Button("\(choice.started ? "Resume" : "Open") \(choice.title)") {
+                        open(choice, conceptID: concept.id, subtopicID: row.id)
+                    }
+                    .focusable()
+                    .accessibilityIdentifier("learning-coverage-open-\(choice.lessonID)")
+                }
+            }
+            let references = LearningCoverage.completedReferences(for: concept.id, in: history)
+            if !references.isEmpty {
+                SectionHeader("Completed references")
+                ForEach(references) { entry in
+                    Button("Read completed \(entry.title) in History") {
+                        // Match the archived ID again; History validates the row and
+                        // detail before displaying saved content or an answer.
+                        guard case .current(let current) = store.historyState,
+                              LearningCoverage.completedReferences(for: concept.id, in: current).contains(entry)
+                        else { return }
+                        navigation.showCompletedReference(id: entry.lessonID)
+                    }
+                    .focusable()
+                    .accessibilityIdentifier("learning-coverage-reference-\(entry.lessonID)")
+                }
+            }
+        } else {
+            Text("Current choices or coverage unavailable. Retry the failed read before viewing lessons.")
+                .appTypography(.body)
+                .accessibilityIdentifier("learning-coverage-lessons-unavailable")
+        }
+    }
+
+    private func open(_ captured: ConceptLessonChoice, conceptID: String, subtopicID: String) {
+        func currentChoice() -> Bool {
+            guard store.state.isAuthoritative, case .current(let history) = store.historyState,
+                  case .current(.available(_, _, let rows, _)) = store.coverageState,
+                  rows.contains(where: { $0.id == subtopicID && $0.concepts.contains(where: { $0.id == conceptID }) }),
+                  let snapshot = store.state.snapshot else { return false }
+            return LearningCoverage.lessons(for: conceptID, in: snapshot, history: history).contains(captured)
+        }
+        guard currentChoice() else { entryError = .staleSlot; return }
+        guard navigation.flushForLifecycle() else { entryError = navigation.saveError; return }
+        guard currentChoice() else { entryError = .staleSlot; return }
+        do {
+            let receipt = try store.openConceptLesson(lessonID: captured.lessonID, expectedSlot: captured.slot,
+                                                      expectedConceptID: conceptID)
+            guard receipt.detail.id == captured.lessonID,
+                  receipt.detail.progress?.status == .started,
+                  receipt.detail.attempt?.lessonID == captured.lessonID else {
+                throw LessonExperienceError.invalidStoredData
+            }
+            entryError = nil
+            navigation.enterLesson(id: captured.lessonID)
+        } catch {
+            entryError = (error as? LessonExperienceError) ?? .persistenceFailure
         }
     }
 

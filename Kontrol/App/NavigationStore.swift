@@ -40,6 +40,8 @@ final class NavigationStore: ObservableObject {
         case choices
         case detail(String)
         case history
+        /// A stable archived ID to inspect, without starting or restoring it.
+        case historyReference(String)
         /// The optional subtopic is a window-local inspection selection, not a learning record.
         case coverage(subtopicID: String?)
     }
@@ -88,6 +90,10 @@ final class NavigationStore: ObservableObject {
 
     func showHistory() {
         transition(to: .learning(.history))
+    }
+
+    func showCompletedReference(id: String) {
+        transition(to: .learning(.historyReference(id)))
     }
 
     func showCoverage() {

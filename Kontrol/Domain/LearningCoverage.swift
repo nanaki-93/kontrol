@@ -31,10 +31,69 @@ enum LearningCoverageSnapshot: Equatable {
                    subtopics: [SubtopicCoverageSnapshot], evidence: CoverageEvidenceState)
 }
 
+/// A currently assigned choice or explicitly restored, unslotted started lesson.
+/// Browsing this value never allocates a slot or opens an attempt.
+struct ConceptLessonChoice: Equatable, Identifiable {
+    let lessonID: String
+    let title: String
+    let started: Bool
+    let slot: LessonSlotSnapshot?
+    var id: String { lessonID }
+}
+
 // Pure projection of explicitly installed taxonomy and detached historical
 // evidence. No attempt state, installed lesson content, or prerequisite closure
 // participates in the numerator.
 enum LearningCoverage {
+    /// Only actual offered work, not every retained definition, may be opened.
+    /// Require authoritative History as well as the committed choices so that a
+    /// stale terminal exclusion cannot become an apparent concept suggestion.
+    static func lessons(for conceptID: String, in snapshot: LearningCatalogSnapshot,
+                        history: [LessonHistorySnapshot]) -> [ConceptLessonChoice] {
+        let terminal = history.map { entry in
+            TerminalLessonMatch(status: entry.status,
+                metadata: LessonMatchMetadata(id: entry.lessonID,
+                    objectiveKey: entry.metadata?.objectiveKey,
+                    conceptIDs: entry.metadata?.conceptIDs,
+                    contentHash: entry.metadata?.normalizedContentHash))
+        }
+        let definitions = Dictionary(snapshot.definitions.map { ($0.id, $0) },
+                                     uniquingKeysWith: { first, _ in first })
+        let statuses = Dictionary(snapshot.progress.map { ($0.lessonID, $0) },
+                                  uniquingKeysWith: { first, _ in first })
+        let pins = Dictionary(snapshot.startedPins.map { ($0.id, $0) },
+                              uniquingKeysWith: { first, _ in first })
+        let slotted = snapshot.slots.map { ($0.lessonID, Optional($0)) }
+        let restored = snapshot.progress.filter { row in
+            row.status == .started && row.dismissedAt != nil &&
+            !snapshot.slots.contains(where: { $0.lessonID == row.lessonID })
+        }.map { ($0.lessonID, Optional<LessonSlotSnapshot>.none) }
+        return (slotted + restored).compactMap { id, slot -> ConceptLessonChoice? in
+            let started = statuses[id]?.status == .started
+            // A started choice is the opened version, even when the installed
+            // definition was edited or removed. Never substitute newer content
+            // when its studied pin is unavailable.
+            guard let lesson = started ? pins[id] : definitions[id],
+                  let ids = LessonDeduplication.canonicalConcepts(lesson.conceptIDs),
+                  ids.contains(conceptID),
+                  statuses[id]?.status != .completed, statuses[id]?.status != .dismissed,
+                  LessonDeduplication.decide(candidate: LessonMatchMetadata(lesson),
+                                             terminal: terminal) == .eligible else { return nil }
+            return ConceptLessonChoice(lessonID: id, title: lesson.title,
+                                       started: statuses[id]?.status == .started, slot: slot)
+        }.sorted { $0.lessonID < $1.lessonID }
+    }
+
+    /// A reference is a completed *archived* lesson that recorded direct practice
+    /// of this concept, not a current definition or a dismissed reference.
+    static func completedReferences(for conceptID: String,
+                                    in history: [LessonHistorySnapshot]) -> [LessonHistorySnapshot] {
+        history.filter { $0.status == .completed && $0.metadata?.conceptIDs?.contains(conceptID) == true }
+            .sorted { lhs, rhs in
+                lhs.date == rhs.date ? lhs.lessonID < rhs.lessonID : lhs.date > rhs.date
+            }
+    }
+
     static func aggregate(membership: CatalogMembershipAvailability,
                           topics: [LearningTopicSnapshot],
                           subtopics: [LearningSubtopicSnapshot],

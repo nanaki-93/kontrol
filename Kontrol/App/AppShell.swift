@@ -99,6 +99,10 @@ struct AppShell: View {
                                                  drafts: dependencies.lessonDraftStore, navigation: navigation)
                         case .history:
                             LearningHistoryView(store: dependencies.learningCatalogStore, navigation: navigation)
+                        case .historyReference(let id):
+                            LearningHistoryView(store: dependencies.learningCatalogStore, navigation: navigation,
+                                                initialSelectedID: id)
+                                .id(id) // a second reference must not inherit the prior row's local selection
                         case .coverage(let subtopicID):
                             LearningCoverageView(store: dependencies.learningCatalogStore, navigation: navigation,
                                                  selectedSubtopicID: subtopicID)

@@ -168,6 +168,38 @@ final class NavigationStoreTests: XCTestCase {
         XCTAssertEqual(try repository.loadLesson(lessonID: id).attempt?.answerDraft, "second answer")
     }
 
+    func testCompletedReferenceRouteIsStableIDGuardedAndDoesNotOpenWork() throws {
+        enum Injected: Error { case save }
+        var fail = false
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataCatalogRepository(container: container, beforeSave: {
+            if fail { throw Injected.save }
+        })
+        _ = try repository.importIfNeeded(BundledCatalogLoader.load())
+        let graph = AppDependencies(container: container, catalogRepository: repository)
+        graph.learningCatalogStore.loadIfNeeded()
+        let slot = try XCTUnwrap(graph.learningCatalogStore.state.snapshot?.slots.first)
+        let opened = try graph.learningCatalogStore.openLesson(lessonID: slot.lessonID)
+        let attempt = try XCTUnwrap(opened.detail.attempt)
+        graph.lessonDraftStore.observe(opened.detail)
+        let navigation = NavigationStore(preferences: CountingPreferences())
+        navigation.attachDrafts(graph.lessonDraftStore)
+        navigation.showCoverage()
+        navigation.selectCoverageSubtopic("subtopic")
+        graph.lessonDraftStore.edit("retain answer", attemptID: attempt.id)
+        fail = true
+        navigation.showCompletedReference(id: "archived-id")
+        XCTAssertEqual(navigation.learningRoute, .coverage(subtopicID: "subtopic"))
+        XCTAssertEqual(navigation.pendingTransition, .learning(.historyReference("archived-id")))
+        XCTAssertTrue(try XCTUnwrap(graph.lessonDraftStore.buffers[attempt.id]).isDirty)
+        fail = false
+        navigation.retryTransition()
+        XCTAssertEqual(navigation.learningRoute, .historyReference("archived-id"))
+        XCTAssertEqual(try repository.loadLesson(lessonID: slot.lessonID).attempt?.answerDraft, "retain answer")
+        XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).count, 1,
+                       "Routing to an archive never opens another attempt")
+    }
+
     func testCrossDestinationEntryFailsWithoutPartialRouteThenCancelAndRetryByStableID() throws {
         enum Injected: Error { case save }
         var fail = false

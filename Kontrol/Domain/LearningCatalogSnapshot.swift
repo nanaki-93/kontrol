@@ -317,4 +317,7 @@ struct LearningCatalogSnapshot: Equatable {
     let definitions: [LessonDefinitionSnapshot]
     let progress: [LessonProgressSnapshot]
     let slots: [LessonSlotSnapshot]
+    // Detached opened versions for active work; definitions can change or be omitted
+    // without changing what a learner is studying. Empty for legacy work without a pin.
+    var startedPins: [LessonDefinitionSnapshot] = []
 }

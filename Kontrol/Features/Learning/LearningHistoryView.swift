@@ -5,6 +5,7 @@ import SwiftUI
 struct LearningHistoryView: View {
     @ObservedObject var store: LearningCatalogStore
     @ObservedObject var navigation: NavigationStore
+    private let initialSelectedID: String?
     @State private var selectedID: String?
     @State private var actionError: LessonExperienceError?
     @State private var filters = LearningHistoryFilters()
@@ -16,9 +17,11 @@ struct LearningHistoryView: View {
     @Environment(\.locale) private var locale
 
     init(store: LearningCatalogStore, navigation: NavigationStore,
-         initialFilters: LearningHistoryFilters = .init()) {
+         initialFilters: LearningHistoryFilters = .init(), initialSelectedID: String? = nil) {
         self.store = store
         self.navigation = navigation
+        self.initialSelectedID = initialSelectedID
+        _selectedID = State(initialValue: initialSelectedID)
         _filters = State(initialValue: initialFilters)
         if case .custom(let start, let end) = initialFilters.date {
             _customStart = State(initialValue: start)
@@ -165,8 +168,12 @@ struct LearningHistoryView: View {
             store.loadIfNeeded()
             if case .notLoaded = store.historyState { _ = try? store.loadHistory() }
             reconcileSelection()
+            loadInitialReferenceIfVisible()
         }
-        .onChange(of: store.historyState) { _, _ in reconcileSelection() }
+        .onChange(of: store.historyState) { _, _ in
+            reconcileSelection()
+            loadInitialReferenceIfVisible()
+        }
         .onChange(of: filters) { _, _ in reconcileSelection() }
         .onChange(of: timeZone) { _, _ in reconcileSelection() }
         .onChange(of: calendar) { _, _ in reconcileSelection() }
@@ -175,6 +182,22 @@ struct LearningHistoryView: View {
     private func selection(for rows: [LessonHistorySnapshot]) -> Result<[LearningHistoryDayGroup], LearningHistorySelectionError> {
         LearningHistorySelection.select(rows, filters: filters, now: Date(), calendar: calendar,
                                         timeZone: timeZone, locale: locale)
+    }
+
+    private func loadInitialReferenceIfVisible() {
+        // A retry may deliver History after this view first appears. Never
+        // replace an archived ID with installed content or a dismissed row.
+        guard let initialSelectedID, selectedID == initialSelectedID,
+              case .current(let rows) = store.historyState else { return }
+        guard case .success(let groups) = selection(for: rows),
+              let entry = Self.visibleEntry(initialSelectedID, in: store.historyState, groups: groups),
+              entry.status == .completed else {
+            selectedID = nil
+            return
+        }
+        if case .current(let detail) = store.detailState, detail.id == entry.lessonID,
+           Self.matchedDetail(entry, state: store.detailState) != nil { return }
+        _ = try? store.loadDetail(lessonID: entry.lessonID)
     }
 
     private func reconcileSelection() {

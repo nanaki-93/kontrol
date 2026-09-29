@@ -212,6 +212,14 @@ final class LearningCatalogStore: ObservableObject {
         try mutate { try repository.openLesson(lessonID: lessonID, now: now) }
     }
 
+    /// Carry both the displayed assignment and concept across the write boundary.
+    /// The repository checks the current slot and authoritative content before opening.
+    @discardableResult
+    func openConceptLesson(lessonID: String, expectedSlot: LessonSlotSnapshot?, expectedConceptID: String, now: Date = Date()) throws -> LessonMutationResult {
+        try mutate { try repository.openConceptLesson(lessonID: lessonID, expectedSlot: expectedSlot,
+                                                       expectedConceptID: expectedConceptID, now: now) }
+    }
+
     @discardableResult
     func saveAnswer(attemptID: UUID, expectedRevision: Int, answer: String) throws -> LessonMutationResult {
         try mutate { try repository.saveAnswer(attemptID: attemptID, expectedRevision: expectedRevision, answer: answer) }

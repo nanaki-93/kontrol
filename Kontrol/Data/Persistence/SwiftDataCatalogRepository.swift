@@ -7,6 +7,7 @@ protocol CatalogRepository {
     func loadSnapshot() throws -> LearningCatalogSnapshot
     func reconcileSlots(now: Date) throws -> LearningCatalogSnapshot
     func openLesson(lessonID: String, now: Date) throws -> LessonMutationResult
+    func openConceptLesson(lessonID: String, expectedSlot: LessonSlotSnapshot?, expectedConceptID: String, now: Date) throws -> LessonMutationResult
     func loadLesson(lessonID: String) throws -> LessonDetailSnapshot
     func loadHistory() throws -> [LessonHistorySnapshot]
     func loadCoverage() throws -> LearningCoverageSnapshot
@@ -27,6 +28,10 @@ protocol CatalogRepository {
 extension CatalogRepository {
     func loadCoverage() throws -> LearningCoverageSnapshot {
         throw LessonExperienceError.persistenceFailure
+    }
+
+    func openConceptLesson(lessonID: String, expectedSlot: LessonSlotSnapshot?, expectedConceptID: String, now: Date) throws -> LessonMutationResult {
+        throw LessonExperienceError.staleSlot
     }
 
     func saveDraftAnswer(attemptID: UUID, expectedRevision: Int, answer: String) throws -> LessonDetailSnapshot {
@@ -337,11 +342,35 @@ final class SwiftDataCatalogRepository: CatalogRepository {
     }
 
     func openLesson(lessonID: String, now: Date) throws -> LessonMutationResult {
+        try openLesson(lessonID: lessonID, expectedSlot: nil, expectedConceptID: nil, now: now)
+    }
+
+    func openConceptLesson(lessonID: String, expectedSlot: LessonSlotSnapshot?, expectedConceptID: String, now: Date) throws -> LessonMutationResult {
+        try openLesson(lessonID: lessonID, expectedSlot: expectedSlot, expectedConceptID: expectedConceptID, now: now)
+    }
+
+    private func openLesson(lessonID: String, expectedSlot: LessonSlotSnapshot?,
+                            expectedConceptID: String?, now: Date) throws -> LessonMutationResult {
         guard now.timeIntervalSinceReferenceDate.isFinite else {
             throw LessonExperienceError.invalidTransition
         }
         let context = ModelContext(container)
         context.autosaveEnabled = false
+        if expectedConceptID != nil {
+            let catalog = try snapshot(in: context)
+            if let expectedSlot {
+                guard expectedSlot.lessonID == lessonID,
+                      catalog.slots.contains(expectedSlot) else { throw LessonExperienceError.staleSlot }
+            } else {
+                // Only explicitly restored started work may be opened without
+                // an assignment. A consumed/externally replaced slot is stale.
+                guard !catalog.slots.contains(where: { $0.lessonID == lessonID }),
+                      catalog.progress.contains(where: { $0.lessonID == lessonID &&
+                          $0.status == .started && $0.dismissedAt != nil }) else {
+                    throw LessonExperienceError.staleSlot
+                }
+            }
+        }
         let definitions = try context.fetch(FetchDescriptor<LessonDefinition>()).filter { $0.id == lessonID }
         let progressRows = try context.fetch(FetchDescriptor<LessonProgress>()).filter { $0.lessonID == lessonID }
         let attempts = try context.fetch(FetchDescriptor<LessonAttempt>()).filter { $0.lessonID == lessonID }
@@ -365,6 +394,22 @@ final class SwiftDataCatalogRepository: CatalogRepository {
         let progressStatus = status ?? .available
         guard completed.isEmpty, progressStatus == .started || unfinished.isEmpty else {
             throw LessonExperienceError.invalidStoredData
+        }
+        if let expectedConceptID {
+            // The displayed choice is only a hint. Use the studied pin for
+            // started work and the installed definition for unopened work, in
+            // this write context, before creating an attempt or progress row.
+            let content: LessonDefinitionSnapshot?
+            if progressStatus == .started {
+                if let attempt = unfinished.first, let data = attempt.pinnedContentData, !data.isEmpty {
+                    content = try PinnedLessonContent.decode(data, lessonID: lessonID,
+                        contentVersion: attempt.contentVersion).definition
+                } else { content = nil }
+            } else {
+                content = definitions.first.map(Self.definitionSnapshot)
+            }
+            guard let content, let ids = LessonDeduplication.canonicalConcepts(content.conceptIDs),
+                  ids.contains(expectedConceptID) else { throw LessonExperienceError.staleSlot }
         }
         var recoveredPin = false
         if let attempt = unfinished.first {
@@ -1010,8 +1055,19 @@ final class SwiftDataCatalogRepository: CatalogRepository {
         // Snapshot reads are a publication boundary, not just a projection. Do
         // not expose corrupt stored identities even when no write is requested.
         try LessonSelector.validateSlotIdentities(slots)
+        var pins: [LessonDefinitionSnapshot] = []
+        let startedIDs = Set(progress.filter { $0.status == .started }.map(\.lessonID))
+        for attempt in try context.fetch(FetchDescriptor<LessonAttempt>())
+            where startedIDs.contains(attempt.lessonID) && attempt.completedAt == nil {
+            guard let data = attempt.pinnedContentData, !data.isEmpty else { continue }
+            let pin = try PinnedLessonContent.decode(data, lessonID: attempt.lessonID,
+                                                      contentVersion: attempt.contentVersion)
+            pins.append(pin.definition)
+        }
+        guard Set(pins.map(\.id)).count == pins.count else { throw LessonExperienceError.invalidStoredData }
         return LearningCatalogSnapshot(topics: topics, subtopics: subtopics,
-            concepts: concepts, definitions: definitions, progress: progress, slots: slots)
+            concepts: concepts, definitions: definitions, progress: progress, slots: slots,
+            startedPins: pins.sorted { $0.id < $1.id })
     }
 
     private static func definitionSnapshot(_ item: LessonDefinition) -> LessonDefinitionSnapshot {
