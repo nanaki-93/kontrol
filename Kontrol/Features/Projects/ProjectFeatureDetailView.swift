@@ -73,6 +73,8 @@ struct ProjectFeatureDetailView: View {
                                  isEnabled: canMarkComplete && !row.isRefreshing && !row.isRetainedInspection) {
                         markComplete()
                     }
+                    .focused(navigationFocus ?? $localFocus,
+                             equals: .detailCompletion(row.reference.id, featureID))
                     .accessibilityLabel(Self.completionLabel(for: feature, state: row.completion))
                     .accessibilityIdentifier("project-feature-complete-\(featureID)")
                 }

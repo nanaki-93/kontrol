@@ -11,6 +11,7 @@ struct ProjectsView: View {
     @FocusState private var navigationFocus: NavigationFocus?
     @State private var featureOrigin: NavigationFocus?
     @State private var pendingReturnFocus: NavigationFocus?
+    @State private var pendingCompletionFocus: (projectID: UUID, target: NavigationFocus)?
     @State private var reconnectPicker: NSOpenPanel?
     @State private var reconnectingID: UUID?
     @State private var recoveryMessage: (id: UUID, text: String)?
@@ -81,6 +82,13 @@ struct ProjectsView: View {
         }
     }
 
+    /// Refresh only reads the project. Return focus to the visible detail heading when
+    /// detail is open; the workspace heading is not rendered in that branch.
+    static func conflictRefreshFocus(projectID: UUID, selectedFeature: ProjectFeatureIdentity?,
+                                     detailAvailable: Bool) -> NavigationFocus {
+        selectedFeature?.projectID == projectID && detailAvailable ? .featureHeading : .projectHeading(projectID)
+    }
+
     static func conflict(_ state: ProjectCompletionState?, projectID: UUID) -> ProjectFeatureIdentity? {
         switch state {
         case let .failed(id, failure), let .undoFailed(id, failure):
@@ -106,6 +114,9 @@ struct ProjectsView: View {
         case projectHeading(UUID)
         case featureHeading
         case card(UUID, String)
+        case cardCompletion(UUID, String)
+        case detailCompletion(UUID, String)
+        case recovery(UUID, String)
         case roadmap(UUID, String)
     }
 
@@ -122,6 +133,23 @@ struct ProjectsView: View {
             return inspection.featureEnumeration == .complete &&
                 inspection.features.contains(where: { $0.id == featureID }) ? origin : heading
         default: return heading
+        }
+    }
+
+    /// The completion control may vanish after disk reconciliation. Never return to a
+    /// different project's card or a disabled/stale control; retained detail keeps its
+    /// heading (and Back) even after the Mark complete button is removed.
+    static func completionReturnFocus(origin: NavigationFocus, row: ProjectRowState?,
+                                      detailVisible: Bool, canComplete: Bool) -> NavigationFocus? {
+        guard let row else { return nil }
+        let id = row.reference.id
+        switch origin {
+        case let .cardCompletion(projectID, featureID) where projectID == id:
+            return !detailVisible && canComplete && recommendations(row).contains(where: { $0.id == featureID })
+                ? origin : .projectHeading(id)
+        case let .detailCompletion(projectID, _) where projectID == id:
+            return detailVisible ? (canComplete ? origin : .featureHeading) : .projectHeading(id)
+        default: return .projectHeading(id)
         }
     }
 
@@ -252,7 +280,8 @@ struct ProjectsView: View {
                                          canMarkComplete: Self.completionEnabled(identity.featureID, row: row,
                                              store: store, isReconnecting: reconnectingID == row.reference.id),
                                          markComplete: {
-                                             Task { await store.markComplete(identity.featureID, in: identity.projectID) }
+                                             complete(identity.featureID, in: identity.projectID,
+                                                      origin: .detailCompletion(identity.projectID, identity.featureID))
                                          }, navigationFocus: $navigationFocus)
                 .onAppear {
                     Task { @MainActor in
@@ -295,14 +324,36 @@ struct ProjectsView: View {
         .onChange(of: selectedConflict) { _, conflict in
             if let conflict { presentedConflict = conflict }
         }
-        .onChange(of: store.selectedID) { _, _ in presentedConflict = selectedConflict }
+        .onChange(of: store.selectedID) { _, _ in
+            presentedConflict = selectedConflict
+            pendingCompletionFocus = nil
+            pendingReturnFocus = nil
+            // A selection switch must not return focus to the previous project.
+            featureOrigin = nil
+        }
+        .onChange(of: presentedConflict) { _, conflict in
+            if conflict == nil, let pending = pendingCompletionFocus {
+                pendingCompletionFocus = nil
+                focusCompletion(pending.target, in: pending.projectID)
+            }
+        }
         .alert("Feature changed on disk", isPresented: Binding(
             get: { presentedConflict != nil && presentedConflict?.projectID == store.selectedID },
             set: { if !$0 { presentedConflict = nil } }
         )) {
-            Button("Cancel", role: .cancel) { presentedConflict = nil }
+            Button("Cancel", role: .cancel) {
+                if let conflict = presentedConflict {
+                    pendingCompletionFocus = (conflict.projectID, .recovery(conflict.projectID, conflict.featureID))
+                }
+                presentedConflict = nil
+            }
             Button("Refresh") {
-                if let conflict = presentedConflict { store.refresh(conflict.projectID) }
+                if let conflict = presentedConflict {
+                    pendingCompletionFocus = (conflict.projectID, Self.conflictRefreshFocus(
+                        projectID: conflict.projectID, selectedFeature: store.selectedFeature,
+                        detailAvailable: store.selectedFeatureContent != nil))
+                    store.refresh(conflict.projectID)
+                }
                 presentedConflict = nil
             }
         } message: {
@@ -314,8 +365,9 @@ struct ProjectsView: View {
         }
         .onChange(of: store.selectedFeature) { old, new in
             if let old, new == nil {
-                let projectID = store.selectedID ?? old.projectID
-                restoreFocus(in: projectID, roadmap: detailID == projectID)
+                if store.selectedID == old.projectID {
+                    restoreFocus(in: old.projectID, roadmap: detailID == old.projectID)
+                }
             }
         }
         .sheet(isPresented: $showingAdd, onDismiss: { addFocused = true }) {
@@ -378,6 +430,7 @@ struct ProjectsView: View {
                     else { store.refresh(id) }
                 }
                 .accessibilityLabel("\(recovery == .reconnect ? "Reconnect" : "Refresh") \(project) after completion result for \(title)")
+                .focused($navigationFocus, equals: .recovery(id, featureID))
                 .accessibilityIdentifier("project-completion-recovery")
             }
         }
@@ -519,8 +572,10 @@ struct ProjectsView: View {
                                                                                        state: row.completion),
                                              isEnabled: Self.completionEnabled(candidate.id, row: row,
                                                  store: store, isReconnecting: reconnectingID == row.reference.id)) {
-                                    Task { await store.markComplete(candidate.id, in: row.reference.id) }
+                                    complete(candidate.id, in: row.reference.id,
+                                             origin: .cardCompletion(row.reference.id, candidate.id))
                                 }
+                                .focused($navigationFocus, equals: .cardCompletion(row.reference.id, candidate.id))
                                 .accessibilityLabel(ProjectFeatureDetailView.completionLabel(for: feature,
                                                                                              state: row.completion))
                                 .accessibilityIdentifier("project-feature-complete-\(candidate.id)")
@@ -617,6 +672,49 @@ struct ProjectsView: View {
                 ActionButton("Refresh project") { store.refresh(row.reference.id) }
                     .accessibilityLabel("Refresh \(row.reference.displayNameHint) from disk")
                     .accessibilityIdentifier("projects-workspace-refresh")
+            }
+        }
+    }
+
+    private func complete(_ featureID: String, in projectID: UUID, origin: NavigationFocus) {
+        Task {
+            await store.markComplete(featureID, in: projectID)
+            guard store.selectedID == projectID,
+                  let row = store.rows.first(where: { $0.reference.id == projectID }) else { return }
+            let detailVisible = store.selectedFeature == ProjectFeatureIdentity(projectID: projectID,
+                                                                                 featureID: featureID) &&
+                store.selectedFeatureContent != nil
+            // Do not steal focus if the user navigated away while IO was in flight.
+            switch origin {
+            case .cardCompletion where detailID != nil || store.selectedFeature != nil: return
+            case .detailCompletion where store.selectedFeature !=
+                ProjectFeatureIdentity(projectID: projectID, featureID: featureID): return
+            default: break
+            }
+            let target = Self.completionReturnFocus(origin: origin, row: row,
+                detailVisible: detailVisible,
+                canComplete: Self.completionEnabled(featureID, row: row, store: store,
+                                                    isReconnecting: reconnectingID == projectID))
+            guard let target else { return }
+            if presentedConflict?.projectID == projectID || selectedConflict?.projectID == projectID {
+                pendingCompletionFocus = (projectID, target)
+            } else {
+                focusCompletion(target, in: projectID)
+            }
+        }
+    }
+
+    private func focusCompletion(_ target: NavigationFocus, in projectID: UUID) {
+        Task { @MainActor in
+            await Task.yield()
+            guard store.selectedID == projectID, presentedConflict == nil else { return }
+            // Refresh can remove the detail between dismissal and this deferred focus.
+            // Never focus a heading that has disappeared from the active branch.
+            if target == .featureHeading {
+                navigationFocus = Self.conflictRefreshFocus(projectID: projectID,
+                    selectedFeature: store.selectedFeature, detailAvailable: store.selectedFeatureContent != nil)
+            } else {
+                navigationFocus = target
             }
         }
     }

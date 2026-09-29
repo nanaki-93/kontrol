@@ -709,6 +709,74 @@ final class ProjectsPresentationTests: XCTestCase {
         // Native keyboard, VoiceOver, zoom and window-size observations remain F13 checks.
     }
 
+    func testCompletionFocusTargetsAndRecoveryLabelsCompile() {
+        let id = UUID(), otherID = UUID()
+        let ready = card("ready")
+        let completed = card("ready", status: .completed)
+        let row = ProjectRowState(reference: reference(id, order: 0), inspection: cardInspection([ready]))
+        let cardAction: ProjectsView.NavigationFocus = .cardCompletion(id, "ready")
+        let detailAction: ProjectsView.NavigationFocus = .detailCompletion(id, "ready")
+        XCTAssertEqual(ProjectsView.completionReturnFocus(origin: cardAction, row: row,
+            detailVisible: false, canComplete: true), cardAction,
+            "An unsuccessful write keeps the surviving card completion action reachable")
+        XCTAssertEqual(ProjectsView.completionReturnFocus(origin: detailAction, row: row,
+            detailVisible: true, canComplete: true), detailAction)
+        var saved = row
+        saved.inspection = cardInspection([completed])
+        saved.completion = .saved("ready")
+        XCTAssertEqual(ProjectsView.completionReturnFocus(origin: cardAction, row: saved,
+            detailVisible: false, canComplete: false), .projectHeading(id),
+            "A completed card disappears; focus the selected project's heading")
+        XCTAssertEqual(ProjectsView.completionReturnFocus(origin: detailAction, row: saved,
+            detailVisible: true, canComplete: false), .featureHeading,
+            "Selected detail survives completion with a focusable heading and Back action")
+        XCTAssertEqual(ProjectsView.completionReturnFocus(origin: detailAction, row: saved,
+            detailVisible: false, canComplete: false), .projectHeading(id))
+        var retained = row
+        retained.isRetainedInspection = true
+        XCTAssertEqual(ProjectsView.completionReturnFocus(origin: cardAction, row: retained,
+            detailVisible: false, canComplete: false), .projectHeading(id))
+        XCTAssertEqual(ProjectsView.completionReturnFocus(origin: detailAction, row: retained,
+            detailVisible: true, canComplete: false), .featureHeading)
+        XCTAssertEqual(ProjectsView.completionReturnFocus(origin: cardAction,
+            row: ProjectRowState(reference: reference(otherID, order: 1), inspection: row.inspection),
+            detailVisible: false, canComplete: true), .projectHeading(otherID),
+            "A selection switch must never focus a prior project's control")
+        XCTAssertNil(ProjectsView.completionReturnFocus(origin: cardAction, row: nil,
+            detailVisible: false, canComplete: false))
+        XCTAssertEqual(ProjectFeatureDetailView.completionLabel(for: ready, state: nil),
+                       "Mark Disk title ready complete")
+        XCTAssertEqual(ProjectsView.undoActionTitle(feature: "Disk title ready", project: "Disk project"),
+                       "Undo completion of Disk title ready in Disk project")
+        XCTAssertEqual(ProjectsView.conflict(.failed("ready", .conflict), projectID: id),
+                       ProjectFeatureIdentity(projectID: id, featureID: "ready"))
+        XCTAssertEqual(ProjectsView.completionRecovery(.failed("ready", .conflict)), .refresh)
+        XCTAssertEqual(ProjectsView.completionRecovery(.failed("ready", .accessDenied)), .reconnect)
+        let conflict = ProjectFeatureIdentity(projectID: id, featureID: "ready")
+        let otherDetail = ProjectFeatureIdentity(projectID: otherID, featureID: "ready")
+        retained.completion = .failed("ready", .conflict)
+        let retainedDetail = NSHostingView(rootView: ProjectFeatureDetailView(row: retained,
+            featureID: "ready", backToRoadmap: false, back: {}))
+        XCTAssertEqual(retainedDetail.rootView.feature?.id, conflict.featureID)
+        XCTAssertEqual(ProjectsView.conflict(retained.completion, projectID: id), conflict)
+        XCTAssertEqual(ProjectsView.conflictRefreshFocus(projectID: id, selectedFeature: conflict,
+            detailAvailable: true), .featureHeading,
+            "Refresh from a retained feature detail must focus its rendered heading, not the absent workspace heading")
+        XCTAssertEqual(ProjectsView.conflictRefreshFocus(projectID: id, selectedFeature: conflict,
+            detailAvailable: false), .projectHeading(id),
+            "If Refresh closes the detail, focus the selected project's heading")
+        XCTAssertEqual(ProjectsView.conflictRefreshFocus(projectID: id, selectedFeature: otherDetail,
+            detailAvailable: true), .projectHeading(id),
+            "A selection switch must not focus another project's detail")
+        XCTAssertEqual(ProjectsView.conflictRefreshFocus(projectID: id, selectedFeature: nil,
+            detailAvailable: false), .projectHeading(id),
+            "Refresh from the workspace keeps its heading reachable")
+        let host = NSHostingView(rootView: ProjectFeatureDetailView(row: saved, featureID: "ready",
+            backToRoadmap: false, back: {}))
+        XCTAssertEqual(host.rootView.feature?.status, .completed)
+        // Native tab order, alert focus, VoiceOver and layout measurements remain F13 checks.
+    }
+
     func testFolderOnlyPickerAndPreviewHostCompile() {
         let panel = ProjectAddView.configuredPicker()
         XCTAssertTrue(panel.canChooseDirectories)
