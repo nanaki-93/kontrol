@@ -65,9 +65,17 @@ enum ProjectRefreshFailure: Equatable {
     }
 }
 
+/// Session-only IO outcome. The inspection remains the sole source for status and counts.
+enum ProjectCompletionState: Equatable {
+    case writing(String)
+    case saved(String)
+    case failed(String, FeatureMutationFailure)
+}
+
 struct ProjectRowState {
     var reference: ProjectReferenceSnapshot
     var inspection: ProjectInspection?
+    var completion: ProjectCompletionState?
     var isRefreshing = false
     var isStale = false
     /// True only when a failed or canceled read kept an older inspection for reference.
@@ -142,6 +150,11 @@ final class ProjectStore: ObservableObject {
     private let inspector: any ProjectInspecting
     private let repository: any ProjectReferenceRepository
     private let identifier: any ProjectFolderIdentifying
+    private let writer: any FeatureFileWriting
+    private let completionClock: () -> Date
+    private let completionValidator: @Sendable (ProjectSourceDocument, ProjectFeature) async -> Bool
+    private var mutating: Set<UUID> = []
+    private var refreshAfterMutation: Set<UUID> = []
     private var previewGeneration = 0
     private var adding = false
     private var reconnecting: Set<UUID> = []
@@ -158,10 +171,83 @@ final class ProjectStore: ObservableObject {
     private let maxConcurrentRefreshes = 3
 
     init(inspector: any ProjectInspecting, repository: any ProjectReferenceRepository,
-         identifier: any ProjectFolderIdentifying = ScopedProjectFolderIdentifier()) {
+         identifier: any ProjectFolderIdentifying = ScopedProjectFolderIdentifier(),
+         writer: any FeatureFileWriting = FeatureFileWriter(),
+         completionClock: @escaping () -> Date = Date.init,
+         completionValidator: @escaping @Sendable (ProjectSourceDocument, ProjectFeature) async -> Bool = { source, feature in
+             await Task.detached(priority: .userInitiated) {
+                 guard case let .supported(parsed) = try? ManifestParser().feature(source) else { return false }
+                 return parsed == feature
+             }.value
+         }) {
         self.inspector = inspector
         self.repository = repository
         self.identifier = identifier
+        self.writer = writer
+        self.completionClock = completionClock
+        self.completionValidator = completionValidator
+    }
+
+    /// Cheap, synchronous view-facing gate. The exact source is parsed off-main after
+    /// claiming the project slot; this predicate alone never authorizes a write.
+    func canMarkComplete(_ featureID: String, in projectID: UUID) -> Bool {
+        completionInput(featureID, in: projectID) != nil
+    }
+
+    private func completionInput(_ featureID: String, in projectID: UUID)
+        -> (ProjectReferenceSnapshot, ProjectSourceDocument)? {
+        guard !mutating.contains(projectID), !reconnecting.contains(projectID),
+              let row = rows.first(where: { $0.reference.id == projectID }),
+              !row.isRefreshing, refreshOperations[projectID]?.task == nil,
+              refreshOperations[projectID]?.queued != true,
+              !row.isRetainedInspection, row.refreshFailure == nil,
+              let inspection = row.inspection, let manifest = inspection.manifest,
+              manifest.schemaVersion == 1, manifest.id == row.reference.manifestID,
+              inspection.featureEnumeration == .complete,
+              let feature = inspection.features.first(where: { $0.id == featureID }),
+              feature.status != .completed,
+              let source = inspection.sources.first(where: { $0.relativePath == feature.sourcePath }),
+              inspection.sources.filter({ $0.relativePath == feature.sourcePath }).count == 1 else { return nil }
+        return (row.reference, source)
+    }
+
+    /// A verified receipt does not itself change displayed progress. Reconciliation and
+    /// publication ownership are added in Step 3.2; until then the old view is retained.
+    func markComplete(_ featureID: String, in projectID: UUID) async {
+        guard let (reference, source) = completionInput(featureID, in: projectID),
+              let index = rows.firstIndex(where: { $0.reference.id == projectID }),
+              let feature = rows[index].inspection?.features.first(where: { $0.id == featureID }) else { return }
+        mutating.insert(projectID) // Before the first suspension, including validation.
+        rows[index].completion = .writing(featureID)
+        let request = FeatureCompletionRequest(reference: reference, featureID: featureID,
+                                               source: source, completedAt: completionClock())
+        do {
+            guard await completionValidator(source, feature) else {
+                throw FeatureMutationFailure.unpatchableSource
+            }
+            _ = try await writer.complete(request)
+            if let index = rows.firstIndex(where: { $0.reference.id == projectID }) {
+                rows[index].completion = .saved(featureID)
+                rows[index].isStale = true
+                rows[index].isRetainedInspection = true
+            }
+        } catch {
+            if let index = rows.firstIndex(where: { $0.reference.id == projectID }) {
+                let failure = (error as? FeatureMutationFailure) ?? .writeFailed
+                rows[index].completion = .failed(featureID, failure)
+                // A conflict or uncertain replacement invalidates the displayed revision.
+                // Require an explicit read before this source becomes actionable again.
+                switch failure {
+                case .conflict, .missingTarget, .changedIdentity, .manifestMismatch,
+                     .unsafePath, .unverifiedWrite:
+                    rows[index].isStale = true
+                    rows[index].isRetainedInspection = true
+                default: break
+                }
+            }
+        }
+        mutating.remove(projectID)
+        if refreshAfterMutation.remove(projectID) != nil { refresh(projectID) }
     }
 
     /// Call on entry to Projects, not at launch. Failed fetches may be retried on next entry.
@@ -233,6 +319,11 @@ final class ProjectStore: ObservableObject {
 
     func refresh(_ id: UUID) {
         guard rows.contains(where: { $0.reference.id == id }) else { return }
+        if mutating.contains(id) {
+            // Never launch a read against the in-flight replacement.
+            refreshAfterMutation.insert(id)
+            return
+        }
         var operation = refreshOperations[id] ?? RefreshOperation()
         if operation.task != nil {
             operation.followUp = true
@@ -422,7 +513,7 @@ final class ProjectStore: ObservableObject {
     /// The repository enforces the stored manifest ID and revision again at commit.
     @discardableResult
     func reconnect(_ id: UUID, to folder: URL) async throws -> ProjectReferenceSnapshot {
-        guard !reconnecting.contains(id) else { throw ProjectStoreError.busy }
+        guard !reconnecting.contains(id), !mutating.contains(id) else { throw ProjectStoreError.busy }
         guard let original = rows.first(where: { $0.reference.id == id })?.reference else {
             throw ProjectStoreError.referenceNotFound
         }

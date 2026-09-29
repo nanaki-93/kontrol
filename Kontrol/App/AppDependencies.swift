@@ -24,6 +24,8 @@ final class AppDependencies {
          projectInspector: any ProjectInspecting = ProjectInspector(),
          projectRepository: (any ProjectReferenceRepository)? = nil,
          projectIdentifier: any ProjectFolderIdentifying = ScopedProjectFolderIdentifier(),
+         projectWriter: any FeatureFileWriting = FeatureFileWriter(),
+         projectCompletionClock: @escaping () -> Date = Date.init,
          focusWallClock: @escaping () -> Date = Date.init,
          focusMonotonicClock: @escaping () -> ContinuousClock.Instant = { ContinuousClock().now },
          draftClock: @escaping () -> Date = Date.init,
@@ -38,7 +40,8 @@ final class AppDependencies {
         // SwiftData stays on the main actor; only detached snapshots cross into IO.
         projectStore = ProjectStore(inspector: projectInspector,
             repository: projectRepository ?? SwiftDataProjectReferenceRepository(container: container),
-            identifier: projectIdentifier)
+            identifier: projectIdentifier, writer: projectWriter,
+            completionClock: projectCompletionClock)
         learningCatalogStore = LearningCatalogStore(repository: catalogRepository)
         let credentials = credentialStore ?? KeychainCredentialStore()
         self.credentialStore = credentials
