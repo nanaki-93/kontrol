@@ -6,12 +6,14 @@ struct LearningView: View {
     @ObservedObject var store: LearningCatalogStore
     /// Supplied by the shell for guarded entry. Standalone previews browse only.
     var navigation: NavigationStore? = nil
+    var generation: LessonGenerationStore? = nil
+    var aiSettings: AISettingsStore? = nil
+    var generationRepository: (any CatalogRepository)? = nil
     @State private var selectedTopicID: String?
     @State private var entryError: LessonExperienceError?
     @State private var dismissal: DismissalConfirmation?
     @State private var showingDismissal = false
-    @State private var showingGenerationNotice = false
-    @State private var generationChoiceCount = 0
+    @State private var generationTopicID: String?
     @FocusState private var focusedTopicID: String?
     @FocusState private var focusedLessonID: String?
     @FocusState private var focusedDismissLessonID: String?
@@ -32,12 +34,6 @@ struct LearningView: View {
               let lesson = snapshot.definitions.first(where: { $0.id == lessonID }) else { return nil }
         return DismissalConfirmation(lessonID: lessonID, title: lesson.title,
                                      slot: slot, attemptID: attemptID)
-    }
-
-    static func generationNotice(choiceCount: Int) -> String {
-        let availability = choiceCount == 0 ? "No eligible lessons are installed" :
-            "No additional eligible lessons are installed"
-        return "\(availability) for this topic. Generate… is unavailable offline in this version. Try History or another topic."
     }
 
     static func orderedTopics(in snapshot: LearningCatalogSnapshot) -> [LearningTopicSnapshot] {
@@ -164,14 +160,15 @@ struct LearningView: View {
                 }
             }
         }
-        .alert("Generation unavailable", isPresented: $showingGenerationNotice) {
-            if let navigation {
-                Button("History") { navigation.showHistory() }
+        .sheet(item: Binding(get: { generationTopicID.map(GenerationTopic.init) },
+                             set: { generationTopicID = $0?.id })) { topic in
+            if let generation, let aiSettings, let generationRepository {
+                LessonGenerationSheet(topicID: topic.id, repository: generationRepository,
+                                      settings: aiSettings, generation: generation, navigation: navigation)
+            } else {
+                Text("Generation is not configured in this preview.")
+                    .padding(AppMetrics.space6)
             }
-            Button("Another topic") { selectAnotherTopic() }
-            Button("Stay here", role: .cancel) {}
-        } message: {
-            Text(Self.generationNotice(choiceCount: generationChoiceCount))
         }
     }
 
@@ -308,13 +305,8 @@ struct LearningView: View {
                             .accessibilityIdentifier("learning-restored-resume-\(progress.lessonID)")
                     }
                 }
-                if choices.count < 4 {
-                    Button("Generate…") {
-                        generationChoiceCount = choices.count
-                        showingGenerationNotice = true
-                    }
-                        .accessibilityIdentifier("learning-generate-unavailable")
-                }
+                Button("Generate lesson") { generationTopicID = selected.id }
+                    .accessibilityIdentifier("learning-generate")
             }
             .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -336,14 +328,8 @@ struct LearningView: View {
         return try store.dismiss(lessonID: captured.lessonID, expectedSlot: captured.slot)
     }
 
-    private func selectAnotherTopic() {
-        guard let snapshot = store.state.snapshot else { return }
-        let topics = Self.orderedTopics(in: snapshot)
-        guard topics.count > 1 else { return }
-        let current = navigation?.selectedTopicID ?? selectedTopicID ?? topics[0].id
-        let index = topics.firstIndex(where: { $0.id == current }) ?? 0
-        let next = topics[(index + 1) % topics.count].id
-        if let navigation { navigation.selectTopic(next) } else { selectedTopicID = next }
+    private struct GenerationTopic: Identifiable {
+        let id: String
     }
 
     private func open(_ id: String, using navigation: NavigationStore) {

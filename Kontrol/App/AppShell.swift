@@ -93,7 +93,10 @@ struct AppShell: View {
                     case .learning:
                         switch navigation.learningRoute {
                         case .choices:
-                            LearningView(store: dependencies.learningCatalogStore, navigation: navigation)
+                            LearningView(store: dependencies.learningCatalogStore, navigation: navigation,
+                                         generation: dependencies.lessonGenerationStore,
+                                         aiSettings: dependencies.aiSettingsStore,
+                                         generationRepository: dependencies.catalogRepository)
                         case .detail(let id):
                             LessonExperienceView(lessonID: id, store: dependencies.learningCatalogStore,
                                                  drafts: dependencies.lessonDraftStore, navigation: navigation)

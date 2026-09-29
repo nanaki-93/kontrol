@@ -466,7 +466,7 @@ final class LessonExperienceStoreTests: XCTestCase {
         XCTAssertEqual(drafts.buffers[firstID]?.expectedRevision, 2)
     }
 
-    func testGenerationNoticeDistinguishesRealPartialAndEmptyExhaustion() throws {
+    func testExhaustedSeedInventoryStillOffersAuthoredGenerationScope() throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         let repository = SwiftDataCatalogRepository(container: container)
         _ = try repository.importIfNeeded(BundledCatalogLoader.load())
@@ -484,18 +484,17 @@ final class LessonExperienceStoreTests: XCTestCase {
         let choices = LearningView.choices(for: topic, in: partial)
         XCTAssertEqual(choices.count, 2)
         XCTAssertEqual(try repository.loadHistory().filter { $0.topicID == topic }.count, total - 2)
-        let notice = LearningView.generationNotice(choiceCount: choices.count)
-        XCTAssertTrue(notice.contains("No additional eligible lessons are installed for this topic"))
-        XCTAssertTrue(notice.contains("Generate… is unavailable offline"))
-        XCTAssertTrue(notice.contains("History or another topic"))
+        let context = try repository.generationContext(topicID: topic)
+        let registry = try GenerationObjectivesLoader.load(catalog: context.catalog, membership: context.membership)
+        XCTAssertFalse(LessonGenerationSheet.available(context, registry: registry, topicID: topic).isEmpty)
         for (step, slot) in partial.slots.filter({ $0.topicID == topic }).enumerated() {
             _ = try repository.dismiss(lessonID: slot.lessonID, expectedSlot: slot,
                                        now: Date(timeIntervalSince1970: 2_000_000_010 + Double(step)))
         }
         let empty = try repository.loadSnapshot()
         XCTAssertTrue(LearningView.choices(for: topic, in: empty).isEmpty)
-        XCTAssertTrue(LearningView.generationNotice(choiceCount: 0)
-            .contains("No eligible lessons are installed for this topic"))
+        let exhaustedContext = try repository.generationContext(topicID: topic)
+        XCTAssertFalse(LessonGenerationSheet.available(exhaustedContext, registry: registry, topicID: topic).isEmpty)
         XCTAssertEqual(try repository.loadHistory().filter { $0.topicID == topic }.count, total)
         XCTAssertEqual(empty.slots.filter { $0.topicID != topic }, initial.slots.filter { $0.topicID != topic })
     }

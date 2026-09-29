@@ -597,7 +597,7 @@ final class LessonExperiencePresentationTests: XCTestCase {
         }
     }
 
-    func testExhaustedChoicesShowVacancyAndHonestGenerateNotice() throws {
+    func testExhaustedChoicesKeepGenerateAvailableWithoutSubmitting() throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         let repository = SwiftDataCatalogRepository(container: container)
         _ = try repository.importIfNeeded(BundledCatalogLoader.load(from: Bundle.main))
@@ -624,14 +624,16 @@ final class LessonExperiencePresentationTests: XCTestCase {
         graph.learningCatalogStore.loadIfNeeded()
         let navigation = NavigationStore()
         navigation.attachDrafts(graph.lessonDraftStore)
-        try inspect(LearningView(store: graph.learningCatalogStore, navigation: navigation)) { elements, currentElements in
+        try inspect(LearningView(store: graph.learningCatalogStore, navigation: navigation,
+                                 generation: graph.lessonGenerationStore, aiSettings: graph.aiSettingsStore,
+                                 generationRepository: repository)) { elements, currentElements in
             let ids = elements.compactMap { attribute($0, kAXIdentifierAttribute) as? String }
             XCTAssertTrue(ids.contains("learning-vacancy"))
             for slot in remaining {
                 XCTAssertEqual(ids.filter { $0 == "learning-open-\(slot.lessonID)" }.count, 1)
             }
             let generate = try XCTUnwrap(elements.first {
-                attribute($0, kAXIdentifierAttribute) as? String == "learning-generate-unavailable"
+                attribute($0, kAXIdentifierAttribute) as? String == "learning-generate"
             })
             XCTAssertEqual(AXUIElementPerformAction(generate, kAXPressAction as CFString), .success)
             RunLoop.main.run(until: Date().addingTimeInterval(0.1))
@@ -641,11 +643,9 @@ final class LessonExperiencePresentationTests: XCTestCase {
                 [kAXValueAttribute, kAXTitleAttribute, kAXDescriptionAttribute]
                     .compactMap { attribute(element, $0) as? String }
             }
-            XCTAssertTrue(labels.contains { $0.contains("Generation unavailable") })
-            XCTAssertTrue(labels.contains { $0.contains("No additional eligible lessons are installed for this topic") })
-            XCTAssertFalse(labels.contains { $0.contains("No more eligible lessons are installed") })
-            XCTAssertTrue(labels.contains { $0 == "History" })
-            XCTAssertTrue(labels.contains { $0 == "Another topic" })
+            XCTAssertTrue(labels.contains { $0.contains("Generate a lesson") })
+            XCTAssertTrue(labels.contains { $0.contains("AI lessons are off") })
+            XCTAssertTrue(labels.contains { $0.contains("Generation may incur provider charges") })
             XCTAssertEqual(try repository.loadSnapshot(), partial)
             XCTAssertEqual(try repository.loadHistory().filter { $0.topicID == topic }.count, 6)
             XCTAssertEqual(currentElements().filter {
@@ -661,18 +661,19 @@ final class LessonExperiencePresentationTests: XCTestCase {
         XCTAssertTrue(empty.slots.filter { $0.topicID == topic }.isEmpty)
         let emptyGraph = AppDependencies(container: container, catalogRepository: repository)
         emptyGraph.learningCatalogStore.loadIfNeeded()
-        try inspect(LearningView(store: emptyGraph.learningCatalogStore)) { elements, _ in
+        try inspect(LearningView(store: emptyGraph.learningCatalogStore,
+                                 generation: emptyGraph.lessonGenerationStore, aiSettings: emptyGraph.aiSettingsStore,
+                                 generationRepository: repository)) { elements, _ in
             XCTAssertTrue(elements.contains { attribute($0, kAXIdentifierAttribute) as? String == "learning-vacancy" })
             let generate = try XCTUnwrap(elements.first {
-                attribute($0, kAXIdentifierAttribute) as? String == "learning-generate-unavailable"
+                attribute($0, kAXIdentifierAttribute) as? String == "learning-generate"
             })
             XCTAssertEqual(AXUIElementPerformAction(generate, kAXPressAction as CFString), .success)
             RunLoop.main.run(until: Date().addingTimeInterval(0.1))
             let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
             let all = (attribute(app, kAXWindowsAttribute) as? [AXUIElement] ?? []).flatMap(descendants)
             let messages = all.compactMap { attribute($0, kAXValueAttribute) as? String }
-            XCTAssertTrue(messages.contains { $0.contains("No eligible lessons are installed for this topic") })
-            XCTAssertFalse(messages.contains { $0.contains("No additional eligible lessons are installed") })
+            XCTAssertTrue(messages.contains { $0.contains("AI lessons are off") })
             XCTAssertEqual(try repository.loadSnapshot(), empty)
         }
     }

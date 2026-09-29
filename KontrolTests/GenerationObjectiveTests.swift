@@ -5,6 +5,25 @@ import XCTest
 
 @MainActor
 final class GenerationObjectiveTests: XCTestCase {
+    func testSheetCancellationAndRetryIgnoreSupersededCompletion() throws {
+        var submission = GenerationSheetSubmission()
+        let first = try XCTUnwrap(submission.begin())
+        XCTAssertTrue(submission.isRunning)
+        XCTAssertNil(submission.begin(), "A second click must not start another request")
+        submission.retire() // Cancel or settings revision change, before transport returns.
+        let retry = try XCTUnwrap(submission.begin()) // First lease has released.
+        XCTAssertNotEqual(first, retry)
+        XCTAssertFalse(submission.finish(first), "Late cancellation must not clear retry progress")
+        XCTAssertTrue(submission.isRunning)
+        XCTAssertNil(submission.begin(), "Late completion must not re-enable Generate")
+        XCTAssertTrue(submission.finish(retry))
+        XCTAssertFalse(submission.isRunning)
+        XCTAssertFalse(submission.finish(retry), "Duplicate completion must not publish twice")
+        let pending = try XCTUnwrap(submission.begin())
+        submission.retire() // Dismiss before the task first runs.
+        XCTAssertFalse(submission.finish(pending))
+    }
+
     private func catalog() throws -> ValidatedCatalog { try BundledCatalogLoader.load() }
 
     private func membership(_ catalog: ValidatedCatalog) -> CurrentCatalogMembership {
@@ -266,6 +285,29 @@ final class GenerationObjectiveTests: XCTestCase {
                 completed: ["go.concurrency.cancel-work"]), registry: registry)) {
             XCTAssertEqual($0 as? LessonGenerationError, .oversizedRequest)
         }
+    }
+
+    func testSheetPreviewOffersScopeAfterSeedExhaustionWithoutWritingOrNetworking() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataCatalogRepository(container: container)
+        _ = try repository.importIfNeeded(catalog())
+        let before = try repository.loadSnapshot()
+        let context = try repository.generationContext(topicID: "go")
+        let registry = try GenerationObjectivesLoader.load(catalog: context.catalog, membership: context.membership)
+        let offered = LessonGenerationSheet.available(context, registry: registry, topicID: "go")
+        XCTAssertFalse(offered.isEmpty)
+        XCTAssertEqual(offered.first?.text, registry.objectives.first { $0.topicID == "go" }?.text)
+        let consumed = generationContext(context.catalog, terminal: offered.map { terminal($0.key) })
+        XCTAssertTrue(LessonGenerationSheet.available(consumed, registry: registry, topicID: "go").isEmpty)
+        XCTAssertEqual(try repository.loadSnapshot(), before)
+        XCTAssertEqual(LessonGenerationSheet.failureMessage(.rateLimited(retryAfter: Date())),
+                       "OpenAI rate limited this request. Retry when permitted.")
+        XCTAssertEqual(LessonGenerationSheet.failureMessage(.persistenceFailure),
+                       "Lesson not saved. Check local storage and retry.")
+        let now = Date(timeIntervalSince1970: 100)
+        XCTAssertFalse(LessonGenerationSheet.retryAllowed(at: now, notBefore: now.addingTimeInterval(1)))
+        XCTAssertTrue(LessonGenerationSheet.retryAllowed(at: now, notBefore: now))
+        XCTAssertTrue(LessonGenerationSheet.retryAllowed(at: now, notBefore: nil))
     }
 
     func testLoadingAndFailureNeverWriteLearningState() throws {

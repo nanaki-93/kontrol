@@ -202,7 +202,7 @@ final class LearningPresentationTests: XCTestCase {
         }
     }
 
-    func testPartialAndExhaustedTopicsShowExactCountsWithoutGenerate() throws {
+    func testPartialAndExhaustedTopicsShowExactCountsAndGenerateEntry() throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         let committed = SwiftDataCatalogRepository(container: container)
         _ = try committed.importIfNeeded(BundledCatalogLoader.load(from: Bundle.main))
@@ -217,7 +217,7 @@ final class LearningPresentationTests: XCTestCase {
         try inspect(LearningView(store: store)) { _, elements in
             XCTAssertTrue(text(elements).contains { $0.contains("2 available") })
             XCTAssertEqual(identifiers(elements).filter { $0.hasPrefix("learning-lesson-") }.count, 2)
-            XCTAssertFalse(text(elements).contains { $0.contains("Generate") })
+            XCTAssertTrue(identifiers(elements).contains("learning-generate"))
         }
         reader.value = LearningCatalogSnapshot(topics: snapshot.topics, subtopics: snapshot.subtopics,
             concepts: snapshot.concepts, definitions: snapshot.definitions, progress: snapshot.progress, slots: [])
@@ -226,7 +226,7 @@ final class LearningPresentationTests: XCTestCase {
             XCTAssertTrue(text(elements).contains { $0.contains("0 available") })
             XCTAssertTrue(text(elements).contains { $0.contains("No choices available in Go.") })
             XCTAssertFalse(identifiers(elements).contains { $0.hasPrefix("learning-lesson-") })
-            XCTAssertFalse(text(elements).contains { $0.contains("Generate") })
+            XCTAssertTrue(identifiers(elements).contains("learning-generate"))
         }
     }
 
