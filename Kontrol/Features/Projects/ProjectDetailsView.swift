@@ -6,6 +6,81 @@ struct ProjectDetailsView: View {
     let row: ProjectRowState
     let back: () -> Void
     let refresh: () -> Void
+    var reconnect: () -> Void = {}
+    var recoveryMessage: String? = nil
+    var isReconnecting = false
+
+    /// Inspection diagnostics carry codes and relative paths, never OS error descriptions.
+    /// Keep the explanation finite and safe even when the selected source is malformed.
+    static func diagnosticReason(_ code: ProjectDiagnosticCode) -> String {
+        switch code {
+        case .missingManifest: return "Required manifest is missing"
+        case .malformedYAML: return "YAML is malformed"
+        case .invalidFrontmatter: return "Feature frontmatter is invalid"
+        case .unsupportedVersion: return "Schema version is unsupported; upgrade the source externally"
+        case .duplicateKey: return "YAML key is repeated"
+        case .invalidField: return "Required value is missing or has the wrong type"
+        case .duplicateID: return "Feature ID is repeated"
+        case .missingDependency: return "Dependency ID is missing"
+        case .selfDependency: return "Feature depends on itself"
+        case .cyclicDependency: return "Features form a dependency cycle"
+        case .invalidDependency: return "Dependency refers to an invalid feature"
+        case .unreadableFile: return "File could not be read"
+        case .invalidUTF8: return "File is not valid UTF-8"
+        case .unsafeEntry: return "Unsafe link or nonregular entry refused"
+        case .sizeLimit: return "File or inspection exceeds the read limit"
+        case .changedDuringRead: return "File changed during inspection"
+        case .enumerationFailed: return "Feature listing could not be completed"
+        case .accessDenied: return "Folder access was denied"
+        case .staleBookmark: return "Folder permission is stale"
+        case .unresolvedBookmark: return "Saved folder could not be found"
+        }
+    }
+
+    static func safeLabel(_ value: String) -> String {
+        String(value.unicodeScalars.map { scalar -> String in
+            if CharacterSet.controlCharacters.contains(scalar) ||
+                (0x202A...0x202E).contains(scalar.value) ||
+                (0x2066...0x2069).contains(scalar.value) {
+                return String(format: "\\u{%X}", scalar.value)
+            }
+            return String(scalar)
+        }.joined().prefix(512))
+    }
+
+    static func diagnosticText(_ diagnostic: ProjectDiagnostic) -> String {
+        let path = diagnostic.relativePath.hasPrefix(".kontrol/") || diagnostic.relativePath == ".kontrol"
+            ? safeLabel(diagnostic.relativePath) : "Project file"
+        let position = diagnostic.line.map { " · line \($0)" } ?? ""
+        let ids = diagnostic.affectedIDs.isEmpty ? "" :
+            " · IDs: \(diagnostic.affectedIDs.prefix(8).map(safeLabel).joined(separator: ", "))"
+        return "\(path)\(position): \(diagnosticReason(diagnostic.code))\(ids) · \(diagnostic.recovery == .reconnect ? "Reconnect" : "Refresh after external repair")"
+    }
+
+    static func failureText(_ failure: ProjectRefreshFailure) -> String {
+        switch failure {
+        case .manifestMismatch:
+            return "This folder now contains a different project ID. The saved reference was not changed. Refresh after restoring the original project, or add the other folder separately."
+        case .persistence:
+            return "The local read receipt could not be saved. Previous project details remain stale; Refresh to retry."
+        case .inspection(.inconsistentRead):
+            return "Files changed during inspection. Previous details are stale; Refresh to retry."
+        case .inspection(.unreadableFolder):
+            return "Folder could not be read. Previous details are stale; Refresh to retry."
+        case let .inspection(.access(code)):
+            return "\(diagnosticReason(code)). Previous details are stale; Reconnect this project to restore folder access."
+        case let .inspection(.selectedAccess(code)):
+            return "\(diagnosticReason(code)). Refresh after restoring folder access."
+        }
+    }
+
+    /// Source bytes are already bounded by the reader; cap rendered text as well so an
+    /// injected inspection cannot create an unbounded selectable view.
+    static func unsupportedText(_ source: ProjectSourceDocument) -> String {
+        guard let text = source.text else { return "Source is not valid UTF-8; Refresh after repair." }
+        let prefix = String(text.prefix(32_768))
+        return prefix + (text.count > 32_768 ? "\n… Preview limited to 32,768 characters" : "")
+    }
 
     static func progress(_ inspection: ProjectInspection) -> String {
         switch inspection.featureCount {
@@ -36,11 +111,45 @@ struct ProjectDetailsView: View {
                 }
             }
             if row.isStale {
-                Text("Last read: \(row.lastReadAt?.formatted(date: .abbreviated, time: .shortened) ?? "unavailable") · Not verified now; Refresh to inspect again")
+                Text("Stale · Last read: \(row.lastReadAt?.formatted(date: .abbreviated, time: .shortened) ?? "unavailable") · Not fully verified now")
                     .appTypography(.body)
                     .accessibilityIdentifier("project-details-stale")
             }
+            if let failure = row.refreshFailure {
+                Text(Self.failureText(failure))
+                    .appTypography(.body)
+                    .accessibilityIdentifier("project-details-failure")
+            }
+            if let recoveryMessage {
+                Text(recoveryMessage)
+                    .appTypography(.body)
+                    .accessibilityIdentifier("project-reconnect-error")
+            }
             if let inspection = row.inspection {
+                if !inspection.diagnostics.isEmpty || !inspection.excludedFeaturePaths.isEmpty {
+                    SectionHeader("Validation details")
+                    if !inspection.excludedFeaturePaths.isEmpty {
+                        Text("\(inspection.excludedFeaturePaths.count) feature \(inspection.excludedFeaturePaths.count == 1 ? "file" : "files") excluded; counts include only valid features. Repair externally, then Refresh.")
+                            .appTypography(.body)
+                            .accessibilityIdentifier("project-details-excluded")
+                    }
+                    ForEach(Array(inspection.diagnostics.enumerated()), id: \.offset) { _, diagnostic in
+                        Text(Self.diagnosticText(diagnostic))
+                            .appTypography(.body)
+                            .textSelection(.enabled)
+                    }
+                }
+                let unsupportedPaths = Set(inspection.diagnostics.filter { $0.code == .unsupportedVersion }.map(\.relativePath))
+                ForEach(inspection.sources.filter { unsupportedPaths.contains($0.relativePath) }, id: \.relativePath) { source in
+                    SectionHeader("Unsupported source · \(Self.safeLabel(source.relativePath)) · read-only")
+                    Text("Upgrade the source externally. Unsupported content is not interpreted as V1 or used for progress.")
+                        .appTypography(.body)
+                    Text(Self.unsupportedText(source))
+                        .appTypography(.body)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityIdentifier("project-unsupported-source")
+                }
                 if let manifest = inspection.manifest {
                     VStack(alignment: .leading, spacing: AppMetrics.space4) {
                         Text(manifest.description.isEmpty ? "No description provided" : manifest.description)
@@ -99,8 +208,14 @@ struct ProjectDetailsView: View {
         Group {
             ActionButton("Back to projects", variant: .secondary, action: back)
                 .accessibilityIdentifier("project-details-back")
-            ActionButton("Refresh project", variant: .secondary, action: refresh)
-                .accessibilityIdentifier("project-details-refresh")
+            if row.refreshFailure?.recovery == .reconnect {
+                ActionButton("Reconnect project", variant: .secondary, action: reconnect)
+                    .disabled(isReconnecting)
+                    .accessibilityIdentifier("project-details-reconnect")
+            } else {
+                ActionButton("Refresh project", variant: .secondary, action: refresh)
+                    .accessibilityIdentifier("project-details-refresh")
+            }
         }
     }
 

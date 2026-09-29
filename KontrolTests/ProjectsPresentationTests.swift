@@ -113,6 +113,71 @@ final class ProjectsPresentationTests: XCTestCase {
         XCTAssertTrue(ProjectDetailsView.progress(unavailable).contains("unavailable"))
     }
 
+    func testDiagnosticsAndUnsupportedSourcesAreBoundedAndReadOnly() {
+        let diagnostic = ProjectDiagnostic(code: .missingDependency, severity: .error,
+            relativePath: ".kontrol/features/bad\nname.md", line: 9,
+            affectedIDs: ["absent"], recovery: .editSource)
+        let text = ProjectDetailsView.diagnosticText(diagnostic)
+        XCTAssertTrue(text.contains(".kontrol/features/bad\\u{A}name.md · line 9"))
+        XCTAssertTrue(text.contains("Dependency ID is missing · IDs: absent · Refresh"))
+        XCTAssertFalse(text.contains("/Users/"))
+        XCTAssertTrue(ProjectDetailsView.diagnosticText(ProjectDiagnostic(code: .unreadableFile,
+            severity: .error, relativePath: "/Users/private/secret", recovery: .refresh))
+            .hasPrefix("Project file:"), "Never show an absolute path supplied by an IO error")
+        let source = ProjectSourceDocument(relativePath: ".kontrol/project.yaml",
+            bytes: Data(String(repeating: "x", count: 40_000).utf8))
+        XCTAssertEqual(ProjectDetailsView.unsupportedText(source).prefix(32_768).count, 32_768)
+        XCTAssertTrue(ProjectDetailsView.unsupportedText(source).contains("Preview limited"))
+        XCTAssertEqual(ProjectDetailsView.diagnosticReason(.unsupportedVersion),
+                       "Schema version is unsupported; upgrade the source externally")
+
+        let unsupported = ProjectInspection(manifest: nil, roadmap: .absent, features: [],
+            excludedFeaturePaths: [], featureEnumeration: .complete, context: .absent,
+            rules: .absent, history: .absent, diagnostics: [ProjectDiagnostic(code: .unsupportedVersion,
+                severity: .error, relativePath: source.relativePath, recovery: .upgradeSource)],
+            sources: [source], readAt: Date())
+        XCTAssertEqual(ProjectDetailsView.progress(unsupported),
+                       "Feature progress unavailable; enumeration or manifest is incomplete")
+        let unsupportedRow = ProjectRowState(reference: reference(UUID(), order: 0), inspection: unsupported)
+        XCTAssertEqual(ProjectsView.status(unsupportedRow),
+                       "Unsupported project format · progress unavailable; upgrade source")
+        let row = ProjectRowState(reference: reference(UUID(), order: 0), inspection: unsupported,
+                                  isStale: true)
+        let host = NSHostingView(rootView: ProjectDetailsView(row: row, back: {}, refresh: {}))
+        XCTAssertEqual(host.rootView.row.inspection?.sources, [source])
+    }
+
+    func testRetainedSnapshotFailuresRequireCorrectRecoveryWithoutHidingPeers() {
+        let healthy = ProjectRowState(reference: reference(UUID(), order: 0), inspection:
+            ProjectInspection(manifest: ProjectManifest(schemaVersion: 1, id: "same-id", name: "Healthy",
+                description: "", stack: [], goals: [], currentFocus: []), roadmap: .absent,
+                features: [], excludedFeaturePaths: [], featureEnumeration: .complete,
+                context: .absent, rules: .absent, history: .absent, diagnostics: [], sources: [], readAt: Date()))
+        var failed = ProjectRowState(reference: reference(UUID(), order: 1), inspection: healthy.inspection)
+        failed.isStale = true
+        failed.lastReadAt = healthy.inspection?.readAt
+        failed.refreshFailure = .inspection(.access(.staleBookmark))
+        XCTAssertEqual(ProjectsView.ordered([failed, healthy]).count, 2)
+        XCTAssertTrue(ProjectsView.status(healthy).contains("Ready"))
+        XCTAssertTrue(ProjectsView.status(failed).contains("Reconnect required"))
+        XCTAssertTrue(ProjectsView.status(failed).contains("Last read:"))
+        XCTAssertTrue(ProjectsView.status(failed).contains("stale"))
+        XCTAssertTrue(ProjectDetailsView.failureText(failed.refreshFailure!).contains("Reconnect"))
+        failed.refreshFailure = .inspection(.inconsistentRead)
+        XCTAssertTrue(ProjectDetailsView.failureText(failed.refreshFailure!).contains("Refresh"))
+        failed.refreshFailure = .manifestMismatch
+        XCTAssertTrue(ProjectDetailsView.failureText(failed.refreshFailure!).contains("different project ID"))
+        XCTAssertTrue(ProjectsView.status(failed).contains("Different project ID"))
+        failed.refreshFailure = .persistence
+        XCTAssertTrue(ProjectDetailsView.failureText(failed.refreshFailure!).contains("could not be saved"))
+        XCTAssertTrue(ProjectsView.status(failed).contains("Local save failed"))
+        let host = NSHostingView(rootView: ProjectDetailsView(row: failed, back: {}, refresh: {},
+            recoveryMessage: "Project not reconnected. The saved reference is unchanged."))
+        XCTAssertTrue(host.rootView.row.isStale)
+        XCTAssertNotNil(host.rootView.row.lastReadAt)
+        XCTAssertNotNil(host.rootView.recoveryMessage)
+    }
+
     func testPerRowStatusKeepsPartialAndGrantFailuresDistinct() {
         let id = UUID()
         let base = ProjectRowState(reference: reference(id, order: 0), inspection: nil)
