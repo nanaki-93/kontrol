@@ -9,7 +9,7 @@ struct FoundationSettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: AppMetrics.space4) {
             PageHeader("Settings")
-            EmptyState("No settings available yet.")
+            AISettingsView(store: dependencies.aiSettingsStore)
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, alignment: .leading)

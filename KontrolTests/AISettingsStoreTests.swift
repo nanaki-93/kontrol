@@ -255,6 +255,26 @@ final class AISettingsStoreTests: XCTestCase {
         XCTAssertNotEqual(store.connectionStatus, .modelAvailable)
     }
 
+    func testSettingsCopyDistinguishesDisabledMissingKeyAndRetryableRemoval() throws {
+        let repository = SettingsMemoryRepository(), credentials = SettingsMemoryCredentials()
+        let store = AISettingsStore(repository: repository, credentials: credentials)
+        XCTAssertFalse(store.presentation.enabled)
+        XCTAssertEqual(AISettingsView.credentialMessage(store.credentialStatus), "Key: Not saved")
+        try store.saveConfiguration(modelID: "gpt-4o-mini", credential: first, expectedRevision: nil)
+        XCTAssertFalse(store.presentation.enabled, "Save must never opt in")
+        XCTAssertEqual(AISettingsView.credentialMessage(store.credentialStatus), "Key: Saved on this device (hidden)")
+        credentials.failRemove = true
+        XCTAssertThrowsError(try store.removeKey(expectedRevision: store.presentation.revision))
+        XCTAssertFalse(store.presentation.enabled)
+        XCTAssertTrue(store.presentation.hasCredential)
+        XCTAssertEqual(store.error, .removalFailed)
+        XCTAssertTrue(AISettingsView.errorMessage(store.error!).contains("Retry Remove key"))
+        credentials.failRemove = false
+        try store.removeKey(expectedRevision: store.presentation.revision)
+        XCTAssertFalse(store.presentation.hasCredential)
+        XCTAssertEqual(AISettingsView.credentialMessage(store.credentialStatus), "Key: Not saved")
+    }
+
     func testSaveDoesNotEnableAndEnabledConfigurationHasNoPublishedSecret() throws {
         let repository = SettingsMemoryRepository(), credentials = SettingsMemoryCredentials()
         let store = try configured(repository, credentials)

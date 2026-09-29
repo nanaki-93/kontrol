@@ -213,6 +213,8 @@ final class SettingsSceneTests: XCTestCase {
         let graph = try XCTUnwrap(launch.dependencies)
         XCTAssertTrue(graph.container === container)
         XCTAssertTrue(FoundationSettingsView(dependencies: graph).dependencies === graph)
+        XCTAssertFalse(graph.aiSettingsStore.presentation.enabled)
+        XCTAssertEqual(graph.aiSettingsStore.credentialStatus, .notConfigured)
         XCTAssertTrue(AppShell(navigation: navigation, dependencies: graph).dependencies === graph)
         navigation.select(.settings)
         XCTAssertEqual(AppShell.contentKind(for: navigation.selectedDestination), .settings)
@@ -239,26 +241,26 @@ final class SettingsSceneTests: XCTestCase {
                  attribute($0, kAXDescriptionAttribute) as? String == "Settings")
             }.count, 1)
             XCTAssertTrue(nodes.contains {
-                attribute($0, kAXValueAttribute) as? String == "No settings available yet." ||
-                attribute($0, kAXDescriptionAttribute) as? String == "No settings available yet."
-            })
-            XCTAssertFalse(nodes.contains { attribute($0, kAXRoleAttribute) as? String == kAXButtonRole },
-                           "Foundation Settings must not advertise controls before F13")
+                attribute($0, kAXIdentifierAttribute) as? String == "ai-settings"
+            }, "Both entries must expose the shared AI configuration surface")
+            for identifier in ["ai-enabled-status", "ai-key-status", "ai-edit", "ai-enable", "ai-test-connection"] {
+                XCTAssertTrue(nodes.contains { attribute($0, kAXIdentifierAttribute) as? String == identifier },
+                              "Missing accessible AI control or status: \(identifier)")
+            }
         }
         try await Task.sleep(for: .milliseconds(100))
-        // At 130% the Settings scene retains a compact window and its entire
-        // foundation message remains visible. It has no phantom F13 actions.
+        // At 130% the Settings scene retains a compact viewport. The first
+        // status and the edit action remain visible; lower controls scroll.
         let settingsAX = try axWindow(settingsWindow)
         let settingsBounds = try axFrame(settingsAX)
         XCTAssertGreaterThanOrEqual(settingsBounds.width, 520)
         XCTAssertGreaterThanOrEqual(settingsBounds.height, 340)
         let settingsNodes = axDescendants(settingsAX)
-        let emptyMessage = try XCTUnwrap(settingsNodes.first {
-            axAttribute($0, kAXValueAttribute) as? String == "No settings available yet." ||
-            axAttribute($0, kAXDescriptionAttribute) as? String == "No settings available yet."
+        let status = try XCTUnwrap(settingsNodes.first {
+            axAttribute($0, kAXIdentifierAttribute) as? String == "ai-enabled-status"
         })
-        let messageBounds = try axFrame(emptyMessage)
-        XCTAssertTrue(settingsBounds.contains(messageBounds), "130% message must be visible in compact Settings")
+        XCTAssertEqual(axAttribute(status, kAXValueAttribute) as? String, "AI lessons: Off")
+        XCTAssertTrue(settingsBounds.contains(try axFrame(status)), "130% status must be visible in compact Settings")
         let enlargedHeading = try XCTUnwrap(settingsNodes.first {
             axAttribute($0, kAXRoleAttribute) as? String == kAXHeadingRole &&
             (axAttribute($0, kAXValueAttribute) as? String == "Settings" ||
