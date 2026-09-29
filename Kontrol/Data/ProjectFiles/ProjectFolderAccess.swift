@@ -52,6 +52,20 @@ struct ProjectFolderAccess {
 
     /// Never retry with a raw URL when resolution, freshness, or access fails.
     func withBookmark<T>(_ data: Data, perform body: (URL) async throws -> T) async throws -> T {
+        try await withResolvedBookmark(data, completion: .read, perform: body)
+    }
+
+    /// Use only for mutation IO whose body owns its commit-point cancellation policy. A body
+    /// that has committed must be able to return its receipt even when cancellation arrives.
+    /// Unlike reads, this entry point does not check cancellation after the body returns.
+    func withMutationBookmark<T>(_ data: Data, perform body: (URL) async throws -> T) async throws -> T {
+        try await withResolvedBookmark(data, completion: .mutation, perform: body)
+    }
+
+    private enum CompletionPolicy { case read, mutation }
+
+    private func withResolvedBookmark<T>(_ data: Data, completion: CompletionPolicy,
+                                         perform body: (URL) async throws -> T) async throws -> T {
         try Task.checkCancellation()
         guard !data.isEmpty else { throw ProjectFolderAccessError.unresolved }
         let resolved: (folder: URL, isStale: Bool)
@@ -63,7 +77,7 @@ struct ProjectFolderAccess {
         }
         try Task.checkCancellation()
         guard !resolved.isStale else { throw ProjectFolderAccessError.stale }
-        return try await withScope(resolved.folder, deniedAs: .revoked, perform: body)
+        return try await withScope(resolved.folder, deniedAs: .revoked, completion: completion, perform: body)
     }
 
     /// Called only after a successful selected-folder inspection and explicit Add/Reconnect.
@@ -83,6 +97,7 @@ struct ProjectFolderAccess {
     }
 
     private func withScope<T>(_ folder: URL, deniedAs failure: ProjectFolderAccessError,
+                              completion: CompletionPolicy = .read,
                               perform body: (URL) async throws -> T) async throws -> T {
         try Task.checkCancellation()
         guard folder.isFileURL else { throw ProjectFolderAccessError.invalidFolder }
@@ -97,8 +112,11 @@ struct ProjectFolderAccess {
             throw failure
         }
         guard isDirectory else { throw ProjectFolderAccessError.invalidFolder }
-        let result = try await body(folder)
+        // The last scope-level check is before IO. The mutation body must handle cancellation
+        // before its commit point and verify the outcome once committing begins.
         try Task.checkCancellation()
+        let result = try await body(folder)
+        if case .read = completion { try Task.checkCancellation() }
         return result
     }
 

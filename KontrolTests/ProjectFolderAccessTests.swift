@@ -12,9 +12,12 @@ final class ProjectFolderAccessTests: XCTestCase {
         var starts = 0
         var stops = 0
         var creations = 0
+        var resolutions = 0
+        var onStart: (() -> Void)?
         let bookmark = Data([0x01, 0x02, 0x03])
 
         func resolve(_ data: Data) throws -> (folder: URL, isStale: Bool) {
+            resolutions += 1
             if let resolveError { throw resolveError }
             guard let resolvedFolder else { throw ProjectFolderAccessError.unresolved }
             return (resolvedFolder, stale)
@@ -28,6 +31,7 @@ final class ProjectFolderAccessTests: XCTestCase {
 
         func startAccessing(_ folder: URL) -> Bool {
             starts += 1
+            onStart?()
             return allowed
         }
 
@@ -124,6 +128,120 @@ final class ProjectFolderAccessTests: XCTestCase {
         }
         XCTAssertEqual(fake.starts, 2)
         XCTAssertEqual(fake.stops, 2)
+    }
+
+    func testMutationCancellationBeforeScopeAndBeforeBodyPreventsWork() async throws {
+        let url = try folder()
+        let fake = FakeOperations()
+        fake.resolvedFolder = url
+        let access = ProjectFolderAccess(operations: fake)
+        var writes = 0
+
+        let alreadyCanceled = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await access.withMutationBookmark(fake.bookmark) { _ in
+                writes += 1
+                return 1
+            }
+        }
+        do {
+            _ = try await alreadyCanceled.value
+            XCTFail("Expected cancellation")
+        } catch is CancellationError { }
+        XCTAssertEqual(fake.resolutions, 0)
+        XCTAssertEqual(fake.starts, 0)
+
+        // Cancellation after scope acquisition still prevents entry into the mutation body.
+        fake.onStart = { withUnsafeCurrentTask { $0?.cancel() } }
+        let canceledInScope = Task {
+            try await access.withMutationBookmark(fake.bookmark) { _ in
+                writes += 1
+                return 2
+            }
+        }
+        do {
+            _ = try await canceledInScope.value
+            XCTFail("Expected cancellation")
+        } catch is CancellationError { }
+        XCTAssertEqual(writes, 0)
+        XCTAssertEqual(fake.starts, 1)
+        XCTAssertEqual(fake.stops, 1)
+    }
+
+    func testMutationReturnsCommittedReceiptWhenCanceledAtBodyReturnButReadStillCancels() async throws {
+        let url = try folder()
+        let fake = FakeOperations()
+        fake.resolvedFolder = url
+        let access = ProjectFolderAccess(operations: fake)
+        let receipt = "verified revision"
+        let mutation = Task {
+            try await access.withMutationBookmark(fake.bookmark) { scoped in
+                XCTAssertEqual(scoped, url)
+                // Stand-in for a committed write and its verified receipt.
+                withUnsafeCurrentTask { $0?.cancel() }
+                return receipt
+            }
+        }
+        let returnedReceipt = try await mutation.value
+        XCTAssertEqual(returnedReceipt, receipt)
+
+        let read = Task {
+            try await access.withBookmark(fake.bookmark) { _ in
+                withUnsafeCurrentTask { $0?.cancel() }
+                return receipt
+            }
+        }
+        do {
+            _ = try await read.value
+            XCTFail("Read must still reject a canceled result")
+        } catch is CancellationError { }
+        XCTAssertEqual(fake.starts, 2)
+        XCTAssertEqual(fake.stops, 2)
+    }
+
+    func testMutationBookmarkFailuresAndBodyThrowReleaseWithoutFallback() async throws {
+        let url = try folder()
+        let fake = FakeOperations()
+        fake.resolvedFolder = url
+        let access = ProjectFolderAccess(operations: fake)
+        var invoked = false
+        func expect(_ failure: ProjectFolderAccessError) async {
+            do {
+                _ = try await access.withMutationBookmark(fake.bookmark) { _ -> Int in
+                    invoked = true
+                    return 0
+                }
+                XCTFail("Expected \(failure)")
+            } catch let error as ProjectFolderAccessError {
+                XCTAssertEqual(error, failure)
+            } catch {
+                XCTFail("Unexpected error: \(error)")
+            }
+        }
+        fake.stale = true
+        await expect(.stale)
+        fake.stale = false
+        fake.resolveError = CocoaError(.fileNoSuchFile)
+        await expect(.unresolved)
+        fake.resolveError = CocoaError(.fileReadNoPermission)
+        await expect(.revoked)
+        fake.resolveError = nil
+        fake.allowed = false
+        await expect(.revoked)
+        XCTAssertFalse(invoked)
+        XCTAssertEqual(fake.starts, 1)
+        XCTAssertEqual(fake.stops, 0)
+        fake.allowed = true
+        do {
+            _ = try await access.withMutationBookmark(fake.bookmark) { _ -> Int in
+                throw ProjectFolderAccessError.invalidFolder
+            }
+            XCTFail("Expected body error")
+        } catch let error as ProjectFolderAccessError {
+            XCTAssertEqual(error, .invalidFolder)
+        }
+        XCTAssertEqual(fake.starts, 2)
+        XCTAssertEqual(fake.stops, 1)
     }
 
     func testCancellationDuringOperationReleasesScope() async throws {
