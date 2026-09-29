@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "topics": [
+    { "id": "go", "name": "Go" },
+    { "id": "java", "name": "Java" },
+    { "id": "software-engineering", "name": "Software Engineering" },
+    { "id": "security", "name": "Security" },
+    { "id": "system-design", "name": "System Design" },
+    { "id": "ai", "name": "AI" },
+    { "id": "japan", "name": "Japan" },
+    { "id": "gaming", "name": "Gaming" },
+    { "id": "anime", "name": "Anime" }
+  ],
+  "initialSelectedTopicIDs": [
+    "go", "java", "software-engineering", "security", "system-design", "ai", "japan"
+  ],
+  "feeds": [
+    {
+      "id": "368191B6-FCD2-45EA-ACFB-86BD36FE0847",
+      "name": "The Go Blog",
+      "url": "https://go.dev/blog/feed.atom",
+      "topicIDs": ["go"]
+    },
+    {
+      "id": "6F530A1B-C27C-43AA-940F-7CA94396DF64",
+      "name": "Inside Java",
+      "url": "https://inside.java/feed.xml",
+      "topicIDs": ["java"]
+    },
+    {
+      "id": "CDF91E1D-2AD5-43A7-BF95-1985CE17BA45",
+      "name": "Martin Fowler",
+      "url": "https://martinfowler.com/feed.atom",
+      "topicIDs": ["software-engineering", "system-design"]
+    },
+    {
+      "id": "F66F6A65-03CF-4473-9332-4FE041FD2940",
+      "name": "InfoQ",
+      "url": "https://feed.infoq.com/",
+      "topicIDs": ["system-design", "software-engineering"]
+    },
+    {
+      "id": "CC3BB6EA-C0DE-426E-90E6-B2DE20C11976",
+      "name": "Schneier on Security",
+      "url": "https://www.schneier.com/feed/atom/",
+      "topicIDs": ["security"]
+    },
+    {
+      "id": "127ABCD7-041F-459B-B500-85DB577798AD",
+      "name": "Google AI",
+      "url": "https://blog.google/innovation-and-ai/technology/ai/rss/",
+      "topicIDs": ["ai"]
+    },
+    {
+      "id": "5A434D6B-DFF5-45CE-B33D-F92A25E23960",
+      "name": "The Japan Times",
+      "url": "https://www.japantimes.co.jp/feed/",
+      "topicIDs": ["japan"]
+    }
+  ]
+}
