@@ -72,6 +72,16 @@ enum GenerationContextError: Error, Equatable {
     case invalidScope, unavailable, invalidEvidence, readFailure
 }
 
+// Detached projections prepared inside the acceptance transaction. Publication
+// belongs to LearningCatalogStore in the next step, never to a precommit read.
+struct GeneratedLessonInsertionResult {
+    let lessonID: String
+    let assignedSlot: LessonSlotSnapshot? // nil means saved without moving choices
+    let catalog: LearningCatalogSnapshot
+    let history: [LessonHistorySnapshot]
+    let coverage: LearningCoverageSnapshot
+}
+
 struct LessonGenerationSelection {
     let topicID: String
     let objectiveKey: String? // nil selects the first unseen, eligible canonical objective

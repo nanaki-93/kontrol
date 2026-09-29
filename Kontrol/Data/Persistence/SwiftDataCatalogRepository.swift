@@ -6,6 +6,7 @@ protocol CatalogRepository {
     func importIfNeeded(_ catalog: ValidatedCatalog) throws -> CatalogImportResult
     func loadSnapshot() throws -> LearningCatalogSnapshot
     func generationContext(topicID: String) throws -> LessonGenerationContext
+    func acceptGeneratedLesson(_ lesson: ValidatedGeneratedLesson, now: Date) throws -> GeneratedLessonInsertionResult
     func reconcileSlots(now: Date) throws -> LearningCatalogSnapshot
     func openLesson(lessonID: String, now: Date) throws -> LessonMutationResult
     func openConceptLesson(lessonID: String, expectedSlot: LessonSlotSnapshot?, expectedConceptID: String, now: Date) throws -> LessonMutationResult
@@ -29,6 +30,10 @@ protocol CatalogRepository {
 extension CatalogRepository {
     func generationContext(topicID: String) throws -> LessonGenerationContext {
         throw GenerationContextError.unavailable
+    }
+
+    func acceptGeneratedLesson(_ lesson: ValidatedGeneratedLesson, now: Date) throws -> GeneratedLessonInsertionResult {
+        throw LessonGenerationError.persistenceFailure
     }
 
     func loadCoverage() throws -> LearningCoverageSnapshot {
@@ -275,10 +280,14 @@ final class SwiftDataCatalogRepository: CatalogRepository {
     }
 
     func generationContext(topicID: String) throws -> LessonGenerationContext {
-        // Never call import, backfill, reconcile, or save from this read. The
-        // same private context supplies all membership and personal evidence.
         let context = ModelContext(container)
         context.autosaveEnabled = false
+        return try generationContext(topicID: topicID, in: context)
+    }
+
+    private func generationContext(topicID: String, in context: ModelContext) throws -> LessonGenerationContext {
+        // Never call import, backfill, reconcile, or save from this read. The
+        // same private context supplies all membership and personal evidence.
         do {
             let projection = try snapshot(in: context)
             let evidence = try selectionEvidence(in: context, catalog: projection)
@@ -334,6 +343,76 @@ final class SwiftDataCatalogRepository: CatalogRepository {
         } catch {
             throw GenerationContextError.readFailure
         }
+    }
+
+    func acceptGeneratedLesson(_ lesson: ValidatedGeneratedLesson, now: Date) throws -> GeneratedLessonInsertionResult {
+        guard now.timeIntervalSinceReferenceDate.isFinite else { throw LessonGenerationError.invalidCandidate }
+        let context = ModelContext(container)
+        context.autosaveEnabled = false
+        let definition = lesson.definition
+        let current: LessonGenerationContext
+        do {
+            current = try generationContext(topicID: definition.topicID, in: context)
+        } catch GenerationContextError.invalidScope {
+            throw LessonGenerationError.staleContext
+        } catch GenerationContextError.unavailable {
+            throw LessonGenerationError.staleContext
+        } catch {
+            throw LessonGenerationError.persistenceFailure
+        }
+        // Reconstruct and revalidate the *original* candidate against the latest
+        // evidence. The locally minted ID and provenance cannot change on retry.
+        let checked = try GeneratedLessonValidator.validate(lesson.candidate, request: lesson.request,
+            context: current, registry: lesson.registry, requestedModel: lesson.requestedModel,
+            returnedModel: lesson.returnedModel, now: lesson.validatedAt)
+        guard checked.definition == definition,
+              lesson.catalogID == current.membership.catalogID,
+              lesson.catalogVersion == current.membership.catalogVersion,
+              lesson.objectiveRegistryVersion == lesson.registry.version else {
+            throw LessonGenerationError.staleContext
+        }
+        // Validate selector eligibility using the same fresh evidence before
+        // assigning only this lesson to the first vacant index. No reconcile.
+        let before = try snapshot(in: context)
+        let evidence = try selectionEvidence(in: context, catalog: before)
+        let vacancy = (0..<LessonSelector.slotsPerTopic).first { index in
+            !before.slots.contains { $0.topicID == definition.topicID && $0.slotIndex == index }
+        }
+        var assigned: LessonSlotSnapshot?
+        if let vacancy {
+            let eligible = try LessonSelector.restoredVacancy(lessonID: definition.id,
+                definitions: before.definitions + [definition], concepts: before.concepts,
+                subtopics: before.subtopics,
+                progress: before.progress + [LessonProgressSnapshot(lessonID: definition.id, status: .available)],
+                slots: before.slots, terminal: evidence.terminal,
+                completedConceptIDs: evidence.completed, membership: evidence.membership,
+                activePins: evidence.activePins, now: now)
+            // A vacancy is offered only when the candidate is eligible. Never
+            // fill a later vacancy if the first one cannot accept this lesson.
+            if eligible?.slotIndex == vacancy { assigned = eligible }
+        }
+        context.insert(LessonDefinition(id: definition.id, objectiveKey: definition.objectiveKey,
+            title: definition.title, topicID: definition.topicID, subtopicID: definition.subtopicID,
+            conceptIDs: definition.conceptIDs, difficulty: definition.difficulty, format: definition.format,
+            estimatedMinutes: definition.estimatedMinutes, prerequisiteConceptIDs: definition.prerequisiteConceptIDs,
+            explanation: definition.explanation, workedExample: definition.workedExample,
+            exercise: definition.exercise, referenceAnswer: definition.referenceAnswer,
+            selfCheckCriteria: definition.selfCheckCriteria, contentVersion: definition.contentVersion,
+            normalizedContentHash: definition.normalizedContentHash, source: definition.source,
+            provenance: definition.provenance, objective: definition.objective))
+        if let assigned {
+            context.insert(LessonSlot(topicID: assigned.topicID, slotIndex: assigned.slotIndex,
+                                      lessonID: assigned.lessonID, assignedAt: assigned.assignedAt))
+        }
+        let catalog = try snapshot(in: context)
+        let receipt = GeneratedLessonInsertionResult(lessonID: definition.id, assignedSlot: assigned,
+            catalog: catalog, history: try history(in: context, catalog: catalog),
+            coverage: try coverage(in: context, catalog: catalog))
+        do {
+            try beforeSave()
+            try save(context)
+        } catch { throw LessonGenerationError.persistenceFailure }
+        return receipt
     }
 
     func reconcileSlots(now: Date) throws -> LearningCatalogSnapshot {

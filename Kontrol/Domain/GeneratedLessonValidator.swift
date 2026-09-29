@@ -9,8 +9,22 @@ struct ValidatedGeneratedLesson {
     let catalogID: String
     let catalogVersion: Int
     let objectiveRegistryVersion: Int
+    let request: LessonGenerationRequest
+    let candidate: CandidateLesson
+    let registry: GenerationObjectives
+    let requestedModel: String
+    let returnedModel: String?
+    let validatedAt: Date
 
-    fileprivate init(definition: LessonDefinitionSnapshot, request: LessonGenerationRequest) {
+    fileprivate init(definition: LessonDefinitionSnapshot, request: LessonGenerationRequest,
+                     candidate: CandidateLesson, registry: GenerationObjectives,
+                     requestedModel: String, returnedModel: String?, now: Date) {
+        self.request = request
+        self.candidate = candidate
+        self.registry = registry
+        self.requestedModel = requestedModel
+        self.returnedModel = returnedModel
+        validatedAt = now
         self.definition = definition
         operationID = request.operationID
         catalogID = request.catalogID
@@ -167,6 +181,7 @@ enum GeneratedLessonValidator {
             throw LessonGenerationError.duplicateIdentity
         case .rejected(.invalidMetadata): throw LessonGenerationError.invalidCandidate
         }
-        return ValidatedGeneratedLesson(definition: definition, request: request)
+        return ValidatedGeneratedLesson(definition: definition, request: request, candidate: candidate,
+            registry: registry, requestedModel: requestedModel, returnedModel: returnedModel, now: now)
     }
 }
