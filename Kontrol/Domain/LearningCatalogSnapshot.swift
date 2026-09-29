@@ -201,6 +201,15 @@ enum CatalogMembershipAvailability: Equatable {
     case unavailable // no matching validated catalog established current membership
 }
 
+// Only terminal completion records are eligible for practice. The date belongs
+// to progress/attempt evidence, not to an installed lesson definition.
+struct CoverageCompletionEvidence: Equatable {
+    let lessonID: String
+    let status: LessonProgressStatus
+    let completedAt: Date?
+    let metadata: LessonTerminalMetadata?
+}
+
 enum LearningEvidenceError: Error, Equatable {
     case unsupportedVersion(Int)
     case corruptPayload
