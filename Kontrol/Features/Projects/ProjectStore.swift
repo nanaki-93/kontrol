@@ -153,6 +153,14 @@ final class ProjectStore: ObservableObject {
         for row in rows { refresh(row.reference.id) }
     }
 
+    /// Main-window key events can occur before Projects is opened or from either
+    /// main window. Never fetch references on activation; use the same bounded,
+    /// per-row queue as manual and initial refresh once references are loaded.
+    func refreshOnMainWindowActivation() {
+        guard isLoaded else { return }
+        refreshAll()
+    }
+
     func select(_ id: UUID) {
         guard rows.contains(where: { $0.reference.id == id }) else { return }
         selectedID = id

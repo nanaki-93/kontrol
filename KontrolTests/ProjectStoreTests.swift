@@ -248,6 +248,52 @@ final class ProjectStoreTests: XCTestCase {
         XCTAssertFalse(subject.rows[0].isStale)
     }
 
+    func testMainWindowActivationsRefreshLoadedReferencesIndependentlyAndCoalesce() async throws {
+        let io = DeferredInspector(), repo = StubRepository()
+        let first = reference(31), second = reference(32)
+        repo.saved = [first, second]
+        let subject = ProjectStore(inspector: io, repository: repo)
+        // Key events in either window before Projects is entered do not fetch or inspect.
+        subject.refreshOnMainWindowActivation()
+        subject.refreshOnMainWindowActivation()
+        XCTAssertFalse(subject.isLoaded)
+        XCTAssertEqual(repo.fetches, 0)
+        let beforeLoad = await io.counts()
+        XCTAssertEqual(beforeLoad.0, 0)
+
+        try subject.enterProjects()
+        await eventually { await io.counts().0 == 2 }
+        await io.release(first.bookmarkData, result: .success(inspection()))
+        await io.release(second.bookmarkData, result: .success(inspection()))
+        await eventually { repo.successfulReads == 2 }
+        // Two different main windows can both become key while the reads are pending.
+        subject.refreshOnMainWindowActivation()
+        await eventually { await io.counts().0 == 4 }
+        for _ in 0..<20 { subject.refreshOnMainWindowActivation() }
+        let coalesced = await io.counts()
+        XCTAssertEqual(coalesced.0, 4)
+        await io.release(first.bookmarkData, result: .failure(ProjectInspectionFailure.access(.staleBookmark)))
+        await eventually { await io.starts(for: first.bookmarkData) == 3 }
+        XCTAssertTrue(subject.rows[0].isStale)
+        // One failed grant does not block the other window's healthy project.
+        await io.release(second.bookmarkData, result: .success(inspection()))
+        await eventually { await io.starts(for: second.bookmarkData) == 3 }
+        await io.release(first.bookmarkData, result: .success(inspection()))
+        await io.release(second.bookmarkData, result: .success(inspection()))
+        await eventually { repo.successfulReads == 5 }
+        await eventually { await io.counts().1 == 0 }
+        let firstStarts = await io.starts(for: first.bookmarkData)
+        let secondStarts = await io.starts(for: second.bookmarkData)
+        let peak = await io.counts().2
+        XCTAssertEqual(firstStarts, 3)
+        XCTAssertEqual(secondStarts, 3)
+        XCTAssertLessThanOrEqual(peak, 3)
+        XCTAssertFalse(subject.rows[0].isStale)
+        XCTAssertEqual(repo.fetches, 1)
+        XCTAssertEqual(repo.inserts, 0)
+        XCTAssertEqual(repo.reconnects, 0)
+    }
+
     func testPartialAndFailedReadsRetainSuccessTimestampAndStaleSnapshot() async throws {
         let io = DeferredInspector(), repo = StubRepository()
         let ref = reference(7)

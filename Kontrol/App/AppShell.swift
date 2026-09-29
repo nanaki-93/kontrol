@@ -131,7 +131,8 @@ struct AppShell: View {
         .foregroundStyle(AppColors.textPrimary)
         .preferredColorScheme(.dark)
         .onAppear { navigation.attachDrafts(dependencies.lessonDraftStore) }
-        .background(WindowCloseGuard { navigation.flushForLifecycle() })
+        .background(WindowCloseGuard(flush: { navigation.flushForLifecycle() },
+                                     onBecomeKey: { dependencies.projectStore.refreshOnMainWindowActivation() }))
     }
 
     private var navigationBar: some View {

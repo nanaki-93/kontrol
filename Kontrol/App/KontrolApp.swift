@@ -6,6 +6,12 @@ import SwiftUI
 /// by the view coordinator and forwards other window delegate messages to SwiftUI.
 struct WindowCloseGuard: NSViewRepresentable {
     let flush: () -> Bool
+    let onBecomeKey: () -> Void
+
+    init(flush: @escaping () -> Bool, onBecomeKey: @escaping () -> Void = {}) {
+        self.flush = flush
+        self.onBecomeKey = onBecomeKey
+    }
 
     final class GuardView: NSView {
         weak var coordinator: Coordinator?
@@ -17,10 +23,19 @@ struct WindowCloseGuard: NSViewRepresentable {
 
     final class Coordinator: NSObject, NSWindowDelegate {
         var flush: () -> Bool
+        var onBecomeKey: () -> Void
         weak var window: NSWindow?
         weak var previous: (any NSWindowDelegate)?
 
-        init(flush: @escaping () -> Bool) { self.flush = flush }
+        init(flush: @escaping () -> Bool, onBecomeKey: @escaping () -> Void) {
+            self.flush = flush
+            self.onBecomeKey = onBecomeKey
+        }
+
+        func windowDidBecomeKey(_ notification: Notification) {
+            onBecomeKey()
+            previous?.windowDidBecomeKey?(notification)
+        }
 
         func windowShouldClose(_ sender: NSWindow) -> Bool {
             guard flush() else { return false }
@@ -29,6 +44,7 @@ struct WindowCloseGuard: NSViewRepresentable {
 
         override func responds(to selector: Selector!) -> Bool {
             selector == #selector(NSWindowDelegate.windowShouldClose(_:)) ||
+                selector == #selector(NSWindowDelegate.windowDidBecomeKey(_:)) ||
                 super.responds(to: selector) || previous?.responds(to: selector) == true
         }
 
@@ -42,6 +58,8 @@ struct WindowCloseGuard: NSViewRepresentable {
             previous = window.delegate
             self.window = window
             window.delegate = self
+            // Installation may follow the key notification during SwiftUI view setup.
+            if window.isKeyWindow { onBecomeKey() }
         }
 
         func uninstall() {
@@ -51,7 +69,7 @@ struct WindowCloseGuard: NSViewRepresentable {
         }
     }
 
-    func makeCoordinator() -> Coordinator { Coordinator(flush: flush) }
+    func makeCoordinator() -> Coordinator { Coordinator(flush: flush, onBecomeKey: onBecomeKey) }
     func makeNSView(context: Context) -> GuardView {
         let view = GuardView()
         view.coordinator = context.coordinator
@@ -59,6 +77,7 @@ struct WindowCloseGuard: NSViewRepresentable {
     }
     func updateNSView(_ view: GuardView, context: Context) {
         context.coordinator.flush = flush
+        context.coordinator.onBecomeKey = onBecomeKey
         context.coordinator.install(view.window)
     }
     static func dismantleNSView(_ view: GuardView, coordinator: Coordinator) { coordinator.uninstall() }

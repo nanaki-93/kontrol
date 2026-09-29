@@ -44,16 +44,38 @@ final class AppShellTests: XCTestCase {
 
     func testWindowCloseGuardVetoesFailedFlushAndAllowsRetry() {
         var canClose = false
-        let guardView = WindowCloseGuard(flush: { canClose })
+        var activations = 0
+        let guardView = WindowCloseGuard(flush: { canClose }, onBecomeKey: { activations += 1 })
         let coordinator = guardView.makeCoordinator()
         let window = NSWindow(contentRect: .zero, styleMask: [.titled, .closable], backing: .buffered, defer: false)
         coordinator.install(window)
+        coordinator.windowDidBecomeKey(Notification(name: NSWindow.didBecomeKeyNotification, object: window))
+        XCTAssertEqual(activations, 1)
         XCTAssertFalse(coordinator.windowShouldClose(window))
         XCTAssertTrue(window.delegate === coordinator)
         canClose = true
         coordinator.flush = { canClose }
         XCTAssertTrue(coordinator.windowShouldClose(window))
         coordinator.uninstall()
+    }
+
+    func testMainWindowGuardKeepsPreviousDelegateAndForwardsKeyEvents() {
+        final class Previous: NSObject, NSWindowDelegate {
+            var keyEvents = 0
+            func windowDidBecomeKey(_ notification: Notification) { keyEvents += 1 }
+        }
+        let previous = Previous()
+        let window = NSWindow(contentRect: .zero, styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.delegate = previous
+        var activations = 0
+        let coordinator = WindowCloseGuard(flush: { true }, onBecomeKey: { activations += 1 }).makeCoordinator()
+        coordinator.install(window)
+        coordinator.windowDidBecomeKey(Notification(name: NSWindow.didBecomeKeyNotification, object: window))
+        XCTAssertEqual(activations, 1)
+        XCTAssertEqual(previous.keyEvents, 1)
+        XCTAssertTrue(window.delegate === coordinator)
+        coordinator.uninstall()
+        XCTAssertTrue(window.delegate === previous)
     }
 
     func testShellUsesAppOwnedDraftsAndStableIDRouteAcrossSlotRotation() throws {
