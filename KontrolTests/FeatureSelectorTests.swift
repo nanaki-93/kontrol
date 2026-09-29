@@ -52,10 +52,93 @@ final class FeatureSelectorTests: XCTestCase {
         let ready = [feature("candidate")]
         for version: Int? in [nil, 2] {
             let selection = FeatureSelector().select(from: inspection(ready, version: version))
-            XCTAssertEqual(selection, FeatureSelection(candidates: [], state: .unavailable))
+            XCTAssertEqual(selection.state, .unavailable)
+            XCTAssertEqual(selection.progress, .unavailable)
+            XCTAssertNil(selection.statusCounts)
+            XCTAssertTrue(selection.unresolvedDependencies.isEmpty)
         }
-        XCTAssertEqual(FeatureSelector().select(from: inspection(ready, enumeration: .failed)).state, .unavailable)
-        XCTAssertEqual(FeatureSelector().select(from: inspection([])).state, .noCandidates)
+        let failed = FeatureSelector().select(from: inspection(ready, enumeration: .failed))
+        XCTAssertEqual(failed.state, .unavailable)
+        XCTAssertEqual(failed.progress, .unavailable)
+        XCTAssertNil(failed.statusCounts)
+        XCTAssertEqual(FeatureSelector().select(from: inspection([])).state, .noFeatures)
+    }
+
+    func testEmptyAndAllCompleteAreDistinctAndProgressCountsValidatedFeatures() {
+        let empty = FeatureSelector().select(from: inspection([]))
+        XCTAssertEqual(empty.state, .noFeatures)
+        XCTAssertEqual(empty.progress, .complete(completed: 0, total: 0))
+        XCTAssertEqual(empty.statusCounts, FeatureStatusCounts(features: []))
+
+        let complete = FeatureSelector().select(from: inspection([feature("done", .completed),
+                                                                 feature("other", .completed)]))
+        XCTAssertEqual(complete.state, .allComplete)
+        XCTAssertEqual(complete.progress, .complete(completed: 2, total: 2))
+        XCTAssertEqual(complete.statusCounts?.completed, 2)
+        XCTAssertTrue(complete.candidates.isEmpty)
+    }
+
+    func testNoReadyCountsDistinguishPlannedActiveBlockedAndUnfinishedPrerequisites() {
+        let cases: [(ProjectFeatureStatus, FeatureStatusCounts)] = [
+            (.planned, FeatureStatusCounts(features: [feature("one", .planned)])),
+            (.active, FeatureStatusCounts(features: [feature("one", .active)])),
+            (.blocked, FeatureStatusCounts(features: [feature("one", .blocked)]))
+        ]
+        for (status, expected) in cases {
+            let result = FeatureSelector().select(from: inspection([feature("one", status)]))
+            XCTAssertEqual(result.state, .noReadyFeatures)
+            XCTAssertEqual(result.statusCounts, expected)
+            XCTAssertEqual(result.progress, .complete(completed: 0, total: 1))
+            XCTAssertTrue(result.unresolvedDependencies.isEmpty)
+        }
+
+        let mixed = [feature("z", dependencies: ["planned", "active", "planned"]),
+                     feature("a", dependencies: ["blocked", "done"]),
+                     feature("planned", .planned), feature("active", .active),
+                     feature("blocked", .blocked), feature("done", .completed)]
+        let result = FeatureSelector().select(from: inspection(mixed))
+        XCTAssertEqual(result.state, .noReadyFeatures)
+        XCTAssertEqual(result.progress, .complete(completed: 1, total: 6))
+        XCTAssertEqual(result.statusCounts, FeatureStatusCounts(features: mixed))
+        XCTAssertEqual(result.unresolvedDependencies, [
+            UnresolvedFeatureDependencies(featureID: "a", dependencyIDs: ["blocked"]),
+            UnresolvedFeatureDependencies(featureID: "z", dependencyIDs: ["active", "planned"])
+        ])
+        XCTAssertTrue(result.candidates.isEmpty)
+    }
+
+    func testExclusionsTakePrecedenceOverEmptyCompleteAndNoReadyButNotValidCandidates() {
+        let excluded = [".kontrol/features/invalid.md"]
+        for records in [[], [feature("done", .completed)], [feature("planned", .planned)]] {
+            let result = FeatureSelector().select(from: inspection(records, excluded: excluded))
+            XCTAssertEqual(result.state, .validationExclusions)
+            XCTAssertEqual(result.progress, .partial(completed: records.filter { $0.status == .completed }.count,
+                                                     total: records.count, excludedFiles: 1))
+            XCTAssertEqual(result.statusCounts, FeatureStatusCounts(features: records))
+            XCTAssertTrue(result.candidates.isEmpty)
+        }
+        let peers = [feature("done", .completed), feature("valid")]
+        let result = FeatureSelector().select(from: inspection(peers, excluded: excluded))
+        XCTAssertEqual(result.state, .candidatesAvailable)
+        XCTAssertEqual(ids(result), ["valid"])
+        XCTAssertEqual(result.progress, .partial(completed: 1, total: 2, excludedFiles: 1))
+        XCTAssertEqual(result.statusCounts?.completed, 1)
+    }
+
+    func testUnavailableOverridesExclusionsAndEvenCompletedRecords() {
+        let records = [feature("done", .completed), feature("ready")]
+        let unavailableCases: [(Int?, ProjectFeatureEnumeration)] = [
+            (nil, .complete), (2, .complete), (1, .failed)
+        ]
+        for (version, enumeration) in unavailableCases {
+            let result = FeatureSelector().select(from: inspection(records, version: version,
+                                                                     enumeration: enumeration,
+                                                                     excluded: ["bad.md"]))
+            XCTAssertEqual(result.state, .unavailable)
+            XCTAssertEqual(result.progress, .unavailable)
+            XCTAssertNil(result.statusCounts)
+            XCTAssertTrue(result.candidates.isEmpty)
+        }
     }
 
     func testFocusIsMembershipNotFocusOrderOrNumberOfMatchesAndWinsOverPriority() {

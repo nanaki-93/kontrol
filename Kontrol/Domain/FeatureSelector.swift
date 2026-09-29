@@ -12,25 +12,56 @@ enum FeatureSelectionReason: Equatable {
     case ready
 }
 
-/// The no-candidate case will be refined into distinct empty states by the next policy step.
 enum FeatureSelectionState: Equatable {
     case unavailable
     case candidatesAvailable
-    case noCandidates
+    case validationExclusions
+    case noFeatures
+    case allComplete
+    case noReadyFeatures
+}
+
+/// Counts only validated records; excluded files have unknown status.
+struct FeatureStatusCounts: Equatable {
+    let planned: Int
+    let ready: Int
+    let active: Int
+    let blocked: Int
+    let completed: Int
+
+    init(features: [ProjectFeature]) {
+        planned = features.filter { $0.status == .planned }.count
+        ready = features.filter { $0.status == .ready }.count
+        active = features.filter { $0.status == .active }.count
+        blocked = features.filter { $0.status == .blocked }.count
+        completed = features.filter { $0.status == .completed }.count
+    }
+}
+
+/// A validated ready record and the prerequisite IDs not currently completed.
+struct UnresolvedFeatureDependencies: Equatable {
+    let featureID: String
+    let dependencyIDs: [String]
 }
 
 struct FeatureSelection: Equatable {
     let candidates: [FeatureCandidate]
     let state: FeatureSelectionState
+    let progress: ProjectFeatureCount
+    /// Nil when the manifest or enumeration is unavailable; never implies zero work.
+    let statusCounts: FeatureStatusCounts?
+    let unresolvedDependencies: [UnresolvedFeatureDependencies]
 }
 
 /// Selects from already validated V1 records; never reads or changes project files.
 struct FeatureSelector {
     func select(from inspection: ProjectInspection) -> FeatureSelection {
+        let progress = inspection.featureCount
         guard inspection.manifest?.schemaVersion == 1,
               inspection.featureEnumeration == .complete,
               let focus = inspection.manifest?.currentFocus else {
-            return FeatureSelection(candidates: [], state: .unavailable)
+            return FeatureSelection(candidates: [], state: .unavailable, progress: progress,
+                                    statusCounts: nil, unresolvedDependencies: [])
         }
 
         let byID = Dictionary(uniqueKeysWithValues: inspection.features.map { ($0.id, $0) })
@@ -59,7 +90,24 @@ struct FeatureSelector {
                 (feature.dependsOn.isEmpty ? .ready : .dependenciesComplete)
             return FeatureCandidate(id: feature.id, reason: reason)
         }
-        return FeatureSelection(candidates: candidates,
-                                state: candidates.isEmpty ? .noCandidates : .candidatesAvailable)
+        let counts = FeatureStatusCounts(features: inspection.features)
+        let unresolved = inspection.features.filter { $0.status == .ready }.compactMap { feature -> UnresolvedFeatureDependencies? in
+            let ids = Set(feature.dependsOn.filter { byID[$0]?.status != .completed }).sorted()
+            return ids.isEmpty ? nil : UnresolvedFeatureDependencies(featureID: feature.id, dependencyIDs: ids)
+        }.sorted { $0.featureID < $1.featureID }
+        let state: FeatureSelectionState
+        if !candidates.isEmpty {
+            state = .candidatesAvailable
+        } else if !inspection.excludedFeaturePaths.isEmpty {
+            state = .validationExclusions
+        } else if inspection.features.isEmpty {
+            state = .noFeatures
+        } else if counts.completed == inspection.features.count {
+            state = .allComplete
+        } else {
+            state = .noReadyFeatures
+        }
+        return FeatureSelection(candidates: candidates, state: state, progress: progress,
+                                statusCounts: counts, unresolvedDependencies: unresolved)
     }
 }
