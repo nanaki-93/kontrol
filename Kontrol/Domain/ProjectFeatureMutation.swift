@@ -43,6 +43,21 @@ struct FeatureUndoRequest {
     let receipt: FeatureMutationReceipt
 }
 
+/// Session-only authorization for the most recently verified completion in one project.
+/// A successful-read receipt may change reference.revision without changing this grant.
+struct ProjectCompletionUndoToken {
+    let receipt: FeatureMutationReceipt
+    let manifestID: String
+    let expiresAt: Date
+
+    func matches(_ reference: ProjectReferenceSnapshot) -> Bool {
+        reference.id == receipt.projectID && reference.manifestID == manifestID &&
+            reference.bookmarkData == receipt.grantBookmarkData &&
+            receipt.relativePath == receipt.inverse.relativePath &&
+            receipt.verifiedSHA256 == receipt.inverse.completedSHA256
+    }
+}
+
 /// Only safe categories cross the IO boundary; no raw OS/parser messages or source text.
 enum FeatureMutationFailure: Error, Equatable {
     case conflict, undoConflict, missingTarget, changedIdentity, unpatchableSource

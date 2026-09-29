@@ -68,9 +68,13 @@ enum ProjectRefreshFailure: Equatable {
 /// Session-only IO outcome. The inspection remains the sole source for status and counts.
 enum ProjectCompletionState: Equatable {
     case writing(String)
+    case undoing(String)
     case refreshing(String)
     case saved(String)
+    case undone(String)
+    case undoFailed(String, FeatureMutationFailure)
     case savedButRefreshFailed(String, ProjectRefreshFailure)
+    case undoneButRefreshFailed(String, ProjectRefreshFailure)
     case failed(String, FeatureMutationFailure)
 }
 
@@ -156,6 +160,7 @@ final class ProjectStore: ObservableObject {
     private let completionClock: () -> Date
     private let completionValidator: @Sendable (ProjectSourceDocument, ProjectFeature) async -> Bool
     private var mutating: Set<UUID> = []
+    private var undoTokens: [UUID: ProjectCompletionUndoToken] = [:]
     private var refreshAfterMutation: Set<UUID> = []
     private struct MutationReconciliation {
         let receipt: FeatureMutationReceipt
@@ -219,6 +224,34 @@ final class ProjectStore: ObservableObject {
         return (row.reference, source)
     }
 
+    /// The clock is checked on access as well as activation: no timer or persistent
+    /// history can keep an expired action alive across a view switch.
+    func undoExpiration(in projectID: UUID) -> Date? {
+        guard let token = validUndoToken(in: projectID) else { return nil }
+        return token.expiresAt
+    }
+
+    func canUndoCompletion(in projectID: UUID) -> Bool {
+        guard validUndoToken(in: projectID) != nil,
+              !mutating.contains(projectID), !reconnecting.contains(projectID),
+              let row = rows.first(where: { $0.reference.id == projectID }),
+              !row.isRefreshing, refreshOperations[projectID]?.task == nil,
+              refreshOperations[projectID]?.queued != true,
+              !row.isRetainedInspection, row.refreshFailure == nil else { return false }
+        return true
+    }
+
+    private func validUndoToken(in id: UUID) -> ProjectCompletionUndoToken? {
+        guard let token = undoTokens[id] else { return nil }
+        guard completionClock() < token.expiresAt,
+              let reference = rows.first(where: { $0.reference.id == id })?.reference,
+              token.matches(reference) else {
+            undoTokens.removeValue(forKey: id)
+            return nil
+        }
+        return token
+    }
+
     /// Claim publication ownership before suspending. A verified IO receipt is not
     /// displayed as progress until the bounded inspector has read the saved revision.
     func markComplete(_ featureID: String, in projectID: UUID) async {
@@ -239,6 +272,8 @@ final class ProjectStore: ObservableObject {
                   receipt.relativePath == source.relativePath else {
                 throw FeatureMutationFailure.unverifiedWrite
             }
+            undoTokens[projectID] = ProjectCompletionUndoToken(receipt: receipt,
+                manifestID: reference.manifestID, expiresAt: completionClock().addingTimeInterval(30))
             let previous = rows.first(where: { $0.reference.id == projectID })?.inspection
             if let index = rows.firstIndex(where: { $0.reference.id == projectID }) {
                 rows[index].completion = .refreshing(featureID)
@@ -263,6 +298,11 @@ final class ProjectStore: ObservableObject {
         } catch {
             if let index = rows.firstIndex(where: { $0.reference.id == projectID }) {
                 let failure = (error as? FeatureMutationFailure) ?? .writeFailed
+                if let token = undoTokens[projectID], token.receipt.featureID == featureID,
+                   token.receipt.relativePath == source.relativePath,
+                   (Self.isTargetConflict(failure) || failure == .unverifiedWrite) {
+                    undoTokens.removeValue(forKey: projectID)
+                }
                 rows[index].completion = .failed(featureID, failure)
                 // A conflict or uncertain replacement invalidates the displayed revision.
                 // Require an explicit read before this source becomes actionable again.
@@ -281,6 +321,70 @@ final class ProjectStore: ObservableObject {
         if refreshAfterMutation.remove(projectID) != nil,
            case .failed = rows.first(where: { $0.reference.id == projectID })?.completion {
             refresh(projectID)
+        }
+    }
+
+    /// Undo is bound to the token's original grant and target, never to selection.
+    /// The writer compares the completed digest inside coordinated access before IO.
+    func undoCompletion(in projectID: UUID) async {
+        guard canUndoCompletion(in: projectID), let token = validUndoToken(in: projectID),
+              let index = rows.firstIndex(where: { $0.reference.id == projectID }) else { return }
+        let reference = rows[index].reference
+        let featureID = token.receipt.featureID
+        mutating.insert(projectID)
+        rows[index].completion = .undoing(featureID)
+        do {
+            let receipt = try await writer.undo(FeatureUndoRequest(reference: reference, receipt: token.receipt))
+            guard receipt.projectID == projectID, receipt.featureID == featureID,
+                  receipt.grantBookmarkData == reference.bookmarkData,
+                  receipt.relativePath == token.receipt.relativePath,
+                  receipt.verifiedSHA256 == token.receipt.inverse.originalSHA256 else {
+                throw FeatureMutationFailure.unverifiedWrite
+            }
+            undoTokens.removeValue(forKey: projectID)
+            let previous = rows.first(where: { $0.reference.id == projectID })?.inspection
+            if let index = rows.firstIndex(where: { $0.reference.id == projectID }) {
+                rows[index].completion = .refreshing(featureID)
+                rows[index].isStale = true
+                rows[index].isRetainedInspection = previous != nil
+            }
+            let failure = await reconcileSavedWrite(receipt, previous: previous)
+            if let index = rows.firstIndex(where: { $0.reference.id == projectID }) {
+                if let failure {
+                    rows[index].inspection = nil
+                    rows[index].lastReadAt = nil
+                    rows[index].isStale = true
+                    rows[index].isRetainedInspection = false
+                    rows[index].refreshFailure = failure
+                    rows[index].completion = .undoneButRefreshFailed(featureID, failure)
+                } else {
+                    rows[index].completion = .undone(featureID)
+                }
+            }
+        } catch {
+            let failure = (error as? FeatureMutationFailure) ?? .writeFailed
+            if Self.isTargetConflict(failure) || failure == .unverifiedWrite {
+                undoTokens.removeValue(forKey: projectID)
+            }
+            if let index = rows.firstIndex(where: { $0.reference.id == projectID }) {
+                rows[index].completion = .undoFailed(featureID, failure)
+                if Self.isTargetConflict(failure) || failure == .unverifiedWrite {
+                    rows[index].isStale = true
+                    rows[index].isRetainedInspection = true
+                }
+            }
+        }
+        mutating.remove(projectID)
+        if refreshAfterMutation.remove(projectID) != nil,
+           case .undoFailed = rows.first(where: { $0.reference.id == projectID })?.completion {
+            refresh(projectID)
+        }
+    }
+
+    private static func isTargetConflict(_ failure: FeatureMutationFailure) -> Bool {
+        switch failure {
+        case .conflict, .undoConflict, .missingTarget, .changedIdentity: return true
+        default: return false
         }
     }
 
@@ -485,6 +589,7 @@ final class ProjectStore: ObservableObject {
                         let receipt = try repository.recordSuccessfulRead(id: id,
                             expectedRevision: revision, nameHint: manifest.name, readAt: inspection.readAt)
                         rows[index].reference = receipt
+                        invalidateUndoIfTargetChanged(in: inspection, projectID: id)
                         rows[index].inspection = inspection
                         rows[index].lastReadAt = inspection.readAt
                         rows[index].isStale = false
@@ -500,6 +605,7 @@ final class ProjectStore: ObservableObject {
                     }
                 } else {
                     let previous = rows[index].inspection
+                    invalidateUndoIfTargetChanged(in: inspection, projectID: id)
                     rows[index].inspection = inspection
                     rows[index].lastReadAt = inspection.readAt
                     rows[index].isStale = true
@@ -534,14 +640,30 @@ final class ProjectStore: ObservableObject {
         drainRefreshQueue()
     }
 
+    /// Only a published read can invalidate a token. Neither failed enumeration nor
+    /// a failed read of this path proves removal. A different readable source does
+    /// prove a conflict, even when validation excludes that source.
+    private func invalidateUndoIfTargetChanged(in inspection: ProjectInspection, projectID: UUID) {
+        guard let token = undoTokens[projectID] else { return }
+        let sources = inspection.sources.filter { $0.relativePath == token.receipt.relativePath }
+        let targetReadFailed = inspection.diagnostics.contains {
+            $0.relativePath == token.receipt.relativePath && $0.severity == .error
+        } || inspection.excludedFeaturePaths.contains(token.receipt.relativePath)
+        if sources.contains(where: { $0.sha256 != token.receipt.verifiedSHA256 }) ||
+            (sources.isEmpty && inspection.featureEnumeration == .complete && !targetReadFailed) {
+            undoTokens.removeValue(forKey: projectID)
+        }
+    }
+
     private static func matchesSavedWrite(_ inspection: ProjectInspection,
                                           receipt: FeatureMutationReceipt, manifestID: String) -> Bool {
         guard inspection.manifest?.id == manifestID,
               inspection.manifest?.schemaVersion == 1,
               inspection.featureEnumeration == .complete,
-              inspection.features.contains(where: { $0.id == receipt.featureID &&
-                  $0.sourcePath == receipt.relativePath && $0.status == .completed }),
-              inspection.sources.contains(where: { $0 == receipt.verifiedSource }) else { return false }
+              inspection.sources.contains(where: { $0 == receipt.verifiedSource }),
+              case let .supported(expected) = try? ManifestParser().feature(receipt.verifiedSource),
+              inspection.features.contains(where: { $0 == expected && $0.id == receipt.featureID &&
+                  $0.sourcePath == receipt.relativePath }) else { return false }
         return true
     }
 
@@ -652,6 +774,7 @@ final class ProjectStore: ObservableObject {
             rows[index].reconnectFeaturePath = rows[index].inspection?.features.first {
                 $0.id == selectedFeature?.featureID && selectedFeature?.projectID == id
             }?.sourcePath
+            undoTokens.removeValue(forKey: id)
             rows[index].reference = receipt
             rows[index].inspection = nil
             rows[index].lastReadAt = nil
