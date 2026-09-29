@@ -17,7 +17,7 @@
 | --- | --- | --- |
 | Mark feature complete and update cards | [M31 · Kontrol](../mockups/M31-feature-completion-undo.png) | Persist to its Markdown frontmatter before showing success. |
 | Undo completion | [M31 · Kontrol](../mockups/M31-feature-completion-undo.png) | Restore the immediately previous status only if the saved revision still matches. |
-| Recover from conflict or write failure | [M32 · Kontrol](../mockups/M32-project-write-conflict.png) | Refresh rather than overwriting a changed file; no optimistic success. |
+| Recover from conflict or write failure | [M32 · Kontrol](../mockups/M32-project-write-conflict.png) · [F11 supplemental states](../../.mockups/flows/f11-feature-completion/index.html) | Refresh rather than overwriting a changed file; no optimistic success. |
 
 ## Implementation checklist
 
@@ -32,6 +32,10 @@
 - [ ] Byte diff contains only intended frontmatter changes.
 - [ ] A conflicting external edit remains intact and produces M32.
 - [ ] Permission failure, disk failure or failed verification never increments completion count.
+
+## Supplemental state references
+
+[Open the F11 state map](../../.mockups/flows/f11-feature-completion/index.html) for linked Projects-workspace previews: [Saving / Undoing](../../.mockups/flows/f11-feature-completion/01-saving.html), [write failure](../../.mockups/flows/f11-feature-completion/02-write-failure.html), [undo conflict](../../.mockups/flows/f11-feature-completion/03-undo-conflict.html), [expired Undo](../../.mockups/flows/f11-feature-completion/04-undo-expired.html), [unpatchable source](../../.mockups/flows/f11-feature-completion/05-unpatchable-source.html), and [verified save with failed refresh](../../.mockups/flows/f11-feature-completion/06-saved-refresh-failed.html). These extend M31/M32 rather than replacing their approved layout. Conflict Refresh only reads the latest version for review; it does not automatically retry a write. Reconnect addresses a lost folder grant, not an edit conflict. Failures do not manufacture a new Undo or completion count; if verification is uncertain, show stale/unverified rather than “not saved.” Example names and counts are illustrative. These HTML pages are **static guidance, not native acceptance**; rendered, interactive, accessibility and signed-sandbox checks remain open for F13.
 
 ## Visual references
 
