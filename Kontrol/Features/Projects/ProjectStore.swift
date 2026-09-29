@@ -68,7 +68,9 @@ enum ProjectRefreshFailure: Equatable {
 /// Session-only IO outcome. The inspection remains the sole source for status and counts.
 enum ProjectCompletionState: Equatable {
     case writing(String)
+    case refreshing(String)
     case saved(String)
+    case savedButRefreshFailed(String, ProjectRefreshFailure)
     case failed(String, FeatureMutationFailure)
 }
 
@@ -155,6 +157,12 @@ final class ProjectStore: ObservableObject {
     private let completionValidator: @Sendable (ProjectSourceDocument, ProjectFeature) async -> Bool
     private var mutating: Set<UUID> = []
     private var refreshAfterMutation: Set<UUID> = []
+    private struct MutationReconciliation {
+        let receipt: FeatureMutationReceipt
+        let previous: ProjectInspection?
+        let continuation: CheckedContinuation<ProjectRefreshFailure?, Never>
+    }
+    private var reconciliations: [UUID: MutationReconciliation] = [:]
     private var previewGeneration = 0
     private var adding = false
     private var reconnecting: Set<UUID> = []
@@ -211,8 +219,8 @@ final class ProjectStore: ObservableObject {
         return (row.reference, source)
     }
 
-    /// A verified receipt does not itself change displayed progress. Reconciliation and
-    /// publication ownership are added in Step 3.2; until then the old view is retained.
+    /// Claim publication ownership before suspending. A verified IO receipt is not
+    /// displayed as progress until the bounded inspector has read the saved revision.
     func markComplete(_ featureID: String, in projectID: UUID) async {
         guard let (reference, source) = completionInput(featureID, in: projectID),
               let index = rows.firstIndex(where: { $0.reference.id == projectID }),
@@ -225,11 +233,32 @@ final class ProjectStore: ObservableObject {
             guard await completionValidator(source, feature) else {
                 throw FeatureMutationFailure.unpatchableSource
             }
-            _ = try await writer.complete(request)
+            let receipt = try await writer.complete(request)
+            guard receipt.projectID == projectID, receipt.featureID == featureID,
+                  receipt.grantBookmarkData == reference.bookmarkData,
+                  receipt.relativePath == source.relativePath else {
+                throw FeatureMutationFailure.unverifiedWrite
+            }
+            let previous = rows.first(where: { $0.reference.id == projectID })?.inspection
             if let index = rows.firstIndex(where: { $0.reference.id == projectID }) {
-                rows[index].completion = .saved(featureID)
+                rows[index].completion = .refreshing(featureID)
                 rows[index].isStale = true
-                rows[index].isRetainedInspection = true
+                rows[index].isRetainedInspection = previous != nil
+            }
+            let failure = await reconcileSavedWrite(receipt, previous: previous)
+            if let index = rows.firstIndex(where: { $0.reference.id == projectID }) {
+                if let failure {
+                    // The previous snapshot predates a verified disk write. It cannot
+                    // provide an actionable count or detail after failed reconciliation.
+                    rows[index].inspection = nil
+                    rows[index].lastReadAt = nil
+                    rows[index].isStale = true
+                    rows[index].isRetainedInspection = false
+                    rows[index].refreshFailure = failure
+                    rows[index].completion = .savedButRefreshFailed(featureID, failure)
+                } else {
+                    rows[index].completion = .saved(featureID)
+                }
             }
         } catch {
             if let index = rows.firstIndex(where: { $0.reference.id == projectID }) {
@@ -247,7 +276,34 @@ final class ProjectStore: ObservableObject {
             }
         }
         mutating.remove(projectID)
-        if refreshAfterMutation.remove(projectID) != nil { refresh(projectID) }
+        // The reconciliation already consumed all refresh requests made during IO.
+        // On a failed write, the coalesced request still needs its own inspection.
+        if refreshAfterMutation.remove(projectID) != nil,
+           case .failed = rows.first(where: { $0.reference.id == projectID })?.completion {
+            refresh(projectID)
+        }
+    }
+
+    private func reconcileSavedWrite(_ receipt: FeatureMutationReceipt,
+                                     previous: ProjectInspection?) async -> ProjectRefreshFailure? {
+        await withCheckedContinuation { continuation in
+            let id = receipt.projectID
+            reconciliations[id] = MutationReconciliation(receipt: receipt, previous: previous,
+                                                          continuation: continuation)
+            var operation = refreshOperations[id] ?? RefreshOperation()
+            // A mutation cannot start during a refresh; still fence any old queued
+            // follow-up rather than permitting it to publish before this inspection.
+            operation.followUp = false
+            if !operation.queued {
+                operation.queued = true
+                refreshQueue.append(id)
+            }
+            refreshOperations[id] = operation
+            if let index = rows.firstIndex(where: { $0.reference.id == id }) {
+                rows[index].isRefreshing = true
+            }
+            drainRefreshQueue()
+        }
     }
 
     /// Call on entry to Projects, not at launch. Failed fetches may be retried on next entry.
@@ -341,7 +397,8 @@ final class ProjectStore: ObservableObject {
     /// Cancel without freeing a slot until the underlying IO actually finishes. A reader
     /// that ignores cancellation still cannot publish its result or start extra work.
     func cancelRefresh(_ id: UUID) {
-        guard var operation = refreshOperations[id] else { return }
+        // A caller's canceled read must not cancel verification of a saved write.
+        guard !mutating.contains(id), var operation = refreshOperations[id] else { return }
         operation.task?.cancel()
         operation.followUp = false
         if operation.queued {
@@ -395,11 +452,26 @@ final class ProjectStore: ObservableObject {
               operation.task != nil else { return }
         operation.task = nil
         activeRefreshes -= 1
+        let reconciliation = reconciliations.removeValue(forKey: id)
+        var reconciliationFailure: ProjectRefreshFailure?
+        var didPublish = false
         // A replaced bookmark, canceled task, or removed row owns no publication rights.
         if let index = rows.firstIndex(where: { $0.reference.id == id }),
-           rows[index].reference.revision == revision {
-            let priorInspection = rows[index].inspection
-            switch canceled ? .failure(CancellationError()) : result {
+           rows[index].reference.revision == revision,
+           (!mutating.contains(id) || reconciliation != nil) {
+            didPublish = true
+            let priorInspection = reconciliation?.previous ?? rows[index].inspection
+            let acceptedResult: Result<ProjectInspection, Error>
+            if canceled {
+                acceptedResult = .failure(CancellationError())
+            } else if let reconciliation, case let .success(inspection) = result,
+                      !Self.matchesSavedWrite(inspection, receipt: reconciliation.receipt,
+                                              manifestID: rows[index].reference.manifestID) {
+                acceptedResult = .failure(ProjectInspectionFailure.inconsistentRead)
+            } else {
+                acceptedResult = result
+            }
+            switch acceptedResult {
             case let .success(inspection):
                 if let location, !location.isEmpty { rows[index].locationHint = location }
                 // A bookmark can still resolve after the selected folder's manifest was
@@ -407,6 +479,7 @@ final class ProjectStore: ObservableObject {
                 if let manifest = inspection.manifest, manifest.id != rows[index].reference.manifestID {
                     retainInspection(at: index)
                     rows[index].refreshFailure = .manifestMismatch
+                    reconciliationFailure = .manifestMismatch
                 } else if Self.isComplete(inspection), let manifest = inspection.manifest {
                     do {
                         let receipt = try repository.recordSuccessfulRead(id: id,
@@ -423,6 +496,7 @@ final class ProjectStore: ObservableObject {
                         // Do not claim a fresh successful read when its durable receipt failed.
                         retainInspection(at: index)
                         rows[index].refreshFailure = .persistence
+                        reconciliationFailure = .persistence
                     }
                 } else {
                     let previous = rows[index].inspection
@@ -431,7 +505,7 @@ final class ProjectStore: ObservableObject {
                     rows[index].isStale = true
                     rows[index].isRetainedInspection = false
                     rows[index].refreshFailure = nil
-                    reconcileFeature(in: inspection, projectID: id, previous: previous)
+                    reconcileFeature(in: inspection, projectID: id, previous: reconciliation?.previous ?? previous)
                     if inspection.manifest?.schemaVersion == 1,
                        inspection.featureEnumeration == .complete {
                         rows[index].reconnectFeaturePath = nil
@@ -442,14 +516,33 @@ final class ProjectStore: ObservableObject {
                 if !(error is CancellationError) {
                     rows[index].refreshFailure = .inspection((error as? ProjectInspectionFailure) ?? .unreadableFolder)
                 }
+                reconciliationFailure = rows[index].refreshFailure ?? .inspection(.inconsistentRead)
             }
             rows[index].isRefreshing = operation.followUp
         }
-        let followUp = operation.followUp
+        if !didPublish, reconciliation != nil {
+            reconciliationFailure = .inspection(.inconsistentRead)
+            if let index = rows.firstIndex(where: { $0.reference.id == id }) {
+                rows[index].isRefreshing = false
+            }
+        }
+        let followUp = operation.followUp && reconciliation == nil
         operation.followUp = false
         refreshOperations[id] = operation
+        reconciliation?.continuation.resume(returning: reconciliationFailure)
         if followUp { refresh(id) }
         drainRefreshQueue()
+    }
+
+    private static func matchesSavedWrite(_ inspection: ProjectInspection,
+                                          receipt: FeatureMutationReceipt, manifestID: String) -> Bool {
+        guard inspection.manifest?.id == manifestID,
+              inspection.manifest?.schemaVersion == 1,
+              inspection.featureEnumeration == .complete,
+              inspection.features.contains(where: { $0.id == receipt.featureID &&
+                  $0.sourcePath == receipt.relativePath && $0.status == .completed }),
+              inspection.sources.contains(where: { $0 == receipt.verifiedSource }) else { return false }
+        return true
     }
 
     private func retainInspection(at index: Int) {
