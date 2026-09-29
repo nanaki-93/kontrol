@@ -10,10 +10,11 @@ private struct ListInspector: ProjectInspecting {
 }
 
 private actor CardInspector: ProjectInspecting {
-    let inspections: [UInt8: ProjectInspection]
+    private var inspections: [UInt8: ProjectInspection]
     private var failing: Set<UInt8> = []
 
     init(_ inspections: [UInt8: ProjectInspection]) { self.inspections = inspections }
+    func update(_ key: UInt8, to inspection: ProjectInspection) { inspections[key] = inspection }
     func fail(_ key: UInt8) { failing.insert(key) }
     func inspect(selectedFolder: URL) async throws -> ProjectInspection { throw CancellationError() }
     func inspect(bookmarkData: Data) async throws -> ProjectInspection {
@@ -275,6 +276,82 @@ final class ProjectsPresentationTests: XCTestCase {
         }
         XCTAssertEqual(inspection.features.map(\.status), features.map(\.status),
                        "Roadmap selection must not change status or create work")
+    }
+
+    func testFullReadOnlyFeatureDetailHostsLongMarkdownEmptyDependenciesRefreshAndStale() async throws {
+        let longBody = "## Verification scenarios (not an Acceptance heading)\n" +
+            String(repeating: "- Read every requirement including **literal** [local text](https://example.invalid) and ![image](remote.png).\n", count: 400) +
+            "\nFinal line must remain visible."
+        let dependency = card("foundation", status: .completed)
+        let active = card("active", status: .active)
+        let feature = ProjectFeature(id: "detail", title: "Disk detail", status: .ready,
+            priority: .high, effort: .large, dependsOn: ["foundation", "active"],
+            areas: ["Focus", "Platform"], completedAt: nil, body: longBody,
+            sourcePath: ".kontrol/features/detail.md")
+        let empty = ProjectFeature(id: "empty", title: "Empty description", status: .planned,
+            priority: .low, effort: .small, dependsOn: [], areas: [], completedAt: nil,
+            body: "", sourcePath: ".kontrol/features/empty.md")
+        let initial = cardInspection([feature, dependency, active, empty])
+        let projectID = UUID()
+        let inspector = CardInspector([1: initial])
+        let store = ProjectStore(inspector: inspector,
+            repository: ListRepository([reference(projectID, order: 0)]))
+        try store.enterProjects()
+        for _ in 0..<100 where store.rows.first?.isRefreshing == true {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertFalse(try XCTUnwrap(store.rows.first).isRefreshing)
+        store.selectFeature("detail", in: projectID)
+        let row = try XCTUnwrap(store.rows.first)
+        let detail = NSHostingView(rootView: ProjectFeatureDetailView(row: row, featureID: "detail",
+            backToRoadmap: true, back: { store.closeFeature() }))
+        XCTAssertEqual(detail.rootView.feature?.body, longBody)
+        XCTAssertTrue(detail.rootView.feature?.body.hasSuffix("Final line must remain visible.") == true)
+        XCTAssertEqual(ProjectFeatureDetailView.dependencyLabels(for: feature, in: initial),
+                       ["Disk title foundation (foundation) · Completed", "Disk title active (active) · Active"])
+        XCTAssertEqual(detail.rootView.feature?.priority, .high)
+        XCTAssertEqual(detail.rootView.feature?.effort, .large)
+        XCTAssertEqual(detail.rootView.feature?.areas, ["Focus", "Platform"])
+        let emptyDetail = NSHostingView(rootView: ProjectFeatureDetailView(row: row, featureID: "empty",
+            backToRoadmap: false, back: {}))
+        XCTAssertEqual(emptyDetail.rootView.feature?.body, "")
+        XCTAssertEqual(emptyDetail.rootView.feature?.dependsOn, [])
+        XCTAssertEqual(ProjectFeatureDetailView.dependencyLabels(for: empty, in: initial), [])
+
+        let revised = ProjectFeature(id: "detail", title: "Externally revised", status: .blocked,
+            priority: .medium, effort: .small, dependsOn: ["active"], areas: [],
+            completedAt: nil, body: "## Other heading\nRevised whole body", sourcePath: feature.sourcePath)
+        await inspector.update(1, to: cardInspection([revised, dependency, active, empty]))
+        store.refresh(projectID)
+        for _ in 0..<100 where store.rows.first?.isRefreshing == true {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(store.selectedFeatureContent, revised, "Detail content must resolve from the latest inspection")
+        let updated = NSHostingView(rootView: ProjectFeatureDetailView(row: try XCTUnwrap(store.rows.first),
+            featureID: "detail", backToRoadmap: true, back: { store.closeFeature() }))
+        XCTAssertEqual(updated.rootView.feature?.body, revised.body)
+        XCTAssertEqual(ProjectFeatureDetailView.dependencyLabels(for: revised,
+            in: try XCTUnwrap(store.rows.first?.inspection)), ["Disk title active (active) · Active"])
+        await inspector.fail(1)
+        store.refresh(projectID)
+        for _ in 0..<100 where store.rows.first?.isRefreshing == true {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let staleRow = try XCTUnwrap(store.rows.first)
+        XCTAssertTrue(staleRow.isRetainedInspection)
+        let stale = NSHostingView(rootView: ProjectFeatureDetailView(row: staleRow, featureID: "detail",
+            backToRoadmap: true, back: { store.closeFeature() }))
+        XCTAssertEqual(stale.rootView.feature, revised)
+        XCTAssertEqual(store.selectedFeatureContent, revised)
+        let projects = NSHostingView(rootView: ProjectsView(store: store))
+        XCTAssertTrue(projects.rootView.store === store)
+        stale.rootView.back()
+        XCTAssertNil(store.selectedFeature)
+        XCTAssertEqual(ProjectsView.selectionNoticeText(ProjectFeatureSelectionNotice(projectID: projectID,
+            featureID: "detail", reason: .removed)),
+            "Feature detail was removed from this project. Detail closed; Refresh to inspect current work.")
+        XCTAssertTrue(ProjectsView.selectionNoticeText(ProjectFeatureSelectionNotice(projectID: projectID,
+            featureID: "detail", reason: .validationExcluded)).contains("failed validation"))
     }
 
     func testFolderOnlyPickerAndPreviewHostCompile() {

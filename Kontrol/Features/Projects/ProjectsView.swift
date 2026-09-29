@@ -70,6 +70,15 @@ struct ProjectsView: View {
         return "Feature listing could not be completed. Progress and suggestions are unavailable; view project details for validation, then Refresh."
     }
 
+    static func selectionNoticeText(_ notice: ProjectFeatureSelectionNotice) -> String {
+        switch notice.reason {
+        case .removed:
+            return "Feature \(ProjectDetailsView.safeLabel(notice.featureID)) was removed from this project. Detail closed; Refresh to inspect current work."
+        case .validationExcluded:
+            return "Feature \(ProjectDetailsView.safeLabel(notice.featureID)) failed validation and was excluded. Detail closed; view project details for validation, repair externally, then Refresh."
+        }
+    }
+
     static func location(_ row: ProjectRowState) -> String {
         guard let hint = row.locationHint, !hint.isEmpty else {
             return "Location unavailable · reference \(row.reference.id.uuidString)"
@@ -108,8 +117,11 @@ struct ProjectsView: View {
         Group {
             if let identity = store.selectedFeature,
                let row = store.rows.first(where: { $0.reference.id == identity.projectID }),
-               let feature = store.selectedFeatureContent {
-                featureReference(feature, row: row)
+               store.selectedFeatureContent != nil {
+                ProjectFeatureDetailView(row: row, featureID: identity.featureID,
+                                         backToRoadmap: detailID == row.reference.id) {
+                    store.closeFeature()
+                }
             } else if let detailID, let row = store.rows.first(where: { $0.reference.id == detailID }) {
                 ProjectDetailsView(row: row, back: { self.detailID = nil },
                                    refresh: { store.refresh(detailID) },
@@ -121,6 +133,15 @@ struct ProjectsView: View {
                                    isReconnecting: reconnectingID == detailID)
             } else {
                 list
+            }
+        }
+        .safeAreaInset(edge: .top) {
+            if let notice = store.selectionNotice, notice.projectID == store.selectedID {
+                Text(Self.selectionNoticeText(notice))
+                    .appTypography(.body)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, AppMetrics.horizontalInset)
+                    .accessibilityIdentifier("project-feature-selection-notice")
             }
         }
         .onAppear { enter() }
@@ -331,32 +352,6 @@ struct ProjectsView: View {
                     .accessibilityIdentifier("projects-workspace-refresh")
             }
         }
-    }
-
-    /// A small read-only reference route until the full F10 feature-detail layout is added.
-    /// Content always resolves from the store's current inspection, including retained stale reads.
-    private func featureReference(_ feature: ProjectFeature, row: ProjectRowState) -> some View {
-        VStack(alignment: .leading, spacing: AppMetrics.space4) {
-            PageHeader(feature.title, metadata: "Feature \(feature.id) · \(feature.status.rawValue.capitalized)") {
-                ActionButton(detailID == row.reference.id ? "Back to roadmap" : "Back to projects") {
-                    store.closeFeature()
-                }
-            }
-            if row.isRetainedInspection {
-                Text("Stale reference · Last read: \(row.lastReadAt?.formatted(date: .abbreviated, time: .shortened) ?? "unavailable") · Refresh or Reconnect to verify this feature.")
-                    .appTypography(.body)
-                    .accessibilityIdentifier("project-feature-stale")
-            }
-            Text(feature.body.isEmpty ? "No description provided" : feature.body)
-                .appTypography(.body)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, AppMetrics.horizontalInset)
-        .padding(.top, AppMetrics.space8)
-        .padding(.bottom, AppMetrics.space8)
-        .accessibilityIdentifier("project-feature-reference")
     }
 
     /// Reconnect is an explicit native selection, never an unscoped path retry. A canceled
