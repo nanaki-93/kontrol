@@ -113,6 +113,30 @@ final class ProjectIntegrationTests: XCTestCase {
         }
     }
 
+    /// Unlike `unchanged`, this snapshots the whole fixture (including Git sentinels and
+    /// source files) so a mutation may change exactly one selected feature, and no temp
+    /// artifact or previously absent entry can escape the comparison.
+    private func tree(_ folder: URL) throws -> [String: Data] {
+        let names = try FileManager.default.subpathsOfDirectory(atPath: folder.path)
+        var result: [String: Data] = [:]
+        for name in names {
+            let entry = folder.appendingPathComponent(name)
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: entry.path, isDirectory: &isDirectory) else {
+                XCTFail("Fixture entry disappeared: \(name)")
+                continue
+            }
+            result[name] = isDirectory.boolValue ? Data() : try Data(contentsOf: entry)
+        }
+        return result
+    }
+
+    private func assertOnlyFeatureChanged(_ before: [String: Data], _ after: [String: Data],
+                                          file: StaticString = #filePath, line: UInt = #line) {
+        let changed = Set(before.keys).union(after.keys).filter { before[$0] != after[$0] }
+        XCTAssertEqual(Set(changed), [".kontrol/features/first.md"], file: file, line: line)
+    }
+
     private func text(_ content: ProjectOptionalDocument) -> String? {
         if case let .present(source) = content { return source.text }
         return nil
@@ -132,7 +156,145 @@ final class ProjectIntegrationTests: XCTestCase {
         let access = ProjectFolderAccess(operations: grants)
         return ProjectStore(inspector: ProjectInspector(access: access),
             repository: SwiftDataProjectReferenceRepository(container: container, beforeSave: beforeSave),
-            identifier: ScopedProjectFolderIdentifier(access: access))
+            identifier: ScopedProjectFolderIdentifier(access: access),
+            writer: FeatureFileWriter(access: access))
+    }
+
+    private func mutationFixture(_ root: URL, name: String) throws -> URL {
+        let folder = try project(root, folder: name, id: name)
+        try writeFeature(folder, "downstream", id: "downstream", priority: "high",
+                         dependencies: ["F1"])
+        try writeFeature(folder, "peer", id: "peer")
+        let git = folder.appendingPathComponent(".git")
+        let source = folder.appendingPathComponent("Sources")
+        try FileManager.default.createDirectory(at: git, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        try Data("ref: refs/heads/main\n".utf8).write(to: git.appendingPathComponent("HEAD"))
+        try Data([0, 1, 255, 42]).write(to: git.appendingPathComponent("index"))
+        try Data("let version = 1\n".utf8).write(to: source.appendingPathComponent("App.swift"))
+        try Data("schema_version: 1\nevents: []\n".utf8)
+            .write(to: folder.appendingPathComponent(".kontrol/history.yaml"))
+        return folder
+    }
+
+    func testRealCompletionUndoAndReopenDeriveProgressFromDisk() async throws {
+        let root = try workspace()
+        let folder = try mutationFixture(root, name: "journey")
+        let grants = IntegrationGrants()
+        let database = root.appendingPathComponent("journey.store")
+        let original = try tree(folder)
+        for sentinel in [".git/HEAD", ".git/index", "Sources/App.swift", ".kontrol/roadmap.yaml",
+                         ".kontrol/history.yaml", ".kontrol/features/peer.md",
+                         ".kontrol/features/downstream.md"] {
+            XCTAssertNotNil(original[sentinel], "Missing fixture sentinel: \(sentinel)")
+        }
+        var id: UUID?
+        var finalBytes: [String: Data] = [:]
+        do {
+            let container = try ModelContainerFactory().makeContainer(mode: .persistent(database))
+            let subject = store(container, grants)
+            _ = try await unchanged([folder]) { try await subject.previewFolder(folder) }
+            guard case let .added(saved) = try await unchanged([folder], {
+                try await subject.addPreviewedProject()
+            }) else { return XCTFail("Expected saved reference") }
+            id = saved
+            XCTAssertEqual(try tree(folder), original)
+            XCTAssertEqual(subject.rows[0].inspection?.featureCount, .complete(completed: 0, total: 3))
+            XCTAssertEqual(candidates(subject, saved), ["peer"])
+            subject.selectFeature("F1", in: saved)
+            XCTAssertEqual(subject.selectedFeatureContent?.status, .planned)
+            XCTAssertTrue(subject.canMarkComplete("F1", in: saved))
+
+            await subject.markComplete("F1", in: saved)
+            guard case .saved("F1") = subject.rows[0].completion else {
+                return XCTFail("Expected verified save and refreshed inspection: \(String(describing: subject.rows[0].completion))")
+            }
+            let completed = try tree(folder)
+            assertOnlyFeatureChanged(original, completed)
+            XCTAssertEqual(subject.rows[0].inspection?.featureCount, .complete(completed: 1, total: 3))
+            XCTAssertEqual(candidates(subject, saved), ["downstream", "peer"])
+            XCTAssertEqual(subject.selectedFeatureContent?.status, .completed)
+            XCTAssertNotNil(subject.selectedFeatureContent?.completedAt)
+            XCTAssertTrue(subject.canUndoCompletion(in: saved))
+            XCTAssertEqual(try Data(contentsOf: folder.appendingPathComponent(".kontrol/features/first.md")),
+                           completed[".kontrol/features/first.md"])
+
+            await subject.undoCompletion(in: saved)
+            guard case .undone("F1") = subject.rows[0].completion else {
+                return XCTFail("Expected verified undo and refreshed inspection: \(String(describing: subject.rows[0].completion))")
+            }
+            XCTAssertEqual(try tree(folder), original, "Undo must restore exact bytes and leave no temp entries")
+            XCTAssertEqual(subject.rows[0].inspection?.featureCount, .complete(completed: 0, total: 3))
+            XCTAssertEqual(candidates(subject, saved), ["peer"])
+            XCTAssertEqual(subject.selectedFeatureContent?.status, .planned)
+            XCTAssertNil(subject.selectedFeatureContent?.completedAt)
+            XCTAssertFalse(subject.canUndoCompletion(in: saved))
+
+            // Complete once more so a fresh store can prove persisted completion is
+            // reconstructed from .kontrol rather than an app-owned status or undo record.
+            await subject.markComplete("F1", in: saved)
+            XCTAssertEqual(subject.rows[0].completion, .saved("F1"))
+            finalBytes = try tree(folder)
+            assertOnlyFeatureChanged(original, finalBytes)
+        }
+        let reopenedContainer = try ModelContainerFactory().makeContainer(mode: .persistent(database))
+        let reopened = store(reopenedContainer, grants)
+        try await unchanged([folder]) {
+            try reopened.enterProjects()
+            await wait { reopened.rows.count == 1 && !reopened.rows[0].isRefreshing &&
+                reopened.rows[0].inspection?.featureCount == .complete(completed: 1, total: 3) }
+        }
+        XCTAssertEqual(reopened.selectedID, id)
+        if let id { XCTAssertEqual(candidates(reopened, id), ["downstream", "peer"])
+            XCTAssertFalse(reopened.canUndoCompletion(in: id), "Undo is session-local") }
+        XCTAssertEqual(reopened.rows[0].inspection?.features.first(where: { $0.id == "F1" })?.status,
+                       .completed)
+        XCTAssertEqual(try tree(folder), finalBytes)
+        XCTAssertTrue(grants.balanced)
+    }
+
+    func testRealCompletionAndUndoRefuseExternalEditsWithoutChangingOtherFiles() async throws {
+        let root = try workspace()
+        let folder = try mutationFixture(root, name: "conflicts")
+        let grants = IntegrationGrants()
+        let container = try ModelContainerFactory().makeContainer(mode: .persistent(root.appendingPathComponent("conflicts.store")))
+        let subject = store(container, grants)
+        _ = try await unchanged([folder]) { try await subject.previewFolder(folder) }
+        guard case let .added(id) = try await unchanged([folder], {
+            try await subject.addPreviewedProject()
+        }) else { return XCTFail("Expected saved reference") }
+        let target = folder.appendingPathComponent(".kontrol/features/first.md")
+        let original = try tree(folder)
+        // Edit after inspection but before activation: the store passes its old digest to IO.
+        try Data("---\nid: F1\ntitle: First\nstatus: planned\npriority: high\neffort: small\n---\nExternal edit\n".utf8)
+            .write(to: target)
+        let external = try tree(folder)
+        assertOnlyFeatureChanged(original, external)
+        await subject.markComplete("F1", in: id)
+        XCTAssertEqual(subject.rows[0].completion, .failed("F1", .conflict))
+        XCTAssertEqual(try tree(folder), external)
+        XCTAssertFalse(subject.canUndoCompletion(in: id))
+        try await unchanged([folder]) {
+            subject.refresh(id)
+            await wait { !subject.rows[0].isRefreshing && subject.rows[0].refreshFailure == nil &&
+                subject.rows[0].inspection?.features.first(where: { $0.id == "F1" })?.body == "External edit\n" }
+        }
+        await subject.markComplete("F1", in: id)
+        XCTAssertEqual(subject.rows[0].completion, .saved("F1"))
+        let completed = try tree(folder)
+        assertOnlyFeatureChanged(external, completed)
+        XCTAssertTrue(subject.canUndoCompletion(in: id))
+
+        var changed = try Data(contentsOf: target)
+        changed.append(contentsOf: Data("\nAnother editor\n".utf8))
+        try changed.write(to: target)
+        let edited = try tree(folder)
+        assertOnlyFeatureChanged(completed, edited)
+        await subject.undoCompletion(in: id)
+        XCTAssertEqual(subject.rows[0].completion, .undoFailed("F1", .undoConflict))
+        XCTAssertEqual(try tree(folder), edited, "Undo must not erase an external edit")
+        XCTAssertFalse(subject.canUndoCompletion(in: id))
+        XCTAssertTrue(grants.balanced)
     }
 
     func testRealEligibilityExternalEditsReorderingReopenAndReadOnlyNavigation() async throws {
