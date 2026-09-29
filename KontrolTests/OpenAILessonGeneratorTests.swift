@@ -3,7 +3,10 @@ import XCTest
 
 final class OpenAILessonGeneratorTests: XCTestCase {
     private final class StreamProtocol: URLProtocol {
-        override class func canInit(with request: URLRequest) -> Bool { request.url == OpenAILessonGenerator.endpoint }
+        override class func canInit(with request: URLRequest) -> Bool {
+            request.url?.host == "api.openai.com" &&
+                (request.url == OpenAILessonGenerator.endpoint || request.url?.path.hasPrefix("/v1/models/") == true)
+        }
         override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
         override func startLoading() {
             client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: 200,
@@ -42,7 +45,7 @@ final class OpenAILessonGeneratorTests: XCTestCase {
         func send(_ request: URLRequest, maximumBytes: Int) async throws -> (HTTPURLResponse, Data) {
             // Deliberately ignores cancellation, as a slow or misbehaving transport might.
             try? await Task.sleep(for: .milliseconds(100))
-            return (HTTPURLResponse(url: OpenAILessonGenerator.endpoint, statusCode: 200,
+            return (HTTPURLResponse(url: request.url!, statusCode: 200,
                 httpVersion: nil, headerFields: nil)!, response)
         }
     }
@@ -90,6 +93,78 @@ final class OpenAILessonGeneratorTests: XCTestCase {
     private func generator(_ intercept: Intercept, model: String = "gpt-4o-mini") -> OpenAILessonGenerator {
         OpenAILessonGenerator(model: model, credentialReference: UUID().uuidString,
                               credentials: FakeCredentials(), transport: intercept)
+    }
+
+    func testExplicitMetadataLookupDoesNotGenerate() async throws {
+        let intercept = Intercept()
+        intercept.responseURL = OpenAILessonGenerator.modelsEndpoint.appendingPathComponent("gpt-4o-mini")
+        intercept.body = Data(#"{"object":"model","id":"gpt-4o-mini"}"#.utf8)
+        let adapter = generator(intercept)
+        XCTAssertEqual(intercept.calls, 0) // construction does not contact the provider
+        try await adapter.testConnection()
+        XCTAssertEqual(intercept.calls, 1)
+        XCTAssertEqual(intercept.request?.url, intercept.responseURL)
+        XCTAssertEqual(intercept.request?.httpMethod, "GET")
+        XCTAssertNil(intercept.request?.httpBody)
+        XCTAssertEqual(intercept.request?.timeoutInterval, 30)
+        XCTAssertEqual(intercept.request?.value(forHTTPHeaderField: "Authorization"), "Bearer test-only-key")
+        XCTAssertEqual(intercept.limit, 256 * 1024)
+    }
+
+    func testMetadataFailuresAreBoundedAndSanitized() async {
+        let intercept = Intercept()
+        intercept.responseURL = OpenAILessonGenerator.modelsEndpoint.appendingPathComponent("gpt-4o-mini")
+        let adapter = generator(intercept)
+        for (status, expected) in [(401, LessonGenerationError.authentication), (403, .authorization),
+                                   (404, .unsupportedModel), (429, .rateLimited(retryAfter: nil)),
+                                   (500, .providerFailure), (302, .providerFailure)] {
+            intercept.status = status
+            intercept.body = Data("secret provider error".utf8)
+            await assertConnectionError(expected) { try await adapter.testConnection() }
+        }
+        intercept.status = 200
+        for body in [Data("{".utf8), Data(#"{"object":"model","id":"different"}"#.utf8)] {
+            intercept.body = body
+            await assertConnectionError(.malformedResponse) { try await adapter.testConnection() }
+        }
+        intercept.body = Data(repeating: 0, count: 256 * 1024 + 1)
+        await assertConnectionError(.oversizedResponse) { try await adapter.testConnection() }
+        intercept.failure = URLError(.timedOut)
+        await assertConnectionError(.timeout) { try await adapter.testConnection() }
+        intercept.failure = URLError(.notConnectedToInternet)
+        await assertConnectionError(.offline) { try await adapter.testConnection() }
+        XCTAssertEqual(intercept.calls, 11)
+        let invalid = generator(intercept, model: "unknown")
+        await assertConnectionError(.unsupportedModel) { try await invalid.testConnection() }
+        XCTAssertEqual(intercept.calls, 11)
+    }
+
+    func testMetadataStreamingCapIsEnforcedBeforeFullBodyArrives() async {
+        let adapter = OpenAILessonGenerator(model: "gpt-4o-mini", credentialReference: UUID().uuidString,
+            credentials: FakeCredentials(), transport: BoundedOpenAITransport(protocolClasses: [StreamProtocol.self]))
+        await assertConnectionError(.oversizedResponse) { try await adapter.testConnection() }
+    }
+
+    func testMetadataRedirectDoesNotForwardCredential() async {
+        RedirectProtocol.foreignRequests = 0
+        let adapter = OpenAILessonGenerator(model: "gpt-4o-mini", credentialReference: UUID().uuidString,
+            credentials: FakeCredentials(), transport: BoundedOpenAITransport(protocolClasses: [RedirectProtocol.self]))
+        await assertConnectionError(.providerFailure) { try await adapter.testConnection() }
+        XCTAssertEqual(RedirectProtocol.foreignRequests, 0)
+    }
+
+    func testMetadataLateResponseAfterCancellationIsDiscarded() async {
+        let late = LateTransport()
+        late.response = Data(#"{"object":"model","id":"gpt-4o-mini"}"#.utf8)
+        // The transport returns a valid metadata URL despite ignoring cancellation.
+        let adapter = OpenAILessonGenerator(model: "gpt-4o-mini", credentialReference: UUID().uuidString,
+            credentials: FakeCredentials(), transport: late)
+        let task = Task { try await adapter.testConnection() }
+        try? await Task.sleep(for: .milliseconds(20))
+        task.cancel()
+        do { try await task.value; XCTFail("Cancelled metadata result must not be published") }
+        catch let error as LessonGenerationError { XCTAssertEqual(error, .cancelled) }
+        catch { XCTFail("Unclassified cancellation") }
     }
 
     func testSingleBoundedPrivateRequestAndStrictSchema() async throws {
@@ -247,6 +322,13 @@ final class OpenAILessonGeneratorTests: XCTestCase {
             intercept.failure = failure
             await assertError(expected) { try await generator.generate(self.request()) }
         }
+    }
+
+    private func assertConnectionError(_ expected: LessonGenerationError, _ action: () async throws -> Void,
+                                       file: StaticString = #filePath, line: UInt = #line) async {
+        do { try await action(); XCTFail("Expected \(expected)", file: file, line: line) }
+        catch let error as LessonGenerationError { XCTAssertEqual(error, expected, file: file, line: line) }
+        catch { XCTFail("Unclassified error", file: file, line: line) }
     }
 
     private func assertError(_ expected: LessonGenerationError, _ action: () async throws -> CandidateLesson,

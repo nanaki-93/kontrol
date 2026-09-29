@@ -18,6 +18,7 @@ enum AISettingsStoreError: Error, Equatable {
     case stagedCleanupFailed
     case removalFailed
     case removalFinalizationFailed
+    case connectionInProgress
 }
 
 /// What a view may observe: never an opaque Keychain reference or credential bytes.
@@ -37,6 +38,15 @@ struct AISettingsPresentation: Equatable {
     }
 }
 
+/// A successful metadata lookup establishes authentication and model visibility only.
+/// It does not promise inference access or produce a lesson.
+enum AIConnectionStatus: Equatable {
+    case notTested
+    case testing
+    case modelAvailable
+    case failed(LessonGenerationError)
+}
+
 @MainActor
 final class AISettingsStore: ObservableObject {
     @Published private(set) var presentation = AISettingsPresentation(.disabled)
@@ -48,6 +58,9 @@ final class AISettingsStore: ObservableObject {
         didSet { presentation = AISettingsPresentation(settings, authorized: !suspended) }
     }
     @Published private(set) var error: AISettingsStoreError?
+    @Published private(set) var connectionStatus: AIConnectionStatus = .notTested
+    private var connectionID: UUID?
+    private let connectionTester: (String, String) -> any OpenAIConnectionTesting
 
     private let repository: any AISettingsRepository
     private let credentials: any CredentialStore
@@ -56,13 +69,72 @@ final class AISettingsStore: ObservableObject {
     var invalidateOperations: () -> Void = {}
     private var pendingCleanup: Set<String> = []
 
-    init(repository: any AISettingsRepository, credentials: any CredentialStore) {
+    init(repository: any AISettingsRepository, credentials: any CredentialStore,
+         connectionTester: ((String, String) -> any OpenAIConnectionTesting)? = nil) {
         self.repository = repository
         self.credentials = credentials
+        self.connectionTester = connectionTester ?? { model, reference in
+            OpenAILessonGenerator(model: model, credentialReference: reference, credentials: credentials)
+        }
         refresh()
     }
 
+    /// Called only by an explicit Test connection action; never by refresh/save/enable.
+    /// No settings or learning records are written. A revision change discards the
+    /// result, including a late failure from a transport that ignores cancellation.
+    func testConnection() async throws {
+        guard connectionID == nil else { throw AISettingsStoreError.connectionInProgress }
+        let current = try authoritative(expectedRevision: settings.revision)
+        guard !suspended, current.providerID == "openai",
+              let model = current.modelID, OpenAILessonGenerator.supportedModels.contains(model),
+              let reference = current.credentialReference else { throw AISettingsStoreError.invalidConfiguration }
+        try requireReadable(reference)
+        let id = UUID()
+        connectionID = id
+        connectionStatus = .testing
+        let outcome: AIConnectionStatus
+        do {
+            try await connectionTester(model, reference).testConnection()
+            outcome = .modelAvailable
+        } catch let failure as LessonGenerationError {
+            outcome = .failed(failure)
+        } catch is CancellationError {
+            outcome = .failed(.cancelled)
+        } catch let failure as URLError where failure.code == .cancelled {
+            outcome = .failed(.cancelled)
+        } catch {
+            outcome = .failed(.providerFailure)
+        }
+        guard connectionID == id else { throw AISettingsStoreError.staleRevision }
+        connectionID = nil
+        if Task.isCancelled || outcome == .failed(.cancelled) {
+            connectionStatus = .notTested
+            throw LessonGenerationError.cancelled
+        }
+        let latest: AISettingsSnapshot
+        do { latest = try repository.load() }
+        catch {
+            connectionStatus = .notTested
+            suspended = true
+            self.error = .storageFailure
+            throw AISettingsStoreError.storageFailure
+        }
+        guard latest.revision == current.revision, settings.revision == current.revision,
+              !suspended else {
+            connectionStatus = .notTested
+            throw AISettingsStoreError.staleRevision
+        }
+        connectionStatus = outcome
+        if case .failed(let failure) = outcome { throw failure }
+    }
+
+    private func resetConnection() {
+        connectionID = nil
+        connectionStatus = .notTested
+    }
+
     func refresh() {
+        resetConnection()
         do {
             settings = try repository.load()
             credentialStatus = Self.status(for: settings.credentialReference, in: credentials)
@@ -105,6 +177,7 @@ final class AISettingsStore: ObservableObject {
             let saved = try repository.save(proposal, expectedRevision: current.revision)
             // No suspension occurs between commit and cancellation/publication.
             invalidateOperations()
+            resetConnection()
             settings = saved
             credentialStatus = Self.status(for: saved.credentialReference, in: credentials)
             suspended = false
@@ -145,6 +218,7 @@ final class AISettingsStore: ObservableObject {
     func disable(expectedRevision: UUID?) throws {
         let current = try authoritative(expectedRevision: expectedRevision)
         suspended = true
+        resetConnection()
         invalidateOperations()
         let proposal = AISettingsSnapshot(enabled: false, providerID: current.providerID,
                                           modelID: current.modelID, credentialReference: current.credentialReference,
@@ -155,6 +229,7 @@ final class AISettingsStore: ObservableObject {
     func removeKey(expectedRevision: UUID?) throws {
         let current = try authoritative(expectedRevision: expectedRevision)
         suspended = true
+        resetConnection()
         invalidateOperations()
         // Do not delete until the disabled state has committed. A failed delete
         // retains the reference in that disabled record for a later explicit retry.
@@ -207,6 +282,7 @@ final class AISettingsStore: ObservableObject {
         do {
             settings = try repository.save(proposal, expectedRevision: proposal.revision)
             credentialStatus = Self.status(for: settings.credentialReference, in: credentials)
+            resetConnection()
             error = nil
         } catch {
             let mapped = Self.persistenceError(error)

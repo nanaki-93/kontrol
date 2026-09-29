@@ -3,10 +3,17 @@ import Foundation
 // Verified 2026-09-29 against https://developers.openai.com/api/reference/resources/responses/methods/create,
 // https://developers.openai.com/api/docs/guides/structured-outputs,
 // https://developers.openai.com/api/docs/guides/your-data and
-// https://developers.openai.com/api/docs/models/gpt-4o-mini.
+// https://developers.openai.com/api/docs/models/gpt-4o-mini and
+// https://developers.openai.com/api/reference/resources/models/methods/retrieve.
+// GET /v1/models/{model} is authenticated metadata retrieval, not an inference check.
 // Responses POST supports Bearer auth, text.format json_schema strict, store=false,
 // max_output_tokens and explicit incomplete/refusal signals. store=false does NOT
 // eliminate abuse-monitoring retention (normally up to 30 days without approved controls).
+protocol OpenAIConnectionTesting {
+    /// Verifies authenticated model metadata only; inference permissions are not tested.
+    func testConnection() async throws
+}
+
 protocol OpenAIHTTPTransport {
     func send(_ request: URLRequest, maximumBytes: Int) async throws -> (HTTPURLResponse, Data)
 }
@@ -52,8 +59,9 @@ final class BoundedOpenAITransport: OpenAIHTTPTransport {
     }
 }
 
-final class OpenAILessonGenerator: LessonGenerator {
+final class OpenAILessonGenerator: LessonGenerator, OpenAIConnectionTesting {
     static let endpoint = URL(string: "https://api.openai.com/v1/responses")!
+    static let modelsEndpoint = URL(string: "https://api.openai.com/v1/models/")!
     // Explicit documented structured-output snapshots, not name-prefix inference.
     static let supportedModels: Set<String> = ["gpt-4o-mini", "gpt-4o-mini-2024-07-18", "gpt-4o-2024-08-06"]
     private let model: String
@@ -84,35 +92,58 @@ final class OpenAILessonGenerator: LessonGenerator {
         guard JSONSerialization.isValidJSONObject(body),
               let payload = try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys]),
               payload.count <= LessonGenerationRequest.maximumBytes else { throw LessonGenerationError.oversizedRequest }
+        var urlRequest = try authenticatedRequest(url: Self.endpoint)
+        urlRequest.httpMethod = "POST"
+        urlRequest.httpBody = payload
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let data = try await send(urlRequest, maximumBytes: GeneratedLessonValidator.maximumResponseBytes)
+        return try Self.decodeResponse(data)
+    }
+
+    /// Explicit metadata request. Success means the key can retrieve this model's
+    /// metadata, not that the key can perform a Responses inference with it.
+    func testConnection() async throws {
+        guard Self.supportedModels.contains(model) else { throw LessonGenerationError.unsupportedModel }
+        // Model IDs are fixed allowlisted path components; never accept a host or URL from settings.
+        let endpoint = Self.modelsEndpoint.appendingPathComponent(model)
+        let data = try await send(authenticatedRequest(url: endpoint), maximumBytes: 256 * 1024)
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              object["object"] as? String == "model", object["id"] as? String == model else {
+            throw LessonGenerationError.malformedResponse
+        }
+    }
+
+    private func authenticatedRequest(url: URL) throws -> URLRequest {
+        if Task.isCancelled { throw LessonGenerationError.cancelled }
         let secret: Data
         do { secret = try credentials.read(reference: credentialReference) }
         catch CredentialStoreError.missing { throw LessonGenerationError.missingCredential }
         catch { throw LessonGenerationError.inaccessibleCredential }
         guard !secret.isEmpty, let key = String(data: secret, encoding: .utf8),
               !key.contains("\n"), !key.contains("\r") else { throw LessonGenerationError.inaccessibleCredential }
-        var urlRequest = URLRequest(url: Self.endpoint, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
-        urlRequest.httpMethod = "POST"
-        urlRequest.httpBody = payload
-        urlRequest.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
+        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        return request
+    }
+
+    private func send(_ request: URLRequest, maximumBytes: Int) async throws -> Data {
         let response: HTTPURLResponse
         let data: Data
-        do { (response, data) = try await transport.send(urlRequest, maximumBytes: GeneratedLessonValidator.maximumResponseBytes) }
+        do { (response, data) = try await transport.send(request, maximumBytes: maximumBytes) }
         catch { throw Self.mapTransport(error) }
         if Task.isCancelled { throw LessonGenerationError.cancelled }
-        guard response.url == Self.endpoint, !(300...399).contains(response.statusCode) else {
+        guard response.url == request.url, !(300...399).contains(response.statusCode) else {
             throw LessonGenerationError.providerFailure
         }
-        guard data.count <= GeneratedLessonValidator.maximumResponseBytes else { throw LessonGenerationError.oversizedResponse }
+        guard data.count <= maximumBytes else { throw LessonGenerationError.oversizedResponse }
         switch response.statusCode {
-        case 200: break
+        case 200: return data
         case 401: throw LessonGenerationError.authentication
         case 403: throw LessonGenerationError.authorization
         case 404: throw LessonGenerationError.unsupportedModel
         case 429: throw LessonGenerationError.rateLimited(retryAfter: Self.retryAfter(response))
         default: throw LessonGenerationError.providerFailure
         }
-        return try Self.decodeResponse(data)
     }
 
     // Retry-After is either nonnegative decimal seconds or an HTTP-date. Never
