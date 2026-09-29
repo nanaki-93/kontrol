@@ -17,10 +17,18 @@ private final class ReadingCatalogRepository: CatalogRepository {
     var detailValue: LessonDetailSnapshot?
     var historyValue: [LessonHistorySnapshot] = []
     var mutationValue: LessonMutationResult?
+    var insertionValue: GeneratedLessonInsertionResult?
+    var insertionError: Error?
     private(set) var reads = 0
     private(set) var writes = 0
 
     init(_ value: LearningCatalogSnapshot) { self.value = value }
+
+    func acceptGeneratedLesson(_ lesson: ValidatedGeneratedLesson, now: Date) throws -> GeneratedLessonInsertionResult {
+        writes += 1
+        if let insertionError { throw insertionError }
+        return try XCTUnwrap(insertionValue)
+    }
 
     func loadSnapshot() throws -> LearningCatalogSnapshot {
         reads += 1
@@ -103,6 +111,141 @@ final class LearningCatalogStoreTests: XCTestCase {
             subtopics: [], concepts: [], definitions: [], progress: [],
             slots: withSlot ? [LessonSlotSnapshot(topicID: "go", slotIndex: 0,
                             lessonID: "go.example", assignedAt: Date(timeIntervalSince1970: 100))] : [])
+    }
+
+    private func generatedFixture(_ repository: SwiftDataCatalogRepository, container: ModelContainer) throws -> ValidatedGeneratedLesson {
+        let initial = try repository.generationContext(topicID: "go")
+        let source = try XCTUnwrap(initial.definitions.first {
+            $0.conceptIDs.contains("go.concurrency.cancel-work") &&
+                $0.objectiveKey != "expansion.go.concurrency.cancellation-race"
+        })
+        let writer = ModelContext(container)
+        let date = Date(timeIntervalSince1970: 20)
+        writer.insert(LessonProgress(lessonID: source.id, status: .completed, completedAt: date))
+        writer.insert(LessonAttempt(id: UUID(), lessonID: source.id, contentVersion: source.contentVersion,
+            completedAt: date, pinnedContentData: try PinnedLessonContent(definition: source).encoded()))
+        writer.insert(try LessonTerminalRecord(metadata: LessonTerminalMetadata(lessonID: source.id,
+            provenance: .studiedPin, title: source.title, topicID: source.topicID,
+            subtopicID: source.subtopicID, contentVersion: source.contentVersion,
+            objectiveKey: source.objectiveKey, conceptIDs: source.conceptIDs.sorted(),
+            normalizedContentHash: source.normalizedContentHash, format: source.format,
+            dismissalTimeDefinition: nil)))
+        try writer.save()
+        let context = try repository.generationContext(topicID: "go")
+        let registry = try GenerationObjectivesLoader.load(catalog: context.catalog, membership: context.membership)
+        let request = try LessonGenerationRequestBuilder.make(selection: LessonGenerationSelection(topicID: "go",
+            objectiveKey: "expansion.go.concurrency.cancellation-race", format: "code",
+            difficulty: "intermediate"), operationID: UUID(), context: context, registry: registry)
+        let candidate = CandidateLesson(title: "Cancellation race", objectiveKey: request.objectiveKey,
+            objective: request.objective, topicID: request.topicID, subtopicID: request.subtopicID,
+            conceptIDs: request.conceptIDs, difficulty: request.difficulty, format: request.format,
+            estimatedMinutes: 20, prerequisiteConceptIDs: request.prerequisiteConceptIDs,
+            explanation: "Distinct cancellation explanation", workedExample: "Distinct worked example",
+            exercise: "Distinct exercise", referenceAnswer: "Distinct reference",
+            selfCheckCriteria: ["Check distinct behavior"])
+        return try GeneratedLessonValidator.validate(candidate, request: request, context: context,
+            registry: registry, requestedModel: "gpt-4o-2024-08-06", now: Date(timeIntervalSince1970: 30))
+    }
+
+    func testGeneratedVacancyPublishesOneCommittedCatalogWithoutReadingOrChangingOtherStates() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let committed = SwiftDataCatalogRepository(container: container)
+        _ = try committed.importIfNeeded(BundledCatalogLoader.load())
+        let lesson = try generatedFixture(committed, container: container)
+        let writer = ModelContext(container)
+        let slot = try XCTUnwrap(writer.fetch(FetchDescriptor<LessonSlot>()).first { $0.topicID == "go" })
+        writer.delete(slot)
+        try writer.save()
+        let before = try committed.loadSnapshot()
+        let repository = ReadingCatalogRepository(before)
+        let store = LearningCatalogStore(repository: repository)
+        store.loadIfNeeded()
+        let detail = LessonDetailSnapshot(id: before.slots[0].lessonID, progress: nil,
+                                          attempt: nil, content: .unavailable)
+        repository.detailValue = detail
+        _ = try store.loadDetail(lessonID: detail.id)
+        _ = try store.loadHistory()
+        _ = try store.loadCoverage()
+        let unchanged = store.projection
+        let readsBeforeInsertion = repository.reads
+        let committedReceipt = try committed.acceptGeneratedLesson(lesson, now: Date(timeIntervalSince1970: 40))
+        repository.insertionValue = committedReceipt
+        repository.failCatalog = true
+        repository.failHistory = true
+        repository.failCoverage = true
+        var published: [LearningExperienceProjection] = []
+        let subscription = store.$projection.dropFirst().sink { published.append($0) }
+        defer { subscription.cancel() }
+        let returned = try store.acceptGeneratedLesson(lesson)
+        XCTAssertEqual(returned.lessonID, lesson.definition.id)
+        XCTAssertEqual(returned.assignedSlot?.slotIndex, slot.slotIndex)
+        XCTAssertEqual(published.count, 1)
+        XCTAssertEqual(store.state.snapshot, committedReceipt.catalog)
+        XCTAssertEqual(store.detailState, unchanged.detail)
+        XCTAssertEqual(store.historyState, unchanged.history)
+        XCTAssertEqual(store.coverageState, unchanged.coverage)
+        XCTAssertEqual(repository.reads, readsBeforeInsertion) // no post-commit read
+        XCTAssertEqual(repository.coverageReads, 1)
+        XCTAssertEqual(repository.writes, 1)
+    }
+
+    func testRealGeneratedVacancyPublishesOnlyAfterCommitAndRetainsCurrentDetail() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataCatalogRepository(container: container)
+        _ = try repository.importIfNeeded(BundledCatalogLoader.load())
+        let lesson = try generatedFixture(repository, container: container)
+        let writer = ModelContext(container)
+        let vacant = try XCTUnwrap(writer.fetch(FetchDescriptor<LessonSlot>()).first { $0.topicID == "go" })
+        writer.delete(vacant)
+        try writer.save()
+        let store = LearningCatalogStore(repository: repository)
+        store.loadIfNeeded()
+        let before = try XCTUnwrap(store.state.snapshot)
+        let detailID = try XCTUnwrap(before.slots.first?.lessonID)
+        let detail = try store.loadDetail(lessonID: detailID)
+        var publications: [LearningExperienceProjection] = []
+        let subscription = store.$projection.dropFirst().sink { publications.append($0) }
+        defer { subscription.cancel() }
+        let result = try store.acceptGeneratedLesson(lesson, now: Date(timeIntervalSince1970: 40))
+        XCTAssertEqual(publications.count, 1)
+        XCTAssertEqual(result.assignedSlot?.slotIndex, vacant.slotIndex)
+        XCTAssertEqual(store.state.snapshot, try repository.loadSnapshot())
+        XCTAssertEqual(store.state.snapshot?.slots.filter { $0.lessonID == result.lessonID }.count, 1)
+        XCTAssertEqual(store.state.snapshot?.slots.filter { $0.lessonID != result.lessonID }, before.slots)
+        XCTAssertEqual(store.detailState, .current(detail))
+        XCTAssertEqual(store.historyState, .notLoaded)
+        XCTAssertEqual(store.coverageState, .notLoaded)
+    }
+
+    func testGeneratedFailureNeverPublishesPrecommitReceiptOrRepairsIndependentFailures() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let committed = SwiftDataCatalogRepository(container: container)
+        _ = try committed.importIfNeeded(BundledCatalogLoader.load())
+        let lesson = try generatedFixture(committed, container: container)
+        let repository = ReadingCatalogRepository(try committed.loadSnapshot())
+        let store = LearningCatalogStore(repository: repository)
+        store.loadIfNeeded()
+        repository.failHistory = true
+        repository.failCoverage = true
+        XCTAssertThrowsError(try store.loadHistory())
+        XCTAssertThrowsError(try store.loadCoverage())
+        let baseline = store.projection
+        repository.insertionError = LessonGenerationError.persistenceFailure
+        repository.insertionValue = GeneratedLessonInsertionResult(lessonID: lesson.definition.id,
+            assignedSlot: nil, catalog: baseline.catalog.snapshot!, history: [], coverage: .membershipUnavailable)
+        var published = 0
+        let subscription = store.$projection.dropFirst().sink { _ in published += 1 }
+        defer { subscription.cancel() }
+        XCTAssertThrowsError(try store.acceptGeneratedLesson(lesson)) {
+            XCTAssertEqual($0 as? LessonGenerationError, .persistenceFailure)
+        }
+        XCTAssertEqual(published, 0)
+        XCTAssertEqual(store.projection, baseline)
+        repository.insertionError = nil
+        _ = try store.acceptGeneratedLesson(lesson)
+        XCTAssertEqual(store.historyState, baseline.history)
+        XCTAssertEqual(store.coverageState, baseline.coverage)
+        XCTAssertEqual(store.error, baseline.error)
     }
 
     func testFailedDetailAndHistoryRetainLastCommittedValuesButBlockMutations() throws {

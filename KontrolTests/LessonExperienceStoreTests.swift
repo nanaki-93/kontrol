@@ -42,6 +42,84 @@ final class LessonExperienceStoreTests: XCTestCase {
         return (repository, graph, graph.lessonDraftStore, scheduler, opened)
     }
 
+    func testGeneratedFullSlotKeepsVisibleChoicesDetailAndDirtyAnswerThroughFailureAndCommit() throws {
+        var fail = false
+        let (repository, graph, drafts, _, opened) = try draftFixture(beforeSave: {
+            if fail { throw Injected.save }
+        })
+        let store = graph.learningCatalogStore
+        let container = graph.container
+        let initial = try repository.generationContext(topicID: "go")
+        let source = try XCTUnwrap(initial.definitions.first {
+            $0.conceptIDs.contains("go.concurrency.cancel-work") &&
+                $0.objectiveKey != "expansion.go.concurrency.cancellation-race"
+        })
+        let date = Date(timeIntervalSince1970: 20)
+        let writer = ModelContext(container)
+        writer.insert(LessonProgress(lessonID: source.id, status: .completed, completedAt: date))
+        writer.insert(LessonAttempt(id: UUID(), lessonID: source.id, contentVersion: source.contentVersion,
+            completedAt: date, pinnedContentData: try PinnedLessonContent(definition: source).encoded()))
+        writer.insert(try LessonTerminalRecord(metadata: LessonTerminalMetadata(lessonID: source.id,
+            provenance: .studiedPin, title: source.title, topicID: source.topicID,
+            subtopicID: source.subtopicID, contentVersion: source.contentVersion,
+            objectiveKey: source.objectiveKey, conceptIDs: source.conceptIDs.sorted(),
+            normalizedContentHash: source.normalizedContentHash, format: source.format,
+            dismissalTimeDefinition: nil)))
+        try writer.save()
+        let context = try repository.generationContext(topicID: "go")
+        let registry = try GenerationObjectivesLoader.load(catalog: context.catalog, membership: context.membership)
+        let request = try LessonGenerationRequestBuilder.make(selection: LessonGenerationSelection(topicID: "go",
+            objectiveKey: "expansion.go.concurrency.cancellation-race", format: "code",
+            difficulty: "intermediate"), operationID: UUID(), context: context, registry: registry)
+        let candidate = CandidateLesson(title: "Cancellation race", objectiveKey: request.objectiveKey,
+            objective: request.objective, topicID: request.topicID, subtopicID: request.subtopicID,
+            conceptIDs: request.conceptIDs, difficulty: request.difficulty, format: request.format,
+            estimatedMinutes: 20, prerequisiteConceptIDs: request.prerequisiteConceptIDs,
+            explanation: "Distinct cancellation explanation", workedExample: "Distinct worked example",
+            exercise: "Distinct exercise", referenceAnswer: "Distinct reference",
+            selfCheckCriteria: ["Check distinct behavior"])
+        let lesson = try GeneratedLessonValidator.validate(candidate, request: request, context: context,
+            registry: registry, requestedModel: "gpt-4o-2024-08-06", now: Date(timeIntervalSince1970: 30))
+        let attempt = try XCTUnwrap(opened.detail.attempt)
+        drafts.edit("  unfinished 🧪\n", attemptID: attempt.id)
+        let baseline = store.projection
+        let choices = try XCTUnwrap(store.state.snapshot).slots
+        let detail = store.detailState
+        let history = store.historyState
+        let coverage = store.coverageState
+        var publications: [LearningExperienceProjection] = []
+        let subscription = store.$projection.dropFirst().sink { publications.append($0) }
+        defer { subscription.cancel() }
+        fail = true
+        XCTAssertThrowsError(try store.acceptGeneratedLesson(lesson)) {
+            XCTAssertEqual($0 as? LessonGenerationError, .persistenceFailure)
+        }
+        XCTAssertTrue(publications.isEmpty)
+        XCTAssertEqual(store.projection, baseline)
+        XCTAssertEqual(try repository.loadSnapshot().slots, choices)
+        XCTAssertFalse(try repository.loadSnapshot().definitions.contains { $0.id == lesson.definition.id })
+        XCTAssertEqual(drafts.buffers[attempt.id]?.text, "  unfinished 🧪\n")
+        XCTAssertTrue(try XCTUnwrap(drafts.buffers[attempt.id]).isDirty)
+        fail = false
+        let receipt = try store.acceptGeneratedLesson(lesson, now: Date(timeIntervalSince1970: 40))
+        XCTAssertNil(receipt.assignedSlot)
+        XCTAssertEqual(publications.count, 1)
+        XCTAssertEqual(store.state.snapshot, receipt.catalog)
+        XCTAssertEqual(store.state.snapshot?.slots, choices)
+        XCTAssertEqual(store.detailState, detail)
+        XCTAssertEqual(store.historyState, history)
+        XCTAssertEqual(store.coverageState, coverage)
+        XCTAssertEqual(drafts.buffers[attempt.id]?.text, "  unfinished 🧪\n")
+        XCTAssertTrue(try XCTUnwrap(drafts.buffers[attempt.id]).isDirty)
+        XCTAssertEqual(try repository.loadLesson(lessonID: opened.detail.id).attempt?.answerDraft, "")
+        XCTAssertThrowsError(try store.acceptGeneratedLesson(lesson)) {
+            XCTAssertEqual($0 as? LessonGenerationError, .duplicateIdentity)
+        }
+        XCTAssertEqual(publications.count, 1)
+        XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<LessonDefinition>())
+            .filter { $0.id == lesson.definition.id }.count, 1)
+    }
+
     func testExplicitChoiceEntryPinsOnceAndBrowsingRemainsReadOnly() throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         let repository = SwiftDataCatalogRepository(container: container)

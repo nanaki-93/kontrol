@@ -207,6 +207,20 @@ final class LearningCatalogStore: ObservableObject {
         }
     }
 
+    /// Publish only after the repository has committed its insertion. Generation
+    /// changes definitions and possibly one slot, but neither the open detail nor
+    /// personal History/Coverage. In particular, a failed independent read must
+    /// remain failed until its own retry; no draft buffer is observed or reset.
+    @discardableResult
+    func acceptGeneratedLesson(_ lesson: ValidatedGeneratedLesson, now: Date = Date()) throws -> GeneratedLessonInsertionResult {
+        let receipt = try repository.acceptGeneratedLesson(lesson, now: now)
+        var committed = projection
+        committed.catalog = receipt.catalog.slots.isEmpty ? .empty(receipt.catalog) : .current(receipt.catalog)
+        if !isDetailReadFailed && !isHistoryReadFailed { committed.error = nil }
+        projection = committed
+        return receipt
+    }
+
     @discardableResult
     func openLesson(lessonID: String, now: Date = Date()) throws -> LessonMutationResult {
         try mutate { try repository.openLesson(lessonID: lessonID, now: now) }
