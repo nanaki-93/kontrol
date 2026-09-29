@@ -117,8 +117,8 @@ final class AISettingsStoreTests: XCTestCase {
         catch { XCTFail("Unexpected error") }
         try store.saveConfiguration(modelID: "gpt-4o-2024-08-06", expectedRevision: store.presentation.revision)
         await tester.finish(LessonGenerationError.authentication)
-        do { try await task.value; XCTFail("Stale result published") }
-        catch let error as AISettingsStoreError { XCTAssertEqual(error, .staleRevision) }
+        do { try await task.value; XCTFail("Canceled result published") }
+        catch let error as LessonGenerationError { XCTAssertEqual(error, .cancelled) }
         catch { XCTFail("Unexpected error") }
         XCTAssertEqual(store.connectionStatus, .notTested)
         XCTAssertEqual(store.presentation.modelID, "gpt-4o-2024-08-06")
@@ -167,6 +167,32 @@ final class AISettingsStoreTests: XCTestCase {
         repository.failLoad = false
         store.refresh()
         XCTAssertEqual(store.connectionStatus, .notTested)
+    }
+
+    func testLateConnectionResponseCannotPublishWhenCredentialBecomesUnreadable() async throws {
+        for problem: CredentialStoreError in [.missing, .inaccessible] {
+            let repository = SettingsMemoryRepository(), credentials = SettingsMemoryCredentials()
+            let tester = PausedConnectionTester()
+            let store = AISettingsStore(repository: repository, credentials: credentials,
+                connectionTester: { _, _ in tester })
+            try store.saveConfiguration(modelID: "gpt-4o-mini", credential: first, expectedRevision: nil)
+            try store.enable(expectedRevision: store.presentation.revision)
+            let saved = repository.value, saves = repository.saves.count
+            let task = Task { try await store.testConnection() }
+            while await tester.calls == 0 { await Task.yield() }
+            credentials.readError = problem
+            await tester.finish() // transport ignores a key that changed while in flight
+            let expected: AISettingsStoreError = problem == .missing ? .missingCredential : .inaccessibleCredential
+            do { try await task.value; XCTFail("Unavailable key published model availability") }
+            catch let error as AISettingsStoreError { XCTAssertEqual(error, expected) }
+            catch { XCTFail("Unexpected error") }
+            XCTAssertEqual(store.connectionStatus, .notTested)
+            XCTAssertEqual(store.error, expected)
+            XCTAssertEqual(store.credentialStatus, problem == .missing ? .missing : .inaccessible)
+            XCTAssertEqual(repository.value, saved)
+            XCTAssertEqual(repository.saves.count, saves)
+            XCTAssertFalse(store.operationGate.isBusy)
+        }
     }
 
     func testTesterCancellationWithoutTaskCancellationIsNotAConnectionFailure() async throws {

@@ -59,7 +59,7 @@ final class AISettingsStore: ObservableObject {
     }
     @Published private(set) var error: AISettingsStoreError?
     @Published private(set) var connectionStatus: AIConnectionStatus = .notTested
-    private var connectionID: UUID?
+    let operationGate = AIOperationGate()
     private let connectionTester: (String, String) -> any OpenAIConnectionTesting
 
     private let repository: any AISettingsRepository
@@ -82,19 +82,33 @@ final class AISettingsStore: ObservableObject {
     /// Called only by an explicit Test connection action; never by refresh/save/enable.
     /// No settings or learning records are written. A revision change discards the
     /// result, including a late failure from a transport that ignores cancellation.
-    func testConnection() async throws {
-        guard connectionID == nil else { throw AISettingsStoreError.connectionInProgress }
+    func cancelConnection(owner: UUID) {
+        guard operationGate.owns(owner: owner, kind: .connection) else { return }
+        operationGate.invalidate(owner: owner)
+        connectionStatus = .notTested
+    }
+
+    func testConnection(owner: UUID = UUID()) async throws {
+        guard !operationGate.isBusy else { throw AISettingsStoreError.connectionInProgress }
         let current = try authoritative(expectedRevision: settings.revision)
         guard !suspended, current.providerID == "openai",
               let model = current.modelID, OpenAILessonGenerator.supportedModels.contains(model),
               let reference = current.credentialReference else { throw AISettingsStoreError.invalidConfiguration }
         try requireReadable(reference)
-        let id = UUID()
-        connectionID = id
+        guard let lease = operationGate.begin(kind: .connection, owner: owner, revision: current.revision) else {
+            throw AISettingsStoreError.connectionInProgress
+        }
+        defer { operationGate.finish(lease) }
         connectionStatus = .testing
         let outcome: AIConnectionStatus
         do {
-            try await connectionTester(model, reference).testConnection()
+            let work = Task { try await connectionTester(model, reference).testConnection() }
+            operationGate.attach(lease) { work.cancel() }
+            try await withTaskCancellationHandler {
+                try await work.value
+            } onCancel: {
+                Task { @MainActor in operationGate.invalidate(lease) }
+            }
             outcome = .modelAvailable
         } catch let failure as LessonGenerationError {
             outcome = .failed(failure)
@@ -105,8 +119,10 @@ final class AISettingsStore: ObservableObject {
         } catch {
             outcome = .failed(.providerFailure)
         }
-        guard connectionID == id else { throw AISettingsStoreError.staleRevision }
-        connectionID = nil
+        guard operationGate.authorized(lease) else {
+            connectionStatus = .notTested
+            throw LessonGenerationError.cancelled
+        }
         if Task.isCancelled || outcome == .failed(.cancelled) {
             connectionStatus = .notTested
             throw LessonGenerationError.cancelled
@@ -124,12 +140,21 @@ final class AISettingsStore: ObservableObject {
             connectionStatus = .notTested
             throw AISettingsStoreError.staleRevision
         }
+        // Metadata success (or failure) is stale if the key disappeared or became
+        // unreadable during the request. Do not publish a transport result until
+        // local authorization is rechecked without another suspension.
+        do { try requireReadable(latest.credentialReference) }
+        catch {
+            connectionStatus = .notTested
+            self.error = error as? AISettingsStoreError ?? .credentialFailure
+            throw error
+        }
         connectionStatus = outcome
         if case .failed(let failure) = outcome { throw failure }
     }
 
     private func resetConnection() {
-        connectionID = nil
+        operationGate.invalidate()
         connectionStatus = .notTested
     }
 
