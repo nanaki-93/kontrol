@@ -99,6 +99,9 @@ struct AppShell: View {
                                                  drafts: dependencies.lessonDraftStore, navigation: navigation)
                         case .history:
                             LearningHistoryView(store: dependencies.learningCatalogStore, navigation: navigation)
+                        case .coverage(let subtopicID):
+                            LearningCoverageView(store: dependencies.learningCatalogStore, navigation: navigation,
+                                                 selectedSubtopicID: subtopicID)
                         }
                     case .focus:
                         FocusView(service: dependencies.focusService, taskStore: dependencies.taskStore,

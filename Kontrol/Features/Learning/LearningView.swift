@@ -79,8 +79,12 @@ struct LearningView: View {
         VStack(alignment: .leading, spacing: AppMetrics.space4) {
             PageHeader("Learning")
             if let navigation {
-                Button("History") { navigation.showHistory() }
-                    .accessibilityIdentifier("learning-history")
+                HStack(spacing: AppMetrics.space4) {
+                    Button("History") { navigation.showHistory() }
+                        .accessibilityIdentifier("learning-history")
+                    Button("Coverage") { navigation.showCoverage() }
+                        .accessibilityIdentifier("learning-coverage")
+                }
             }
             if entryError != nil {
                 ErrorBanner(.saveFailed)

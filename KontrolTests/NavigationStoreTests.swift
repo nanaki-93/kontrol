@@ -119,6 +119,55 @@ final class NavigationStoreTests: XCTestCase {
         XCTAssertEqual(preferences.writes, 2)
     }
 
+    func testCoverageRouteAndSubtopicRemainWindowLocalAndFailedDraftBarrierKeepsPreviousRoute() throws {
+        enum Injected: Error { case save }
+        var fail = false
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataCatalogRepository(container: container, beforeSave: {
+            if fail { throw Injected.save }
+        })
+        _ = try repository.importIfNeeded(BundledCatalogLoader.load())
+        let graph = AppDependencies(container: container, catalogRepository: repository)
+        graph.learningCatalogStore.loadIfNeeded()
+        let id = try XCTUnwrap(graph.learningCatalogStore.state.snapshot?.slots.first?.lessonID)
+        let opened = try graph.learningCatalogStore.openLesson(lessonID: id)
+        let attempt = try XCTUnwrap(opened.detail.attempt)
+        graph.lessonDraftStore.observe(opened.detail)
+        let preferences = CountingPreferences()
+        let first = NavigationStore(preferences: preferences)
+        let second = NavigationStore(preferences: preferences)
+        first.attachDrafts(graph.lessonDraftStore)
+        first.select(.learning)
+        first.enterLesson(id: id)
+        graph.lessonDraftStore.edit("unsaved coverage answer", attemptID: attempt.id)
+        fail = true
+        first.showCoverage()
+        XCTAssertEqual(first.learningRoute, .detail(id))
+        XCTAssertEqual(first.pendingTransition, .learning(.coverage(subtopicID: nil)))
+        XCTAssertTrue(try XCTUnwrap(graph.lessonDraftStore.buffers[attempt.id]).isDirty)
+        XCTAssertEqual(second.learningRoute, .choices)
+        fail = false
+        first.retryTransition()
+        XCTAssertEqual(first.learningRoute, .coverage(subtopicID: nil))
+        first.selectCoverageSubtopic("subtopic")
+        XCTAssertEqual(first.learningRoute, .coverage(subtopicID: "subtopic"))
+        XCTAssertEqual(second.learningRoute, .choices)
+        first.selectCoverageSubtopic(nil)
+        XCTAssertEqual(first.learningRoute, .coverage(subtopicID: nil))
+        graph.lessonDraftStore.edit("second answer", attemptID: attempt.id)
+        fail = true
+        first.backToChoices()
+        XCTAssertEqual(first.learningRoute, .coverage(subtopicID: nil))
+        XCTAssertEqual(first.pendingTransition, .learning(.choices))
+        fail = false
+        first.retryTransition()
+        XCTAssertEqual(first.learningRoute, .choices)
+        first.selectCoverageSubtopic("ignored")
+        XCTAssertEqual(first.learningRoute, .choices)
+        XCTAssertEqual(preferences.writes, 1, "Coverage and subtopic routes are not preferences")
+        XCTAssertEqual(try repository.loadLesson(lessonID: id).attempt?.answerDraft, "second answer")
+    }
+
     func testCrossDestinationEntryFailsWithoutPartialRouteThenCancelAndRetryByStableID() throws {
         enum Injected: Error { case save }
         var fail = false

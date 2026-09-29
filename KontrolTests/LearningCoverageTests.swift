@@ -105,6 +105,17 @@ final class LearningCoverageTests: XCTestCase {
         XCTAssertEqual(evidence, .incomplete(completedLessonIDs: ["no-date", "partial", "unknown"]))
     }
 
+    func testOverviewGroupsCurrentSubtopicsAndDistinguishesKnownFromIncompleteCounts() throws {
+        let rows = try coverage(membership([], subtopics: ["one", "two"]))
+        XCTAssertEqual(LearningCoverageView.groups(rows).map(\.id), ["topic"])
+        XCTAssertEqual(LearningCoverageView.groups(rows)[0].subtopics.map(\.id), ["one", "two"])
+        XCTAssertEqual(LearningCoverageView.countLabel(rows[0], evidence: .complete),
+                       "0 of 0 concepts practiced")
+        XCTAssertEqual(LearningCoverageView.countLabel(rows[0],
+            evidence: .incomplete(completedLessonIDs: ["legacy"])),
+            "0 of 0 concepts practiced (known evidence only)")
+    }
+
     func testInconsistentCurrentTaxonomyFailsRatherThanProducingFalseZero() {
         XCTAssertThrowsError(try coverage(membership(["missing"]))) { error in
             XCTAssertEqual(error as? LearningEvidenceError, .invalidPayload)

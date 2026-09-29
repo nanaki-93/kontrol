@@ -40,6 +40,83 @@ final class LessonExperiencePresentationTests: XCTestCase {
         try check(descendants(root), { self.descendants(root) })
     }
 
+    func testCoverageEntryOverviewAndSubtopicSelectionAreReadOnly() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataCatalogRepository(container: container)
+        _ = try repository.importIfNeeded(BundledCatalogLoader.load(from: Bundle.main))
+        let graph = AppDependencies(container: container, catalogRepository: repository)
+        let store = graph.learningCatalogStore
+        store.loadIfNeeded()
+        let before = try repository.loadSnapshot()
+        let navigation = NavigationStore()
+        navigation.attachDrafts(graph.lessonDraftStore)
+        navigation.select(.learning)
+        try inspect(LearningView(store: store, navigation: navigation)) { elements, _ in
+            let entry = try XCTUnwrap(elements.first {
+                attribute($0, kAXIdentifierAttribute) as? String == "learning-coverage"
+            })
+            XCTAssertEqual(AXUIElementPerformAction(entry, kAXPressAction as CFString), .success)
+            XCTAssertEqual(navigation.learningRoute, .coverage(subtopicID: nil))
+        }
+        let coverage = try repository.loadCoverage()
+        guard case .available(_, _, let rows, _) = coverage else { return XCTFail("Missing current membership") }
+        let row = try XCTUnwrap(rows.first)
+        try inspect(LearningCoverageView(store: store, navigation: navigation, selectedSubtopicID: nil)) { elements, currentElements in
+            let ids = elements.compactMap { attribute($0, kAXIdentifierAttribute) as? String }
+            XCTAssertTrue(ids.contains("learning-coverage-topic-\(row.topicID)"))
+            XCTAssertTrue(ids.contains("learning-coverage-count-\(row.id)"))
+            XCTAssertTrue(ids.contains("learning-coverage-recent-\(row.id)"))
+            let button = try XCTUnwrap(elements.first {
+                attribute($0, kAXIdentifierAttribute) as? String == "learning-coverage-view-concepts-\(row.id)"
+            })
+            XCTAssertEqual(AXUIElementPerformAction(button, kAXPressAction as CFString), .success)
+            XCTAssertEqual(navigation.learningRoute, .coverage(subtopicID: row.id))
+            XCTAssertFalse(currentElements().contains {
+                attribute($0, kAXIdentifierAttribute) as? String == "learning-coverage-read-error"
+            })
+        }
+        try inspect(LearningCoverageView(store: store, navigation: navigation, selectedSubtopicID: row.id)) { elements, _ in
+            XCTAssertTrue(elements.contains { attribute($0, kAXIdentifierAttribute) as? String == "learning-coverage-back" })
+            XCTAssertTrue(elements.contains { attribute($0, kAXIdentifierAttribute) as? String == "learning-coverage-count-\(row.id)" })
+        }
+        XCTAssertEqual(try repository.loadSnapshot(), before)
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).isEmpty)
+        XCTAssertEqual(try repository.loadCoverage(), coverage)
+    }
+
+    func testCoverageFailedReadShowsRetryInsteadOfStaleCounts() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataCatalogRepository(container: container)
+        _ = try repository.importIfNeeded(BundledCatalogLoader.load(from: Bundle.main))
+        let store = AppDependencies(container: container, catalogRepository: repository).learningCatalogStore
+        let prior = try store.loadCoverage()
+        let context = ModelContext(container)
+        let membership = try XCTUnwrap(context.fetch(FetchDescriptor<CatalogMembership>()).first)
+        let validPayload = membership.payload
+        membership.payload = Data("{\"version\":999}".utf8)
+        try context.save()
+        XCTAssertThrowsError(try store.loadCoverage())
+        try inspect(LearningCoverageView(store: store, navigation: NavigationStore(), selectedSubtopicID: nil)) { elements, currentElements in
+            let ids = elements.compactMap { attribute($0, kAXIdentifierAttribute) as? String }
+            XCTAssertTrue(ids.contains("learning-coverage-read-error"))
+            XCTAssertTrue(ids.contains("learning-coverage-unavailable"))
+            XCTAssertFalse(ids.contains { $0.hasPrefix("learning-coverage-count-") })
+            membership.payload = validPayload
+            try context.save()
+            let retry = try XCTUnwrap(currentElements().first { element in
+                [kAXTitleAttribute, kAXDescriptionAttribute].contains { key in
+                    attribute(element, key) as? String == "Retry Coverage read"
+                }
+            })
+            XCTAssertEqual(AXUIElementPerformAction(retry, kAXPressAction as CFString), .success)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+            XCTAssertEqual(store.coverageState, .current(prior))
+            XCTAssertTrue(currentElements().contains {
+                (attribute($0, kAXIdentifierAttribute) as? String)?.hasPrefix("learning-coverage-count-") == true
+            })
+        }
+    }
+
     func testHistoryEmptySelectionReadOnlyAndExplicitRestore() throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         let repository = SwiftDataCatalogRepository(container: container)

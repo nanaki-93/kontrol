@@ -40,6 +40,8 @@ final class NavigationStore: ObservableObject {
         case choices
         case detail(String)
         case history
+        /// The optional subtopic is a window-local inspection selection, not a learning record.
+        case coverage(subtopicID: String?)
     }
 
     enum Transition: Equatable {
@@ -86,6 +88,15 @@ final class NavigationStore: ObservableObject {
 
     func showHistory() {
         transition(to: .learning(.history))
+    }
+
+    func showCoverage() {
+        transition(to: .learning(.coverage(subtopicID: nil)))
+    }
+
+    func selectCoverageSubtopic(_ id: String?) {
+        guard case .coverage = learningRoute else { return }
+        transition(to: .learning(.coverage(subtopicID: id)))
     }
 
     func backToChoices() {
