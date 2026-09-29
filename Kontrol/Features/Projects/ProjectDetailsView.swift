@@ -6,6 +6,7 @@ struct ProjectDetailsView: View {
     let row: ProjectRowState
     let back: () -> Void
     let refresh: () -> Void
+    let viewFeature: (String) -> Void
     var reconnect: () -> Void = {}
     var recoveryMessage: String? = nil
     var isReconnecting = false
@@ -91,6 +92,11 @@ struct ProjectDetailsView: View {
         case .unavailable:
             return "Feature progress unavailable; enumeration or manifest is incomplete"
         }
+    }
+
+    /// Roadmap milestones retain source order; only the validated feature index is sorted.
+    static func orderedFeatures(_ inspection: ProjectInspection) -> [ProjectFeature] {
+        inspection.features.sorted { $0.id < $1.id }
     }
 
     static func documentText(_ content: ProjectOptionalDocument) -> String {
@@ -182,6 +188,27 @@ struct ProjectDetailsView: View {
                                 .frame(maxWidth: .infinity, alignment: .leading)
                             }
                         }
+                    }
+                    SectionHeader("Validated features", metadata: "Read-only · ordered by feature ID")
+                    if inspection.featureEnumeration == .complete {
+                        if inspection.features.isEmpty {
+                            Text("No validated features to view")
+                                .appTypography(.body)
+                        } else {
+                            ForEach(Self.orderedFeatures(inspection), id: \.id) { feature in
+                                AppListRow(feature.title,
+                                           metadata: "ID: \(feature.id) · \(feature.priority.rawValue) priority · \(feature.effort.rawValue) effort",
+                                           status: StatusPill(feature.status.rawValue.capitalized,
+                                                              kind: feature.status == .completed ? .success : .warning)) {
+                                    ActionButton("View feature") { viewFeature(feature.id) }
+                                        .accessibilityIdentifier("project-roadmap-feature-open-\(feature.id)")
+                                }
+                                .accessibilityIdentifier("project-roadmap-feature-\(feature.id)")
+                            }
+                        }
+                    } else {
+                        Text("Feature listing incomplete; Refresh to view validated work.")
+                            .appTypography(.body)
                     }
                     document("Context", inspection.context)
                     document("Rules", inspection.rules)

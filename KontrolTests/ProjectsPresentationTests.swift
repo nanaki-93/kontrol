@@ -230,6 +230,53 @@ final class ProjectsPresentationTests: XCTestCase {
         XCTAssertTrue(ProjectsView.status(noInspection).contains("Reconnect required"))
     }
 
+    func testRoadmapIndexesAllValidatedStatusesAndRoutesBeyondTopThree() async throws {
+        let features = [card("z-planned", status: .planned), card("d-ready"),
+                        card("a-active", status: .active), card("x-blocked", status: .blocked),
+                        card("b-done", status: .completed), card("c-ready"),
+                        card("e-ready"), card("f-ready")]
+        let milestones = [RoadmapMilestone(id: "later", title: "Second", status: "active"),
+                          RoadmapMilestone(id: "earlier", title: "First", status: "planned")]
+        let base = cardInspection(features, excluded: [".kontrol/features/invalid.md"])
+        let inspection = ProjectInspection(manifest: base.manifest,
+            roadmap: .present(ProjectRoadmap(schemaVersion: 1, milestones: milestones)),
+            features: features, excludedFeaturePaths: base.excludedFeaturePaths,
+            featureEnumeration: .complete, context: .present(ProjectSourceDocument(
+                relativePath: ".kontrol/context.md", bytes: Data("Project notes".utf8))),
+            rules: .absent, history: .absent, diagnostics: [], sources: [], readAt: Date())
+        let projectID = UUID()
+        let store = ProjectStore(inspector: CardInspector([1: inspection]),
+                                 repository: ListRepository([reference(projectID, order: 0)]))
+        try store.enterProjects()
+        for _ in 0..<100 where store.rows.first?.isRefreshing == true {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let row = try XCTUnwrap(store.rows.first)
+        XCTAssertEqual(row.inspection, inspection)
+        XCTAssertEqual(ProjectDetailsView.orderedFeatures(inspection).map(\.id),
+                       ["a-active", "b-done", "c-ready", "d-ready", "e-ready", "f-ready", "x-blocked", "z-planned"])
+        XCTAssertEqual(inspection.features.map(\.status),
+                       [.planned, .ready, .active, .blocked, .completed, .ready, .ready, .ready])
+        XCTAssertEqual(inspection.roadmap, .present(ProjectRoadmap(schemaVersion: 1, milestones: milestones)),
+                       "Sorting feature IDs must not reorder milestones")
+        XCTAssertEqual(ProjectsView.recommendations(row).map(\.id), ["c-ready", "d-ready", "e-ready"])
+        XCTAssertEqual(ProjectDetailsView.progress(inspection),
+                       "1 of 8 valid features completed (partial; 1 file excluded)")
+        XCTAssertEqual(ProjectDetailsView.documentText(inspection.context), "Project notes")
+        let details = NSHostingView(rootView: ProjectDetailsView(row: row, back: {}, refresh: {},
+            viewFeature: { store.selectFeature($0, in: projectID) }))
+        let projects = NSHostingView(rootView: ProjectsView(store: store))
+        XCTAssertTrue(projects.rootView.store === store)
+        for feature in ProjectDetailsView.orderedFeatures(inspection) {
+            details.rootView.viewFeature(feature.id)
+            XCTAssertEqual(store.selectedFeature, ProjectFeatureIdentity(projectID: projectID, featureID: feature.id))
+            XCTAssertEqual(store.selectedFeatureContent, feature)
+            store.closeFeature()
+        }
+        XCTAssertEqual(inspection.features.map(\.status), features.map(\.status),
+                       "Roadmap selection must not change status or create work")
+    }
+
     func testFolderOnlyPickerAndPreviewHostCompile() {
         let panel = ProjectAddView.configuredPicker()
         XCTAssertTrue(panel.canChooseDirectories)
@@ -277,7 +324,8 @@ final class ProjectsPresentationTests: XCTestCase {
         XCTAssertEqual(ProjectDetailsView.documentText(inspection.rules), "No file provided")
         var row = ProjectRowState(reference: reference(UUID(), order: 0), inspection: inspection)
         let store = ProjectStore(inspector: ListInspector(), repository: ListRepository([row.reference]))
-        let host = NSHostingView(rootView: ProjectDetailsView(row: row, back: {}, refresh: { store.refresh(row.reference.id) }))
+        let host = NSHostingView(rootView: ProjectDetailsView(row: row, back: {}, refresh: { store.refresh(row.reference.id) },
+            viewFeature: { store.selectFeature($0, in: row.reference.id) }))
         XCTAssertEqual(host.rootView.row.inspection?.manifest?.name, "Disk name")
         XCTAssertEqual(host.rootView.row.inspection?.roadmap, inspection.roadmap)
         row.inspection = ProjectInspection(manifest: manifest, roadmap: .absent, features: [],
@@ -323,7 +371,7 @@ final class ProjectsPresentationTests: XCTestCase {
                        "Unsupported project format · progress unavailable; upgrade source")
         let row = ProjectRowState(reference: reference(UUID(), order: 0), inspection: unsupported,
                                   isStale: true)
-        let host = NSHostingView(rootView: ProjectDetailsView(row: row, back: {}, refresh: {}))
+        let host = NSHostingView(rootView: ProjectDetailsView(row: row, back: {}, refresh: {}, viewFeature: { _ in }))
         XCTAssertEqual(host.rootView.row.inspection?.sources, [source])
     }
 
@@ -351,7 +399,7 @@ final class ProjectsPresentationTests: XCTestCase {
         failed.refreshFailure = .persistence
         XCTAssertTrue(ProjectDetailsView.failureText(failed.refreshFailure!).contains("could not be saved"))
         XCTAssertTrue(ProjectsView.status(failed).contains("Local save failed"))
-        let host = NSHostingView(rootView: ProjectDetailsView(row: failed, back: {}, refresh: {},
+        let host = NSHostingView(rootView: ProjectDetailsView(row: failed, back: {}, refresh: {}, viewFeature: { _ in },
             recoveryMessage: "Project not reconnected. The saved reference is unchanged."))
         XCTAssertTrue(host.rootView.row.isStale)
         XCTAssertNotNil(host.rootView.row.lastReadAt)

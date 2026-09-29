@@ -113,6 +113,9 @@ struct ProjectsView: View {
             } else if let detailID, let row = store.rows.first(where: { $0.reference.id == detailID }) {
                 ProjectDetailsView(row: row, back: { self.detailID = nil },
                                    refresh: { store.refresh(detailID) },
+                                   viewFeature: { featureID in
+                                       store.selectFeature(featureID, in: detailID)
+                                   },
                                    reconnect: { chooseReconnectFolder(for: detailID) },
                                    recoveryMessage: recoveryMessage?.id == detailID ? recoveryMessage?.text : nil,
                                    isReconnecting: reconnectingID == detailID)
@@ -335,7 +338,9 @@ struct ProjectsView: View {
     private func featureReference(_ feature: ProjectFeature, row: ProjectRowState) -> some View {
         VStack(alignment: .leading, spacing: AppMetrics.space4) {
             PageHeader(feature.title, metadata: "Feature \(feature.id) · \(feature.status.rawValue.capitalized)") {
-                ActionButton("Back to projects") { store.closeFeature() }
+                ActionButton(detailID == row.reference.id ? "Back to roadmap" : "Back to projects") {
+                    store.closeFeature()
+                }
             }
             if row.isRetainedInspection {
                 Text("Stale reference · Last read: \(row.lastReadAt?.formatted(date: .abbreviated, time: .shortened) ?? "unavailable") · Refresh or Reconnect to verify this feature.")
