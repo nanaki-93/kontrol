@@ -43,6 +43,20 @@ enum LessonDuplicateDecision: Equatable {
 struct TerminalLessonMatch {
     let status: LessonProgressStatus
     let metadata: LessonMatchMetadata
+    // Historical topic and terminal date must come from the archive/progress,
+    // never from a potentially upgraded installed definition.
+    let topicID: String?
+    let format: String?
+    let date: Date?
+
+    init(status: LessonProgressStatus, metadata: LessonMatchMetadata,
+         topicID: String? = nil, format: String? = nil, date: Date? = nil) {
+        self.status = status
+        self.metadata = metadata
+        self.topicID = topicID
+        self.format = format
+        self.date = date
+    }
 }
 
 /// No content, answer, title, objective or identifiers are included in a decision.

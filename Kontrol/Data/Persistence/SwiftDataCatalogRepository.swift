@@ -834,7 +834,7 @@ final class SwiftDataCatalogRepository: CatalogRepository {
 
     private func selectionEvidence(in context: ModelContext, catalog: LearningCatalogSnapshot) throws ->
         (terminal: [TerminalLessonMatch], completed: Set<String>,
-         membership: CatalogMembershipAvailability, activePins: [LessonMatchMetadata]) {
+         membership: CatalogMembershipAvailability, activePins: [StartedLessonEvidence]) {
         let archives = try EvidenceIdentity.terminalMetadata(
             context.fetch(FetchDescriptor<LessonTerminalRecord>()))
         let progress = Dictionary(uniqueKeysWithValues: catalog.progress.map { ($0.lessonID, $0.status) })
@@ -843,7 +843,9 @@ final class SwiftDataCatalogRepository: CatalogRepository {
                 let metadata = archives[row.lessonID]
                 return TerminalLessonMatch(status: row.status, metadata: LessonMatchMetadata(
                     id: row.lessonID, objectiveKey: metadata?.objectiveKey,
-                    conceptIDs: metadata?.conceptIDs, contentHash: metadata?.normalizedContentHash))
+                    conceptIDs: metadata?.conceptIDs, contentHash: metadata?.normalizedContentHash),
+                    topicID: metadata?.topicID, format: metadata?.format,
+                    date: row.status == .completed ? row.completedAt : row.dismissedAt)
             }
         let completed = Set(catalog.progress.filter { $0.status == .completed }
             .flatMap { archives[$0.lessonID]?.conceptIDs ?? [] })
@@ -859,13 +861,13 @@ final class SwiftDataCatalogRepository: CatalogRepository {
             for row in unique.values { _ = try row.membership() }
             membership = .unavailable
         }
-        var activePins: [LessonMatchMetadata] = []
+        var activePins: [StartedLessonEvidence] = []
         for attempt in try context.fetch(FetchDescriptor<LessonAttempt>())
             where progress[attempt.lessonID] == .started && attempt.completedAt == nil {
             guard let data = attempt.pinnedContentData, !data.isEmpty else { continue }
             let pin = try PinnedLessonContent.decode(data, lessonID: attempt.lessonID,
                                                       contentVersion: attempt.contentVersion)
-            activePins.append(LessonMatchMetadata(pin.definition))
+            activePins.append(StartedLessonEvidence(pin.definition))
         }
         return (terminal, completed, membership, activePins)
     }

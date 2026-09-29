@@ -178,7 +178,7 @@ final class LessonSelectorTests: XCTestCase {
                                                prerequisiteConceptIDs: [])],
             subtopics: subtopics(lessons, concepts: []),
             progress: [.init(lessonID: "pinned", status: .started)],
-            slots: [unstarted, pinned], activePins: [LessonMatchMetadata(lesson("pinned", body: "Original pinned text"))],
+            slots: [unstarted, pinned], activePins: [StartedLessonEvidence(lesson("pinned", body: "Original pinned text"))],
             now: later)
         XCTAssertTrue(result.contains(pinned))
         XCTAssertFalse(result.contains(unstarted))
@@ -464,7 +464,7 @@ final class LessonSelectorTests: XCTestCase {
         let progress: [LessonProgressSnapshot] = [.init(lessonID: "started", status: .started),
             .init(lessonID: "other", status: .completed),
             .init(lessonID: "done", status: .completed)]
-        let pin = LessonMatchMetadata(studied)
+        let pin = StartedLessonEvidence(studied)
         let consumed = slot("done", 0)
         for (terminalBody, shouldOffer) in [("Pinned original", false), ("Installed upgrade", true)] {
             let other = lesson("other", body: terminalBody)
@@ -482,6 +482,162 @@ final class LessonSelectorTests: XCTestCase {
                 terminal: history, activePins: [pin], now: later)
             XCTAssertEqual(restored?.lessonID, shouldOffer ? "started" : nil, terminalBody)
         }
+    }
+
+    func testVacancyRanksCurrentDirectPracticeBeforeFormatDifficultyAndID() throws {
+        let lessons = [lesson("a-practiced", subtopic: "one", format: "code"),
+                       lesson("z-unpracticed", subtopic: "two", format: "learn", difficulty: "advanced"),
+                       lesson("history", subtopic: "one", body: "Old completed prose")]
+        let concepts = [LearningConceptSnapshot(id: "root", subtopicID: "one", name: "Root", prerequisiteConceptIDs: []),
+                        LearningConceptSnapshot(id: "go.two.root", subtopicID: "two", name: "Other", prerequisiteConceptIDs: [])]
+        let membership: CatalogMembershipAvailability = .available(.init(catalogID: "test", catalogVersion: 2,
+            topicIDs: ["go"], subtopicIDs: ["one", "two"], conceptIDs: ["go.two.root", "root"],
+            seededLessonIDs: lessons.map(\.id).sorted()))
+        let terminal = [TerminalLessonMatch(status: .completed, metadata: LessonMatchMetadata(lessons[2]),
+            topicID: "go", format: "learn", date: early)]
+        func chosen(_ definitions: [LessonDefinitionSnapshot], _ concepts: [LearningConceptSnapshot],
+                    _ date: Date) throws -> String? {
+            try LessonSelector.reconcile(definitions: definitions, concepts: concepts,
+                subtopics: subtopics(lessons, concepts: concepts),
+                progress: [.init(lessonID: "history", status: .completed)], slots: [],
+                terminal: terminal, completedConceptIDs: ["root", "retired", "root"],
+                membership: membership, now: date).first?.lessonID
+        }
+        XCTAssertEqual(try chosen(lessons, concepts, early), "z-unpracticed")
+        XCTAssertEqual(try chosen(lessons.reversed(), concepts.reversed(), .distantFuture), "z-unpracticed")
+        // The completed prerequisite of "root" does not imply direct practice of the other subtopic.
+        let active = slot("z-unpracticed", 3, date: early)
+        let retained = try LessonSelector.reconcile(definitions: lessons, concepts: concepts,
+            subtopics: subtopics(lessons, concepts: concepts),
+            progress: [.init(lessonID: "history", status: .completed)], slots: [active],
+            terminal: terminal, completedConceptIDs: ["root"], membership: membership, now: later)
+        XCTAssertTrue(retained.contains(active))
+        XCTAssertEqual(retained.first { $0.slotIndex == 0 }?.lessonID, "a-practiced")
+    }
+
+    func testFormatRecencyFourMostRecentStableTieAndConsumedSlotNotRetained() throws {
+        let consumed = slot("consumed", 0, date: early)
+        let held = slot("held", 2, date: early)
+        let lessons = [lesson("consumed", format: "code"), lesson("held", format: "design"),
+                       lesson("a-code", format: "code"), lesson("b-learn", format: "learn"),
+                       lesson("c-question", format: "question", difficulty: "advanced")]
+        let concepts = [LearningConceptSnapshot(id: "root", subtopicID: "one", name: "Root", prerequisiteConceptIDs: [])]
+        func history(_ id: String, _ format: String, _ date: Date) -> TerminalLessonMatch {
+            TerminalLessonMatch(status: .dismissed,
+                metadata: LessonMatchMetadata(id: id, objectiveKey: nil, conceptIDs: nil, contentHash: nil),
+                topicID: "go", format: format, date: date)
+        }
+        let recent = [history("z", "learn", later), history("a", "question", later),
+                      history("b", "learn", early), history("c", "question", early),
+                      history("d", "code", .distantPast)]
+        func pick(_ evidence: [TerminalLessonMatch]) throws -> [LessonSlotSnapshot] {
+            try LessonSelector.replace(consumedSlot: consumed, definitions: lessons, concepts: concepts,
+                subtopics: subtopics(lessons, concepts: concepts),
+                progress: [.init(lessonID: "consumed", status: .completed)], slots: [held, consumed],
+                terminal: evidence, now: later)
+        }
+        // The fifth record's code format and consumed code assignment do not penalize code.
+        XCTAssertEqual(try pick(recent), [slot("a-code", 0, date: later), held])
+        XCTAssertEqual(try pick(recent.reversed()), try pick(recent))
+        // With code in the most recent four, no format is novel: difficulty then ID wins.
+        let shifted = [history("new", "code", .distantFuture)] + recent
+        XCTAssertEqual(try pick(shifted).first?.lessonID, "a-code")
+        // Exactly equal dates break on stable terminal ID at the fourth-record cutoff.
+        let tied = [history("e", "question", later), history("d", "learn", later),
+                    history("c", "learn", later), history("b", "learn", later),
+                    history("a", "code", later)]
+        XCTAssertEqual(try pick(tied).first?.lessonID, "c-question")
+        XCTAssertEqual(try pick(tied.reversed()).first?.lessonID, "c-question")
+        let undated = TerminalLessonMatch(status: .dismissed,
+            metadata: LessonMatchMetadata(id: "unknown-date", objectiveKey: nil,
+                                          conceptIDs: nil, contentHash: nil),
+            topicID: "go", format: "question")
+        XCTAssertEqual(try pick(tied + [undated]).first?.lessonID, "c-question")
+        let started = [LessonProgressSnapshot(lessonID: "consumed", status: .completed),
+                       LessonProgressSnapshot(lessonID: "c-question", status: .started)]
+        XCTAssertEqual(try LessonSelector.replace(consumedSlot: consumed, definitions: lessons,
+            concepts: concepts, subtopics: subtopics(lessons, concepts: concepts),
+            progress: started, slots: [consumed, held], terminal: recent, now: later).first?.lessonID,
+            "c-question")
+    }
+
+    func testRetainedStartedPinFormatRanksVacanciesAfterDefinitionChangedOrRemoved() throws {
+        let pinned = lesson("held", format: "learn", body: "Original study")
+        let held = slot("held", 2, date: early)
+        let consumed = slot("consumed", 0, date: early)
+        let candidates = [lesson("a-learn", format: "learn"), lesson("b-code", format: "code")]
+        let concepts = [LearningConceptSnapshot(id: "root", subtopicID: "one", name: "Root",
+                                                prerequisiteConceptIDs: [])]
+        let progress: [LessonProgressSnapshot] = [.init(lessonID: "held", status: .started),
+            .init(lessonID: "consumed", status: .completed)]
+        let pin = StartedLessonEvidence(pinned)
+        for definitions in [candidates + [lesson("held", format: "code", body: "Upgraded study")],
+                            candidates] {
+            let taxonomy = subtopics(definitions, concepts: concepts)
+            let replaced = try LessonSelector.replace(consumedSlot: consumed,
+                definitions: definitions, concepts: concepts, subtopics: taxonomy,
+                progress: progress, slots: [consumed, held], activePins: [pin], now: later)
+            XCTAssertEqual(replaced, [slot("b-code", 0, date: later), held])
+            let reconciled = try LessonSelector.reconcile(definitions: definitions,
+                concepts: concepts, subtopics: taxonomy, progress: progress,
+                slots: [held], activePins: [pin], now: later)
+            XCTAssertTrue(reconciled.contains(held))
+            XCTAssertEqual(reconciled.first { $0.slotIndex == 0 }?.lessonID, "b-code")
+            XCTAssertEqual(try LessonSelector.reconcile(definitions: definitions,
+                concepts: concepts, subtopics: taxonomy, progress: progress,
+                slots: reconciled, activePins: [pin], now: .distantFuture), reconciled)
+        }
+    }
+
+    func testCompetingUnslottedStartedCandidatesRankByPinnedNotUpgradedFormat() throws {
+        // Both installed formats have swapped since the attempts were opened.
+        // The recent learn format penalizes a's pin, not b's pin.
+        let pinnedA = lesson("a", format: "learn", body: "Original A")
+        let pinnedB = lesson("b", format: "code", body: "Original B")
+        let installed = [lesson("a", format: "code", body: "Updated A"),
+                         lesson("b", format: "learn", body: "Updated B")]
+        let pins = [StartedLessonEvidence(pinnedA), StartedLessonEvidence(pinnedB)]
+        let concepts = [LearningConceptSnapshot(id: "root", subtopicID: "one", name: "Root",
+                                                prerequisiteConceptIDs: [])]
+        let taxonomy = subtopics(installed, concepts: concepts)
+        let progress: [LessonProgressSnapshot] = [.init(lessonID: "a", status: .started),
+            .init(lessonID: "b", status: .started), .init(lessonID: "done", status: .completed)]
+        let recent = TerminalLessonMatch(status: .completed,
+            metadata: LessonMatchMetadata(id: "old", objectiveKey: nil, conceptIDs: nil, contentHash: nil),
+            topicID: "go", format: "learn", date: early)
+        let consumed = slot("done", 0, date: early)
+        for (definitions, evidence) in [(installed, pins), (installed.reversed(), pins.reversed())] {
+            let replaced = try LessonSelector.replace(consumedSlot: consumed, definitions: definitions,
+                concepts: concepts, subtopics: taxonomy, progress: progress, slots: [consumed],
+                terminal: [recent], activePins: evidence, now: later)
+            XCTAssertEqual(replaced.first?.lessonID, "b")
+            let reconciled = try LessonSelector.reconcile(definitions: definitions, concepts: concepts,
+                subtopics: taxonomy, progress: progress, slots: [], terminal: [recent],
+                activePins: evidence, now: later)
+            XCTAssertEqual(reconciled.prefix(2).map(\.lessonID), ["b", "a"])
+            XCTAssertEqual(try LessonSelector.reconcile(definitions: definitions, concepts: concepts,
+                subtopics: taxonomy, progress: progress, slots: reconciled, terminal: [recent],
+                activePins: evidence, now: .distantFuture), reconciled)
+        }
+    }
+
+    func testDifficultyOrderPrecedesStableIDAndUnslottedTerminalRotatesNothing() throws {
+        let lessons = [lesson("a-advanced", difficulty: "advanced"),
+                       lesson("b-intermediate", difficulty: "intermediate"),
+                       lesson("z-basic", difficulty: "basic")]
+        XCTAssertEqual(try select(lessons).first?.lessonID, "z-basic")
+        XCTAssertEqual(try select(lessons.reversed()).first?.lessonID, "z-basic")
+        let held = slot("z-basic", 2, date: early)
+        let terminal: [TerminalLessonMatch] = [.init(status: .completed,
+            metadata: LessonMatchMetadata(id: "unslotted", objectiveKey: nil,
+                                          conceptIDs: nil, contentHash: nil),
+            topicID: "go", format: "learn", date: later)]
+        let result = try LessonSelector.reconcile(definitions: lessons,
+            concepts: [LearningConceptSnapshot(id: "root", subtopicID: "one", name: "Root", prerequisiteConceptIDs: [])],
+            subtopics: subtopics(lessons, concepts: []),
+            progress: [.init(lessonID: "unslotted", status: .completed)],
+            slots: [held], terminal: terminal, now: later)
+        XCTAssertTrue(result.contains(held))
     }
 
     func testStaleOrNonterminalConsumptionAndInvalidRowsAreRejected() throws {

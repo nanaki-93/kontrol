@@ -370,6 +370,42 @@ final class LessonSlotRepositoryTests: XCTestCase {
         }
     }
 
+    func testReconcileRanksVacanciesUsingArchivedTerminalFormatsWithoutMovingOtherTopics() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataCatalogRepository(container: container)
+        try repository.importIfNeeded(seed())
+        let initial = try repository.loadSnapshot().slots
+        let context = ModelContext(container)
+        for row in try context.fetch(FetchDescriptor<LessonSlot>()) where row.topicID == "go" {
+            context.delete(row)
+        }
+        try context.save()
+        let baseline = try repository.reconcileSlots(now: Date(timeIntervalSinceReferenceDate: 100))
+        let first = try XCTUnwrap(baseline.slots.first { $0.topicID == "go" })
+        let format = try XCTUnwrap(baseline.definitions.first { $0.id == first.lessonID }?.format)
+        // Return to the same vacancies. The next reconciliation must consult
+        // archived history rather than current definitions for these absent IDs.
+        let evidence = ModelContext(container)
+        for row in try evidence.fetch(FetchDescriptor<LessonSlot>()) where row.topicID == "go" {
+            evidence.delete(row)
+        }
+        let date = Date(timeIntervalSinceReferenceDate: 200)
+        for id in ["archived-a", "archived-b", "archived-c", "archived-d"] {
+            evidence.insert(LessonProgress(lessonID: id, status: .dismissed, dismissedAt: date))
+            evidence.insert(try LessonTerminalRecord(metadata: .init(lessonID: id,
+                provenance: .legacyCompletedPartial, title: nil, topicID: "go", subtopicID: nil,
+                contentVersion: nil, objectiveKey: nil, conceptIDs: nil,
+                normalizedContentHash: nil, format: format, dismissalTimeDefinition: nil)))
+        }
+        try evidence.save()
+        let ranked = try repository.reconcileSlots(now: date)
+        let newFirst = try XCTUnwrap(ranked.slots.first { $0.topicID == "go" })
+        XCTAssertNotEqual(newFirst.lessonID, first.lessonID)
+        XCTAssertEqual(ranked.slots.filter { $0.topicID != "go" },
+                       initial.filter { $0.topicID != "go" })
+        XCTAssertEqual(try repository.reconcileSlots(now: .distantFuture).slots, ranked.slots)
+    }
+
     func testDiskReopenPreservesSlotsAndAssignments() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(
             "KontrolSlot-\(UUID().uuidString)/Kontrol.store")

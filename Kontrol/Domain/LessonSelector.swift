@@ -11,6 +11,18 @@ enum LessonSelectionError: Error, Equatable {
     case consumedLessonNotTerminal
 }
 
+/// Detached evidence for started work: matching and format both belong to the opened pin,
+/// not a potentially upgraded or removed installed definition.
+struct StartedLessonEvidence {
+    let metadata: LessonMatchMetadata
+    let format: String
+
+    init(_ definition: LessonDefinitionSnapshot) {
+        metadata = LessonMatchMetadata(definition)
+        format = definition.format
+    }
+}
+
 /// Pure initial, vacancy, and one-slot replacement selection. No progress or attempts are changed.
 enum LessonSelector {
     static let slotsPerTopic = 4
@@ -48,7 +60,7 @@ enum LessonSelector {
                         terminal: [TerminalLessonMatch] = [],
                         completedConceptIDs: Set<String> = [],
                         membership: CatalogMembershipAvailability? = nil,
-                        activePins: [LessonMatchMetadata] = [],
+                        activePins: [StartedLessonEvidence] = [],
                         now: Date) throws -> [LessonSlotSnapshot] {
         try validateInputs(definitions: definitions, concepts: concepts, progress: progress, slots: slots)
         guard slots.contains(consumedSlot) else { throw LessonSelectionError.staleConsumedSlot }
@@ -59,12 +71,18 @@ enum LessonSelector {
         let remaining = slots.filter { $0.key != consumedSlot.key }
         let byID = Dictionary(uniqueKeysWithValues: definitions.map { ($0.id, $0) })
         let status = Dictionary(uniqueKeysWithValues: progress.map { ($0.lessonID, $0.status) })
-        let active = remaining.compactMap { byID[$0.lessonID] }.filter { $0.topicID == consumedSlot.topicID }
+        let pins = Dictionary(uniqueKeysWithValues: activePins.map { ($0.metadata.id, $0) })
+        let activeFormats = remaining.filter { $0.topicID == consumedSlot.topicID }.compactMap { slot -> String? in
+            if status[slot.lessonID] == .started, let pin = pins[slot.lessonID] { return pin.format }
+            return byID[slot.lessonID]?.format
+        }
         let candidates = definitions.filter { $0.topicID == consumedSlot.topicID &&
             eligible($0, concepts: concepts, subtopics: subtopics, progress: progress, slots: remaining,
                      terminal: terminal, completedConceptIDs: completedConceptIDs,
                      membership: membership, definitions: definitions, activePins: activePins) }
-        if let chosen = rankedCandidate(candidates, active: active, status: status) {
+        if let chosen = rankedCandidate(candidates, topicID: consumedSlot.topicID, activeFormats: activeFormats,
+                                        status: status, concepts: concepts, completedConceptIDs: completedConceptIDs,
+                                        membership: membership, terminal: terminal, activePins: activePins) {
             return (remaining + [LessonSlotSnapshot(topicID: consumedSlot.topicID,
                 slotIndex: consumedSlot.slotIndex, lessonID: chosen.id, assignedAt: now)])
                 .sorted(by: slotOrder)
@@ -81,7 +99,7 @@ enum LessonSelector {
                                 terminal: [TerminalLessonMatch] = [],
                                 completedConceptIDs: Set<String> = [],
                                 membership: CatalogMembershipAvailability? = nil,
-                                activePins: [LessonMatchMetadata] = [],
+                                activePins: [StartedLessonEvidence] = [],
                                 now: Date) throws -> LessonSlotSnapshot? {
         try validateInputs(definitions: definitions, concepts: concepts, progress: progress, slots: slots)
         guard let candidate = definitions.first(where: { $0.id == lessonID }),
@@ -107,11 +125,12 @@ enum LessonSelector {
                           terminal: [TerminalLessonMatch] = [],
                           completedConceptIDs: Set<String> = [],
                           membership: CatalogMembershipAvailability? = nil,
-                          activePins: [LessonMatchMetadata] = [],
+                          activePins: [StartedLessonEvidence] = [],
                           now: Date) throws -> [LessonSlotSnapshot] {
         try validateInputs(definitions: definitions, concepts: concepts, progress: progress, slots: slots)
         let byID = Dictionary(uniqueKeysWithValues: definitions.map { ($0.id, $0) })
         let status = Dictionary(uniqueKeysWithValues: progress.map { ($0.lessonID, $0.status) })
+        let pins = Dictionary(uniqueKeysWithValues: activePins.map { ($0.metadata.id, $0) })
         // Started assignments own their pinned version even if an upgrade removed
         // the definition. Reserve them first; never evict pinned work for an
         // unstarted choice whose new definition now matches that pin.
@@ -136,15 +155,17 @@ enum LessonSelector {
         for topicID in topics.sorted() {
             for index in 0..<slotsPerTopic {
                 if result.contains(where: { $0.topicID == topicID && $0.slotIndex == index }) { continue }
-                let active = result.compactMap { slot -> LessonDefinitionSnapshot? in
-                    guard slot.topicID == topicID else { return nil }
-                    return byID[slot.lessonID]
+                let activeFormats = result.filter { $0.topicID == topicID }.compactMap { slot -> String? in
+                    if status[slot.lessonID] == .started, let pin = pins[slot.lessonID] { return pin.format }
+                    return byID[slot.lessonID]?.format
                 }
                 let candidates = definitions.filter { $0.topicID == topicID &&
                     eligible($0, concepts: concepts, subtopics: subtopics, progress: progress, slots: result,
                              terminal: terminal, completedConceptIDs: completedConceptIDs,
                              membership: membership, definitions: definitions, activePins: activePins) }
-                guard let chosen = rankedCandidate(candidates, active: active, status: status) else { continue }
+                guard let chosen = rankedCandidate(candidates, topicID: topicID, activeFormats: activeFormats,
+                                                   status: status, concepts: concepts, completedConceptIDs: completedConceptIDs,
+                                                   membership: membership, terminal: terminal, activePins: activePins) else { continue }
                 result.append(LessonSlotSnapshot(topicID: topicID, slotIndex: index,
                                                  lessonID: chosen.id, assignedAt: now))
             }
@@ -159,7 +180,7 @@ enum LessonSelector {
                                  terminal: [TerminalLessonMatch], completedConceptIDs: Set<String>,
                                  membership: CatalogMembershipAvailability?,
                                  definitions: [LessonDefinitionSnapshot],
-                                 activePins: [LessonMatchMetadata]) -> Bool {
+                                 activePins: [StartedLessonEvidence]) -> Bool {
         guard supportedFormats.contains(lesson.format), supportedDifficulties.contains(lesson.difficulty),
               supportedSources.contains(lesson.source),
               let ids = LessonDeduplication.canonicalConcepts(lesson.conceptIDs), !ids.isEmpty,
@@ -194,17 +215,17 @@ enum LessonSelector {
         }
         guard lesson.prerequisiteConceptIDs.allSatisfy(satisfied.contains) else { return false }
         let byID = Dictionary(uniqueKeysWithValues: definitions.map { ($0.id, $0) })
-        let pins = Dictionary(uniqueKeysWithValues: activePins.map { ($0.id, $0) })
+        let pins = Dictionary(uniqueKeysWithValues: activePins.map { ($0.metadata.id, $0) })
         let active = slots.map { slot -> LessonMatchMetadata in
             if progress.contains(where: { $0.lessonID == slot.lessonID && $0.status == .started }),
-               let pin = pins[slot.lessonID] { return pin }
+               let pin = pins[slot.lessonID] { return pin.metadata }
             if let definition = byID[slot.lessonID] { return LessonMatchMetadata(definition) }
             return LessonMatchMetadata(id: slot.lessonID, objectiveKey: nil,
                                        conceptIDs: nil, contentHash: nil)
         }
         // Unslotted started work (including Restore) must be compared using what
         // the learner actually opened, not an upgraded installed definition.
-        let candidate = status == .started ? pins[lesson.id] ?? LessonMatchMetadata(lesson)
+        let candidate = status == .started ? pins[lesson.id]?.metadata ?? LessonMatchMetadata(lesson)
                                            : LessonMatchMetadata(lesson)
         return LessonDeduplication.decide(candidate: candidate,
             terminal: terminal, active: active) == .eligible
@@ -220,16 +241,50 @@ enum LessonSelector {
         try validateSlotIdentities(slots)
     }
 
-    private static func rankedCandidate(_ candidates: [LessonDefinitionSnapshot],
-                                        active: [LessonDefinitionSnapshot],
-                                        status: [String: LessonProgressStatus]) -> LessonDefinitionSnapshot? {
-        let subtopics = Set(active.map(\.subtopicID))
-        let formats = Set(active.map(\.format))
+    /// Only vacancies are ranked. Retained assignments are never re-scored.
+    /// Tuple: unslotted started work, direct practice in the current subtopic,
+    /// format absent from retained choices and four most recent topic terminals,
+    /// basic/intermediate/advanced, then stable ID. No wall-clock window.
+    private static func rankedCandidate(_ candidates: [LessonDefinitionSnapshot], topicID: String,
+                                        activeFormats: [String],
+                                        status: [String: LessonProgressStatus],
+                                        concepts: [LearningConceptSnapshot],
+                                        completedConceptIDs: Set<String>,
+                                        membership: CatalogMembershipAvailability?,
+                                        terminal: [TerminalLessonMatch],
+                                        activePins: [StartedLessonEvidence]) -> LessonDefinitionSnapshot? {
+        let pinnedFormats = Dictionary(uniqueKeysWithValues: activePins.map { ($0.metadata.id, $0.format) })
+        let currentIDs: Set<String>
+        if case .available(let current) = membership {
+            currentIDs = Set(current.conceptIDs)
+        } else {
+            currentIDs = Set(concepts.map(\.id))
+        }
+        var practicedBySubtopic: [String: Set<String>] = [:]
+        for concept in concepts where currentIDs.contains(concept.id) && completedConceptIDs.contains(concept.id) {
+            practicedBySubtopic[concept.subtopicID, default: []].insert(concept.id)
+        }
+        // A legacy terminal without a known date cannot establish recency.
+        let recent = terminal.filter { $0.topicID == topicID && $0.date != nil &&
+            ($0.status == .completed || $0.status == .dismissed) }
+            .sorted { lhs, rhs in
+                if lhs.date != rhs.date { return (lhs.date ?? .distantPast) > (rhs.date ?? .distantPast) }
+                return lhs.metadata.id < rhs.metadata.id
+            }.prefix(4)
+        let formats = Set(activeFormats).union(recent.compactMap { $0.format })
+        let difficulty = ["basic": 0, "intermediate": 1, "advanced": 2]
+        // Started candidates are ranked with the same opened version used for matching;
+        // an installed upgrade cannot change their format recency.
+        let candidateFormat: (LessonDefinitionSnapshot) -> String = { candidate in
+            status[candidate.id] == .started ? pinnedFormats[candidate.id] ?? candidate.format : candidate.format
+        }
         return candidates.min { lhs, rhs in
-            let l = (status[lhs.id] == .started ? 0 : 1, subtopics.contains(lhs.subtopicID) ? 1 : 0,
-                     formats.contains(lhs.format) ? 1 : 0)
-            let r = (status[rhs.id] == .started ? 0 : 1, subtopics.contains(rhs.subtopicID) ? 1 : 0,
-                     formats.contains(rhs.format) ? 1 : 0)
+            let l = (status[lhs.id] == .started ? 0 : 1,
+                     practicedBySubtopic[lhs.subtopicID, default: []].count,
+                     formats.contains(candidateFormat(lhs)) ? 1 : 0, difficulty[lhs.difficulty]!)
+            let r = (status[rhs.id] == .started ? 0 : 1,
+                     practicedBySubtopic[rhs.subtopicID, default: []].count,
+                     formats.contains(candidateFormat(rhs)) ? 1 : 0, difficulty[rhs.difficulty]!)
             if l != r { return l < r }
             return lhs.id < rhs.id
         }
