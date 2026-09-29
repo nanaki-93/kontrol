@@ -149,6 +149,19 @@ final class ProjectStoreTests: XCTestCase {
             context: .absent, rules: .absent, history: .absent, diagnostics: [], sources: [], readAt: Date())
     }
 
+    private func feature(_ id: String, title: String = "Original", status: ProjectFeatureStatus = .ready) -> ProjectFeature {
+        ProjectFeature(id: id, title: title, status: status, priority: .medium, effort: .small,
+            dependsOn: [], areas: [], completedAt: nil, body: "Entire body", sourcePath: ".kontrol/features/\(id).md")
+    }
+
+    private func inspectionWithFeatures(_ features: [ProjectFeature]) -> ProjectInspection {
+        let base = inspection()
+        return ProjectInspection(manifest: base.manifest, roadmap: base.roadmap,
+            features: features, excludedFeaturePaths: [], featureEnumeration: .complete,
+            context: base.context, rules: base.rules, history: base.history,
+            diagnostics: [], sources: [], readAt: Date())
+    }
+
     private func store(_ inspector: StubInspector, _ repository: StubRepository,
                        saved: [Data: ProjectFolderIdentity] = [:]) -> ProjectStore {
         ProjectStore(inspector: inspector, repository: repository,
@@ -207,6 +220,8 @@ final class ProjectStoreTests: XCTestCase {
         XCTAssertTrue(graph.projectStore.rows.isEmpty)
         try graph.projectStore.enterProjects()
         XCTAssertEqual(graph.projectStore.rows.map(\.reference), [persisted])
+        XCTAssertEqual(graph.projectStore.selectedID, persisted.id)
+        XCTAssertNil(graph.projectStore.selectedFeature)
         XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<ProjectReference>()).count, 1)
     }
 
@@ -219,6 +234,7 @@ final class ProjectStoreTests: XCTestCase {
         await eventually { await io.counts().0 == 3 }
         let initialPeak = await io.counts().2
         XCTAssertEqual(initialPeak, 3)
+        XCTAssertEqual(subject.selectedID, refs[0].id)
         for _ in 0..<10 { subject.refresh(refs[0].id); subject.refresh(refs[4].id) }
         let initialStarts = await io.counts().0
         XCTAssertEqual(initialStarts, 3) // Waiting requests merge.
@@ -246,6 +262,72 @@ final class ProjectStoreTests: XCTestCase {
         XCTAssertEqual(peak, 3)
         XCTAssertEqual(repo.successfulReads, 5)
         XCTAssertFalse(subject.rows[0].isStale)
+    }
+
+    func testEntrySelectsFirstDisplayReferenceAndPreservesExistingSelectionOnReentry() async throws {
+        let io = DeferredInspector(), repo = StubRepository()
+        let first = reference(1), tied = reference(1), later = reference(3)
+        repo.saved = [later, tied, first] // A repository need not supply sorted rows.
+        let subject = ProjectStore(inspector: io, repository: repo)
+        try subject.enterProjects()
+        let expected = [first, tied].min { $0.id.uuidString < $1.id.uuidString }!.id
+        XCTAssertEqual(subject.selectedID, expected)
+        XCTAssertNil(subject.selectedFeature)
+        subject.select(later.id)
+        try subject.enterProjects()
+        XCTAssertEqual(subject.selectedID, later.id)
+        XCTAssertEqual(repo.fetches, 1)
+        subject.select(UUID())
+        XCTAssertEqual(subject.selectedID, later.id)
+        await eventually { await io.counts().0 == 3 }
+        for ref in [later, tied, first] {
+            await io.release(ref.bookmarkData, result: .failure(CancellationError()))
+        }
+    }
+
+    func testFeatureSelectionIsValidatedProjectScopedAndReadOnly() async throws {
+        let io = DeferredInspector(), repo = StubRepository()
+        let first = reference(1), second = reference(2)
+        repo.saved = [first, second]
+        let subject = ProjectStore(inspector: io, repository: repo)
+        try subject.enterProjects()
+        await eventually { await io.counts().0 == 2 }
+        subject.selectFeature("same", in: first.id) // Not yet inspected.
+        XCTAssertNil(subject.selectedFeature)
+        let original = inspectionWithFeatures([feature("same"), feature("planned", status: .planned)])
+        await io.release(first.bookmarkData, result: .success(original))
+        await io.release(second.bookmarkData, result: .success(inspectionWithFeatures([feature("same", title: "Other folder")])))
+        await eventually { repo.successfulReads == 2 }
+        subject.selectFeature("missing", in: first.id)
+        subject.selectFeature("same", in: UUID())
+        XCTAssertNil(subject.selectedFeature)
+        subject.selectFeature("planned", in: first.id) // Not limited to ready candidates.
+        XCTAssertEqual(subject.selectedFeature, ProjectFeatureIdentity(projectID: first.id, featureID: "planned"))
+        XCTAssertEqual(subject.selectedFeatureContent?.status, .planned)
+        subject.selectFeature("missing", in: second.id)
+        XCTAssertEqual(subject.selectedID, first.id)
+        XCTAssertEqual(subject.selectedFeatureContent?.title, "Original")
+        XCTAssertNil(subject.selectionNotice)
+        XCTAssertEqual(subject.rows[0].inspection, original)
+        XCTAssertEqual(repo.inserts, 0)
+        XCTAssertEqual(repo.reconnects, 0)
+        XCTAssertEqual(repo.successfulReads, 2, "Selecting features must not write a read receipt")
+        subject.selectFeature("same", in: second.id)
+        XCTAssertEqual(subject.selectedID, second.id)
+        XCTAssertEqual(subject.selectedFeature, ProjectFeatureIdentity(projectID: second.id, featureID: "same"))
+        XCTAssertEqual(subject.selectedFeatureContent?.title, "Other folder")
+        subject.select(first.id)
+        XCTAssertNil(subject.selectedFeature)
+        XCTAssertNil(subject.selectedFeatureContent)
+        XCTAssertNil(subject.selectionNotice)
+        subject.selectFeature("same", in: first.id)
+        try subject.enterProjects()
+        XCTAssertEqual(subject.selectedFeature, ProjectFeatureIdentity(projectID: first.id, featureID: "same"))
+        subject.closeFeature()
+        XCTAssertNil(subject.selectedFeature)
+        XCTAssertNil(subject.selectedFeatureContent)
+        XCTAssertEqual(subject.selectedID, first.id)
+        XCTAssertEqual(subject.rows[0].inspection?.features, original.features)
     }
 
     func testMainWindowActivationsRefreshLoadedReferencesIndependentlyAndCoalesce() async throws {

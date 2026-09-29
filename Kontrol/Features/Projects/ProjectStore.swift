@@ -75,6 +75,23 @@ struct ProjectRowState {
     var locationHint: String? // Transient last-seen location; not a saved authorization path.
 }
 
+/// Stable feature IDs are unique only within a saved folder reference.
+struct ProjectFeatureIdentity: Equatable {
+    let projectID: UUID
+    let featureID: String
+}
+
+enum ProjectFeatureSelectionNoticeReason: Equatable {
+    case removed
+    case validationExcluded
+}
+
+struct ProjectFeatureSelectionNotice: Equatable {
+    let projectID: UUID
+    let featureID: String
+    let reason: ProjectFeatureSelectionNoticeReason
+}
+
 struct ProjectAddPreview {
     let folder: URL // Ephemeral picker selection only; never written to SwiftData.
     let inspection: ProjectInspection
@@ -102,6 +119,16 @@ enum ProjectStoreError: Error, Equatable {
 final class ProjectStore: ObservableObject {
     @Published private(set) var rows: [ProjectRowState] = []
     @Published private(set) var selectedID: UUID?
+    @Published private(set) var selectedFeature: ProjectFeatureIdentity?
+    @Published private(set) var selectionNotice: ProjectFeatureSelectionNotice?
+    /// The inspection, not a second feature-content cache, owns the displayed fields.
+    var selectedFeatureContent: ProjectFeature? {
+        guard let selectedFeature, selectedID == selectedFeature.projectID,
+              let inspection = rows.first(where: { $0.reference.id == selectedFeature.projectID })?.inspection else {
+            return nil
+        }
+        return inspection.features.first { $0.id == selectedFeature.featureID }
+    }
     @Published private(set) var preview: ProjectAddPreview?
     @Published private(set) var addMessage: String?
     @Published private(set) var reconnectMessage: String?
@@ -135,11 +162,15 @@ final class ProjectStore: ObservableObject {
 
     /// Call on entry to Projects, not at launch. Failed fetches may be retried on next entry.
     func enterProjects() throws {
-        guard !isLoaded else { return }
+        guard !isLoaded else {
+            selectInitialProjectIfNeeded()
+            return
+        }
         do {
             rows = try repository.fetchAll().map { ProjectRowState(reference: $0, inspection: nil) }
             isLoaded = true
             loadFailed = false
+            selectInitialProjectIfNeeded()
             refreshAll()
         } catch {
             loadFailed = true
@@ -161,9 +192,39 @@ final class ProjectStore: ObservableObject {
         refreshAll()
     }
 
+    private func selectInitialProjectIfNeeded() {
+        if let selectedID, rows.contains(where: { $0.reference.id == selectedID }) { return }
+        let first = rows.map(\.reference).min {
+            if $0.displayOrder != $1.displayOrder { return $0.displayOrder < $1.displayOrder }
+            return $0.id.uuidString < $1.id.uuidString
+        }
+        selectedID = first?.id
+    }
+
     func select(_ id: UUID) {
         guard rows.contains(where: { $0.reference.id == id }) else { return }
+        if selectedID != id {
+            selectedFeature = nil
+            selectionNotice = nil
+        }
         selectedID = id
+    }
+
+    /// Accept only validated records in the current inspection, including non-candidates.
+    /// Invalid requests leave the current project and detail untouched.
+    func selectFeature(_ featureID: String, in projectID: UUID) {
+        guard let row = rows.first(where: { $0.reference.id == projectID }),
+              let inspection = row.inspection, inspection.manifest?.schemaVersion == 1,
+              inspection.featureEnumeration == .complete,
+              inspection.features.contains(where: { $0.id == featureID }) else { return }
+        select(projectID)
+        selectedFeature = ProjectFeatureIdentity(projectID: projectID, featureID: featureID)
+        selectionNotice = nil
+    }
+
+    func closeFeature() {
+        selectedFeature = nil
+        selectionNotice = nil
     }
 
     func refresh(_ id: UUID) {
@@ -424,7 +485,7 @@ final class ProjectStore: ObservableObject {
                     try Task.checkCancellation()
                     guard generation == previewGeneration else { throw CancellationError() }
                     if existingIdentity == selectedIdentity {
-                        selectedID = row.reference.id
+                        select(row.reference.id)
                         preview = nil
                         addMessage = nil
                         return .selectedExisting(row.reference.id)
@@ -450,7 +511,7 @@ final class ProjectStore: ObservableObject {
                 bookmarkData: bookmark, displayOrder: nextOrder, displayNameHint: manifest.name))
             rows.append(ProjectRowState(reference: receipt, inspection: inspection,
                                         locationHint: candidate.folder.path))
-            selectedID = receipt.id
+            select(receipt.id)
             preview = nil
             addMessage = nil
             return .added(receipt.id)
