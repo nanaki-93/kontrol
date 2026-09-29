@@ -1,10 +1,11 @@
 import SwiftUI
 
 /// The folder list stays visible when an individual reference cannot be read.
-/// Details and reconnect controls are separate follow-up surfaces.
+/// A selected reference remains selected when returning from its read-only details.
 struct ProjectsView: View {
     @ObservedObject var store: ProjectStore
     @State private var showingAdd = false
+    @State private var detailID: UUID?
     @FocusState private var addFocused: Bool
 
     static func ordered(_ rows: [ProjectRowState]) -> [ProjectRowState] {
@@ -43,6 +44,22 @@ struct ProjectsView: View {
     }
 
     var body: some View {
+        Group {
+            if let detailID, let row = store.rows.first(where: { $0.reference.id == detailID }) {
+                ProjectDetailsView(row: row, back: { self.detailID = nil },
+                                   refresh: { store.refresh(detailID) })
+            } else {
+                list
+            }
+        }
+        .onAppear { enter() }
+        .sheet(isPresented: $showingAdd, onDismiss: { addFocused = true }) {
+            ProjectAddView(store: store) { showingAdd = false }
+        }
+        .accessibilityIdentifier("projects-content")
+    }
+
+    private var list: some View {
         VStack(alignment: .leading, spacing: AppMetrics.space6) {
             PageHeader("Projects") {
                 ActionButton("Add project", symbol: "plus", variant: .primary) { showingAdd = true }
@@ -70,6 +87,12 @@ struct ProjectsView: View {
                             .accessibilityLabel("Select project \(row.inspection?.manifest?.name ?? row.reference.displayNameHint), \(Self.location(row))")
                             .accessibilityIdentifier("project-select-\(row.reference.id.uuidString)")
                             .disabled(selected)
+                        Button("View details") {
+                            store.select(row.reference.id)
+                            detailID = row.reference.id
+                        }
+                        .accessibilityLabel("View details for \(row.inspection?.manifest?.name ?? row.reference.displayNameHint), \(Self.location(row))")
+                        .accessibilityIdentifier("project-details-open-\(row.reference.id.uuidString)")
                     }
                     .accessibilityElement(children: .contain)
                     .accessibilityIdentifier("project-row-\(row.reference.id.uuidString)")
@@ -85,11 +108,6 @@ struct ProjectsView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, AppMetrics.horizontalInset)
         .padding(.top, AppMetrics.space8)
-        .onAppear { enter() }
-        .sheet(isPresented: $showingAdd, onDismiss: { addFocused = true }) {
-            ProjectAddView(store: store) { showingAdd = false }
-        }
-        .accessibilityIdentifier("projects-content")
     }
 
     private func enter() {

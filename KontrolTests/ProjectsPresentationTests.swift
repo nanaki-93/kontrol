@@ -78,6 +78,41 @@ final class ProjectsPresentationTests: XCTestCase {
         XCTAssertEqual(ProjectAddView.summary(invalid), "Validation: 1 issue · Project cannot be added")
     }
 
+    func testDetailsUseInspectionValuesAndExplicitCountQualifications() {
+        let manifest = ProjectManifest(schemaVersion: 1, id: "local-id", name: "Disk name",
+            description: "Disk description", stack: ["Swift"], goals: ["Ship"], currentFocus: ["Review"])
+        let source = ProjectSourceDocument(relativePath: ".kontrol/context.md", bytes: Data("Disk notes\r\n".utf8))
+        let inspection = ProjectInspection(manifest: manifest,
+            roadmap: .present(ProjectRoadmap(schemaVersion: 1, milestones: [
+                RoadmapMilestone(id: "b", title: "Second", status: "active"),
+                RoadmapMilestone(id: "a", title: "First", status: "planned")])),
+            features: [], excludedFeaturePaths: [], featureEnumeration: .complete,
+            context: .present(source), rules: .absent,
+            history: .present(ProjectSourceDocument(relativePath: ".kontrol/history.yaml",
+                bytes: Data("status: completed\n".utf8))),
+            diagnostics: [], sources: [source], readAt: Date())
+        XCTAssertEqual(ProjectDetailsView.progress(inspection), "0 of 0 features completed (complete enumeration)")
+        XCTAssertEqual(ProjectDetailsView.documentText(inspection.history), "status: completed\n")
+        XCTAssertEqual(ProjectDetailsView.documentText(inspection.context), "Disk notes\r\n")
+        XCTAssertEqual(ProjectDetailsView.documentText(inspection.rules), "No file provided")
+        var row = ProjectRowState(reference: reference(UUID(), order: 0), inspection: inspection)
+        let store = ProjectStore(inspector: ListInspector(), repository: ListRepository([row.reference]))
+        let host = NSHostingView(rootView: ProjectDetailsView(row: row, back: {}, refresh: { store.refresh(row.reference.id) }))
+        XCTAssertEqual(host.rootView.row.inspection?.manifest?.name, "Disk name")
+        XCTAssertEqual(host.rootView.row.inspection?.roadmap, inspection.roadmap)
+        row.inspection = ProjectInspection(manifest: manifest, roadmap: .absent, features: [],
+            excludedFeaturePaths: [".kontrol/features/bad.md"], featureEnumeration: .complete,
+            context: .absent, rules: .failed, history: .absent, diagnostics: [], sources: [], readAt: Date())
+        XCTAssertEqual(ProjectDetailsView.progress(row.inspection!),
+                       "0 of 0 valid features completed (partial; 1 file excluded)")
+        XCTAssertEqual(ProjectDetailsView.documentText(row.inspection!.rules),
+                       "File could not be read; Refresh after repairing it")
+        let unavailable = ProjectInspection(manifest: manifest, roadmap: .absent, features: [],
+            excludedFeaturePaths: [], featureEnumeration: .failed, context: .absent,
+            rules: .absent, history: .absent, diagnostics: [], sources: [], readAt: Date())
+        XCTAssertTrue(ProjectDetailsView.progress(unavailable).contains("unavailable"))
+    }
+
     func testPerRowStatusKeepsPartialAndGrantFailuresDistinct() {
         let id = UUID()
         let base = ProjectRowState(reference: reference(id, order: 0), inspection: nil)
