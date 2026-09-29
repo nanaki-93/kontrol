@@ -1,0 +1,277 @@
+import Foundation
+import SwiftData
+import XCTest
+@testable import Kontrol
+
+/// Opaque in-process grants exercise the real scoped reader/parser/store and V8 repository.
+/// They are intentionally not OS bookmarks: signed sandbox relaunch remains an F13 check.
+private final class IntegrationGrants: ProjectBookmarkOperations {
+    private let lock = NSLock()
+    private var folders: [Data: URL] = [:]
+    private var stale: Set<Data> = []
+    private var starts = 0
+    private var stops = 0
+
+    func resolve(_ data: Data) throws -> (folder: URL, isStale: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        guard let folder = folders[data] else { throw ProjectFolderAccessError.unresolved }
+        return (folder, stale.contains(data))
+    }
+
+    func createBookmark(for selectedFolder: URL) throws -> Data {
+        lock.lock(); defer { lock.unlock() }
+        let token = Data(UUID().uuidString.utf8)
+        folders[token] = selectedFolder
+        return token
+    }
+
+    func startAccessing(_ folder: URL) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        starts += 1
+        return true
+    }
+
+    func stopAccessing(_ folder: URL) {
+        lock.lock(); defer { lock.unlock() }
+        stops += 1
+    }
+
+    func invalidate(_ token: Data) {
+        lock.lock(); defer { lock.unlock() }
+        stale.insert(token)
+    }
+
+    var balanced: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return starts == stops
+    }
+}
+
+@MainActor
+final class ProjectIntegrationTests: XCTestCase {
+    private func workspace() throws -> URL {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        return root
+    }
+
+    private func project(_ root: URL, folder: String, id: String) throws -> URL {
+        let url = root.appendingPathComponent(folder, isDirectory: true)
+        let base = url.appendingPathComponent(".kontrol", isDirectory: true)
+        try FileManager.default.createDirectory(at: base.appendingPathComponent("features"),
+                                                withIntermediateDirectories: true)
+        try Data("schema_version: 1\r\nid: \(id)\r\nname: \(folder)\r\ndescription: From disk\r\nstack: [Swift]\r\ngoals: [Inspect]\r\ncurrent_focus: [Local]\r\n".utf8)
+            .write(to: base.appendingPathComponent("project.yaml"))
+        try Data("schema_version: 1\nmilestones:\n  - id: phase\n    title: First\n    status: active\n".utf8)
+            .write(to: base.appendingPathComponent("roadmap.yaml"))
+        try Data("Notes from disk\r\n".utf8).write(to: base.appendingPathComponent("context.md"))
+        try Data("---\nid: F1\ntitle: First\nstatus: planned\npriority: high\neffort: small\n---\nBody from disk\n".utf8)
+            .write(to: base.appendingPathComponent("features/first.md"))
+        return url
+    }
+
+    /// Capture all .kontrol entries, including malformed peers, not just parsed sources.
+    private func bytes(_ folders: [URL]) throws -> [String: Data] {
+        var result: [String: Data] = [:]
+        for folder in folders {
+            let base = folder.appendingPathComponent(".kontrol")
+            let names = try FileManager.default.subpathsOfDirectory(atPath: base.path)
+            for name in names {
+                let file = base.appendingPathComponent(name)
+                var isDirectory: ObjCBool = false
+                if FileManager.default.fileExists(atPath: file.path, isDirectory: &isDirectory), !isDirectory.boolValue {
+                    result[folder.lastPathComponent + "/" + name] = try Data(contentsOf: file)
+                }
+            }
+        }
+        return result
+    }
+
+    private func unchanged<T>(_ folders: [URL], _ action: () async throws -> T) async throws -> T {
+        let before = try bytes(folders)
+        // Verify bytes even when the action fails; the caller asserts its error separately.
+        do {
+            let result = try await action()
+            XCTAssertEqual(try bytes(folders), before, "An app operation changed project files")
+            return result
+        } catch {
+            XCTAssertEqual(try bytes(folders), before, "A failed app operation changed project files")
+            throw error
+        }
+    }
+
+    private func text(_ content: ProjectOptionalDocument) -> String? {
+        if case let .present(source) = content { return source.text }
+        return nil
+    }
+
+    private func wait(_ condition: @escaping () -> Bool, file: StaticString = #filePath,
+                      line: UInt = #line) async {
+        for _ in 0..<500 {
+            if condition() { return }
+            try? await Task.sleep(nanoseconds: 2_000_000)
+        }
+        XCTFail("Timed out waiting for project inspection", file: file, line: line)
+    }
+
+    private func store(_ container: ModelContainer, _ grants: IntegrationGrants,
+                       beforeSave: @escaping () throws -> Void = {}) -> ProjectStore {
+        let access = ProjectFolderAccess(operations: grants)
+        return ProjectStore(inspector: ProjectInspector(access: access),
+            repository: SwiftDataProjectReferenceRepository(container: container, beforeSave: beforeSave),
+            identifier: ScopedProjectFolderIdentifier(access: access))
+    }
+
+    func testTwoFolderAddReopenExternalEditsIndependentFailureAndReconnect() async throws {
+        let root = try workspace()
+        let first = try project(root, folder: "first", id: "one")
+        let second = try project(root, folder: "second", id: "two")
+        let folders = [first, second]
+        let database = root.appendingPathComponent("isolated.store")
+        let grants = IntegrationGrants()
+        var firstID = UUID(), secondID = UUID()
+        var oldGrant = Data()
+        do {
+            let container = try ModelContainerFactory().makeContainer(mode: .persistent(database))
+            let subject = store(container, grants)
+            for (folder, id) in [(first, "one"), (second, "two")] {
+                let preview = try await unchanged(folders) { try await subject.previewFolder(folder) }
+                XCTAssertTrue(preview.canAdd)
+                XCTAssertEqual(preview.inspection.manifest?.id, id)
+                guard case let .added(savedID) = try await unchanged(folders, {
+                    try await subject.addPreviewedProject()
+                }) else { return XCTFail("Add did not commit") }
+                if id == "one" { firstID = savedID } else { secondID = savedID }
+            }
+            XCTAssertEqual(subject.rows.map(\.reference.id), [firstID, secondID])
+            oldGrant = subject.rows[0].reference.bookmarkData
+            let existing = try await unchanged(folders) { try await subject.previewFolder(first) }
+            XCTAssertTrue(existing.canAdd)
+            let duplicate = try await unchanged(folders) { try await subject.addPreviewedProject() }
+            XCTAssertEqual(duplicate, .selectedExisting(firstID))
+            XCTAssertEqual(subject.rows.count, 2)
+            XCTAssertEqual(try SwiftDataProjectReferenceRepository(container: container).fetchAll().count, 2)
+        }
+        // Reopen using a new container/store. The inspector must read disk, not saved metadata.
+        let reopened = try ModelContainerFactory().makeContainer(mode: .persistent(database))
+        let subject = store(reopened, grants)
+        let reopenBaseline = try bytes(folders)
+        try await unchanged(folders) { try subject.enterProjects() }
+        await wait { subject.rows.allSatisfy { $0.inspection != nil && !$0.isRefreshing } }
+        XCTAssertEqual(try bytes(folders), reopenBaseline)
+        XCTAssertEqual(subject.rows.map(\.reference.id), [firstID, secondID])
+        XCTAssertEqual(subject.rows.map { $0.inspection?.featureCount },
+                       [.complete(completed: 0, total: 1), .complete(completed: 0, total: 1)])
+        XCTAssertEqual(subject.rows[0].inspection.flatMap { text($0.context) }, "Notes from disk\r\n")
+        let priorRead = subject.rows[0].reference.lastSuccessfulReadAt
+        let feature = first.appendingPathComponent(".kontrol/features/first.md")
+        try Data("---\nid: F1\ntitle: First\nstatus: completed\npriority: high\neffort: small\n---\nExternally edited\n".utf8).write(to: feature)
+        try Data("Updated outside Kontrol\n".utf8)
+            .write(to: first.appendingPathComponent(".kontrol/context.md"))
+        let editedBaseline = try bytes(folders)
+        try await unchanged(folders) { subject.refresh(firstID) }
+        await wait { subject.rows[0].inspection?.featureCount == .complete(completed: 1, total: 1)
+            && !subject.rows[0].isRefreshing }
+        XCTAssertEqual(try bytes(folders), editedBaseline)
+        XCTAssertEqual(subject.rows[0].inspection.flatMap { text($0.context) }, "Updated outside Kontrol\n")
+        XCTAssertEqual(subject.rows[0].inspection?.features.first?.body, "Externally edited\n")
+        XCTAssertNotEqual(subject.rows[0].reference.lastSuccessfulReadAt, priorRead)
+        XCTAssertEqual(subject.rows[1].inspection?.featureCount, .complete(completed: 0, total: 1))
+
+        // A damaged peer is a partial result, not a failure of the other folder.
+        try Data("---\nid: broken\nstatus: nope\n---\n".utf8)
+            .write(to: second.appendingPathComponent(".kontrol/features/broken.md"))
+        let partialBaseline = try bytes(folders)
+        try await unchanged(folders) { subject.refresh(secondID); subject.refresh(firstID) }
+        await wait { subject.rows[1].inspection?.featureCount == .partial(completed: 0, total: 1, excludedFiles: 1)
+            && !subject.rows[1].isRefreshing && !subject.rows[0].isRefreshing }
+        XCTAssertEqual(try bytes(folders), partialBaseline)
+        XCTAssertTrue(subject.rows[1].isStale)
+        XCTAssertTrue(subject.rows[1].inspection?.diagnostics.contains(where: {
+            $0.relativePath == ".kontrol/features/broken.md"
+        }) == true)
+        XCTAssertEqual(subject.rows[0].inspection?.featureCount, .complete(completed: 1, total: 1))
+
+        grants.invalidate(oldGrant)
+        let beforeFailure = try bytes(folders)
+        try await unchanged(folders) { subject.refresh(firstID); subject.refresh(secondID) }
+        await wait { subject.rows[0].refreshFailure == .inspection(.access(.staleBookmark))
+            && !subject.rows[0].isRefreshing && !subject.rows[1].isRefreshing }
+        XCTAssertEqual(try bytes(folders), beforeFailure)
+        XCTAssertEqual(subject.rows[0].refreshFailure?.recovery, .reconnect)
+        XCTAssertEqual(subject.rows[0].inspection?.featureCount, .complete(completed: 1, total: 1))
+        XCTAssertEqual(subject.rows[1].inspection?.featureCount, .partial(completed: 0, total: 1, excludedFiles: 1))
+
+        let replacement = try project(root, folder: "replacement", id: "one")
+        let all = [first, second, replacement]
+        let original = subject.rows[0].reference
+        let reconnectBaseline = try bytes(all)
+        let receipt = try await unchanged(all) { try await subject.reconnect(firstID, to: replacement) }
+        XCTAssertEqual(receipt.id, firstID)
+        XCTAssertEqual(receipt.displayOrder, original.displayOrder)
+        XCTAssertNotEqual(receipt.revision, original.revision)
+        XCTAssertNotEqual(receipt.bookmarkData, oldGrant)
+        await wait { subject.rows[0].inspection?.manifest?.name == "replacement"
+            && !subject.rows[0].isRefreshing }
+        XCTAssertEqual(try bytes(all), reconnectBaseline)
+        XCTAssertEqual(try SwiftDataProjectReferenceRepository(container: reopened).fetchAll().map(\.id),
+                       [firstID, secondID])
+        XCTAssertEqual(subject.rows[1].inspection?.featureCount, .partial(completed: 0, total: 1, excludedFiles: 1))
+        XCTAssertTrue(grants.balanced)
+    }
+
+    func testCancellationInvalidAddAndFailedSaveOrReconnectNeverWriteProjectFiles() async throws {
+        let root = try workspace()
+        let good = try project(root, folder: "good", id: "good")
+        let wrong = try project(root, folder: "wrong", id: "wrong")
+        let folders = [good, wrong]
+        let grants = IntegrationGrants()
+        enum Injected: Error { case save }
+        var failSave = false
+        let container = try ModelContainerFactory().makeContainer(mode: .persistent(root.appendingPathComponent("failure.store")))
+        let subject = store(container, grants, beforeSave: { if failSave { throw Injected.save } })
+        _ = try await unchanged(folders) { try await subject.previewFolder(good) }
+        try await unchanged(folders) { subject.cancelAdd() }
+        XCTAssertTrue(subject.rows.isEmpty)
+        XCTAssertTrue(try SwiftDataProjectReferenceRepository(container: container).fetchAll().isEmpty)
+        // An externally damaged peer between preview and confirmation must block Add.
+        let peer = good.appendingPathComponent(".kontrol/features/first.md")
+        let originalPeer = try Data(contentsOf: peer)
+        _ = try await unchanged(folders) { try await subject.previewFolder(good) }
+        try Data("---\nid: F1\nstatus: invalid\n---\n".utf8).write(to: peer)
+        do {
+            _ = try await unchanged(folders) { try await subject.addPreviewedProject() }
+            XCTFail("Invalid final inspection was accepted")
+        } catch { XCTAssertEqual(error as? ProjectStoreError, .invalidPreview) }
+        XCTAssertEqual(subject.preview?.canAdd, false)
+        XCTAssertTrue(try SwiftDataProjectReferenceRepository(container: container).fetchAll().isEmpty)
+        try originalPeer.write(to: peer) // External repair, never an app operation.
+        _ = try await unchanged(folders) { try await subject.previewFolder(good) }
+        failSave = true
+        do {
+            _ = try await unchanged(folders) { try await subject.addPreviewedProject() }
+            XCTFail("Failed Add was accepted")
+        } catch { XCTAssertEqual(subject.addMessage, "Project not added") }
+        XCTAssertTrue(subject.rows.isEmpty)
+        XCTAssertTrue(try SwiftDataProjectReferenceRepository(container: container).fetchAll().isEmpty)
+        failSave = false
+        guard case let .added(id) = try await unchanged(folders, { try await subject.addPreviewedProject() }) else {
+            return XCTFail("Expected committed Add")
+        }
+        let old = subject.rows[0].reference
+        try await unchanged(folders) { subject.cancelReconnect(id) }
+        do {
+            _ = try await unchanged(folders) { try await subject.reconnect(id, to: wrong) }
+            XCTFail("Identity mismatch was accepted")
+        } catch { XCTAssertEqual(error as? ProjectStoreError, .manifestMismatch) }
+        failSave = true
+        do {
+            _ = try await unchanged(folders) { try await subject.reconnect(id, to: good) }
+            XCTFail("Failed Reconnect was accepted")
+        } catch { XCTAssertEqual(error as? ProjectStoreError, .projectNotReconnected) }
+        XCTAssertEqual(subject.rows[0].reference, old)
+        XCTAssertEqual(try SwiftDataProjectReferenceRepository(container: container).fetchAll(), [old])
+        XCTAssertTrue(grants.balanced)
+    }
+}
