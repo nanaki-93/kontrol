@@ -129,6 +129,27 @@ final class CatalogValidatorTests: XCTestCase {
         try rejects(.invalidFingerprint) { $0.lessons[0].normalizedContentHash = original.uppercased() }
     }
 
+    func testSharedFingerprintTrimsNFCInEveryAuthoredSectionWithoutCollapsingBoundaries() throws {
+        var value = try valid()
+        value.lessons[0].explanation = "  cafe\u{301} \n"
+        value.lessons[0].workedExample = " Example\t"
+        value.lessons[0].exercise = "Exercise"
+        value.lessons[0].referenceAnswer = "Answer"
+        value.lessons[0].selfCheckCriteria = [" Check ", " second\n"]
+        let expected = CatalogValidator.fingerprint(explanation: "café", workedExample: "Example",
+            exercise: "Exercise", referenceAnswer: "Answer", selfCheckCriteria: ["Check", "second"])
+        XCTAssertEqual(CatalogValidator.fingerprint(for: value.lessons[0]), expected)
+        XCTAssertEqual(LessonMatchMetadata(value.lessons[0]).contentHash, expected)
+        value.lessons[0].normalizedContentHash = expected
+        XCTAssertNoThrow(try CatalogValidator.validate(value))
+        XCTAssertNotEqual(expected, CatalogValidator.fingerprint(explanation: "café Example",
+            workedExample: "", exercise: "Exercise", referenceAnswer: "Answer",
+            selfCheckCriteria: ["Check", "second"]))
+        XCTAssertNotEqual(expected, CatalogValidator.fingerprint(explanation: "café",
+            workedExample: "Example", exercise: "Exercise", referenceAnswer: "Answer",
+            selfCheckCriteria: ["second", "Check"]))
+    }
+
     func testLessonMetadataAndEveryRequiredSection() throws {
         try rejects(.unsupportedDifficulty) { $0.lessons[0].difficulty = "expert" }
         try rejects(.unsupportedFormat) { $0.lessons[0].format = "video" }

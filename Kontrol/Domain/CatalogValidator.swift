@@ -56,8 +56,15 @@ enum CatalogValidator {
     // The teaching-content fingerprint excludes metadata (including the objective).
     // Trim, normalize to NFC, and separate sections with U+001F in authored order.
     static func fingerprint(for lesson: LessonDTO) -> String {
-        let sections = [lesson.explanation, lesson.workedExample, lesson.exercise,
-                        lesson.referenceAnswer] + lesson.selfCheckCriteria
+        fingerprint(explanation: lesson.explanation, workedExample: lesson.workedExample,
+                    exercise: lesson.exercise, referenceAnswer: lesson.referenceAnswer,
+                    selfCheckCriteria: lesson.selfCheckCriteria)
+    }
+
+    // Also used by the pure duplicate matcher for detached and archived sections.
+    static func fingerprint(explanation: String, workedExample: String, exercise: String,
+                            referenceAnswer: String, selfCheckCriteria: [String]) -> String {
+        let sections = [explanation, workedExample, exercise, referenceAnswer] + selfCheckCriteria
         let normalized = sections.map {
             $0.trimmingCharacters(in: .whitespacesAndNewlines).precomposedStringWithCanonicalMapping
         }.joined(separator: "\u{001F}")
