@@ -273,8 +273,27 @@ struct LessonHistorySnapshot: Equatable, Identifiable {
     // definition has an honest stable-ID label and no invented topic.
     let title: String
     let topicID: String?
+    let contentVersion: Int?
+    let provenance: TerminalMetadataProvenance?
+    let metadata: LessonTerminalMetadata?
     let content: LessonStudiedContent
     let attempt: LessonAttemptSnapshot?
+
+    init(lessonID: String, status: LessonProgressStatus, date: Date, title: String,
+         topicID: String?, contentVersion: Int? = nil,
+         provenance: TerminalMetadataProvenance? = nil, metadata: LessonTerminalMetadata? = nil,
+         content: LessonStudiedContent, attempt: LessonAttemptSnapshot?) {
+        self.lessonID = lessonID
+        self.status = status
+        self.date = date
+        self.title = title
+        self.topicID = topicID
+        self.contentVersion = contentVersion
+        self.provenance = provenance
+        self.metadata = metadata
+        self.content = content
+        self.attempt = attempt
+    }
 }
 
 enum LessonMutationOutcome: Equatable {

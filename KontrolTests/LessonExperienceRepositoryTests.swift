@@ -632,6 +632,12 @@ final class LessonExperienceRepositoryTests: XCTestCase {
         XCTAssertEqual(completed.history.count, 1)
         XCTAssertEqual(completed.history.first?.attempt, completed.detail.attempt)
         XCTAssertEqual(completed.history.first?.content, .pinned(pinned))
+        XCTAssertEqual(completed.history.first?.provenance, .studiedPin)
+        XCTAssertEqual(completed.history.first?.metadata?.title, pinned.title)
+        XCTAssertEqual(completed.history.first?.metadata?.topicID, pinned.topicID)
+        XCTAssertEqual(completed.history.first?.metadata?.conceptIDs, pinned.conceptIDs.sorted())
+        XCTAssertEqual(completed.history.first?.contentVersion, pinned.contentVersion)
+        let terminalBytes = try XCTUnwrap(rows(LessonTerminalRecord.self, in: container).first).payload
         let archived = try XCTUnwrap(completed.detail.attempt?.completedContentSnapshot)
         XCTAssertEqual(archived, PinnedLessonContent(definition: pinned).completedSnapshot)
         XCTAssertEqual(completed.catalog.slots.filter { $0.key != consumed.key },
@@ -648,6 +654,7 @@ final class LessonExperienceRepositoryTests: XCTestCase {
         XCTAssertEqual(repeated.detail, completed.detail)
         XCTAssertEqual(repeated.catalog, completed.catalog)
         XCTAssertEqual(repeated.history, completed.history)
+        XCTAssertEqual(try XCTUnwrap(rows(LessonTerminalRecord.self, in: container).first).payload, terminalBytes)
         XCTAssertEqual(try other.loadSnapshot(), completed.catalog)
         XCTAssertThrowsError(try writer.saveAnswer(attemptID: attempt.id,
             expectedRevision: revision + 1, answer: "late")) {
@@ -663,11 +670,17 @@ final class LessonExperienceRepositoryTests: XCTestCase {
         let upgrade = ModelContext(container)
         let definition = try XCTUnwrap(upgrade.fetch(FetchDescriptor<LessonDefinition>()).first { $0.id == id })
         definition.title = "New title"
+        definition.topicID = "new-topic"
+        definition.conceptIDs = ["new-concept"]
         definition.exercise = "New exercise"
         definition.contentVersion += 1
         try upgrade.save()
         let completed = try writer.complete(attemptID: attempt.id, expectedRevision: attempt.revision, now: later)
         XCTAssertEqual(completed.detail.content, .pinned(studied))
+        XCTAssertEqual(completed.history.first?.title, studied.title)
+        XCTAssertEqual(completed.history.first?.topicID, studied.topicID)
+        XCTAssertEqual(completed.history.first?.metadata?.conceptIDs, studied.conceptIDs.sorted())
+        XCTAssertEqual(completed.history.first?.metadata?.dismissalTimeDefinition, nil)
         XCTAssertEqual(completed.detail.attempt?.contentVersion, studied.contentVersion)
         XCTAssertEqual(completed.detail.attempt?.completedContentSnapshot,
                        PinnedLessonContent(definition: studied).completedSnapshot)
@@ -738,11 +751,13 @@ final class LessonExperienceRepositoryTests: XCTestCase {
                     expectedRevision: revision, now: later)) { XCTAssertTrue($0 is Injected) }
                 XCTAssertEqual(try writer.loadSnapshot(), baseline)
                 XCTAssertEqual(try writer.loadLesson(lessonID: id), detail)
+                XCTAssertTrue(try rows(LessonTerminalRecord.self, in: container).isEmpty)
             }
             try autoreleasepool {
                 let reopened = try ModelContainerFactory().makeContainer(mode: .persistent(url))
                 let writer = SwiftDataCatalogRepository(container: reopened)
                 let id = try XCTUnwrap(detail?.id)
+                XCTAssertTrue(try rows(LessonTerminalRecord.self, in: reopened).isEmpty)
                 XCTAssertEqual(try writer.loadSnapshot(), baseline)
                 XCTAssertEqual(try writer.loadLesson(lessonID: id), detail)
                 XCTAssertNil(try XCTUnwrap(rows(LessonAttempt.self, in: reopened).first {
@@ -864,6 +879,9 @@ final class LessonExperienceRepositoryTests: XCTestCase {
         XCTAssertEqual(dismissed.history.map(\.lessonID), [id])
         XCTAssertEqual(dismissed.history.first?.status, .dismissed)
         XCTAssertEqual(dismissed.history.first?.attempt, retained)
+        XCTAssertEqual(dismissed.history.first?.provenance, .dismissalPin)
+        XCTAssertEqual(dismissed.history.first?.metadata?.contentVersion, retained.contentVersion)
+        let terminalBytes = try XCTUnwrap(rows(LessonTerminalRecord.self, in: container).first).payload
         XCTAssertEqual(dismissed.catalog.slots.filter { $0.key != slot.key },
                        before.slots.filter { $0.key != slot.key })
         XCTAssertNotEqual(dismissed.catalog.slots.first { $0.key == slot.key }?.lessonID, id)
@@ -879,6 +897,7 @@ final class LessonExperienceRepositoryTests: XCTestCase {
         XCTAssertEqual(repeated.detail, dismissed.detail)
         XCTAssertEqual(repeated.catalog, dismissed.catalog)
         XCTAssertEqual(repeated.history, dismissed.history)
+        XCTAssertEqual(try XCTUnwrap(rows(LessonTerminalRecord.self, in: container).first).payload, terminalBytes)
         XCTAssertThrowsError(try writer.saveAnswer(attemptID: attemptID,
             expectedRevision: retained.revision, answer: "late")) {
             XCTAssertEqual($0 as? LessonExperienceError, .invalidTransition)
@@ -945,6 +964,9 @@ final class LessonExperienceRepositoryTests: XCTestCase {
                        before.slots.filter { $0.key != consumed.key })
         XCTAssertNil(dismissed.detail.attempt)
         XCTAssertEqual(dismissed.detail.progress?.status, .dismissed)
+        XCTAssertEqual(dismissed.history.first?.provenance, .dismissalReference)
+        XCTAssertEqual(dismissed.history.first?.content,
+                       .current(try XCTUnwrap(initial.definitions.first { $0.id == id })))
         XCTAssertEqual(dismissed.history.first?.lessonID, id)
         XCTAssertEqual(dismissed.catalog.progress.filter { $0.status == .completed }.count, 0)
     }
@@ -976,11 +998,13 @@ final class LessonExperienceRepositoryTests: XCTestCase {
                     expectedSlot: XCTUnwrap(slot), now: later)) { XCTAssertTrue($0 is Injected) }
                 XCTAssertEqual(try writer.loadSnapshot(), baseline)
                 XCTAssertEqual(try writer.loadLesson(lessonID: id), detail)
+                XCTAssertTrue(try rows(LessonTerminalRecord.self, in: container).isEmpty)
             }
             try autoreleasepool {
                 let reopened = try ModelContainerFactory().makeContainer(mode: .persistent(url))
                 let writer = SwiftDataCatalogRepository(container: reopened)
                 let id = try XCTUnwrap(slot?.lessonID)
+                XCTAssertTrue(try rows(LessonTerminalRecord.self, in: reopened).isEmpty)
                 XCTAssertEqual(try writer.loadSnapshot(), baseline)
                 XCTAssertEqual(try writer.loadLesson(lessonID: id), detail)
                 XCTAssertNil(try XCTUnwrap(rows(LessonAttempt.self, in: reopened).first {
@@ -991,6 +1015,84 @@ final class LessonExperienceRepositoryTests: XCTestCase {
                 XCTAssertEqual(retry.detail.attempt, detail?.attempt)
             }
         }
+    }
+
+    func testPreStudyDismissalRetainsReferenceThroughDefinitionEditAndRestore() throws {
+        let (container, writer, id) = try setup()
+        let slot = try XCTUnwrap(writer.loadSnapshot().slots.first { $0.lessonID == id })
+        let original = try XCTUnwrap(writer.loadSnapshot().definitions.first { $0.id == id })
+        let dismissal = try writer.dismiss(lessonID: id, expectedSlot: slot, now: first)
+        let archive = try XCTUnwrap(dismissal.history.first)
+        XCTAssertNil(archive.attempt)
+        XCTAssertEqual(archive.provenance, .dismissalReference)
+        XCTAssertEqual(archive.metadata?.dismissalTimeDefinition, original)
+        XCTAssertEqual(archive.content, .current(original))
+        XCTAssertEqual(archive.contentVersion, original.contentVersion)
+        let payload = try XCTUnwrap(rows(LessonTerminalRecord.self, in: container).first).payload
+        let edit = ModelContext(container)
+        let installed = try XCTUnwrap(edit.fetch(FetchDescriptor<LessonDefinition>()).first { $0.id == id })
+        installed.title = "Renamed later"
+        installed.topicID = "later-topic"
+        installed.conceptIDs = ["later-concept"]
+        installed.exercise = "Later exercise"
+        installed.contentVersion += 1
+        try edit.save()
+        XCTAssertEqual(try writer.loadHistory().first, archive)
+        XCTAssertEqual(try writer.dismiss(lessonID: id, expectedSlot: slot, now: later).history.first, archive)
+        XCTAssertEqual(try XCTUnwrap(rows(LessonTerminalRecord.self, in: container).first).payload, payload)
+        XCTAssertTrue(try rows(LessonAttempt.self, in: container).isEmpty)
+        _ = try writer.restoreDismissed(lessonID: id, now: later)
+        XCTAssertEqual(try XCTUnwrap(rows(LessonTerminalRecord.self, in: container).first).payload, payload)
+    }
+
+    func testPreStudyDismissalFailureDoesNotPersistArchiveProgressOrSlot() throws {
+        enum Injected: Error { case failure }
+        for failBefore in [true, false] {
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "KontrolReferenceFailure-\(UUID().uuidString)/Kontrol.store")
+            var slot: LessonSlotSnapshot?
+            try autoreleasepool {
+                let container = try ModelContainerFactory().makeContainer(mode: .persistent(url))
+                let writer = SwiftDataCatalogRepository(container: container)
+                _ = try writer.importIfNeeded(BundledCatalogLoader.load())
+                slot = try XCTUnwrap(writer.loadSnapshot().slots.first)
+                let failing = SwiftDataCatalogRepository(container: container,
+                    beforeSave: { if failBefore { throw Injected.failure } },
+                    save: { _ in if !failBefore { throw Injected.failure } })
+                XCTAssertThrowsError(try failing.dismiss(lessonID: XCTUnwrap(slot?.lessonID),
+                    expectedSlot: XCTUnwrap(slot), now: first)) { XCTAssertTrue($0 is Injected) }
+                XCTAssertTrue(try rows(LessonTerminalRecord.self, in: container).isEmpty)
+                XCTAssertTrue(try rows(LessonProgress.self, in: container).isEmpty)
+                XCTAssertTrue(try rows(LessonAttempt.self, in: container).isEmpty)
+            }
+            try autoreleasepool {
+                let container = try ModelContainerFactory().makeContainer(mode: .persistent(url))
+                let writer = SwiftDataCatalogRepository(container: container)
+                XCTAssertTrue(try rows(LessonTerminalRecord.self, in: container).isEmpty)
+                XCTAssertTrue(try rows(LessonProgress.self, in: container).isEmpty)
+                XCTAssertTrue(try rows(LessonAttempt.self, in: container).isEmpty)
+                XCTAssertEqual(try writer.loadSnapshot().slots.first { $0.key == slot?.key }, slot)
+                XCTAssertTrue(try writer.loadHistory().isEmpty)
+            }
+        }
+    }
+
+    func testUnsupportedTerminalArchiveFailsHistoryAndReceiptBeforeSaving() throws {
+        let (container, writer, id) = try setup()
+        let slot = try XCTUnwrap(writer.loadSnapshot().slots.first { $0.lessonID == id })
+        let context = ModelContext(container)
+        context.insert(LessonTerminalRecord(lessonID: "future",
+            payload: Data("{\"version\":2,\"value\":{}}".utf8)))
+        try context.save()
+        XCTAssertThrowsError(try writer.loadHistory()) {
+            XCTAssertEqual($0 as? LearningEvidenceError, .unsupportedVersion(2))
+        }
+        XCTAssertThrowsError(try writer.dismiss(lessonID: id, expectedSlot: slot, now: first)) {
+            XCTAssertEqual($0 as? LearningEvidenceError, .unsupportedVersion(2))
+        }
+        XCTAssertNil(try writer.loadLesson(lessonID: id).progress)
+        XCTAssertTrue(try rows(LessonAttempt.self, in: container).isEmpty)
+        XCTAssertEqual(try writer.loadSnapshot().slots.first { $0.key == slot.key }, slot)
     }
 
     func testPreSaveAndSaveFailureLeaveNoAttemptProgressOrReceipt() throws {

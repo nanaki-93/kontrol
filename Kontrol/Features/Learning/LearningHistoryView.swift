@@ -18,7 +18,12 @@ struct LearningHistoryView: View {
               detail.id == entry.lessonID, detail.progress?.status == entry.status,
               detail.attempt == entry.attempt else { return nil }
         if entry.attempt == nil, entry.status == .dismissed {
-            guard entry.content == .unavailable else { return nil }
+            // Detail may preview a newer installed definition. Only the archive
+            // is shown as dismissal-time reference; never compare it to preview.
+            guard entry.content == .unavailable ||
+                  (entry.provenance == .dismissalReference || entry.provenance == .legacyRecoveredReference) &&
+                  entry.content == entry.metadata?.dismissalTimeDefinition.map(LessonStudiedContent.current)
+            else { return nil }
         } else {
             guard detail.content == entry.content else { return nil }
         }

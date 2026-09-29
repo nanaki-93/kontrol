@@ -49,6 +49,11 @@ final class LearningHistoryTests: XCTestCase {
             XCTAssertEqual(archived.first?.attempt?.answerDraft, "  🧪\n  keep\n")
             XCTAssertEqual(archived.first?.title, baseline.definitions.first { $0.id == ids[0] }?.title)
             XCTAssertNotNil(archived.first?.topicID)
+            XCTAssertEqual(archived.first?.provenance, .dismissalPin)
+            XCTAssertEqual(archived.last?.provenance, .studiedPin)
+            XCTAssertEqual(archived.last?.contentVersion, archived.last?.attempt?.contentVersion)
+            XCTAssertEqual(archived.last?.metadata?.conceptIDs,
+                           baseline.definitions.first { $0.id == last }?.conceptIDs.sorted())
             // An installed edit is not permission to rewrite studied History.
             let edit = ModelContext(container)
             for row in try edit.fetch(FetchDescriptor<LessonDefinition>()) where ids.contains(row.id) {
@@ -275,7 +280,12 @@ final class LearningHistoryTests: XCTestCase {
         XCTAssertEqual(try repository.loadHistory(), history) // selection and detail reads do not restore
         XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).count, 1)
         let beforeStudy = try XCTUnwrap(LearningHistoryView.entry(secondSlot.lessonID, in: store.historyState))
-        XCTAssertEqual(beforeStudy.content, .unavailable)
+        XCTAssertEqual(beforeStudy.provenance, .dismissalReference)
+        XCTAssertNil(beforeStudy.attempt)
+        guard case .current(let reference) = beforeStudy.content else {
+            return XCTFail("Expected dismissal-time reference, not studied content")
+        }
+        XCTAssertEqual(reference.id, secondSlot.lessonID)
         let unstudied = try store.loadDetail(lessonID: secondSlot.lessonID)
         XCTAssertNotNil(LearningHistoryView.matchedDetail(beforeStudy, state: .current(unstudied)))
         XCTAssertNil(unstudied.attempt)
@@ -359,6 +369,8 @@ final class LearningHistoryTests: XCTestCase {
         try context.save()
         XCTAssertEqual(try writer.loadHistory().first?.content, .legacyCompleted(studied))
         XCTAssertEqual(try writer.loadHistory().first?.title, "Old title")
+        XCTAssertNil(try writer.loadHistory().first?.topicID) // legacy snapshot recorded no taxonomy
+        XCTAssertNil(try writer.loadHistory().first?.provenance) // awaiting import backfill
         guard case .legacyCompleted(let archived) = try XCTUnwrap(writer.loadHistory().first).content else {
             return XCTFail("Expected legacy completed snapshot")
         }
@@ -369,7 +381,9 @@ final class LearningHistoryTests: XCTestCase {
         let another = try XCTUnwrap(writer.loadSnapshot().slots.first { $0.lessonID != slot.lessonID })
         let dismissal = try writer.dismiss(lessonID: another.lessonID, expectedSlot: another, now: later)
         let entry = try XCTUnwrap(dismissal.history.first { $0.lessonID == another.lessonID })
-        XCTAssertEqual(entry.content, .unavailable) // no studied attempt exists
+        XCTAssertEqual(entry.provenance, .dismissalReference)
+        XCTAssertEqual(entry.contentVersion, entry.metadata?.dismissalTimeDefinition?.contentVersion)
+        XCTAssertEqual(entry.content, .current(try XCTUnwrap(entry.metadata?.dismissalTimeDefinition)))
         XCTAssertNil(entry.attempt)
         XCTAssertEqual(try writer.loadHistory().count, 2)
     }

@@ -419,6 +419,9 @@ final class SwiftDataCatalogRepository: CatalogRepository {
                 completedContentSnapshot: item.id == attemptID ? finished.completedContentSnapshot : item.completedContentSnapshot,
                 pinnedContentData: item.pinnedContentData, revision: item.id == attemptID ? finished.revision : item.revision)
         }
+        let archive = try Self.terminalMetadata(lessonID: row.lessonID, attempt: finished,
+                                                 provenance: .studiedPin)
+        try storeTerminal(archive, in: context)
         row.completedAt = finished.completedAt
         row.completedContentSnapshot = finished.completedContentSnapshot
         row.revision = finished.revision
@@ -489,6 +492,15 @@ final class SwiftDataCatalogRepository: CatalogRepository {
             record = LessonProgress(lessonID: lessonID)
             context.insert(record)
         }
+        let archive: LessonTerminalMetadata
+        if let attempt = current.attempt {
+            archive = try Self.terminalMetadata(lessonID: lessonID, attempt: attempt,
+                                                provenance: .dismissalPin)
+        } else {
+            archive = Self.terminalMetadata(definition: definition, provenance: .dismissalReference,
+                                            reference: definition)
+        }
+        try storeTerminal(archive, in: context)
         record.status = .dismissed
         record.dismissedAt = now
         if record.firstShownAt == nil { record.firstShownAt = now }
@@ -563,6 +575,7 @@ final class SwiftDataCatalogRepository: CatalogRepository {
     private func history(in context: ModelContext,
                          catalog existing: LearningCatalogSnapshot? = nil) throws -> [LessonHistorySnapshot] {
         let catalog = try existing ?? snapshot(in: context)
+        let archives = try EvidenceIdentity.terminalMetadata(context.fetch(FetchDescriptor<LessonTerminalRecord>()))
         var entries: [LessonHistorySnapshot] = []
         for progress in catalog.progress where progress.status == .completed || progress.status == .dismissed {
             let item = try detail(lessonID: progress.lessonID, in: context)
@@ -570,29 +583,73 @@ final class SwiftDataCatalogRepository: CatalogRepository {
             guard let date = timestamp, date.timeIntervalSinceReferenceDate.isFinite else {
                 throw LessonExperienceError.invalidStoredData
             }
-            // A dismissal without an attempt has no retained studied version.
-            // Never present a subsequently upgraded definition as its history.
-            let content: LessonStudiedContent = item.attempt == nil ? .unavailable : item.content
-            let installed = catalog.definitions.first { $0.id == progress.lessonID }
-            let title: String
-            let topicID: String?
-            switch content {
-            case .pinned(let studied), .current(let studied):
-                title = studied.title
-                topicID = studied.topicID
-            case .legacyCompleted(let studied):
-                title = studied.title
-                topicID = installed?.topicID
-            case .unavailable:
-                title = installed?.title ?? progress.lessonID
-                topicID = installed?.topicID
+            // Missing archives are legacy gaps until import backfill (Step 2.2).
+            // Do not infer their labels or taxonomy from an installed definition.
+            let metadata = archives[progress.lessonID]
+            let content: LessonStudiedContent
+            if progress.status == .dismissed && item.attempt == nil {
+                content = metadata?.dismissalTimeDefinition.map(LessonStudiedContent.current) ?? .unavailable
+            } else {
+                content = item.content
             }
+            let legacyTitle: String?
+            if case .legacyCompleted(let snapshot) = content { legacyTitle = snapshot.title }
+            else { legacyTitle = nil }
             entries.append(LessonHistorySnapshot(lessonID: progress.lessonID, status: progress.status,
-                                                  date: date, title: title, topicID: topicID,
+                                                  date: date, title: metadata?.title ?? legacyTitle ?? progress.lessonID,
+                                                  topicID: metadata?.topicID,
+                                                  contentVersion: metadata?.contentVersion ?? item.attempt?.contentVersion,
+                                                  provenance: metadata?.provenance, metadata: metadata,
                                                   content: content, attempt: item.attempt))
         }
         return entries.sorted { lhs, rhs in
             lhs.date == rhs.date ? lhs.lessonID < rhs.lessonID : lhs.date > rhs.date
+        }
+    }
+
+    // Replace a prior dismissal archive only when the restored lesson is actually
+    // completed. All other terminal writes create exactly one detached record.
+    private func storeTerminal(_ metadata: LessonTerminalMetadata, in context: ModelContext) throws {
+        try metadata.validate()
+        let rows = try context.fetch(FetchDescriptor<LessonTerminalRecord>())
+        _ = try EvidenceIdentity.terminalMetadata(rows)
+        if let row = rows.first(where: { $0.lessonID == metadata.lessonID }) {
+            row.payload = try LessonTerminalRecord(metadata: metadata).payload
+        } else {
+            context.insert(try LessonTerminalRecord(metadata: metadata))
+        }
+    }
+
+    private static func terminalMetadata(definition: LessonDefinitionSnapshot,
+                                         provenance: TerminalMetadataProvenance,
+                                         reference: LessonDefinitionSnapshot? = nil) -> LessonTerminalMetadata {
+        LessonTerminalMetadata(lessonID: definition.id, provenance: provenance,
+            title: definition.title, topicID: definition.topicID, subtopicID: definition.subtopicID,
+            contentVersion: definition.contentVersion, objectiveKey: definition.objectiveKey,
+            conceptIDs: Array(Set(definition.conceptIDs)).sorted(),
+            normalizedContentHash: definition.normalizedContentHash, format: definition.format,
+            dismissalTimeDefinition: reference)
+    }
+
+    private static func terminalMetadata(lessonID: String, attempt: LessonAttemptSnapshot,
+                                         provenance: TerminalMetadataProvenance) throws -> LessonTerminalMetadata {
+        switch try LessonExperience.studiedContent(attempt) {
+        case .pinned(let definition):
+            return terminalMetadata(definition: definition, provenance: provenance)
+        case .legacyCompleted(let snapshot):
+            let ids = Array(Set(snapshot.conceptIDs)).sorted()
+            return LessonTerminalMetadata(lessonID: lessonID, provenance: .legacyCompletedPartial,
+                title: snapshot.title, topicID: nil, subtopicID: nil,
+                contentVersion: attempt.contentVersion,
+                objectiveKey: snapshot.objectiveKey.isEmpty ? nil : snapshot.objectiveKey,
+                conceptIDs: ids.isEmpty ? nil : ids,
+                normalizedContentHash: CatalogValidator.fingerprint(
+                    explanation: snapshot.explanation, workedExample: snapshot.workedExample,
+                    exercise: snapshot.exercise, referenceAnswer: snapshot.referenceAnswer,
+                    selfCheckCriteria: snapshot.selfCheckCriteria), format: snapshot.format,
+                dismissalTimeDefinition: nil)
+        case .current, .unavailable:
+            throw LessonExperienceError.contentUnavailable
         }
     }
 
