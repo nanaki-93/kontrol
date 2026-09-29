@@ -184,6 +184,16 @@ private actor EditorNewsService: NewsRefreshing {
 }
 
 @MainActor
+private final class StubNewsBrowserOpener: NewsBrowserOpening {
+    var urls: [URL] = []
+    var succeeds = true
+    func open(_ url: URL) -> Bool {
+        urls.append(url)
+        return succeeds
+    }
+}
+
+@MainActor
 final class NewsStoreTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_750_000_000)
     private let firstID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
@@ -249,6 +259,83 @@ final class NewsStoreTests: XCTestCase {
     private func outcomes(_ feeds: [FeedSourceSnapshot], _ date: Date) -> [FeedRefreshOutcome] {
         feeds.map { FeedRefreshOutcome(feedID: $0.id, configurationRevision: $0.configurationRevision,
             attemptedAt: date, result: .notModified) }
+    }
+
+    private func replacingArticleURL(_ snapshot: NewsSnapshot, with url: URL) -> NewsSnapshot {
+        let state = snapshot.articleStates[0]
+        let article = state.article
+        let changed = ArticleMetadata(id: article.id, url: url, canonicalURL: article.canonicalURL,
+            title: article.title, publishedAt: article.publishedAt, firstFetchedAt: article.firstFetchedAt,
+            summary: article.summary, sources: article.sources)
+        return NewsSnapshot(topics: snapshot.topics, feeds: snapshot.feeds,
+            articleStates: [.init(article: changed, aliases: state.aliases,
+                contributions: state.contributions)], preferences: snapshot.preferences)
+    }
+
+    func testBrowserOpensOnlyCurrentValidatedCachedHTTPSLinks() {
+        let (catalog, cached) = fixture()
+        let repo = StubNewsRepository(cached)
+        let opener = StubNewsBrowserOpener()
+        let store = NewsStore(repository: repo, service: HeldNewsService(), catalog: catalog,
+                              browserOpener: opener)
+        store.loadIfNeeded()
+        let id = cached.articles[0].id
+        store.openArticle(id: UUID()) // no caller-provided URL or unknown row may be opened
+        XCTAssertTrue(opener.urls.isEmpty)
+        store.openArticle(id: id)
+        XCTAssertEqual(opener.urls, [cached.articles[0].url])
+        XCTAssertNil(store.browserOpenFailure)
+
+        for bad in ["http://news.example.com/story", "https://user:secret@news.example.com/story",
+                    "https://news.example.com:99999/story", "file:///tmp/story"] {
+            repo.value = replacingArticleURL(cached, with: URL(string: bad)!)
+            store.reload() // simulate a persisted link altered after the original load
+            let before = store.snapshot
+            store.openArticle(id: id)
+            XCTAssertEqual(opener.urls.count, 1, bad)
+            XCTAssertEqual(store.browserOpenFailure?.articleID, id, bad)
+            XCTAssertEqual(store.browserOpenFailure?.code, .unsafeURL, bad)
+            XCTAssertFalse(store.browserOpenFailure!.message.contains("secret"))
+            XCTAssertFalse(store.browserOpenFailure!.message.contains(bad))
+            XCTAssertEqual(store.snapshot, before, bad)
+            XCTAssertEqual(repo.value, before, bad)
+        }
+        repo.value = replacingArticleURL(cached, with: URL(string: "https://other.example.com/current")!)
+        store.reload()
+        store.openArticle(id: id)
+        XCTAssertEqual(opener.urls.last?.absoluteString, "https://other.example.com/current")
+        XCTAssertNil(store.browserOpenFailure)
+    }
+
+    func testBrowserFailureCanRetryWithoutChangingCachedArticleOrRefreshMetadata() {
+        let (catalog, cached) = fixture()
+        let repo = StubNewsRepository(cached)
+        let opener = StubNewsBrowserOpener()
+        opener.succeeds = false
+        let store = NewsStore(repository: repo, service: HeldNewsService(), catalog: catalog,
+                              browserOpener: opener)
+        store.loadIfNeeded()
+        let id = cached.articles[0].id
+        store.openArticle(id: id)
+        XCTAssertEqual(store.browserOpenFailure,
+                       NewsBrowserFailure(articleID: id, code: .openFailed))
+        XCTAssertEqual(store.browserOpenFailure?.message,
+                       "Could not open this article in your browser. Try again.")
+        XCTAssertEqual(store.snapshot, cached)
+        XCTAssertEqual(repo.value, cached)
+        XCTAssertNil(store.snapshot?.preferences.lastRefreshAt)
+        XCTAssertEqual(repo.applied.count, 0)
+        opener.succeeds = true
+        store.openArticle(id: id) // Retry uses the same current cached row.
+        XCTAssertEqual(opener.urls, [cached.articles[0].url, cached.articles[0].url])
+        XCTAssertNil(store.browserOpenFailure)
+        XCTAssertEqual(store.snapshot, cached)
+        XCTAssertEqual(repo.value, cached)
+        store.openArticle(id: id)
+        opener.succeeds = false
+        store.openArticle(id: id)
+        store.dismissBrowserOpenFailure()
+        XCTAssertNil(store.browserOpenFailure)
     }
 
     func testCacheFirstCoalescesWindowsAndForegroundIsNotKeyWindow() async {

@@ -23,6 +23,20 @@ enum NewsEditorError: Error, Equatable {
     case sessionRequired
 }
 
+/// Only stable classifications leave the opening boundary; never publish the URL or a
+/// system error description (which may include untrusted URL contents).
+struct NewsBrowserFailure: Equatable {
+    let articleID: UUID
+    let code: NewsErrorCode
+
+    var message: String {
+        switch code {
+        case .unsafeURL: return "This article link is unsafe. Check the source and try again."
+        default: return "Could not open this article in your browser. Try again."
+        }
+    }
+}
+
 /// One app-owned instance can be observed by any number of windows. Visibility is counted
 /// by window identity; app foreground activity is independent of key-window status.
 @MainActor
@@ -34,9 +48,11 @@ final class NewsStore: ObservableObject {
     @Published private(set) var refreshFailures: [UUID: NewsErrorCode] = [:]
     @Published private(set) var retryDeadlines: [UUID: Date] = [:]
     @Published private(set) var isPartialRefresh = false
+    @Published private(set) var browserOpenFailure: NewsBrowserFailure?
 
     private let repository: NewsRepository
     private let service: NewsRefreshing
+    private let browserOpener: NewsBrowserOpening
     private let catalog: DefaultFeedCatalog
     private let clock: () -> Date
     private let sleep: (TimeInterval) async throws -> Void
@@ -51,12 +67,14 @@ final class NewsStore: ObservableObject {
     private var editorAttempts: [UUID: UUID] = [:]
 
     init(repository: NewsRepository, service: NewsRefreshing, catalog: DefaultFeedCatalog,
+         browserOpener: NewsBrowserOpening? = nil,
          clock: @escaping () -> Date = Date.init,
          sleep: @escaping (TimeInterval) async throws -> Void = { interval in
              try await Task.sleep(nanoseconds: UInt64(max(0, interval) * 1_000_000_000))
          }) {
         self.repository = repository
         self.service = service
+        self.browserOpener = browserOpener ?? NewsBrowserOpener()
         self.catalog = catalog
         self.clock = clock
         self.sleep = sleep
@@ -64,6 +82,26 @@ final class NewsStore: ObservableObject {
     }
 
     var isVisibleAndActive: Bool { appIsActive && !visibleWindows.isEmpty }
+
+    /// Resolve the current cached row by identity on every attempt, including Retry. An
+    /// altered persisted link cannot be replaced by a view-supplied destination. Opening
+    /// is not a read-history mutation and cannot evict or rewrite the cached article.
+    func openArticle(id: UUID) {
+        guard let article = snapshot?.articles.first(where: { $0.id == id }) else { return }
+        guard let safeURL = try? NewsURLPolicy.articleURL(article.url) else {
+            browserOpenFailure = NewsBrowserFailure(articleID: id, code: .unsafeURL)
+            return
+        }
+        if browserOpener.open(safeURL) {
+            browserOpenFailure = nil
+        } else {
+            browserOpenFailure = NewsBrowserFailure(articleID: id, code: .openFailed)
+        }
+    }
+
+    func dismissBrowserOpenFailure() {
+        browserOpenFailure = nil
+    }
 
     /// Synchronous cache-first publication: callers may inspect cached rows before starting IO.
     func loadIfNeeded() {
