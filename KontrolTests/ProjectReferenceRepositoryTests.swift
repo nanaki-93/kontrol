@@ -76,6 +76,15 @@ final class ProjectReferenceRepositoryTests: XCTestCase {
         XCTAssertNil(reconnected.lastSuccessfulReadAt)
         XCTAssertNotEqual(reconnected.revision, read.revision)
         XCTAssertEqual(try repository.fetchAll(), [reconnected])
+        let reopened = try ModelContainerFactory().makeContainer(mode: .persistent(
+            directory.appendingPathComponent("Kontrol.store")))
+        XCTAssertEqual(try SwiftDataProjectReferenceRepository(container: reopened).fetchAll(), [reconnected])
+        XCTAssertThrowsError(try repository.reconnect(id: read.id, expectedRevision: read.revision,
+            input: ReconnectedProjectReference(manifestID: read.manifestID,
+                                               bookmarkData: Data([4]), displayNameHint: "Late"))) {
+            XCTAssertEqual($0 as? ProjectReferencePersistenceError, .staleRevision)
+        }
+        XCTAssertEqual(try repository.fetchAll(), [reconnected])
     }
 
     func testInjectedSaveFailuresDoNotPublishOrChangeDurableRowsOrOtherContexts() throws {
@@ -93,7 +102,9 @@ final class ProjectReferenceRepositoryTests: XCTestCase {
         XCTAssertThrowsError(try failing.insert(input(order: 1)))
         XCTAssertThrowsError(try failing.reconnect(id: original.id, expectedRevision: original.revision,
             input: ReconnectedProjectReference(manifestID: original.manifestID,
-                                               bookmarkData: Data([3]), displayNameHint: "Replacement")))
+                                               bookmarkData: Data([3]), displayNameHint: "Replacement"))) {
+            XCTAssertTrue($0 is SaveFailure)
+        }
         XCTAssertThrowsError(try failing.recordSuccessfulRead(id: original.id,
             expectedRevision: original.revision, nameHint: "Not saved", readAt: Date()))
         XCTAssertEqual(try working.fetchAll(), [original])

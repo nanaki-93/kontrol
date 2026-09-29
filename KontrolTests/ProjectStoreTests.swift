@@ -41,6 +41,8 @@ private final class StubRepository: ProjectReferenceRepository {
     var inserts = 0
     var failInsert = false
     var failReadSave = false
+    var failReconnect = false
+    var reconnects = 0
     var successfulReads = 0
     func fetchAll() throws -> [ProjectReferenceSnapshot] { fetches += 1; return saved }
     func insert(_ input: NewProjectReference) throws -> ProjectReferenceSnapshot {
@@ -54,7 +56,19 @@ private final class StubRepository: ProjectReferenceRepository {
     }
     func reconnect(id: UUID, expectedRevision: UUID,
                    input: ReconnectedProjectReference) throws -> ProjectReferenceSnapshot {
-        throw ProjectReferencePersistenceError.notFound
+        guard let index = saved.firstIndex(where: { $0.id == id }) else {
+            throw ProjectReferencePersistenceError.notFound
+        }
+        let old = saved[index]
+        guard old.revision == expectedRevision else { throw ProjectReferencePersistenceError.staleRevision }
+        guard old.manifestID == input.manifestID else { throw ProjectReferencePersistenceError.manifestMismatch }
+        if failReconnect { throw ProjectReferencePersistenceError.invalidReference }
+        reconnects += 1
+        let receipt = ProjectReferenceSnapshot(id: id, manifestID: old.manifestID,
+            bookmarkData: input.bookmarkData, displayOrder: old.displayOrder,
+            displayNameHint: input.displayNameHint, lastSuccessfulReadAt: nil, revision: UUID())
+        saved[index] = receipt
+        return receipt
     }
     func recordSuccessfulRead(id: UUID, expectedRevision: UUID, nameHint: String,
                               readAt: Date) throws -> ProjectReferenceSnapshot {
@@ -79,7 +93,15 @@ private final class StubRepository: ProjectReferenceRepository {
 /// publication observable without a sandbox grant or filesystem timing assumptions.
 private actor DeferredInspector: ProjectInspecting {
     let selectedInspection: ProjectInspection?
-    init(selectedInspection: ProjectInspection? = nil) { self.selectedInspection = selectedInspection }
+    let newBookmark: Data
+    let waitSelected: Bool
+    private var selectedWaiter: CheckedContinuation<ProjectInspection, Error>?
+    init(selectedInspection: ProjectInspection? = nil, newBookmark: Data = Data([9]),
+         waitSelected: Bool = false) {
+        self.selectedInspection = selectedInspection
+        self.newBookmark = newBookmark
+        self.waitSelected = waitSelected
+    }
     private var waiting: [(Data, CheckedContinuation<ProjectInspection, Error>)] = []
     private var started: [Data] = []
     private var active = 0
@@ -87,7 +109,15 @@ private actor DeferredInspector: ProjectInspecting {
 
     func inspect(selectedFolder: URL) async throws -> ProjectInspection {
         guard let selectedInspection else { throw CancellationError() }
+        if waitSelected {
+            return try await withCheckedThrowingContinuation { selectedWaiter = $0 }
+        }
         return selectedInspection
+    }
+    func hasSelectedWaiter() -> Bool { selectedWaiter != nil }
+    func releaseSelected() {
+        selectedWaiter?.resume(returning: selectedInspection!)
+        selectedWaiter = nil
     }
     func inspect(bookmarkData: Data) async throws -> ProjectInspection {
         started.append(bookmarkData)
@@ -96,7 +126,7 @@ private actor DeferredInspector: ProjectInspecting {
         defer { active -= 1 }
         return try await withCheckedThrowingContinuation { waiting.append((bookmarkData, $0)) }
     }
-    func makeBookmark(selectedFolder: URL) async throws -> Data { throw CancellationError() }
+    func makeBookmark(selectedFolder: URL) async throws -> Data { newBookmark }
     func counts() -> (Int, Int, Int) { (started.count, active, peak) }
     func starts(for data: Data) -> Int { started.filter { $0 == data }.count }
     func release(_ data: Data, result: Result<ProjectInspection, Error>) {
@@ -431,6 +461,99 @@ final class ProjectStoreTests: XCTestCase {
         XCTAssertEqual(subject.addMessage, "Project not added")
         XCTAssertTrue(subject.rows.isEmpty)
         XCTAssertTrue(repo.saved.isEmpty)
+    }
+
+    func testReconnectRejectsMismatchInvalidSelectionCancellationAndSaveFailure() async throws {
+        let io = StubInspector(), repo = StubRepository()
+        let old = reference(1, lastSuccess: Date(timeIntervalSince1970: 100))
+        repo.saved = [old]
+        let subject = store(io, repo)
+        try subject.enterProjects()
+        // Initial refresh from this stub is canceled; it must not affect the row.
+        io.inspections = [inspection(id: "other"), inspection(valid: false), inspection()]
+        do { _ = try await subject.reconnect(old.id, to: folder); XCTFail("Mismatch") }
+        catch { XCTAssertEqual(error as? ProjectStoreError, .manifestMismatch) }
+        XCTAssertEqual(subject.reconnectMessage, "Different project selected")
+        do { _ = try await subject.reconnect(old.id, to: folder); XCTFail("Invalid") }
+        catch { XCTAssertEqual(error as? ProjectStoreError, .invalidReconnect) }
+        XCTAssertEqual(io.bookmarkCount, 0)
+        repo.failReconnect = true
+        do { _ = try await subject.reconnect(old.id, to: folder); XCTFail("Save") }
+        catch { XCTAssertEqual(error as? ProjectStoreError, .projectNotReconnected) }
+        XCTAssertEqual(subject.reconnectMessage, "Project not reconnected")
+        XCTAssertEqual(repo.saved, [old])
+        XCTAssertEqual(subject.rows[0].reference, old)
+        XCTAssertEqual(repo.reconnects, 0)
+        XCTAssertEqual(io.bookmarkCount, 1)
+
+        // Unsupported manifests are never accepted as the same V1 identity.
+        io.inspections = [ProjectInspection(manifest: ProjectManifest(schemaVersion: 2,
+            id: "shared", name: "Future", description: "", stack: [], goals: [], currentFocus: []),
+            roadmap: .absent, features: [], excludedFeaturePaths: [], featureEnumeration: .complete,
+            context: .absent, rules: .absent, history: .absent, diagnostics: [], sources: [], readAt: Date())]
+        do { _ = try await subject.reconnect(old.id, to: folder); XCTFail("Unsupported") }
+        catch { XCTAssertEqual(error as? ProjectStoreError, .invalidReconnect) }
+        XCTAssertEqual(io.bookmarkCount, 1)
+        XCTAssertEqual(repo.saved, [old])
+
+        // A picker cancellation does not call reconnect or create a bookmark.
+        subject.cancelReconnect(old.id)
+        XCTAssertEqual(repo.saved, [old])
+        XCTAssertEqual(repo.reconnects, 0)
+    }
+
+    func testCancelInFlightReconnectCannotReplaceGrantEvenWhenInspectorReturnsSuccess() async throws {
+        let io = DeferredInspector(selectedInspection: inspection(), waitSelected: true)
+        let repo = StubRepository(), old = reference(2)
+        repo.saved = [old]
+        let subject = ProjectStore(inspector: io, repository: repo,
+            identifier: StubIdentity(selectedIdentity: identity, saved: [:]))
+        try subject.enterProjects()
+        let reconnect = Task { try await subject.reconnect(old.id, to: folder) }
+        await eventually { await io.hasSelectedWaiter() }
+        subject.cancelReconnect(old.id)
+        await io.releaseSelected()
+        do { _ = try await reconnect.value; XCTFail("Canceled selection") }
+        catch is CancellationError { }
+        XCTAssertEqual(repo.saved, [old])
+        XCTAssertEqual(subject.rows[0].reference, old)
+        XCTAssertEqual(repo.reconnects, 0)
+        XCTAssertNil(subject.reconnectMessage)
+        await eventually { await io.starts(for: old.bookmarkData) == 1 }
+        await io.release(old.bookmarkData, result: .failure(CancellationError()))
+    }
+
+    func testReconnectPreservesRowAndDiscardsLateOldRead() async throws {
+        let io = DeferredInspector(selectedInspection: inspection(), newBookmark: Data([9]))
+        let repo = StubRepository(), old = reference(1)
+        repo.saved = [old]
+        let subject = ProjectStore(inspector: io, repository: repo,
+            identifier: StubIdentity(selectedIdentity: identity, saved: [:]))
+        try subject.enterProjects()
+        await eventually { await io.starts(for: old.bookmarkData) == 1 }
+        subject.refresh(old.id) // an old follow-up must not survive reconnect
+        let receipt = try await subject.reconnect(old.id, to: folder)
+        XCTAssertEqual(repo.reconnects, 1)
+        XCTAssertEqual(repo.saved.count, 1)
+        XCTAssertEqual(receipt.id, old.id)
+        XCTAssertEqual(receipt.displayOrder, old.displayOrder)
+        XCTAssertEqual(receipt.manifestID, old.manifestID)
+        XCTAssertEqual(receipt.bookmarkData, Data([9]))
+        XCTAssertNil(receipt.lastSuccessfulReadAt)
+        XCTAssertNotEqual(receipt.revision, old.revision)
+        XCTAssertNil(subject.rows[0].inspection)
+        await io.release(old.bookmarkData, result: .success(inspection(id: "other")))
+        await eventually { await io.starts(for: Data([9])) == 1 }
+        XCTAssertNil(subject.rows[0].inspection)
+        XCTAssertNil(subject.rows[0].refreshFailure)
+        XCTAssertEqual(repo.successfulReads, 0)
+        let oldStarts = await io.starts(for: old.bookmarkData)
+        XCTAssertEqual(oldStarts, 1)
+        await io.release(Data([9]), result: .success(inspection()))
+        await eventually { repo.successfulReads == 1 }
+        XCTAssertEqual(subject.rows[0].reference.id, old.id)
+        XCTAssertEqual(repo.saved.count, 1)
+        XCTAssertFalse(subject.rows[0].isStale)
     }
 
     func testSameFilesystemIdentitySelectsExistingButSameManifestDifferentFolderAdds() async throws {

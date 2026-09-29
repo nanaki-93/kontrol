@@ -77,6 +77,10 @@ enum ProjectAddResult: Equatable {
 enum ProjectStoreError: Error, Equatable {
     case invalidPreview
     case projectNotAdded
+    case projectNotReconnected
+    case invalidReconnect
+    case manifestMismatch
+    case referenceNotFound
     case busy
 }
 
@@ -88,6 +92,7 @@ final class ProjectStore: ObservableObject {
     @Published private(set) var selectedID: UUID?
     @Published private(set) var preview: ProjectAddPreview?
     @Published private(set) var addMessage: String?
+    @Published private(set) var reconnectMessage: String?
     @Published private(set) var loadFailed = false
     private(set) var isLoaded = false
 
@@ -96,6 +101,8 @@ final class ProjectStore: ObservableObject {
     private let identifier: any ProjectFolderIdentifying
     private var previewGeneration = 0
     private var adding = false
+    private var reconnecting: Set<UUID> = []
+    private var reconnectGenerations: [UUID: Int] = [:]
     private struct RefreshOperation {
         var generation = 0
         var task: Task<Void, Never>?
@@ -253,6 +260,79 @@ final class ProjectStore: ObservableObject {
         if case .failed = inspection.rules { return false }
         if case .failed = inspection.history { return false }
         return true
+    }
+
+    /// Cancel a pending picker/inspection without changing the saved reference. An IO
+    /// operation that does not cooperate with cancellation still loses publication rights.
+    func cancelReconnect(_ id: UUID) {
+        reconnectGenerations[id, default: 0] += 1
+    }
+
+    /// A reconnect is an explicit replacement of a grant, not an Add or a rename.
+    /// The repository enforces the stored manifest ID and revision again at commit.
+    @discardableResult
+    func reconnect(_ id: UUID, to folder: URL) async throws -> ProjectReferenceSnapshot {
+        guard !reconnecting.contains(id) else { throw ProjectStoreError.busy }
+        guard let original = rows.first(where: { $0.reference.id == id })?.reference else {
+            throw ProjectStoreError.referenceNotFound
+        }
+        reconnecting.insert(id)
+        let generation = reconnectGenerations[id, default: 0]
+        reconnectGenerations[id] = generation
+        defer { reconnecting.remove(id) }
+        reconnectMessage = nil
+        do {
+            let selectedIdentity = try await identifier.selected(folder)
+            try Task.checkCancellation()
+            guard reconnectGenerations[id] == generation else { throw CancellationError() }
+            let inspection = try await inspector.inspect(selectedFolder: folder)
+            try Task.checkCancellation()
+            guard reconnectGenerations[id] == generation else { throw CancellationError() }
+            guard ProjectInspector.canAdd(inspection), let manifest = inspection.manifest else {
+                throw ProjectStoreError.invalidReconnect
+            }
+            guard manifest.id == original.manifestID else { throw ProjectStoreError.manifestMismatch }
+            let bookmark = try await inspector.makeBookmark(selectedFolder: folder)
+            let bookmarkedIdentity = try await identifier.bookmarked(bookmark)
+            try Task.checkCancellation()
+            guard reconnectGenerations[id] == generation else { throw CancellationError() }
+            guard bookmarkedIdentity == selectedIdentity else { throw ProjectStoreError.invalidReconnect }
+            // Reentrant refreshes may have advanced the revision while IO was suspended.
+            // Never overwrite a newer reference with a grant validated against old state.
+            guard let current = rows.first(where: { $0.reference.id == id })?.reference,
+                  current.revision == original.revision else { throw ProjectStoreError.projectNotReconnected }
+            let receipt: ProjectReferenceSnapshot
+            do {
+                receipt = try repository.reconnect(id: id, expectedRevision: original.revision,
+                    input: ReconnectedProjectReference(manifestID: manifest.id,
+                        bookmarkData: bookmark, displayNameHint: manifest.name))
+            } catch {
+                throw ProjectStoreError.projectNotReconnected
+            }
+            // No suspension between commit and publication. Old queued work is removed;
+            // an in-flight read retains its concurrency slot but cannot publish by revision.
+            cancelRefresh(id)
+            guard let index = rows.firstIndex(where: { $0.reference.id == id }) else {
+                preconditionFailure("Committed project disappeared from the main-actor store")
+            }
+            rows[index].reference = receipt
+            rows[index].inspection = nil
+            rows[index].lastReadAt = nil
+            rows[index].isStale = false
+            rows[index].refreshFailure = nil
+            reconnectMessage = nil
+            refresh(id)
+            return receipt
+        } catch {
+            if !(error is CancellationError) && reconnectGenerations[id] == generation {
+                switch error {
+                case ProjectStoreError.manifestMismatch: reconnectMessage = "Different project selected"
+                case ProjectStoreError.invalidReconnect: reconnectMessage = "Selected project is not valid"
+                default: reconnectMessage = "Project not reconnected"
+                }
+            }
+            throw error
+        }
     }
 
     func cancelAdd() {
