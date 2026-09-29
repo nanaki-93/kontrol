@@ -50,6 +50,39 @@ final class LearningHistoryCoverageMigrationTests: XCTestCase {
         return (ids[0], ids[1], ids[2], pin)
     }
 
+    func testMatchingVersionBackfillsMissingMembershipButMismatchedCatalogCannot() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let catalog = try BundledCatalogLoader.load()
+        let repository = SwiftDataCatalogRepository(container: container)
+        _ = try repository.importIfNeeded(catalog)
+        let context = ModelContext(container)
+        for row in try context.fetch(FetchDescriptor<CatalogMembership>()) { context.delete(row) }
+        try context.save()
+        XCTAssertEqual(try repository.loadMembership(catalogID: catalog.value.catalogID), .unavailable)
+        let marker = try XCTUnwrap(context.fetch(FetchDescriptor<CatalogImportState>()).first)
+        marker.lastImportedVersion = catalog.value.version + 1
+        try context.save()
+        XCTAssertThrowsError(try repository.importIfNeeded(catalog)) {
+            XCTAssertEqual($0 as? CatalogImportError, .downgrade(
+                installed: catalog.value.version + 1, requested: catalog.value.version))
+        }
+        XCTAssertEqual(try repository.loadMembership(catalogID: catalog.value.catalogID), .unavailable)
+        marker.lastImportedVersion = catalog.value.version
+        try context.save()
+        let failing = SwiftDataCatalogRepository(container: container, beforeSave: { throw Injected.save })
+        XCTAssertThrowsError(try failing.importIfNeeded(catalog)) { XCTAssertTrue($0 is Injected) }
+        XCTAssertEqual(try repository.loadMembership(catalogID: catalog.value.catalogID), .unavailable)
+        XCTAssertEqual(try repository.importIfNeeded(catalog), .unchanged)
+        let expected = CurrentCatalogMembership(catalogID: catalog.value.catalogID,
+            catalogVersion: catalog.value.version, topicIDs: catalog.value.topics.map(\.id).sorted(),
+            subtopicIDs: catalog.value.subtopics.map(\.id).sorted(),
+            conceptIDs: catalog.value.concepts.map(\.id).sorted(),
+            seededLessonIDs: catalog.value.lessons.filter { $0.source == "seed" }.map(\.id).sorted())
+        XCTAssertEqual(try repository.loadMembership(catalogID: catalog.value.catalogID), .available(expected))
+        XCTAssertEqual(try SwiftDataCatalogRepository(container: container,
+            beforeSave: { throw Injected.save }).importIfNeeded(catalog), .unchanged)
+    }
+
     func testSameVersionBackfillIsIdempotentAndKeepsOriginalAttempts() throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         let catalog = try BundledCatalogLoader.load()
@@ -138,6 +171,11 @@ final class LearningHistoryCoverageMigrationTests: XCTestCase {
             _ = try writer.importIfNeeded(catalog)
             let (_, _, _, pin) = try seed(container, catalog: catalog)
             originalPin = pin
+            // Simulate V5→V6: installed marker and definitions, but no membership.
+            let migration = ModelContext(container)
+            for row in try migration.fetch(FetchDescriptor<CatalogMembership>()) { migration.delete(row) }
+            try migration.save()
+            XCTAssertEqual(try writer.loadMembership(catalogID: catalog.value.catalogID), .unavailable)
             let failed = SwiftDataCatalogRepository(container: container,
                 beforeSave: { throw Injected.save })
             XCTAssertThrowsError(try failed.importIfNeeded(catalog)) {
@@ -150,11 +188,17 @@ final class LearningHistoryCoverageMigrationTests: XCTestCase {
             XCTAssertTrue(try context.fetch(FetchDescriptor<LessonTerminalRecord>()).isEmpty)
             XCTAssertEqual(try context.fetch(FetchDescriptor<CatalogImportState>()).first?.lastImportedVersion,
                            catalog.value.version)
+            XCTAssertEqual(try SwiftDataCatalogRepository(container: container).loadMembership(
+                catalogID: catalog.value.catalogID), .unavailable)
             XCTAssertEqual(try context.fetch(FetchDescriptor<LessonAttempt>())
                 .first { $0.pinnedContentData?.isEmpty == false }?.pinnedContentData, originalPin)
             XCTAssertEqual(try context.fetch(FetchDescriptor<LessonAttempt>()).count, 2)
-            _ = try SwiftDataCatalogRepository(container: container).importIfNeeded(catalog)
+            let repository = SwiftDataCatalogRepository(container: container)
+            _ = try repository.importIfNeeded(catalog)
             XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<LessonTerminalRecord>()).count, 3)
+            if case .available(let membership) = try repository.loadMembership(catalogID: catalog.value.catalogID) {
+                XCTAssertEqual(membership.catalogVersion, catalog.value.version)
+            } else { XCTFail("Matching-version retry must recover membership") }
         }
     }
 

@@ -30,12 +30,26 @@ final class CatalogImportTests: XCTestCase {
         try ModelContext(container).fetch(FetchDescriptor<T>())
     }
 
+    private func expectedMembership(_ catalog: ValidatedCatalog) -> CatalogMembershipAvailability {
+        let value = catalog.value
+        return .available(CurrentCatalogMembership(catalogID: value.catalogID,
+            catalogVersion: value.version, topicIDs: value.topics.map(\.id).sorted(),
+            subtopicIDs: value.subtopics.map(\.id).sorted(),
+            conceptIDs: value.concepts.map(\.id).sorted(),
+            seededLessonIDs: value.lessons.filter { $0.source == "seed" }.map(\.id).sorted()))
+    }
+
     func testSeedAndRepeatDoNotCreatePersonalRecordsOrDuplicateDefinitions() throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         let repository = SwiftDataCatalogRepository(container: container)
         let seed = try catalog()
+        XCTAssertEqual(try repository.loadMembership(catalogID: seed.value.catalogID), .unavailable)
         XCTAssertEqual(try repository.importIfNeeded(seed), .imported)
-        XCTAssertEqual(try repository.importIfNeeded(seed), .unchanged)
+        XCTAssertEqual(try repository.loadMembership(catalogID: seed.value.catalogID), expectedMembership(seed))
+        let membershipBytes = try XCTUnwrap(records(CatalogMembership.self, in: container).first?.payload)
+        let noSave = SwiftDataCatalogRepository(container: container, beforeSave: { throw Injected.failure })
+        XCTAssertEqual(try noSave.importIfNeeded(seed), .unchanged)
+        XCTAssertEqual(try records(CatalogMembership.self, in: container).first?.payload, membershipBytes)
         var sameVersion = seed.value
         sameVersion.lessons[0].title = "Not a new release"
         sameVersion.lessons[0].objective = "Not an imported objective"
@@ -43,6 +57,7 @@ final class CatalogImportTests: XCTestCase {
         sameVersion.lessons[0].explanation = "Unreleased teaching revision"
         sameVersion.lessons[0].normalizedContentHash = CatalogValidator.fingerprint(for: sameVersion.lessons[0])
         XCTAssertEqual(try repository.importIfNeeded(CatalogValidator.validate(sameVersion)), .unchanged)
+        XCTAssertEqual(try repository.loadMembership(catalogID: seed.value.catalogID), expectedMembership(seed))
         let unchanged = try XCTUnwrap(records(LessonDefinition.self, in: container).first {
             $0.id == seed.value.lessons[0].id
         })
@@ -58,6 +73,31 @@ final class CatalogImportTests: XCTestCase {
         XCTAssertTrue(try records(LessonProgress.self, in: container).isEmpty)
         XCTAssertTrue(try records(LessonAttempt.self, in: container).isEmpty)
         XCTAssertTrue(try records(TaskItem.self, in: container).isEmpty)
+    }
+
+    func testUpgradeRetainsOmittedTaxonomyWithoutIncludingItInCurrentMembership() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataCatalogRepository(container: container)
+        let seed = try catalog()
+        _ = try repository.importIfNeeded(seed)
+        var release = seed.value
+        release.version += 1
+        let retainedTopic = try XCTUnwrap(release.topics.first?.id)
+        let retainedSubtopics = Set(release.subtopics.filter { $0.topicID == retainedTopic }.map(\.id))
+        release.topics.removeAll { $0.id != retainedTopic }
+        release.subtopics.removeAll { !retainedSubtopics.contains($0.id) }
+        release.concepts.removeAll { !retainedSubtopics.contains($0.subtopicID) }
+        release.lessons.removeAll { $0.topicID != retainedTopic }
+        let upgrade = try CatalogValidator.validate(release)
+        let oldSlots = try repository.loadSnapshot().slots
+        XCTAssertEqual(try repository.importIfNeeded(upgrade), .imported)
+        XCTAssertEqual(try repository.loadMembership(catalogID: release.catalogID), expectedMembership(upgrade))
+        XCTAssertEqual(try records(Topic.self, in: container).count, seed.value.topics.count)
+        XCTAssertEqual(try records(Subtopic.self, in: container).count, seed.value.subtopics.count)
+        XCTAssertEqual(try records(Concept.self, in: container).count, seed.value.concepts.count)
+        XCTAssertEqual(try records(LessonDefinition.self, in: container).count, seed.value.lessons.count)
+        XCTAssertEqual(try repository.loadSnapshot().slots, oldSlots,
+                       "Membership persistence must not implicitly rotate slots in Step 2.3")
     }
 
     func testUpgradeKeepsIdentityPersonalDataAndAbsentHistoricalDefinitions() throws {
@@ -137,6 +177,10 @@ final class CatalogImportTests: XCTestCase {
         XCTAssertEqual(try records(Subtopic.self, in: container).first { $0.id == updated.subtopics[0].id }?.name, "Corrected subtopic")
         XCTAssertEqual(try records(Concept.self, in: container).first { $0.id == updated.concepts[0].id }?.name, "Corrected concept")
         XCTAssertNotNil(definitions.first { $0.id == removedID })
+        XCTAssertEqual(try repository.loadMembership(catalogID: updated.catalogID), expectedMembership(upgrade))
+        if case .available(let membership) = try repository.loadMembership(catalogID: updated.catalogID) {
+            XCTAssertFalse(membership.seededLessonIDs.contains(removedID))
+        } else { XCTFail("Upgrade must establish membership") }
         let allProgress = try records(LessonProgress.self, in: container)
         let allAttempts = try records(LessonAttempt.self, in: container)
         XCTAssertEqual(allProgress.count, 4)
@@ -537,6 +581,7 @@ final class CatalogImportTests: XCTestCase {
         XCTAssertEqual(try records(LessonDefinition.self, in: container).count, seed.value.lessons.count)
         XCTAssertEqual(try records(CatalogImportState.self, in: container).map(\.lastImportedVersion), [seed.value.version])
         let committedSlots = try repository.loadSnapshot().slots
+        let committedMembership = try repository.loadMembership(catalogID: seed.value.catalogID)
         XCTAssertEqual(committedSlots.count, 20)
         // There is no import API accepting an unvalidated DTO.
         for failing in [SwiftDataCatalogRepository(container: container,
@@ -554,6 +599,7 @@ final class CatalogImportTests: XCTestCase {
             XCTAssertEqual(try records(LessonDefinition.self, in: container).count, seed.value.lessons.count)
             XCTAssertFalse(try records(LessonDefinition.self, in: container).contains { $0.id == newLesson.id })
             XCTAssertEqual(try repository.loadSnapshot().slots, committedSlots)
+            XCTAssertEqual(try repository.loadMembership(catalogID: seed.value.catalogID), committedMembership)
         }
         // A failed first import must not leave even a marker or a partial row.
         let empty = try ModelContainerFactory().makeContainer(mode: .inMemory)
@@ -562,7 +608,10 @@ final class CatalogImportTests: XCTestCase {
         XCTAssertTrue(try records(Topic.self, in: empty).isEmpty)
         XCTAssertTrue(try records(CatalogImportState.self, in: empty).isEmpty)
         XCTAssertTrue(try records(LessonSlot.self, in: empty).isEmpty)
+        XCTAssertEqual(try SwiftDataCatalogRepository(container: empty).loadMembership(
+            catalogID: seed.value.catalogID), .unavailable)
         XCTAssertEqual(try repository.importIfNeeded(upgraded), .imported)
+        XCTAssertEqual(try repository.loadMembership(catalogID: upgraded.value.catalogID), expectedMembership(upgraded))
         XCTAssertEqual(try repository.loadSnapshot().slots, committedSlots)
     }
 
@@ -583,12 +632,15 @@ final class CatalogImportTests: XCTestCase {
             XCTAssertThrowsError(try SwiftDataCatalogRepository(container: container,
                              save: { _ in throw Injected.failure }).importIfNeeded(upgraded))
             XCTAssertEqual(try repository.loadSnapshot().slots.count, 20)
+            XCTAssertEqual(try repository.loadMembership(catalogID: seed.value.catalogID), expectedMembership(seed))
         }
         func reopenAndCheck() throws {
             let container = try ModelContainerFactory().makeContainer(mode: .persistent(url))
             XCTAssertEqual(try records(CatalogImportState.self, in: container).map(\.lastImportedVersion),
                            [seed.value.version])
             XCTAssertEqual(try SwiftDataCatalogRepository(container: container).loadSnapshot().slots.count, 20)
+            XCTAssertEqual(try SwiftDataCatalogRepository(container: container).loadMembership(
+                catalogID: seed.value.catalogID), expectedMembership(seed))
             XCTAssertEqual(try records(LessonDefinition.self, in: container).first {
                 $0.id == seed.value.lessons[0].id
             }?.title, seed.value.lessons[0].title)
@@ -599,6 +651,8 @@ final class CatalogImportTests: XCTestCase {
             lastContainer = reopened
             XCTAssertEqual(try records(CatalogImportState.self, in: reopened).map(\.lastImportedVersion),
                            [upgraded.value.version])
+            XCTAssertEqual(try SwiftDataCatalogRepository(container: reopened).loadMembership(
+                catalogID: seed.value.catalogID), expectedMembership(upgraded))
             XCTAssertEqual(try records(LessonDefinition.self, in: reopened).first {
                 $0.id == seed.value.lessons[0].id
             }?.title, "Corrected lesson")

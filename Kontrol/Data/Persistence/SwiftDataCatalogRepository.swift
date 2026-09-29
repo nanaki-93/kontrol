@@ -65,10 +65,11 @@ final class SwiftDataCatalogRepository: CatalogRepository {
                 // A V6 container may have migrated without terminal records. Backfill
                 // even when the installed release has not changed, in one write context.
                 let recovered = try backfillTerminalEvidence(in: context)
+                let membershipChanged = try persistMembership(catalog, in: context)
                 let previousSlots = try snapshot(in: context).slots
                 try reconcile(in: context, now: Date(), commit: false)
                 let slotsChanged = try snapshot(in: context).slots != previousSlots
-                if recovered || slotsChanged {
+                if recovered || membershipChanged || slotsChanged {
                     try beforeSave()
                     try save(context)
                 }
@@ -195,12 +196,51 @@ final class SwiftDataCatalogRepository: CatalogRepository {
             context.insert(CatalogImportState(catalogID: value.catalogID,
                                               lastImportedVersion: value.version))
         }
+        _ = try persistMembership(catalog, in: context)
         // Re-fetch within this private write context, including newly inserted
         // definitions. One commit owns the definitions, slots, and version marker.
         try reconcile(in: context, now: Date(), commit: false)
         try beforeSave()
         try save(context)
         return .imported
+    }
+
+    // A migrated marker alone cannot establish the contents of an old release.
+    // Only an exact-version validated import can create this evidence.
+    func loadMembership(catalogID: String) throws -> CatalogMembershipAvailability {
+        let context = ModelContext(container)
+        let states = try EvidenceIdentity.requireUnique(
+            context.fetch(FetchDescriptor<CatalogImportState>()), id: { $0.catalogID })
+        let rows = try context.fetch(FetchDescriptor<CatalogMembership>())
+        guard let version = states[catalogID]?.lastImportedVersion else {
+            // Still validate corrupt evidence instead of masking it as unavailable.
+            _ = try EvidenceIdentity.requireUnique(rows, id: { $0.catalogID })
+            for row in rows { _ = try row.membership() }
+            return .unavailable
+        }
+        return try EvidenceIdentity.membership(rows, catalogID: catalogID, installedVersion: version)
+    }
+
+    // Return true only when a missing or stale membership was actually written.
+    // Never derive current sets from retained taxonomy or definition rows.
+    private func persistMembership(_ catalog: ValidatedCatalog, in context: ModelContext) throws -> Bool {
+        let rows = try EvidenceIdentity.requireUnique(
+            context.fetch(FetchDescriptor<CatalogMembership>()), id: { $0.catalogID })
+        for row in rows.values { _ = try row.membership() }
+        let value = catalog.value
+        if try rows[value.catalogID]?.membership().catalogVersion == value.version { return false }
+        let membership = CurrentCatalogMembership(catalogID: value.catalogID,
+            catalogVersion: value.version,
+            topicIDs: value.topics.map(\.id).sorted(),
+            subtopicIDs: value.subtopics.map(\.id).sorted(),
+            conceptIDs: value.concepts.map(\.id).sorted(),
+            seededLessonIDs: value.lessons.filter { $0.source == "seed" }.map(\.id).sorted())
+        if let row = rows[value.catalogID] {
+            row.payload = try CatalogMembership(membership: membership).payload
+        } else {
+            context.insert(try CatalogMembership(membership: membership))
+        }
+        return true
     }
 
     func loadSnapshot() throws -> LearningCatalogSnapshot {
