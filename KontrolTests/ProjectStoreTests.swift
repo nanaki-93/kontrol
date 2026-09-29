@@ -154,12 +154,15 @@ final class ProjectStoreTests: XCTestCase {
             dependsOn: [], areas: [], completedAt: nil, body: "Entire body", sourcePath: ".kontrol/features/\(id).md")
     }
 
-    private func inspectionWithFeatures(_ features: [ProjectFeature]) -> ProjectInspection {
+    private func inspectionWithFeatures(_ features: [ProjectFeature], excluded: [String] = [],
+                                        diagnostics: [ProjectDiagnostic] = [],
+                                        sources: [ProjectSourceDocument] = [],
+                                        enumeration: ProjectFeatureEnumeration = .complete) -> ProjectInspection {
         let base = inspection()
         return ProjectInspection(manifest: base.manifest, roadmap: base.roadmap,
-            features: features, excludedFeaturePaths: [], featureEnumeration: .complete,
+            features: features, excludedFeaturePaths: excluded, featureEnumeration: enumeration,
             context: base.context, rules: base.rules, history: base.history,
-            diagnostics: [], sources: [], readAt: Date())
+            diagnostics: diagnostics, sources: sources, readAt: Date())
     }
 
     private func store(_ inspector: StubInspector, _ repository: StubRepository,
@@ -729,6 +732,308 @@ final class ProjectStoreTests: XCTestCase {
         XCTAssertEqual(subject.rows[0].reference.id, old.id)
         XCTAssertEqual(repo.saved.count, 1)
         XCTAssertFalse(subject.rows[0].isStale)
+    }
+
+    func testRefreshReconcilesContentAndRankingWithoutClosingDetail() async throws {
+        let io = DeferredInspector(), repo = StubRepository(), ref = reference(40)
+        repo.saved = [ref]
+        let subject = ProjectStore(inspector: io, repository: repo)
+        try subject.enterProjects()
+        await eventually { await io.starts(for: ref.bookmarkData) == 1 }
+        await io.release(ref.bookmarkData, result: .success(inspectionWithFeatures([feature("open")])))
+        await eventually { repo.successfulReads == 1 }
+        subject.selectFeature("open", in: ref.id)
+        let updated = ProjectFeature(id: "open", title: "Updated", status: .active,
+            priority: .low, effort: .large, dependsOn: ["done"], areas: ["new"],
+            completedAt: nil, body: "Updated full body", sourcePath: ".kontrol/features/open.md")
+        let replacement = inspectionWithFeatures([feature("done", status: .completed), updated])
+        subject.refresh(ref.id)
+        await eventually { await io.starts(for: ref.bookmarkData) == 2 }
+        await io.release(ref.bookmarkData, result: .success(replacement))
+        await eventually { subject.rows[0].inspection?.readAt == replacement.readAt }
+        XCTAssertEqual(subject.selectedFeature, ProjectFeatureIdentity(projectID: ref.id, featureID: "open"))
+        XCTAssertEqual(subject.selectedFeatureContent, updated)
+        XCTAssertNil(subject.selectionNotice)
+        XCTAssertFalse(subject.rows[0].isRetainedInspection)
+        // Leaving the candidate top three solely due to ranking is not deletion either.
+        let ranked = inspectionWithFeatures([updated] + (0..<4).map { feature("ready\($0)") })
+        subject.refresh(ref.id)
+        await eventually { await io.starts(for: ref.bookmarkData) == 3 }
+        await io.release(ref.bookmarkData, result: .success(ranked))
+        await eventually { subject.rows[0].inspection?.readAt == ranked.readAt }
+        XCTAssertEqual(subject.selectedFeatureContent, updated)
+        XCTAssertNil(subject.selectionNotice)
+    }
+
+    func testAuthoritativeRemovalAndExclusionHaveDistinctProjectScopedNotices() async throws {
+        let io = DeferredInspector(), repo = StubRepository()
+        let first = reference(41), peer = reference(42)
+        repo.saved = [first, peer]
+        let subject = ProjectStore(inspector: io, repository: repo)
+        try subject.enterProjects()
+        await eventually { await io.counts().0 == 2 }
+        let original = inspectionWithFeatures([feature("open")])
+        await io.release(first.bookmarkData, result: .success(original))
+        await io.release(peer.bookmarkData, result: .success(original))
+        await eventually { repo.successfulReads == 2 }
+        subject.selectFeature("open", in: first.id)
+        // An excluded dependent can mention this deleted ID without making the
+        // deleted feature itself an excluded record.
+        let removed = inspectionWithFeatures([], excluded: [".kontrol/features/dependent.md"],
+            diagnostics: [ProjectDiagnostic(code: .invalidDependency, severity: .error,
+                relativePath: ".kontrol/features/dependent.md", affectedIDs: ["dependent", "open"],
+                recovery: .editSource)])
+        subject.refresh(first.id)
+        await eventually { await io.starts(for: first.bookmarkData) == 2 }
+        await io.release(first.bookmarkData, result: .success(removed))
+        await eventually { subject.rows[0].inspection?.readAt == removed.readAt }
+        XCTAssertNil(subject.selectedFeature)
+        XCTAssertEqual(subject.selectionNotice, ProjectFeatureSelectionNotice(projectID: first.id,
+            featureID: "open", reason: .removed))
+        subject.selectFeature("open", in: peer.id)
+        XCTAssertNil(subject.selectionNotice)
+        subject.selectFeature("open", in: first.id) // No longer valid; cannot reopen.
+        XCTAssertEqual(subject.selectedFeature?.projectID, peer.id)
+        let excluded = inspectionWithFeatures([], excluded: [".kontrol/features/open.md"],
+            diagnostics: [ProjectDiagnostic(code: .invalidFrontmatter, severity: .error,
+                relativePath: ".kontrol/features/open.md", recovery: .editSource)])
+        subject.refresh(peer.id)
+        await eventually { await io.starts(for: peer.bookmarkData) == 2 }
+        await io.release(peer.bookmarkData, result: .success(excluded))
+        await eventually { subject.rows[1].inspection?.readAt == excluded.readAt }
+        XCTAssertNil(subject.selectedFeatureContent)
+        XCTAssertNil(subject.selectedFeature)
+        XCTAssertEqual(subject.selectionNotice, ProjectFeatureSelectionNotice(projectID: peer.id,
+            featureID: "open", reason: .validationExcluded))
+        subject.select(first.id)
+        XCTAssertNil(subject.selectionNotice)
+    }
+
+    func testDiagnosticIdentifiesMovedExcludedFeatureWithoutInferringFromFilename() async throws {
+        let io = DeferredInspector(), repo = StubRepository(), ref = reference(47)
+        repo.saved = [ref]
+        let subject = ProjectStore(inspector: io, repository: repo)
+        try subject.enterProjects()
+        await eventually { await io.starts(for: ref.bookmarkData) == 1 }
+        await io.release(ref.bookmarkData, result: .success(inspectionWithFeatures([feature("open")])))
+        await eventually { repo.successfulReads == 1 }
+        subject.selectFeature("open", in: ref.id)
+        let moved = ".kontrol/features/renamed.md"
+        let excluded = inspectionWithFeatures([], excluded: [moved], diagnostics: [
+            ProjectDiagnostic(code: .duplicateID, severity: .error, relativePath: moved,
+                affectedIDs: ["open"], recovery: .editSource)])
+        subject.refresh(ref.id)
+        await eventually { await io.starts(for: ref.bookmarkData) == 2 }
+        await io.release(ref.bookmarkData, result: .success(excluded))
+        await eventually { subject.rows[0].inspection?.readAt == excluded.readAt }
+        XCTAssertNil(subject.selectedFeature)
+        XCTAssertEqual(subject.selectionNotice?.reason, .validationExcluded)
+    }
+
+    func testMovedDependencyExclusionsIdentifyRecordNotSortedTargetID() async throws {
+        let io = DeferredInspector(), repo = StubRepository(), ref = reference(48)
+        repo.saved = [ref]
+        let subject = ProjectStore(inspector: io, repository: repo)
+        try subject.enterProjects()
+        await eventually { await io.starts(for: ref.bookmarkData) == 1 }
+        await io.release(ref.bookmarkData, result: .success(inspectionWithFeatures([feature("z-open")])))
+        await eventually { repo.successfulReads == 1 }
+        subject.selectFeature("z-open", in: ref.id)
+
+        // The validator sorts affected IDs: the missing target precedes the moved
+        // record alphabetically. Reconcile using its diagnostic path and source ID.
+        let moved = ".kontrol/features/moved.md"
+        let missingRecord = ProjectFeature(id: "z-open", title: "Moved", status: .ready,
+            priority: .medium, effort: .small, dependsOn: ["a-missing"], areas: [],
+            completedAt: nil, body: "", sourcePath: moved)
+        let missing = ProjectValidator().validate([missingRecord])
+        XCTAssertEqual(missing.diagnostics.map(\.affectedIDs), [["a-missing", "z-open"]])
+        let source = ProjectSourceDocument(relativePath: moved, bytes: Data(
+            "---\nid: z-open\ntitle: Moved\nstatus: ready\npriority: medium\neffort: small\ndepends_on: [a-missing]\n---\n".utf8))
+        let excluded = inspectionWithFeatures(missing.features, excluded: missing.excludedFeaturePaths,
+            diagnostics: missing.diagnostics, sources: [source])
+        subject.refresh(ref.id)
+        await eventually { await io.starts(for: ref.bookmarkData) == 2 }
+        await io.release(ref.bookmarkData, result: .success(excluded))
+        await eventually { subject.rows[0].inspection?.readAt == excluded.readAt }
+        XCTAssertNil(subject.selectedFeature)
+        XCTAssertEqual(subject.selectionNotice?.reason, .validationExcluded)
+
+        // Repeat for an invalid target (duplicate ID), including propagation to a
+        // moved dependent. The dependent's ID is again last in sorted affectedIDs.
+        subject.refresh(ref.id)
+        await eventually { await io.starts(for: ref.bookmarkData) == 3 }
+        await io.release(ref.bookmarkData, result: .success(inspectionWithFeatures([feature("z-open")])))
+        await eventually { repo.successfulReads == 2 }
+        subject.selectFeature("z-open", in: ref.id)
+        let invalidRecord = ProjectFeature(id: "z-open", title: "Moved", status: .ready,
+            priority: .medium, effort: .small, dependsOn: ["a-duplicate"], areas: [],
+            completedAt: nil, body: "", sourcePath: moved)
+        let invalid = ProjectValidator().validate([invalidRecord,
+            feature("a-duplicate"), ProjectFeature(id: "a-duplicate", title: "Other", status: .ready,
+                priority: .medium, effort: .small, dependsOn: [], areas: [], completedAt: nil,
+                body: "", sourcePath: ".kontrol/features/other.md")])
+        XCTAssertTrue(invalid.diagnostics.contains { $0.code == .invalidDependency &&
+            $0.relativePath == moved && $0.affectedIDs == ["a-duplicate", "z-open"] })
+        let invalidInspection = inspectionWithFeatures(invalid.features, excluded: invalid.excludedFeaturePaths,
+            diagnostics: invalid.diagnostics, sources: [ProjectSourceDocument(relativePath: moved, bytes: Data(
+                "---\nid: z-open\ntitle: Moved\nstatus: ready\npriority: medium\neffort: small\ndepends_on: [a-duplicate]\n---\n".utf8))])
+        subject.refresh(ref.id)
+        await eventually { await io.starts(for: ref.bookmarkData) == 4 }
+        await io.release(ref.bookmarkData, result: .success(invalidInspection))
+        await eventually { subject.rows[0].inspection?.readAt == invalidInspection.readAt }
+        XCTAssertNil(subject.selectedFeature)
+        XCTAssertEqual(subject.selectionNotice?.reason, .validationExcluded)
+    }
+
+    func testDeletedDependencyTargetIsNotConfusedWithMovedExcludedDependent() async throws {
+        let io = DeferredInspector(), repo = StubRepository(), ref = reference(49)
+        repo.saved = [ref]
+        let subject = ProjectStore(inspector: io, repository: repo)
+        try subject.enterProjects()
+        await eventually { await io.starts(for: ref.bookmarkData) == 1 }
+        await io.release(ref.bookmarkData, result: .success(inspectionWithFeatures([feature("a-target")])))
+        await eventually { repo.successfulReads == 1 }
+        subject.selectFeature("a-target", in: ref.id)
+        let dependentPath = ".kontrol/features/moved-dependent.md"
+        let dependent = ProjectFeature(id: "z-dependent", title: "Dependent", status: .ready,
+            priority: .medium, effort: .small, dependsOn: ["a-target"], areas: [],
+            completedAt: nil, body: "", sourcePath: dependentPath)
+        let validated = ProjectValidator().validate([dependent])
+        XCTAssertEqual(validated.diagnostics.map(\.affectedIDs), [["a-target", "z-dependent"]])
+        let source = ProjectSourceDocument(relativePath: dependentPath, bytes: Data(
+            "---\nid: z-dependent\ntitle: Dependent\nstatus: ready\npriority: medium\neffort: small\ndepends_on: [a-target]\n---\n".utf8))
+        let deleted = inspectionWithFeatures(validated.features, excluded: validated.excludedFeaturePaths,
+            diagnostics: validated.diagnostics, sources: [source])
+        subject.refresh(ref.id)
+        await eventually { await io.starts(for: ref.bookmarkData) == 2 }
+        await io.release(ref.bookmarkData, result: .success(deleted))
+        await eventually { subject.rows[0].inspection?.readAt == deleted.readAt }
+        XCTAssertNil(subject.selectedFeature)
+        XCTAssertEqual(subject.selectionNotice?.reason, .removed)
+    }
+
+    func testFailedAndCanceledRefreshRetainSelectedDetailAndMarkOldContent() async throws {
+        let io = DeferredInspector(), repo = StubRepository(), ref = reference(43)
+        repo.saved = [ref]
+        let subject = ProjectStore(inspector: io, repository: repo)
+        try subject.enterProjects()
+        await eventually { await io.starts(for: ref.bookmarkData) == 1 }
+        let original = inspectionWithFeatures([feature("open")])
+        await io.release(ref.bookmarkData, result: .success(original))
+        await eventually { repo.successfulReads == 1 }
+        subject.selectFeature("open", in: ref.id)
+        subject.refresh(ref.id)
+        await eventually { await io.starts(for: ref.bookmarkData) == 2 }
+        await io.release(ref.bookmarkData, result: .failure(ProjectInspectionFailure.inconsistentRead))
+        await eventually { subject.rows[0].refreshFailure == .inspection(.inconsistentRead) }
+        XCTAssertEqual(subject.selectedFeatureContent, original.features[0])
+        XCTAssertNil(subject.selectionNotice)
+        XCTAssertTrue(subject.rows[0].isRetainedInspection)
+        subject.refresh(ref.id)
+        await eventually { await io.starts(for: ref.bookmarkData) == 3 }
+        subject.cancelRefresh(ref.id)
+        await io.release(ref.bookmarkData, result: .success(inspectionWithFeatures([])))
+        await eventually { !subject.rows[0].isRefreshing }
+        XCTAssertEqual(subject.selectedFeatureContent, original.features[0])
+        XCTAssertTrue(subject.rows[0].isRetainedInspection)
+        XCTAssertNil(subject.selectionNotice)
+        let partial = inspectionWithFeatures([feature("open")], excluded: [".kontrol/features/bad.md"])
+        subject.refresh(ref.id)
+        await eventually { await io.starts(for: ref.bookmarkData) == 4 }
+        await io.release(ref.bookmarkData, result: .success(partial))
+        await eventually { subject.rows[0].inspection?.readAt == partial.readAt }
+        XCTAssertTrue(subject.rows[0].isStale)
+        XCTAssertFalse(subject.rows[0].isRetainedInspection)
+        XCTAssertNil(subject.rows[0].refreshFailure)
+        XCTAssertEqual(subject.selectedFeatureContent, partial.features[0])
+    }
+
+    func testReconnectPreservesFeatureIdentityUntilReplacementAndRejectsLateOldRead() async throws {
+        let replacement = inspectionWithFeatures([feature("open", title: "Reconnected")])
+        let io = DeferredInspector(selectedInspection: replacement)
+        let repo = StubRepository(), ref = reference(44)
+        repo.saved = [ref]
+        let subject = ProjectStore(inspector: io, repository: repo,
+            identifier: StubIdentity(selectedIdentity: identity, saved: [:]))
+        try subject.enterProjects()
+        await eventually { await io.starts(for: ref.bookmarkData) == 1 }
+        let old = inspectionWithFeatures([feature("open")])
+        await io.release(ref.bookmarkData, result: .success(old))
+        await eventually { repo.successfulReads == 1 }
+        subject.selectFeature("open", in: ref.id)
+        subject.refresh(ref.id)
+        await eventually { await io.starts(for: ref.bookmarkData) == 2 }
+        _ = try await subject.reconnect(ref.id, to: folder)
+        XCTAssertEqual(subject.selectedFeature?.featureID, "open")
+        XCTAssertNil(subject.selectedFeatureContent) // No independently cached body.
+        await io.release(ref.bookmarkData, result: .success(inspectionWithFeatures([])))
+        await eventually { await io.starts(for: Data([9])) == 1 }
+        XCTAssertEqual(subject.selectedFeature?.projectID, ref.id)
+        XCTAssertNil(subject.selectionNotice)
+        await io.release(Data([9]), result: .success(replacement))
+        await eventually { repo.successfulReads == 2 }
+        XCTAssertEqual(subject.selectedFeatureContent?.title, "Reconnected")
+        XCTAssertNil(subject.selectionNotice)
+        let oldStarts = await io.starts(for: ref.bookmarkData)
+        XCTAssertEqual(oldStarts, 2)
+    }
+
+    func testReconnectReplacementExclusionUsesPreviousSourcePath() async throws {
+        let path = ".kontrol/features/open.md"
+        let invalid = inspectionWithFeatures([], excluded: [path], diagnostics: [
+            ProjectDiagnostic(code: .malformedYAML, severity: .error, relativePath: path,
+                recovery: .editSource)])
+        let io = DeferredInspector(selectedInspection: inspectionWithFeatures([feature("open")]))
+        let repo = StubRepository(), ref = reference(45)
+        repo.saved = [ref]
+        let subject = ProjectStore(inspector: io, repository: repo,
+            identifier: StubIdentity(selectedIdentity: identity, saved: [:]))
+        try subject.enterProjects()
+        await eventually { await io.starts(for: ref.bookmarkData) == 1 }
+        await io.release(ref.bookmarkData, result: .success(inspectionWithFeatures([feature("open")])))
+        await eventually { repo.successfulReads == 1 }
+        subject.selectFeature("open", in: ref.id)
+        _ = try await subject.reconnect(ref.id, to: folder)
+        await eventually { await io.starts(for: Data([9])) == 1 }
+        await io.release(Data([9]), result: .success(invalid))
+        await eventually { subject.rows[0].inspection?.readAt == invalid.readAt }
+        XCTAssertNil(subject.selectedFeature)
+        XCTAssertEqual(subject.selectionNotice?.reason, .validationExcluded)
+    }
+
+    func testLatePreReconnectReadAndLaterRefreshCannotReopenClosedDetail() async throws {
+        let io = DeferredInspector(selectedInspection: inspectionWithFeatures([feature("open")]))
+        let repo = StubRepository(), ref = reference(46)
+        repo.saved = [ref]
+        let subject = ProjectStore(inspector: io, repository: repo,
+            identifier: StubIdentity(selectedIdentity: identity, saved: [:]))
+        try subject.enterProjects()
+        await eventually { await io.starts(for: ref.bookmarkData) == 1 }
+        await io.release(ref.bookmarkData, result: .success(inspectionWithFeatures([feature("open")])))
+        await eventually { repo.successfulReads == 1 }
+        subject.selectFeature("open", in: ref.id)
+        subject.refresh(ref.id)
+        await eventually { await io.starts(for: ref.bookmarkData) == 2 }
+        _ = try await subject.reconnect(ref.id, to: folder)
+        let late = inspectionWithFeatures([feature("open", title: "Old")])
+        await io.release(ref.bookmarkData, result: .success(late))
+        await eventually { await io.starts(for: Data([9])) == 1 }
+        XCTAssertEqual(subject.selectedFeature?.featureID, "open")
+        XCTAssertNil(subject.rows[0].inspection)
+        let removed = inspectionWithFeatures([])
+        await io.release(Data([9]), result: .success(removed))
+        await eventually { subject.rows[0].inspection?.readAt == removed.readAt }
+        XCTAssertNil(subject.selectedFeature)
+        XCTAssertEqual(subject.selectionNotice?.reason, .removed)
+        subject.refresh(ref.id)
+        await eventually { await io.starts(for: Data([9])) == 2 }
+        await io.release(Data([9]), result: .success(late))
+        await eventually { subject.rows[0].inspection?.readAt == late.readAt }
+        XCTAssertNil(subject.selectedFeature)
+        XCTAssertEqual(subject.selectionNotice?.reason, .removed)
+        XCTAssertEqual(subject.rows[0].inspection, late)
+        XCTAssertEqual(repo.successfulReads, 3)
     }
 
     func testSameFilesystemIdentitySelectsExistingButSameManifestDifferentFolderAdds() async throws {

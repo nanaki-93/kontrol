@@ -70,6 +70,10 @@ struct ProjectRowState {
     var inspection: ProjectInspection?
     var isRefreshing = false
     var isStale = false
+    /// True only when a failed or canceled read kept an older inspection for reference.
+    /// A newly accepted partial inspection can also be isStale, but is not retained content.
+    var isRetainedInspection = false
+    var reconnectFeaturePath: String? // Temporary identity hint while a replacement grant is read.
     var lastReadAt: Date? // Last displayed inspection, distinct from lastSuccessfulReadAt.
     var refreshFailure: ProjectRefreshFailure?
     var locationHint: String? // Transient last-seen location; not a saved authorization path.
@@ -256,6 +260,10 @@ final class ProjectStore: ObservableObject {
         refreshOperations[id] = operation
         if operation.task == nil, let index = rows.firstIndex(where: { $0.reference.id == id }) {
             rows[index].isRefreshing = false
+            if rows[index].inspection != nil {
+                rows[index].isStale = true
+                rows[index].isRetainedInspection = true
+            }
         }
     }
 
@@ -283,14 +291,15 @@ final class ProjectStore: ObservableObject {
                     result = .failure(error)
                 }
                 self.finishRefresh(id: id, revision: reference.revision,
-                                   generation: generation, result: result, location: location)
+                                   generation: generation, result: result, location: location,
+                                   canceled: Task.isCancelled)
             }
             refreshOperations[id] = operation
         }
     }
 
     private func finishRefresh(id: UUID, revision: UUID, generation: Int,
-                               result: Result<ProjectInspection, Error>, location: String?) {
+                               result: Result<ProjectInspection, Error>, location: String?, canceled: Bool) {
         guard var operation = refreshOperations[id], operation.generation == generation,
               operation.task != nil else { return }
         operation.task = nil
@@ -298,13 +307,14 @@ final class ProjectStore: ObservableObject {
         // A replaced bookmark, canceled task, or removed row owns no publication rights.
         if let index = rows.firstIndex(where: { $0.reference.id == id }),
            rows[index].reference.revision == revision {
-            switch result {
+            let priorInspection = rows[index].inspection
+            switch canceled ? .failure(CancellationError()) : result {
             case let .success(inspection):
                 if let location, !location.isEmpty { rows[index].locationHint = location }
                 // A bookmark can still resolve after the selected folder's manifest was
                 // replaced. Never publish content belonging to a different project ID.
                 if let manifest = inspection.manifest, manifest.id != rows[index].reference.manifestID {
-                    rows[index].isStale = true
+                    retainInspection(at: index)
                     rows[index].refreshFailure = .manifestMismatch
                 } else if Self.isComplete(inspection), let manifest = inspection.manifest {
                     do {
@@ -314,21 +324,31 @@ final class ProjectStore: ObservableObject {
                         rows[index].inspection = inspection
                         rows[index].lastReadAt = inspection.readAt
                         rows[index].isStale = false
+                        rows[index].isRetainedInspection = false
                         rows[index].refreshFailure = nil
+                        reconcileFeature(in: inspection, projectID: id, previous: priorInspection)
+                        rows[index].reconnectFeaturePath = nil
                     } catch {
                         // Do not claim a fresh successful read when its durable receipt failed.
-                        rows[index].isStale = true
+                        retainInspection(at: index)
                         rows[index].refreshFailure = .persistence
                     }
                 } else {
+                    let previous = rows[index].inspection
                     rows[index].inspection = inspection
                     rows[index].lastReadAt = inspection.readAt
                     rows[index].isStale = true
+                    rows[index].isRetainedInspection = false
                     rows[index].refreshFailure = nil
+                    reconcileFeature(in: inspection, projectID: id, previous: previous)
+                    if inspection.manifest?.schemaVersion == 1,
+                       inspection.featureEnumeration == .complete {
+                        rows[index].reconnectFeaturePath = nil
+                    }
                 }
             case let .failure(error):
+                retainInspection(at: index)
                 if !(error is CancellationError) {
-                    rows[index].isStale = true
                     rows[index].refreshFailure = .inspection((error as? ProjectInspectionFailure) ?? .unreadableFolder)
                 }
             }
@@ -339,6 +359,45 @@ final class ProjectStore: ObservableObject {
         refreshOperations[id] = operation
         if followUp { refresh(id) }
         drainRefreshQueue()
+    }
+
+    private func retainInspection(at index: Int) {
+        rows[index].isStale = true
+        rows[index].isRetainedInspection = rows[index].inspection != nil
+    }
+
+    /// Only a completed V1 enumeration can establish that a previously valid ID is gone.
+    /// The old source path catches parse/read failures without assuming filenames are IDs.
+    /// For moved sources, validator diagnostics identify the excluded record's path.
+    /// Dependency diagnostics sort both record and target IDs, so affectedIDs alone
+    /// cannot identify which one belongs to that path (or prove a deleted target moved).
+    private func reconcileFeature(in inspection: ProjectInspection, projectID: UUID,
+                                  previous: ProjectInspection?) {
+        guard selectedFeature?.projectID == projectID, let featureID = selectedFeature?.featureID,
+              inspection.manifest?.schemaVersion == 1,
+              inspection.featureEnumeration == .complete,
+              !inspection.features.contains(where: { $0.id == featureID }) else { return }
+        let path = previous?.features.first(where: { $0.id == featureID })?.sourcePath ??
+            rows.first(where: { $0.reference.id == projectID })?.reconnectFeaturePath
+        let excluded = Set(inspection.excludedFeaturePaths)
+        let invalid = (path.map { excluded.contains($0) } ?? false) || inspection.diagnostics.contains { diagnostic in
+            guard excluded.contains(diagnostic.relativePath), diagnostic.affectedIDs.contains(featureID) else { return false }
+            switch diagnostic.code {
+            case .duplicateID, .selfDependency, .cyclicDependency:
+                return true
+            case .missingDependency, .invalidDependency:
+                guard let source = inspection.sources.first(where: { $0.relativePath == diagnostic.relativePath }) else {
+                    return false
+                }
+                guard case let .supported(record) = try? ManifestParser().feature(source) else { return false }
+                return record.id == featureID
+            default:
+                return false
+            }
+        }
+        selectedFeature = nil
+        selectionNotice = ProjectFeatureSelectionNotice(projectID: projectID, featureID: featureID,
+            reason: invalid ? .validationExcluded : .removed)
     }
 
     private static func isComplete(_ inspection: ProjectInspection) -> Bool {
@@ -406,11 +465,15 @@ final class ProjectStore: ObservableObject {
             guard let index = rows.firstIndex(where: { $0.reference.id == id }) else {
                 preconditionFailure("Committed project disappeared from the main-actor store")
             }
+            rows[index].reconnectFeaturePath = rows[index].inspection?.features.first {
+                $0.id == selectedFeature?.featureID && selectedFeature?.projectID == id
+            }?.sourcePath
             rows[index].reference = receipt
             rows[index].inspection = nil
             rows[index].lastReadAt = nil
             rows[index].locationHint = nil
             rows[index].isStale = false
+            rows[index].isRetainedInspection = false
             rows[index].refreshFailure = nil
             reconnectMessage = nil
             refresh(id)
