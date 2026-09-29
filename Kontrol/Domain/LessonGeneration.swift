@@ -98,7 +98,8 @@ enum LessonGenerationError: Error, Equatable {
     case disabled, unconfigured, missingCredential, inaccessibleCredential
     case unsupportedModel, unavailableObjectives, corruptObjectives, exhaustedObjectives
     case invalidScope, unmetPrerequisites, oversizedRequest, staleContext
-    case offline, timeout, cancelled, authentication, authorization, rateLimited
+    case offline, timeout, cancelled, authentication, authorization
+    case rateLimited(retryAfter: Date?)
     case providerFailure, oversizedResponse, refusal, incompleteResponse, malformedResponse
     case invalidCandidate, duplicateIdentity, duplicateContent, duplicateObjective, persistenceFailure
 }
