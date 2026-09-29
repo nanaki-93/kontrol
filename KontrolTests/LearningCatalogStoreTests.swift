@@ -11,6 +11,9 @@ private final class ReadingCatalogRepository: CatalogRepository {
     var failCatalog = false
     var failDetail = false
     var failHistory = false
+    var failCoverage = false
+    var coverageValue: LearningCoverageSnapshot = .membershipUnavailable
+    private(set) var coverageReads = 0
     var detailValue: LessonDetailSnapshot?
     var historyValue: [LessonHistorySnapshot] = []
     var mutationValue: LessonMutationResult?
@@ -51,6 +54,13 @@ private final class ReadingCatalogRepository: CatalogRepository {
         reads += 1
         if shouldFail || failHistory { throw ReadError.unavailable }
         return historyValue
+    }
+
+    func loadCoverage() throws -> LearningCoverageSnapshot {
+        reads += 1
+        coverageReads += 1
+        if shouldFail || failCoverage { throw ReadError.unavailable }
+        return coverageValue
     }
 
     func restoreDismissed(lessonID: String, now: Date) throws -> LessonMutationResult {
@@ -181,6 +191,89 @@ final class LearningCatalogStoreTests: XCTestCase {
         repository.failDetail = false
         XCTAssertEqual(try store.retryDetail(lessonID: detail.id), detail)
         XCTAssertNil(store.error)
+    }
+
+    func testCoverageReadFailureIsNotZeroAndRetryDoesNotClearOtherFailures() throws {
+        let repository = ReadingCatalogRepository(snapshot(withSlot: true))
+        let store = LearningCatalogStore(repository: repository)
+        store.loadIfNeeded()
+        repository.detailValue = LessonDetailSnapshot(id: "go.example", progress: nil,
+                                                       attempt: nil, content: .unavailable)
+        let available: LearningCoverageSnapshot = .available(catalogID: "catalog", catalogVersion: 1,
+                                                              subtopics: [], evidence: .complete)
+        repository.coverageValue = available
+        XCTAssertEqual(try store.loadCoverage(), available)
+        XCTAssertEqual(store.coverageState, .current(available))
+        repository.failCoverage = true
+        XCTAssertThrowsError(try store.loadCoverage())
+        XCTAssertEqual(store.coverageState, .failed(stale: available))
+        XCTAssertTrue(store.coverageState.isStale)
+        XCTAssertEqual(store.coverageState.snapshot, available) // display-only, never authoritative
+        XCTAssertNil(store.error)
+        XCTAssertTrue(store.state.isAuthoritative)
+        XCTAssertEqual(try store.loadHistory(), []) // unrelated read-only navigation remains usable
+        XCTAssertEqual(try store.loadDetail(lessonID: "go.example").id, "go.example")
+        let reads = repository.coverageReads
+        XCTAssertThrowsError(try store.retryCoverage())
+        XCTAssertEqual(repository.coverageReads, reads + 1)
+        XCTAssertEqual(store.coverageState, .failed(stale: available))
+        XCTAssertThrowsError(try store.openLesson(lessonID: "go.example")) {
+            XCTAssertEqual($0 as? LessonExperienceError, .invalidTransition)
+        }
+        XCTAssertEqual(repository.writes, 0)
+        XCTAssertNil(store.error) // coverage failure is not a global catalog/detail error
+
+        repository.failHistory = true
+        XCTAssertThrowsError(try store.loadHistory())
+        repository.failCoverage = false
+        repository.coverageValue = .membershipUnavailable
+        XCTAssertEqual(try store.retryCoverage(), .membershipUnavailable)
+        XCTAssertEqual(store.coverageState, .current(.membershipUnavailable))
+        XCTAssertFalse(store.coverageState.isStale)
+        XCTAssertEqual(store.historyState, .failed(stale: []))
+        XCTAssertEqual(store.error, .persistenceFailure) // History needs its own retry
+        XCTAssertThrowsError(try store.retryCoverage())
+        repository.failHistory = false
+        XCTAssertEqual(try store.retryHistory(), [])
+        XCTAssertNil(store.error)
+        XCTAssertEqual(repository.writes, 0)
+    }
+
+    func testMutationUsesCommittedCoverageReceiptWithoutPostCommitCoverageRead() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let committed = SwiftDataCatalogRepository(container: container)
+        _ = try committed.importIfNeeded(BundledCatalogLoader.load())
+        let slot = try XCTUnwrap(committed.loadSnapshot().slots.first)
+        let receipt = try committed.openLesson(lessonID: slot.lessonID, now: .distantPast)
+        let repository = ReadingCatalogRepository(try committed.loadSnapshot())
+        repository.mutationValue = receipt
+        repository.failCoverage = true // a post-commit coverage refresh would fail
+        let store = LearningCatalogStore(repository: repository)
+        store.loadIfNeeded()
+        let returned = try store.openLesson(lessonID: slot.lessonID)
+        XCTAssertEqual(returned, receipt)
+        XCTAssertEqual(store.coverageState, .current(receipt.coverage))
+        XCTAssertEqual(store.state.snapshot, receipt.catalog)
+        XCTAssertEqual(store.historyState, .current(receipt.history))
+        XCTAssertEqual(repository.coverageReads, 0)
+        XCTAssertEqual(repository.reads, 1)
+        XCTAssertEqual(repository.writes, 1)
+    }
+
+    func testFirstCoverageFailureHasNoSyntheticEmptyValueAndDoesNotBlockHistory() throws {
+        let repository = ReadingCatalogRepository(snapshot())
+        let store = LearningCatalogStore(repository: repository)
+        repository.failCoverage = true
+        XCTAssertThrowsError(try store.loadCoverage())
+        XCTAssertEqual(store.coverageState, .failed(stale: nil))
+        XCTAssertNil(store.coverageState.snapshot)
+        XCTAssertEqual(try store.loadHistory(), [])
+        store.loadIfNeeded()
+        XCTAssertEqual(store.state, .empty(snapshot()))
+        XCTAssertThrowsError(try store.openLesson(lessonID: "go.example"))
+        XCTAssertEqual(repository.writes, 0)
+        repository.failCoverage = false
+        XCTAssertEqual(try store.retryCoverage(), .membershipUnavailable)
     }
 
     func testEmptyIsSuccessfulAndReadFailureIsRetryableNotEmpty() {

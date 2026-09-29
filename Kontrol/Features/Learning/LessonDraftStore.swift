@@ -87,10 +87,22 @@ final class LessonDraftStore: ObservableObject {
         guard let buffer = buffers[attemptID], buffer.isDirty else { return nil }
         let generation = generations[attemptID, default: 0]
         do {
-            let receipt = try learning.saveAnswer(attemptID: attemptID,
-                                                   expectedRevision: buffer.expectedRevision, answer: buffer.text)
+            // A Coverage failure must not strand a dirty draft at the navigation
+            // barrier. The draft-only path returns no selection/coverage receipt.
+            let receipt: LessonMutationResult?
+            let detail: LessonDetailSnapshot
+            if case .failed = learning.coverageState {
+                receipt = nil
+                detail = try learning.saveAnswerForDraft(attemptID: attemptID,
+                                                         expectedRevision: buffer.expectedRevision, answer: buffer.text)
+            } else {
+                let saved = try learning.saveAnswer(attemptID: attemptID,
+                                                    expectedRevision: buffer.expectedRevision, answer: buffer.text)
+                receipt = saved
+                detail = saved.detail
+            }
             if var current = buffers[attemptID] {
-                if let saved = receipt.detail.attempt, saved.id == attemptID {
+                if let saved = detail.attempt, saved.id == attemptID {
                     current.expectedRevision = saved.revision
                 }
                 if generations[attemptID] == generation {

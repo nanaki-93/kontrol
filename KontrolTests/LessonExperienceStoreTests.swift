@@ -689,6 +689,94 @@ final class LessonExperienceStoreTests: XCTestCase {
         XCTAssertEqual(try repository.loadLesson(lessonID: id).attempt?.answerDraft, "remote")
     }
 
+    func testFailedCoverageReadKeepsDirtyDraftAndPreventsSlotMutationUntilOwnRetry() throws {
+        let (repository, graph, drafts, _, opened) = try draftFixture()
+        let store = graph.learningCatalogStore
+        let attempt = try XCTUnwrap(opened.detail.attempt)
+        let slot = try XCTUnwrap(store.state.snapshot?.slots.first { $0.lessonID == opened.detail.id })
+        let initial = try store.loadCoverage()
+        drafts.edit("  keep local 🧪\n", attemptID: attempt.id)
+        let container = graph.container
+        let context = ModelContext(container)
+        context.autosaveEnabled = false
+        let membership = try XCTUnwrap(context.fetch(FetchDescriptor<CatalogMembership>()).first)
+        let payload = membership.payload
+        membership.payload = Data("corrupt".utf8)
+        try context.save()
+        XCTAssertThrowsError(try store.loadCoverage())
+        XCTAssertEqual(store.coverageState, .failed(stale: initial))
+        XCTAssertEqual(store.state.snapshot?.slots.first { $0.key == slot.key }, slot)
+        XCTAssertEqual(try store.loadHistory(), [])
+        XCTAssertEqual(try store.loadDetail(lessonID: opened.detail.id).id, opened.detail.id)
+        XCTAssertThrowsError(try store.dismiss(lessonID: slot.lessonID, expectedSlot: slot)) {
+            XCTAssertEqual($0 as? LessonExperienceError, .invalidTransition)
+        }
+        XCTAssertThrowsError(try drafts.dismiss(lessonID: slot.lessonID, expectedSlot: slot,
+                                                 attemptID: attempt.id)) {
+            XCTAssertEqual($0 as? LessonExperienceError, .invalidTransition)
+        }
+        // Draft flush is safe despite unreadable selection evidence; dismissal is not.
+        XCTAssertEqual(try repository.loadLesson(lessonID: slot.lessonID).attempt?.answerDraft, "  keep local 🧪\n")
+        XCTAssertEqual(try repository.loadSnapshot().slots.first { $0.key == slot.key }, slot)
+        XCTAssertEqual(try repository.loadLesson(lessonID: slot.lessonID).progress?.status, .started)
+        XCTAssertEqual(drafts.buffers[attempt.id]?.text, "  keep local 🧪\n")
+        XCTAssertFalse(try XCTUnwrap(drafts.buffers[attempt.id]).isDirty)
+        membership.payload = payload
+        try context.save()
+        XCTAssertEqual(try store.retryCoverage(), initial)
+        XCTAssertEqual(store.coverageState, .current(initial))
+        XCTAssertFalse(try XCTUnwrap(drafts.buffers[attempt.id]).isDirty)
+        let dismissed = try store.dismiss(lessonID: slot.lessonID, expectedSlot: slot)
+        XCTAssertEqual(store.coverageState, .current(dismissed.coverage))
+    }
+
+    func testCoverageFailureWithDirtyDraftAllowsReadOnlyNavigationButNotSlotWrites() throws {
+        var failSave = false
+        let (repository, graph, drafts, _, opened) = try draftFixture(beforeSave: {
+            if failSave { throw Injected.save }
+        })
+        let store = graph.learningCatalogStore
+        let attempt = try XCTUnwrap(opened.detail.attempt)
+        let slot = try XCTUnwrap(store.state.snapshot?.slots.first { $0.lessonID == opened.detail.id })
+        let navigation = NavigationStore(preferences: UserDefaultsDestinationPreferences(
+            defaults: UserDefaults(suiteName: "CoverageNavigation.\(UUID())")!))
+        navigation.attachDrafts(drafts)
+        navigation.enterLesson(id: opened.detail.id)
+        drafts.edit("  keep 🧪\n", attemptID: attempt.id)
+        let context = ModelContext(graph.container)
+        context.autosaveEnabled = false
+        let membership = try XCTUnwrap(context.fetch(FetchDescriptor<CatalogMembership>()).first)
+        let original = membership.payload
+        defer { membership.payload = original; try? context.save() }
+        membership.payload = Data("corrupt".utf8)
+        try context.save()
+        XCTAssertThrowsError(try store.loadCoverage())
+        let failed = store.coverageState
+        failSave = true
+        navigation.showHistory()
+        XCTAssertEqual(navigation.learningRoute, .detail(opened.detail.id))
+        XCTAssertEqual(navigation.pendingTransition, .learning(.history))
+        XCTAssertEqual(navigation.saveError, .persistenceFailure)
+        XCTAssertTrue(try XCTUnwrap(drafts.buffers[attempt.id]).isDirty)
+        XCTAssertEqual(try repository.loadLesson(lessonID: opened.detail.id).attempt?.answerDraft, "")
+        failSave = false
+        navigation.retryTransition()
+        XCTAssertEqual(navigation.learningRoute, .history)
+        XCTAssertNil(navigation.saveError)
+        XCTAssertNil(navigation.pendingTransition)
+        XCTAssertEqual(store.coverageState, failed)
+        XCTAssertEqual(try repository.loadLesson(lessonID: opened.detail.id).attempt?.answerDraft, "  keep 🧪\n")
+        XCTAssertFalse(try XCTUnwrap(drafts.buffers[attempt.id]).isDirty)
+        XCTAssertEqual(drafts.buffers[attempt.id]?.expectedRevision, attempt.revision + 1)
+        XCTAssertThrowsError(try store.dismiss(lessonID: slot.lessonID, expectedSlot: slot)) {
+            XCTAssertEqual($0 as? LessonExperienceError, .invalidTransition)
+        }
+        XCTAssertEqual(try repository.loadSnapshot().slots.first { $0.key == slot.key }, slot)
+        XCTAssertEqual(try repository.loadLesson(lessonID: opened.detail.id).progress?.status, .started)
+        navigation.select(.focus)
+        XCTAssertEqual(navigation.selectedDestination, .focus)
+    }
+
     func testCommittedReceiptsPublishChoicesDetailAndHistoryTogetherToBothConsumers() throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         let repository = SwiftDataCatalogRepository(container: container)
@@ -715,14 +803,17 @@ final class LessonExperienceStoreTests: XCTestCase {
         let completed = try first.complete(attemptID: attempt.id, expectedRevision: 3)
         XCTAssertEqual(completed.detail.progress?.status, .completed)
         XCTAssertEqual(second.historyState, .current(completed.history))
+        XCTAssertEqual(first.coverageState, .current(completed.coverage))
         XCTAssertEqual(first.state.snapshot, completed.catalog)
         XCTAssertFalse(completed.catalog.slots.contains { $0.lessonID == slot.lessonID })
         XCTAssertEqual(completed.history.first?.attempt?.answerDraft, "  🧪\n  exact\n")
         XCTAssertEqual(publications.last?.detail, .current(completed.detail))
         XCTAssertEqual(publications.last?.history, .current(completed.history))
+        XCTAssertEqual(publications.last?.coverage, .current(completed.coverage))
         XCTAssertEqual(publications.last?.catalog.snapshot, completed.catalog)
         XCTAssertEqual(try repository.loadSnapshot(), completed.catalog)
         XCTAssertEqual(try repository.loadHistory(), completed.history)
+        XCTAssertEqual(try repository.loadCoverage(), completed.coverage)
         // Reads of the new selection cannot retroactively make an earlier receipt stale.
         let repeated = try second.complete(attemptID: attempt.id, expectedRevision: 0)
         XCTAssertEqual(repeated.outcome, .unchanged)
@@ -740,11 +831,13 @@ final class LessonExperienceStoreTests: XCTestCase {
         XCTAssertEqual(store.projection.catalog.snapshot, dismissed.catalog)
         XCTAssertEqual(store.detailState, .current(dismissed.detail))
         XCTAssertEqual(store.historyState, .current(dismissed.history))
+        XCTAssertEqual(store.coverageState, .current(dismissed.coverage))
         XCTAssertEqual(dismissed.history.first?.status, .dismissed)
         let restored = try store.restoreDismissed(lessonID: slot.lessonID)
         XCTAssertEqual(store.projection.catalog.snapshot, restored.catalog)
         XCTAssertEqual(store.detailState, .current(restored.detail))
         XCTAssertEqual(store.historyState, .current(restored.history))
+        XCTAssertEqual(store.coverageState, .current(restored.coverage))
         XCTAssertTrue(restored.history.isEmpty)
         XCTAssertEqual(try repository.loadSnapshot(), restored.catalog)
     }
@@ -768,6 +861,7 @@ final class LessonExperienceStoreTests: XCTestCase {
         XCTAssertEqual(store.projection.catalog, baseline.catalog)
         XCTAssertEqual(store.projection.detail, baseline.detail)
         XCTAssertEqual(store.projection.history, baseline.history)
+        XCTAssertEqual(store.projection.coverage, baseline.coverage)
         XCTAssertEqual(try repository.loadLesson(lessonID: id).attempt?.answerDraft, "")
         fail = false
         let saved = try store.saveAnswer(attemptID: attempt.id, expectedRevision: 0, answer: "saved")

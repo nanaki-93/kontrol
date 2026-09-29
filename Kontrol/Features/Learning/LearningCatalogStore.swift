@@ -42,12 +42,33 @@ enum LessonHistoryReadState: Equatable {
     case failed(stale: [LessonHistorySnapshot]?)
 }
 
+/// Unavailable membership and incomplete evidence are successful coverage reads.
+/// A failed read is distinct from either, and its cached value is display-only.
+enum LearningCoverageReadState: Equatable {
+    case notLoaded
+    case current(LearningCoverageSnapshot)
+    case failed(stale: LearningCoverageSnapshot?)
+
+    var snapshot: LearningCoverageSnapshot? {
+        switch self {
+        case .current(let value), .failed(stale: .some(let value)): return value
+        case .notLoaded, .failed(stale: nil): return nil
+        }
+    }
+
+    var isStale: Bool {
+        if case .failed(stale: .some) = self { return true }
+        return false
+    }
+}
+
 /// One publication for all projections affected by a committed learning command.
 /// Stale content is retained for display, but never treated as an authoritative baseline.
 struct LearningExperienceProjection: Equatable {
     var catalog: LearningCatalogReadState = .notLoaded
     var detail: LessonDetailReadState = .notLoaded
     var history: LessonHistoryReadState = .notLoaded
+    var coverage: LearningCoverageReadState = .notLoaded
     var error: LessonExperienceError?
 }
 
@@ -60,6 +81,7 @@ final class LearningCatalogStore: ObservableObject {
     var state: LearningCatalogReadState { projection.catalog }
     var detailState: LessonDetailReadState { projection.detail }
     var historyState: LessonHistoryReadState { projection.history }
+    var coverageState: LearningCoverageReadState { projection.coverage }
     var error: LessonExperienceError? { projection.error }
 
     init(repository: any CatalogRepository) {
@@ -103,6 +125,26 @@ final class LearningCatalogStore: ObservableObject {
     func retryHistory() throws -> [LessonHistorySnapshot] {
         guard case .failed = historyState else { throw LessonExperienceError.invalidTransition }
         return try loadHistory()
+    }
+
+    /// Coverage has its own retry path. Its failure does not poison catalog,
+    /// detail or History reads (or discard local draft buffers).
+    @discardableResult
+    func loadCoverage() throws -> LearningCoverageSnapshot {
+        do {
+            let coverage = try repository.loadCoverage()
+            projection.coverage = .current(coverage)
+            return coverage
+        } catch {
+            projection.coverage = .failed(stale: coverageState.snapshot)
+            throw error
+        }
+    }
+
+    @discardableResult
+    func retryCoverage() throws -> LearningCoverageSnapshot {
+        guard case .failed = coverageState else { throw LessonExperienceError.invalidTransition }
+        return try loadCoverage()
     }
 
     /// Schedule links can outlive an unstarted lesson's definition. A confirmed
@@ -175,6 +217,28 @@ final class LearningCatalogStore: ObservableObject {
         try mutate { try repository.saveAnswer(attemptID: attemptID, expectedRevision: expectedRevision, answer: answer) }
     }
 
+    /// Saving a draft cannot rotate a slot. If Coverage is unreadable, keep that
+    /// failure visible while committing only the answer and its validated detail.
+    /// All selection-dependent commands still require an authoritative Coverage read.
+    func saveAnswerForDraft(attemptID: UUID, expectedRevision: Int, answer: String) throws -> LessonDetailSnapshot {
+        guard isCoverageReadFailed else {
+            return try saveAnswer(attemptID: attemptID, expectedRevision: expectedRevision, answer: answer).detail
+        }
+        guard state.isAuthoritative, !isDetailReadFailed, !isHistoryReadFailed else {
+            throw LessonExperienceError.invalidTransition
+        }
+        do {
+            let detail = try repository.saveDraftAnswer(attemptID: attemptID,
+                                                        expectedRevision: expectedRevision, answer: answer)
+            projection.detail = .current(detail)
+            clearErrorIfHealthy()
+            return detail
+        } catch {
+            projection.error = Self.classification(error)
+            throw error
+        }
+    }
+
     @discardableResult
     func revealSolution(attemptID: UUID, expectedRevision: Int, now: Date = Date()) throws -> LessonMutationResult {
         try mutate { try repository.revealSolution(attemptID: attemptID, expectedRevision: expectedRevision, now: now) }
@@ -204,9 +268,9 @@ final class LearningCatalogStore: ObservableObject {
 
     private func mutate(_ operation: () throws -> LessonMutationResult) throws -> LessonMutationResult {
         guard state.isAuthoritative,
-              !isDetailReadFailed, !isHistoryReadFailed else {
+              !isDetailReadFailed, !isHistoryReadFailed, !isCoverageReadFailed else {
             // Keep the original read classification visible until an explicit retry.
-            if projection.error == nil { projection.error = .invalidTransition }
+            if projection.error == nil && !isCoverageReadFailed { projection.error = .invalidTransition }
             throw LessonExperienceError.invalidTransition
         }
         do {
@@ -215,7 +279,8 @@ final class LearningCatalogStore: ObservableObject {
             // Never follow this with a read: a failing refresh cannot undo a commit.
             projection = LearningExperienceProjection(
                 catalog: receipt.catalog.slots.isEmpty ? .empty(receipt.catalog) : .current(receipt.catalog),
-                detail: .current(receipt.detail), history: .current(receipt.history), error: nil)
+                detail: .current(receipt.detail), history: .current(receipt.history),
+                coverage: .current(receipt.coverage), error: nil)
             return receipt
         } catch {
             projection.error = Self.classification(error)
@@ -230,6 +295,11 @@ final class LearningCatalogStore: ObservableObject {
 
     private var isHistoryReadFailed: Bool {
         if case .failed = historyState { return true }
+        return false
+    }
+
+    private var isCoverageReadFailed: Bool {
+        if case .failed = coverageState { return true }
         return false
     }
 

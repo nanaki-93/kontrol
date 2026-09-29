@@ -12,6 +12,8 @@ protocol CatalogRepository {
     func loadCoverage() throws -> LearningCoverageSnapshot
     func restoreDismissed(lessonID: String, now: Date) throws -> LessonMutationResult
     func saveAnswer(attemptID: UUID, expectedRevision: Int, answer: String) throws -> LessonMutationResult
+    /// Draft-only save when Coverage is unreadable. No selection or Coverage receipt is authorized.
+    func saveDraftAnswer(attemptID: UUID, expectedRevision: Int, answer: String) throws -> LessonDetailSnapshot
     func revealSolution(attemptID: UUID, expectedRevision: Int, now: Date) throws -> LessonMutationResult
     func setSelfCheckAcknowledged(attemptID: UUID, expectedRevision: Int,
                                   acknowledged: Bool, now: Date) throws -> LessonMutationResult
@@ -25,6 +27,10 @@ protocol CatalogRepository {
 extension CatalogRepository {
     func loadCoverage() throws -> LearningCoverageSnapshot {
         throw LessonExperienceError.persistenceFailure
+    }
+
+    func saveDraftAnswer(attemptID: UUID, expectedRevision: Int, answer: String) throws -> LessonDetailSnapshot {
+        throw LessonExperienceError.invalidTransition
     }
 }
 
@@ -433,6 +439,29 @@ final class SwiftDataCatalogRepository: CatalogRepository {
         try beforeSave()
         try save(context)
         return receipt
+    }
+
+    /// Only the answer changes. Validate the identity/revision and detached detail
+    /// before committing; unlike slot commands, this does not need Coverage evidence.
+    func saveDraftAnswer(attemptID: UUID, expectedRevision: Int, answer: String) throws -> LessonDetailSnapshot {
+        let context = ModelContext(container)
+        context.autosaveEnabled = false
+        let matches = try context.fetch(FetchDescriptor<LessonAttempt>()).filter { $0.id == attemptID }
+        guard matches.count <= 1 else { throw LessonExperienceError.invalidStoredData }
+        guard let row = matches.first else { throw LessonExperienceError.attemptNotFound }
+        let current = try detail(lessonID: row.lessonID, in: context)
+        guard let attempt = current.attempt, attempt.id == attemptID,
+              let progress = current.progress else { throw LessonExperienceError.invalidStoredData }
+        let edited = try LessonExperience.edit(attempt, status: progress.status,
+                                               expectedRevision: expectedRevision, answer: answer)
+        if edited == attempt { return current }
+        row.answerDraft = edited.answerDraft
+        row.selfCheckAcknowledgedAt = edited.selfCheckAcknowledgedAt
+        row.revision = edited.revision
+        let updated = try detail(lessonID: row.lessonID, in: context)
+        try beforeSave()
+        try save(context)
+        return updated
     }
 
     func revealSolution(attemptID: UUID, expectedRevision: Int, now: Date) throws -> LessonMutationResult {
