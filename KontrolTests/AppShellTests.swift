@@ -4,6 +4,20 @@ import SwiftUI
 import XCTest
 @testable import Kontrol
 
+private actor CountingNewsService: NewsRefreshing {
+    private(set) var requests = 0
+
+    func refresh(_ feeds: [FeedSourceSnapshot]) async -> [FeedRefreshOutcome] {
+        requests += feeds.count
+        return []
+    }
+
+    func validate(_ draft: FeedDraft) async throws -> ValidatedFeed {
+        requests += 1
+        throw FeedServiceError(code: .offline, retryNotBefore: nil)
+    }
+}
+
 @MainActor
 final class AppShellTests: XCTestCase {
     private func makeDependencies() throws -> AppDependencies {
@@ -11,11 +25,16 @@ final class AppShellTests: XCTestCase {
         return AppDependencies(container: container, catalogRepository: SwiftDataCatalogRepository(container: container))
     }
 
-    func testOneStorePerDependencyGraphAcrossRoutesAndWindows() throws {
-        let dependencies = try makeDependencies()
+    func testOneStorePerDependencyGraphAcrossRoutesAndWindows() async throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let service = CountingNewsService()
+        let dependencies = AppDependencies(container: container,
+            catalogRepository: SwiftDataCatalogRepository(container: container), newsService: service)
         let shared = dependencies.taskStore
         let sharedSchedule = dependencies.scheduleStore
         let sharedProjects = dependencies.projectStore
+        let sharedNews = dependencies.newsStore
+        XCTAssertNil(sharedNews.snapshot, "Dependency construction must not load news or start network IO")
         let first = AppShell(navigation: NavigationStore(), dependencies: dependencies)
         let second = AppShell(navigation: NavigationStore(), dependencies: dependencies)
         XCTAssertTrue(first.dependencies.taskStore === shared)
@@ -24,7 +43,17 @@ final class AppShellTests: XCTestCase {
         XCTAssertTrue(second.dependencies.scheduleStore === sharedSchedule)
         XCTAssertTrue(first.dependencies.projectStore === sharedProjects)
         XCTAssertTrue(second.dependencies.projectStore === sharedProjects)
+        XCTAssertTrue(first.dependencies.newsStore === sharedNews)
+        XCTAssertTrue(second.dependencies.newsStore === sharedNews)
         XCTAssertTrue(first.dependencies.container === second.dependencies.container)
+        let requestsBeforeEntry = await service.requests
+        XCTAssertEqual(requestsBeforeEntry, 0, "Building two window routes must not fetch feeds")
+        sharedNews.loadIfNeeded()
+        XCTAssertNotNil(sharedNews.snapshot)
+        let persisted = try SwiftDataNewsRepository(container: container).loadOrInitialize(BundledFeedCatalog.load())
+        XCTAssertEqual(sharedNews.snapshot, persisted, "News must read from the graph's container")
+        let requestsAfterCache = await service.requests
+        XCTAssertEqual(requestsAfterCache, 0, "Loading the offline cache must not fetch feeds")
         XCTAssertTrue((shared.repository as AnyObject) === (dependencies.taskStore.repository as AnyObject))
         XCTAssertTrue((sharedSchedule.repository as AnyObject) === (dependencies.scheduleStore.repository as AnyObject))
         let start = Date(timeIntervalSince1970: 1_750_000_000)
@@ -37,9 +66,49 @@ final class AppShellTests: XCTestCase {
         XCTAssertFalse(other.taskStore === shared)
         XCTAssertFalse(other.scheduleStore === sharedSchedule)
         XCTAssertFalse(other.projectStore === sharedProjects)
+        XCTAssertFalse(other.newsStore === sharedNews)
         XCTAssertFalse(other.container === dependencies.container)
         XCTAssertFalse((other.taskStore.repository as AnyObject) === (shared.repository as AnyObject))
         XCTAssertFalse((other.scheduleStore.repository as AnyObject) === (sharedSchedule.repository as AnyObject))
+    }
+
+    func testDirectGraphWithMissingNewsCatalogDoesNotFabricateEmptyCacheOrRequestFeeds() async throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let service = CountingNewsService()
+        let graph = AppDependencies(container: container,
+            catalogRepository: SwiftDataCatalogRepository(container: container),
+            newsService: service, newsCatalogLoader: { throw BundledFeedCatalogError.invalidCatalog })
+        graph.newsStore.loadIfNeeded()
+        XCTAssertNil(graph.newsStore.snapshot)
+        XCTAssertEqual(graph.newsStore.localFailure, .catalog)
+        let requests = await service.requests
+        XCTAssertEqual(requests, 0)
+    }
+
+    func testNewsCatalogFailuresEnterLaunchRecoveryWithoutPublishingGraph() async throws {
+        for failure in [BundledFeedCatalogError.missingResource, .invalidCatalog] {
+            let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+            var opens = 0
+            var newsLoads = 0
+            let launch = LaunchCoordinator(open: {
+                opens += 1
+                return container
+            }, loadNewsCatalog: {
+                newsLoads += 1
+                if newsLoads == 1 { throw failure }
+                return try BundledFeedCatalog.load()
+            })
+            await launch.start()
+            XCTAssertEqual(launch.state, .failed(.catalog))
+            XCTAssertNil(launch.dependencies)
+            XCTAssertEqual(opens, 1)
+            await launch.retry()
+            XCTAssertEqual(launch.state, .ready)
+            XCTAssertTrue(launch.dependencies?.container === container)
+            XCTAssertNotNil(launch.dependencies?.newsStore)
+            XCTAssertEqual(opens, 1, "Retry must reuse the opened store")
+            XCTAssertEqual(newsLoads, 2)
+        }
     }
 
     func testWindowCloseGuardVetoesFailedFlushAndAllowsRetry() {
@@ -114,6 +183,8 @@ final class AppShellTests: XCTestCase {
                 XCTAssertEqual(AppShell.contentKind(for: destination), .focus)
             } else if destination == .tasks {
                 XCTAssertEqual(AppShell.contentKind(for: destination), .tasks)
+            } else if destination == .news {
+                XCTAssertEqual(AppShell.contentKind(for: destination), .news)
             } else if destination == .settings {
                 XCTAssertEqual(AppShell.contentKind(for: destination), .settings)
             } else {

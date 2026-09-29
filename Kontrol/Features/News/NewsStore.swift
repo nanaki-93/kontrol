@@ -17,6 +17,7 @@ enum NewsRefreshTrigger {
 enum NewsLocalFailure: Equatable {
     case read
     case save
+    case catalog
 }
 
 enum NewsEditorError: Error, Equatable {
@@ -53,7 +54,7 @@ final class NewsStore: ObservableObject {
     private let repository: NewsRepository
     private let service: NewsRefreshing
     private let browserOpener: NewsBrowserOpening
-    private let catalog: DefaultFeedCatalog
+    private let catalog: DefaultFeedCatalog?
     private let clock: () -> Date
     private let sleep: (TimeInterval) async throws -> Void
     private var visibleWindows = Set<UUID>()
@@ -66,7 +67,7 @@ final class NewsStore: ObservableObject {
     // Never store the draft here: the editor retains it through validation/save failures.
     private var editorAttempts: [UUID: UUID] = [:]
 
-    init(repository: NewsRepository, service: NewsRefreshing, catalog: DefaultFeedCatalog,
+    init(repository: NewsRepository, service: NewsRefreshing, catalog: DefaultFeedCatalog?,
          browserOpener: NewsBrowserOpening? = nil,
          clock: @escaping () -> Date = Date.init,
          sleep: @escaping (TimeInterval) async throws -> Void = { interval in
@@ -106,6 +107,10 @@ final class NewsStore: ObservableObject {
     /// Synchronous cache-first publication: callers may inspect cached rows before starting IO.
     func loadIfNeeded() {
         guard snapshot == nil, !isLoading else { return }
+        guard let catalog else {
+            localFailure = .catalog
+            return
+        }
         isLoading = true
         defer { isLoading = false }
         do {
@@ -120,6 +125,10 @@ final class NewsStore: ObservableObject {
     /// Reload after a Settings edit made through the shared repository. Obsolete requests
     /// cannot publish into the old configuration even when the transport ignores cancellation.
     func reload() {
+        guard let catalog else {
+            localFailure = .catalog
+            return
+        }
         do {
             let current = try repository.loadOrInitialize(catalog)
             publishConfiguration(current)

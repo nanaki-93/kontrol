@@ -16,6 +16,7 @@ final class LaunchCoordinator: ObservableObject {
     private let open: () throws -> ModelContainer
     private let loadCatalog: @Sendable () async throws -> ValidatedCatalog
     private let makeRepository: (ModelContainer) -> any CatalogRepository
+    private let loadNewsCatalog: () throws -> DefaultFeedCatalog
     private let makeDependencies: ((ModelContainer, any CatalogRepository) -> AppDependencies)?
     // Keep a successfully opened store if catalog loading/import fails. Retry
     // must never open a competing container against that store.
@@ -28,10 +29,12 @@ final class LaunchCoordinator: ObservableObject {
             try BundledCatalogLoader.load()
         }.value
     }, makeRepository: ((ModelContainer) -> any CatalogRepository)? = nil,
+       loadNewsCatalog: @escaping () throws -> DefaultFeedCatalog = { try BundledFeedCatalog.load() },
        makeDependencies: ((ModelContainer, any CatalogRepository) -> AppDependencies)? = nil) {
         self.open = open
         self.loadCatalog = loadCatalog
         self.makeRepository = makeRepository ?? { SwiftDataCatalogRepository(container: $0) }
+        self.loadNewsCatalog = loadNewsCatalog
         self.makeDependencies = makeDependencies
     }
 
@@ -86,10 +89,16 @@ final class LaunchCoordinator: ObservableObject {
             let repository = makeRepository(container)
             _ = try repository.importIfNeeded(catalog)
             try Task.checkCancellation() // do not publish a stale result
+            // The bundled News catalog is required app content. Validate it before
+            // publishing a dependency graph so a missing/invalid resource enters the
+            // same retryable catalog recovery path as the Learning catalog.
+            let newsCatalog = try loadNewsCatalog()
+            try Task.checkCancellation()
             // AI settings are optional: their store handles read/credential failures
             // locally, never as a catalog launch prerequisite.
             dependencies = makeDependencies?(container, repository) ??
-                AppDependencies(container: container, catalogRepository: repository)
+                AppDependencies(container: container, catalogRepository: repository,
+                                newsCatalog: newsCatalog)
             state = .ready
         } catch {
             if Task.isCancelled {

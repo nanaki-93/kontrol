@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 extension AppDestination {
@@ -32,7 +33,7 @@ extension AppDestination {
         case .projects: "Projects are available in the Projects tab."
         case .focus: "Focus"
         case .tasks: "No tasks captured yet."
-        case .news: "News is not available yet."
+        case .news: "News"
         case .settings: "No settings available yet."
         }
     }
@@ -46,7 +47,7 @@ struct AppShell: View {
     @Environment(\.appTextScaleOverride) private var previewTextScale
 
     /// Foundation routes remain only for features that have not shipped.
-    enum ContentKind: Equatable { case today, learning, projects, focus, tasks, settings, foundation(AppDestination) }
+    enum ContentKind: Equatable { case today, learning, projects, focus, tasks, news, settings, foundation(AppDestination) }
 
     static func contentKind(for destination: AppDestination) -> ContentKind {
         switch destination {
@@ -55,6 +56,7 @@ struct AppShell: View {
         case .projects: .projects
         case .focus: .focus
         case .tasks: .tasks
+        case .news: .news
         case .settings: .settings
         default: .foundation(destination)
         }
@@ -118,6 +120,8 @@ struct AppShell: View {
                                   learningStore: dependencies.learningCatalogStore)
                     case .tasks:
                         TasksView(store: dependencies.taskStore)
+                    case .news:
+                        NewsRouteView(store: dependencies.newsStore)
                     case .settings:
                         FoundationSettingsView(dependencies: dependencies)
                     case .foundation(let destination):
@@ -201,5 +205,40 @@ struct AppShell: View {
             }
         }
         .focusSection()
+    }
+}
+
+/// Routing bridge until the headline presentation replaces this surface in Step 4.3.
+/// The shared owner publishes local cache before its foreground refresh starts.
+private struct NewsRouteView: View {
+    @ObservedObject var store: NewsStore
+    @State private var windowID = UUID()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppMetrics.space4) {
+            PageHeader("News")
+            if store.localFailure == .catalog {
+                Text("The bundled News catalog could not be loaded. Restart Kontrol to try again.")
+            } else if store.localFailure == .read {
+                Text("Could not load saved news. Try opening News again.")
+            } else if let snapshot = store.snapshot {
+                Text("\(snapshot.articles.count) cached articles")
+            } else {
+                LoadingState("Loading saved news")
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(AppMetrics.horizontalInset)
+        .onAppear {
+            store.setAppActive(NSApp.isActive)
+            store.setVisible(true, windowID: windowID)
+        }
+        .onDisappear { store.setVisible(false, windowID: windowID) }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            store.setAppActive(true)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
+            store.setAppActive(false)
+        }
     }
 }

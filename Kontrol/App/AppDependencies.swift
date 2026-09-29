@@ -16,6 +16,7 @@ final class AppDependencies {
     let scheduleStore: ScheduleStore
     let focusService: FocusService
     let projectStore: ProjectStore
+    let newsStore: NewsStore
 
     init(container: ModelContainer, catalogRepository: any CatalogRepository,
          taskRepository: (any TaskRepository)? = nil,
@@ -33,9 +34,25 @@ final class AppDependencies {
          aiSettingsRepository: (any AISettingsRepository)? = nil,
          credentialStore: (any CredentialStore)? = nil,
          aiGenerator: ((String, String, any CredentialStore) -> any LessonGenerator)? = nil,
-         aiConnectionTester: ((String, String, any CredentialStore) -> any OpenAIConnectionTesting)? = nil) {
+         aiConnectionTester: ((String, String, any CredentialStore) -> any OpenAIConnectionTesting)? = nil,
+         newsRepository: (any NewsRepository)? = nil,
+         newsService: any NewsRefreshing = FeedService(),
+         newsCatalog: DefaultFeedCatalog? = nil,
+         newsCatalogLoader: () throws -> DefaultFeedCatalog = { try BundledFeedCatalog.load() }) {
         self.container = container
         self.catalogRepository = catalogRepository
+        // LaunchCoordinator validates the required resource before publishing this graph.
+        // Directly constructed graphs also surface a catalog failure on the News route
+        // rather than trapping or treating a missing resource as an empty feed.
+        // Neither construction nor catalog loading starts a feed request.
+        let loadedCatalog: DefaultFeedCatalog?
+        if let newsCatalog {
+            loadedCatalog = newsCatalog
+        } else {
+            loadedCatalog = try? newsCatalogLoader()
+        }
+        newsStore = NewsStore(repository: newsRepository ?? SwiftDataNewsRepository(container: container),
+                              service: newsService, catalog: loadedCatalog)
         // Assemble the project boundary without fetching references or resolving grants.
         // SwiftData stays on the main actor; only detached snapshots cross into IO.
         projectStore = ProjectStore(inspector: projectInspector,

@@ -73,7 +73,7 @@ final class SettingsSceneTests: XCTestCase {
             let children = attribute(element, kAXChildrenAttribute) as? [AXUIElement] ?? []
             return children.flatMap { [$0] + descendants($0) }
         }
-        for destination in [AppDestination.projects, .focus, .news] {
+        for destination in [AppDestination.projects, .focus] {
             host.rootView = FoundationView(destination: destination)
                 .environment(\.appTextScaleOverride, 1.3)
             host.layoutSubtreeIfNeeded()
