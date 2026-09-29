@@ -19,7 +19,7 @@ final class ContainerFactoryTests: XCTestCase {
         try ModelContext(container).fetch(FetchDescriptor<TaskItem>()).map(\.id)
     }
 
-    func testV5DiskMigratesAdditivelyAndV6EvidenceSurvivesV7Reopen() throws {
+    func testV5DiskMigratesAdditivelyAndV6EvidenceSurvivesV8Reopen() throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let url = directory.appendingPathComponent("Kontrol.store")
@@ -41,6 +41,7 @@ final class ContainerFactoryTests: XCTestCase {
             let context = ModelContext(container)
             XCTAssertTrue(try context.fetch(FetchDescriptor<LessonTerminalRecord>()).isEmpty)
             XCTAssertTrue(try context.fetch(FetchDescriptor<CatalogMembership>()).isEmpty)
+            XCTAssertTrue(try context.fetch(FetchDescriptor<ProjectReference>()).isEmpty)
             XCTAssertEqual(try SwiftDataAISettingsRepository(container: container).load(), .disabled)
             context.insert(try LessonTerminalRecord(metadata: LessonTerminalMetadata(
                 lessonID: "old", provenance: .legacyCompletedPartial, title: "Past",
@@ -56,6 +57,7 @@ final class ContainerFactoryTests: XCTestCase {
         let reopened = try factory.makeContainer(mode: .persistent(url))
         let context = ModelContext(reopened)
         XCTAssertEqual(try SwiftDataAISettingsRepository(container: reopened).load(), .disabled)
+        XCTAssertTrue(try context.fetch(FetchDescriptor<ProjectReference>()).isEmpty)
         XCTAssertEqual(try context.fetch(FetchDescriptor<LessonTerminalRecord>()).count, 1)
         XCTAssertNil(try context.fetch(FetchDescriptor<LessonTerminalRecord>()).first?.metadata().topicID)
         XCTAssertEqual(try context.fetch(FetchDescriptor<CatalogMembership>()).first?.membership().topicIDs, ["go"])
@@ -75,6 +77,8 @@ final class ContainerFactoryTests: XCTestCase {
         XCTAssertTrue(try taskIDs(in: second).isEmpty)
         XCTAssertEqual(try SwiftDataAISettingsRepository(container: first).load(), .disabled)
         XCTAssertEqual(try SwiftDataAISettingsRepository(container: second).load(), .disabled)
+        XCTAssertTrue(try ModelContext(first).fetch(FetchDescriptor<ProjectReference>()).isEmpty)
+        XCTAssertTrue(try ModelContext(second).fetch(FetchDescriptor<ProjectReference>()).isEmpty)
     }
 
     func testClosedDiskStoreReopensAtSameLocationButNotOtherDiskOrMemory() throws {
@@ -108,7 +112,7 @@ final class ContainerFactoryTests: XCTestCase {
         XCTAssertTrue(try taskIDs(in: memory).isEmpty)
     }
 
-    func testCopiedFrozenV2AndV3StoresOpenAsV4WithoutChangingOriginals() throws {
+    func testCopiedFrozenV2AndV3StoresOpenAsV8WithoutChangingOriginals() throws {
         for version in ["V2", "V3"] {
             let source = try XCTUnwrap(Bundle(for: Self.self).url(forResource: version, withExtension: nil))
             let directory = try temporaryDirectory()
@@ -135,6 +139,7 @@ final class ContainerFactoryTests: XCTestCase {
                 XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<FocusSession>()).count,
                                version == "V3" ? 1 : 0)
                 XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonSlot>()).isEmpty)
+                XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<ProjectReference>()).isEmpty)
             }
             try checkOpen()
             try checkOpen()
