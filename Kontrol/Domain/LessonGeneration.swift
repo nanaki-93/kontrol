@@ -70,7 +70,7 @@ struct LessonGenerationSelection {
 }
 
 // Untrusted output only; no provider-supplied ID, source, hash or provenance.
-// Strict JSON envelope/schema checking is the validator/adapter's responsibility.
+// Decode only via GeneratedLessonValidator.decode: Codable alone ignores unknown keys.
 struct CandidateLesson: Codable, Equatable {
     let title: String
     let objectiveKey: String
@@ -100,7 +100,7 @@ enum LessonGenerationError: Error, Equatable {
     case invalidScope, unmetPrerequisites, oversizedRequest, staleContext
     case offline, timeout, cancelled, authentication, authorization, rateLimited
     case providerFailure, oversizedResponse, refusal, incompleteResponse, malformedResponse
-    case invalidCandidate, duplicateContent, duplicateObjective, persistenceFailure
+    case invalidCandidate, duplicateIdentity, duplicateContent, duplicateObjective, persistenceFailure
 }
 
 enum LessonGenerationRequestBuilder {
