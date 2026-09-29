@@ -1,5 +1,15 @@
 import SwiftUI
 
+extension ProjectCompletionState {
+    var featureID: String {
+        switch self {
+        case let .writing(id), let .undoing(id), let .refreshing(id), let .saved(id), let .undone(id),
+             let .failed(id, _), let .undoFailed(id, _), let .savedButRefreshFailed(id, _),
+             let .undoneButRefreshFailed(id, _): return id
+        }
+    }
+}
+
 /// Local Markdown remains plain selectable text; completion is delegated to the store.
 /// Resolve by ID on each render so refresh/reconnect never leaves a second content cache.
 struct ProjectFeatureDetailView: View {

@@ -40,6 +40,66 @@ private final class ListRepository: ProjectReferenceRepository {
     }
 }
 
+/// Real store fixtures: the hosted view observes the same row that publishes each IO outcome.
+private actor PresentationInspector: ProjectInspecting {
+    private var current: ProjectInspection
+    private var failNextRead = false
+    private var failAfterUpdate = false
+    init(_ initial: ProjectInspection) { current = initial }
+    func update(_ inspection: ProjectInspection) {
+        current = inspection
+        if failAfterUpdate { failNextRead = true }
+    }
+    func failReconciliation() { failAfterUpdate = true }
+    func inspect(selectedFolder: URL) async throws -> ProjectInspection { throw CancellationError() }
+    func inspect(bookmarkData: Data) async throws -> ProjectInspection {
+        if failNextRead {
+            failNextRead = false
+            throw ProjectInspectionFailure.inconsistentRead
+        }
+        return current
+    }
+    func makeBookmark(selectedFolder: URL) async throws -> Data { throw CancellationError() }
+}
+
+private actor PresentationWriter: FeatureFileWriting {
+    let inspector: PresentationInspector
+    private var completionFailure: FeatureMutationFailure?
+    private var waiting: CheckedContinuation<FeatureMutationReceipt, Error>?
+    init(inspector: PresentationInspector, failure: FeatureMutationFailure? = nil) {
+        self.inspector = inspector
+        completionFailure = failure
+    }
+    func failNextCompletion(_ failure: FeatureMutationFailure) { completionFailure = failure }
+    func hasWaitingCompletion() -> Bool { waiting != nil }
+    func release() { waiting?.resume(throwing: completionFailure ?? .writeFailed); waiting = nil }
+    func complete(_ request: FeatureCompletionRequest) async throws -> FeatureMutationReceipt {
+        if completionFailure != nil {
+            return try await withCheckedThrowingContinuation { waiting = $0 }
+        }
+        let patch = try FeatureFrontmatterPatcher().completeWithInverse(request.source,
+            featureID: request.featureID, at: request.completedAt)
+        guard case let .supported(feature) = try ManifestParser().feature(patch.source) else {
+            throw FeatureMutationFailure.unverifiedWrite
+        }
+        let previous = try await inspector.inspect(bookmarkData: request.reference.bookmarkData)
+        let inspection = ProjectInspection(manifest: previous.manifest, roadmap: previous.roadmap,
+            features: previous.features.map { $0.id == feature.id ? feature : $0 },
+            excludedFeaturePaths: previous.excludedFeaturePaths,
+            featureEnumeration: previous.featureEnumeration, context: previous.context,
+            rules: previous.rules, history: previous.history, diagnostics: previous.diagnostics,
+            sources: previous.sources.map { $0.relativePath == patch.source.relativePath ? patch.source : $0 },
+            readAt: Date())
+        await inspector.update(inspection)
+        return FeatureMutationReceipt(projectID: request.reference.id,
+            grantBookmarkData: request.reference.bookmarkData, featureID: request.featureID,
+            verifiedSource: patch.source, inverse: patch.inverse)
+    }
+    func undo(_ request: FeatureUndoRequest) async throws -> FeatureMutationReceipt {
+        throw FeatureMutationFailure.undoConflict
+    }
+}
+
 @MainActor
 final class ProjectsPresentationTests: XCTestCase {
     private func reference(_ id: UUID, order: Int) -> ProjectReferenceSnapshot {
@@ -151,6 +211,201 @@ final class ProjectsPresentationTests: XCTestCase {
         XCTAssertFalse(ProjectsView.completionEnabled("ready", row: stale, store: store))
         XCTAssertFalse(ProjectsView.completionEnabled("ready", row: row, store: store, isReconnecting: true))
         // Native button activation, selectable text and AX inspection remain hosted F13 checks.
+    }
+
+    func testCompletionOutcomeCopyAndRecoveryCompileAcrossWorkspaceAndDetail() {
+        let projectID = UUID()
+        let row = ProjectRowState(reference: reference(projectID, order: 0),
+                                  inspection: cardInspection([card("next")]))
+        let fixtures: [(ProjectCompletionState, String, ProjectsView.CompletionRecovery?)] = [
+            (.writing("next"), "No completion has been verified", nil),
+            (.refreshing("next"), "verifying project progress", nil),
+            (.undoing("next"), "Undoing completion", nil),
+            (.saved("next"), "saved and verified", nil),
+            (.undone("next"), "undone and verified", nil),
+            (.failed("next", .conflict), "Feature changed on disk", .refresh),
+            (.undoFailed("next", .undoConflict), "Your changes were not overwritten", .refresh),
+            (.failed("next", .unpatchableSource), "cannot be edited safely", .refresh),
+            (.failed("next", .writeFailed), "Completion not verified", .refresh),
+            (.failed("next", .unverifiedWrite), "outcome is uncertain", .refresh),
+            (.undoFailed("next", .unverifiedWrite), "outcome is uncertain", .refresh),
+            (.failed("next", .accessDenied), "Reconnect", .reconnect),
+            (.savedButRefreshFailed("next", .inspection(.inconsistentRead)),
+             "File saved and verified", .refresh),
+            (.savedButRefreshFailed("next", .persistence), "local read receipt", .refresh),
+            (.savedButRefreshFailed("next", .inspection(.access(.staleBookmark))),
+             "until Reconnect", .reconnect),
+            (.undoneButRefreshFailed("next", .persistence), "Undo saved and verified", .refresh)
+        ]
+        for (state, expected, recovery) in fixtures {
+            var fixture = row
+            fixture.completion = state
+            let message = ProjectsView.completionMessage(state, feature: "Disk title next", project: "Disk project")
+            XCTAssertTrue(message.contains(expected), "\(state): \(message)")
+            XCTAssertTrue(message.contains("Disk title next in Disk project"), "Outcome must identify both targets")
+            XCTAssertEqual(ProjectsView.completionRecovery(state), recovery)
+            XCTAssertEqual(state.featureID, "next")
+            let detail = NSHostingView(rootView: ProjectFeatureDetailView(row: fixture, featureID: "next",
+                backToRoadmap: false, back: {}))
+            XCTAssertEqual(detail.rootView.feature?.id, "next")
+        }
+        XCTAssertEqual(ProjectsView.conflict(.failed("next", .conflict), projectID: projectID),
+                       ProjectFeatureIdentity(projectID: projectID, featureID: "next"))
+        XCTAssertEqual(ProjectsView.conflict(.undoFailed("next", .undoConflict), projectID: projectID),
+                       ProjectFeatureIdentity(projectID: projectID, featureID: "next"))
+        XCTAssertNil(ProjectsView.conflict(.failed("next", .unverifiedWrite), projectID: projectID))
+        XCTAssertNil(ProjectsView.conflict(.saved("next"), projectID: projectID))
+        XCTAssertNil(ProjectsView.conflict(.failed("next", .writeFailed), projectID: projectID))
+        var recovered = row
+        recovered.completion = .savedButRefreshFailed("next", .persistence)
+        recovered.refreshFailure = .persistence
+        XCTAssertEqual(ProjectsView.displayedCompletion(recovered), recovered.completion)
+        recovered.refreshFailure = nil
+        XCTAssertEqual(ProjectsView.displayedCompletion(recovered), .saved("next"))
+        recovered.completion = .undoneButRefreshFailed("next", .persistence)
+        XCTAssertEqual(ProjectsView.displayedCompletion(recovered), .undone("next"))
+        recovered.isRetainedInspection = true
+        XCTAssertEqual(ProjectsView.displayedCompletion(recovered), recovered.completion)
+        // Hosted dialog activation, live Undo expiry and VoiceOver remain F13 checks.
+    }
+
+    /// These hosts observe published store states, rather than detached rows that the
+    /// ProjectsView can never render. Native AX/dialog interaction remains for F13.
+    func testCompletionOutcomesHostPublishedRowsAndTokenTarget() async throws {
+        let first = "first", next = "next"
+        let projectID = UUID()
+        let sources = [first, next].map { id in
+            ProjectSourceDocument(relativePath: ".kontrol/features/\(id).md", bytes: Data(
+                "---\nid: \(id)\ntitle: Disk \(id)\nstatus: ready\npriority: medium\neffort: small\n---\nBody".utf8))
+        }
+        let features = try sources.map { source -> ProjectFeature in
+            guard case let .supported(feature) = try ManifestParser().feature(source) else {
+                throw ProjectStoreError.invalidPreview
+            }
+            return feature
+        }
+        let base = cardInspection(features)
+        let inspection = ProjectInspection(manifest: base.manifest, roadmap: base.roadmap,
+            features: features, excludedFeaturePaths: [], featureEnumeration: .complete,
+            context: .absent, rules: .absent, history: .absent, diagnostics: [],
+            sources: sources, readAt: Date())
+
+        func ready(_ store: ProjectStore) async throws {
+            try store.enterProjects()
+            for _ in 0..<200 where store.rows.first?.isRefreshing == true {
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+            XCTAssertFalse(try XCTUnwrap(store.rows.first).isRefreshing)
+            XCTAssertEqual(store.rows.first?.inspection?.features.count, 2)
+        }
+        func host(_ store: ProjectStore, _ state: ProjectCompletionState,
+                  file: StaticString = #filePath, line: UInt = #line) {
+            let view = NSHostingView(rootView: ProjectsView(store: store))
+            XCTAssertTrue(view.rootView.store === store, file: file, line: line)
+            let row = store.rows.first { $0.reference.id == projectID }
+            XCTAssertEqual(row?.completion, state, file: file, line: line)
+            if let row {
+                XCTAssertEqual(ProjectsView.displayedCompletion(row), state, file: file, line: line)
+            }
+            XCTAssertEqual(store.selectedID, projectID, file: file, line: line)
+        }
+
+        // Each refusal must be in the hosted store's row, with no manufactured Undo.
+        for (failure, expected) in [
+            (FeatureMutationFailure.conflict, ProjectCompletionState.failed(next, .conflict)),
+            (.unpatchableSource, .failed(next, .unpatchableSource)),
+            (.writeFailed, .failed(next, .writeFailed)),
+            (.unverifiedWrite, .failed(next, .unverifiedWrite)),
+            (.accessDenied, .failed(next, .accessDenied))
+        ] {
+            let inspector = PresentationInspector(inspection)
+            let writer = PresentationWriter(inspector: inspector, failure: failure)
+            let store = ProjectStore(inspector: inspector, repository: ListRepository([reference(projectID, order: 0)]),
+                                     writer: writer)
+            try await ready(store)
+            let task = Task { await store.markComplete(next, in: projectID) }
+            for _ in 0..<200 where !(await writer.hasWaitingCompletion()) {
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+            let waiting = await writer.hasWaitingCompletion()
+            XCTAssertTrue(waiting)
+            host(store, .writing(next))
+            await writer.release()
+            await task.value
+            host(store, expected)
+            XCTAssertFalse(store.canUndoCompletion(in: projectID))
+            XCTAssertNil(store.undoFeatureID(in: projectID))
+            XCTAssertEqual(ProjectsView.conflict(store.rows[0].completion, projectID: projectID) != nil,
+                           failure == .conflict)
+        }
+
+        var now = Date(timeIntervalSince1970: 1_000)
+        let inspector = PresentationInspector(inspection)
+        let writer = PresentationWriter(inspector: inspector)
+        let store = ProjectStore(inspector: inspector, repository: ListRepository([reference(projectID, order: 0)]),
+                                 writer: writer, completionClock: { now })
+        try await ready(store)
+        await store.markComplete(first, in: projectID)
+        host(store, .saved(first))
+        XCTAssertEqual(store.undoFeatureID(in: projectID), first)
+        XCTAssertTrue(store.canUndoCompletion(in: projectID))
+        XCTAssertEqual(ProjectsView.undoActionTitle(feature: "Disk first", project: "Disk project"),
+                       "Undo completion of Disk first in Disk project")
+
+        // A failed attempt on another feature must not relabel the older token.
+        await writer.failNextCompletion(.writeFailed)
+        let failed = Task { await store.markComplete(next, in: projectID) }
+        for _ in 0..<200 where !(await writer.hasWaitingCompletion()) {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        host(store, .writing(next))
+        await writer.release()
+        await failed.value
+        host(store, .failed(next, .writeFailed))
+        XCTAssertEqual(store.undoFeatureID(in: projectID), first)
+        XCTAssertTrue(store.canUndoCompletion(in: projectID))
+        now.addTimeInterval(30)
+        host(store, .failed(next, .writeFailed))
+        XCTAssertNil(store.undoFeatureID(in: projectID))
+        XCTAssertFalse(store.canUndoCompletion(in: projectID))
+
+        var expiryClock = Date(timeIntervalSince1970: 2_000)
+        let expiryInspector = PresentationInspector(inspection)
+        let expiryStore = ProjectStore(inspector: expiryInspector,
+            repository: ListRepository([reference(projectID, order: 0)]),
+            writer: PresentationWriter(inspector: expiryInspector), completionClock: { expiryClock })
+        try await ready(expiryStore)
+        await expiryStore.markComplete(first, in: projectID)
+        host(expiryStore, .saved(first))
+        XCTAssertTrue(expiryStore.canUndoCompletion(in: projectID))
+        expiryClock.addTimeInterval(30)
+        host(expiryStore, .saved(first)) // Saved outcome remains true; Undo is now expired.
+        XCTAssertNil(expiryStore.undoExpiration(in: projectID))
+        XCTAssertFalse(expiryStore.canUndoCompletion(in: projectID))
+
+        let undoInspector = PresentationInspector(inspection)
+        let undoWriter = PresentationWriter(inspector: undoInspector)
+        let undoStore = ProjectStore(inspector: undoInspector,
+            repository: ListRepository([reference(projectID, order: 0)]), writer: undoWriter)
+        try await ready(undoStore)
+        await undoStore.markComplete(first, in: projectID)
+        host(undoStore, .saved(first))
+        await undoStore.undoCompletion(in: projectID)
+        host(undoStore, .undoFailed(first, .undoConflict))
+        XCTAssertNil(undoStore.undoFeatureID(in: projectID))
+        XCTAssertEqual(ProjectsView.conflict(undoStore.rows[0].completion, projectID: projectID),
+                       ProjectFeatureIdentity(projectID: projectID, featureID: first))
+
+        let staleInspector = PresentationInspector(inspection)
+        await staleInspector.failReconciliation()
+        let staleStore = ProjectStore(inspector: staleInspector,
+            repository: ListRepository([reference(projectID, order: 0)]),
+            writer: PresentationWriter(inspector: staleInspector))
+        try await ready(staleStore)
+        await staleStore.markComplete(first, in: projectID)
+        host(staleStore, .savedButRefreshFailed(first, .inspection(.inconsistentRead)))
+        XCTAssertNil(staleStore.rows[0].inspection, "No unverified count may be shown")
+        XCTAssertNil(ProjectsView.conflict(staleStore.rows[0].completion, projectID: projectID))
     }
 
     func testSelectedWorkspaceHostsOneThreePartialAndRetainedFailure() async throws {

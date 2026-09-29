@@ -231,6 +231,12 @@ final class ProjectStore: ObservableObject {
         return token.expiresAt
     }
 
+    /// The latest verified completion target, not the most recent attempted feature.
+    /// Keep expiry and grant validation in the same place as the Undo gate.
+    func undoFeatureID(in projectID: UUID) -> String? {
+        validUndoToken(in: projectID)?.receipt.featureID
+    }
+
     func canUndoCompletion(in projectID: UUID) -> Bool {
         guard validUndoToken(in: projectID) != nil,
               !mutating.contains(projectID), !reconnecting.contains(projectID),

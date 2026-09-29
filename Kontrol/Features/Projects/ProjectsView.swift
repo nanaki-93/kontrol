@@ -14,6 +14,93 @@ struct ProjectsView: View {
     @State private var reconnectPicker: NSOpenPanel?
     @State private var reconnectingID: UUID?
     @State private var recoveryMessage: (id: UUID, text: String)?
+    @State private var presentedConflict: ProjectFeatureIdentity?
+
+    enum CompletionRecovery: Equatable { case refresh, reconnect }
+
+    static func undoActionTitle(feature: String, project: String) -> String {
+        "Undo completion of \(feature) in \(project)"
+    }
+
+    /// These messages never infer a completed status from an in-flight or uncertain write.
+    /// Only the store's verified `.saved` receipt may feed UndoAffordance.
+    static func completionMessage(_ state: ProjectCompletionState, feature: String, project: String) -> String {
+        let target = "\(feature) in \(project)"
+        switch state {
+        case .writing: return "Saving \(target)… No completion has been verified yet."
+        case .refreshing: return "File saved for \(target); verifying project progress from disk…"
+        case .undoing: return "Undoing completion of \(target)… Verifying the restored file."
+        case .saved: return "\(target) saved and verified. Project progress refreshed from disk."
+        case .undone: return "Completion of \(target) undone and verified. Project progress refreshed from disk."
+        case let .failed(_, failure), let .undoFailed(_, failure):
+            let undo = { if case .undoFailed = state { return true }; return false }()
+            let prefix = undo ? "Undo not verified for \(target). " : "Completion not verified for \(target). "
+            switch failure {
+            case .conflict, .undoConflict, .missingTarget, .changedIdentity:
+                return prefix + "Feature changed on disk. Your changes were not overwritten. Refresh to review the current file; this does not retry the action."
+            case .unpatchableSource:
+                return prefix + "The frontmatter cannot be edited safely. Repair the source externally, then Refresh."
+            case .accessDenied:
+                return prefix + "Folder access is unavailable. Reconnect the original project folder."
+            case .unverifiedWrite:
+                return prefix + "The file outcome is uncertain; progress is stale. Refresh to check the disk before any new action."
+            case .manifestMismatch, .unsafePath:
+                return prefix + "The saved project or file identity could not be verified. Refresh to review the project."
+            case .canceled:
+                return prefix + "The operation was canceled before replacement. Refresh before retrying."
+            default:
+                return prefix + "The file could not be written or verified. Refresh to check its current state before retrying."
+            }
+        case let .savedButRefreshFailed(_, failure), let .undoneButRefreshFailed(_, failure):
+            let saved = { if case .savedButRefreshFailed = state { return true }; return false }()
+            let prefix = saved ? "File saved and verified for \(target)" : "Undo saved and verified for \(target)"
+            let cause = failure == .persistence ? "the local read receipt could not be saved" : "project refresh failed"
+            return "\(prefix), but \(cause). Progress and detail are unavailable until \(failure.recovery == .reconnect ? "Reconnect" : "Refresh") succeeds."
+        }
+    }
+
+    /// A later explicit Refresh can recover a saved file without changing the store's
+    /// historical IO outcome. Use the newly accepted inspection to retire stale copy.
+    static func displayedCompletion(_ row: ProjectRowState) -> ProjectCompletionState? {
+        guard let state = row.completion, row.refreshFailure == nil,
+              row.inspection != nil, !row.isRetainedInspection else { return row.completion }
+        switch state {
+        case let .savedButRefreshFailed(id, _): return .saved(id)
+        case let .undoneButRefreshFailed(id, _): return .undone(id)
+        default: return state
+        }
+    }
+
+    static func completionRecovery(_ state: ProjectCompletionState) -> CompletionRecovery? {
+        switch state {
+        case let .failed(_, failure), let .undoFailed(_, failure):
+            return failure == .accessDenied ? .reconnect : .refresh
+        case let .savedButRefreshFailed(_, failure), let .undoneButRefreshFailed(_, failure):
+            return failure.recovery == .reconnect ? .reconnect : .refresh
+        default: return nil
+        }
+    }
+
+    static func conflict(_ state: ProjectCompletionState?, projectID: UUID) -> ProjectFeatureIdentity? {
+        switch state {
+        case let .failed(id, failure), let .undoFailed(id, failure):
+            switch failure {
+            case .conflict, .undoConflict, .missingTarget, .changedIdentity:
+                return ProjectFeatureIdentity(projectID: projectID, featureID: id)
+            default: return nil
+            }
+        default: return nil
+        }
+    }
+
+    private var selectedRow: ProjectRowState? {
+        store.rows.first { $0.reference.id == store.selectedID }
+    }
+
+    private var selectedConflict: ProjectFeatureIdentity? {
+        guard let row = selectedRow, row.isRetainedInspection else { return nil }
+        return Self.conflict(row.completion, projectID: row.reference.id)
+    }
 
     enum NavigationFocus: Hashable {
         case projectHeading(UUID)
@@ -190,15 +277,41 @@ struct ProjectsView: View {
             }
         }
         .safeAreaInset(edge: .top) {
-            if let notice = store.selectionNotice, notice.projectID == store.selectedID {
-                Text(Self.selectionNoticeText(notice))
-                    .appTypography(.body)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, AppMetrics.horizontalInset)
-                    .accessibilityIdentifier("project-feature-selection-notice")
+            VStack(alignment: .leading, spacing: AppMetrics.space2) {
+                if let notice = store.selectionNotice, notice.projectID == store.selectedID {
+                    Text(Self.selectionNoticeText(notice))
+                        .appTypography(.body)
+                        .accessibilityIdentifier("project-feature-selection-notice")
+                }
+                if let row = selectedRow, let state = Self.displayedCompletion(row) {
+                    TimelineView(.periodic(from: .now, by: 1)) { _ in
+                        completionFeedback(row: row, state: state)
+                    }
+                }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, AppMetrics.horizontalInset)
         }
-        .onAppear { enter() }
+        .onChange(of: selectedConflict) { _, conflict in
+            if let conflict { presentedConflict = conflict }
+        }
+        .onChange(of: store.selectedID) { _, _ in presentedConflict = selectedConflict }
+        .alert("Feature changed on disk", isPresented: Binding(
+            get: { presentedConflict != nil && presentedConflict?.projectID == store.selectedID },
+            set: { if !$0 { presentedConflict = nil } }
+        )) {
+            Button("Cancel", role: .cancel) { presentedConflict = nil }
+            Button("Refresh") {
+                if let conflict = presentedConflict { store.refresh(conflict.projectID) }
+                presentedConflict = nil
+            }
+        } message: {
+            Text("This feature changed since it was inspected. No newer content was overwritten. Refresh only reads the project; review the current file before choosing another action.")
+        }
+        .onAppear {
+            enter()
+            if let conflict = selectedConflict { presentedConflict = conflict }
+        }
         .onChange(of: store.selectedFeature) { old, new in
             if let old, new == nil {
                 let projectID = store.selectedID ?? old.projectID
@@ -209,6 +322,67 @@ struct ProjectsView: View {
             ProjectAddView(store: store) { showingAdd = false }
         }
         .accessibilityIdentifier("projects-content")
+    }
+
+    @ViewBuilder
+    private func completionFeedback(row: ProjectRowState, state: ProjectCompletionState) -> some View {
+        let id = row.reference.id
+        let featureID = state.featureID
+        let title = ProjectDetailsView.safeLabel(row.inspection?.features.first { $0.id == featureID }?.title ?? featureID)
+        let project = ProjectDetailsView.safeLabel(row.inspection?.manifest?.name ?? row.reference.displayNameHint)
+        let message = Self.completionMessage(state, feature: title, project: project)
+        VStack(alignment: .leading, spacing: AppMetrics.space2) {
+            if case .saved = state, let expiry = store.undoExpiration(in: id),
+               store.canUndoCompletion(in: id) {
+                UndoAffordance(message, undoTitle: Self.undoActionTitle(feature: title, project: project)) {
+                    Task { await store.undoCompletion(in: id) }
+                }
+                .accessibilityIdentifier("project-completion-undo-\(featureID)")
+                Text("Undo available until \(expiry.formatted(date: .omitted, time: .standard))")
+                    .appTypography(.metadata)
+                    .accessibilityIdentifier("project-completion-undo-expiry")
+            } else {
+                Text(message)
+                    .appTypography(.body)
+                    .foregroundStyle(AppColors.textPrimary)
+                    .accessibilityIdentifier("project-completion-status")
+                if case .saved = state {
+                    Text("Undo unavailable or expired. Refresh to review current project data.")
+                        .appTypography(.body)
+                        .accessibilityIdentifier("project-completion-expired")
+                }
+            }
+            // A failed attempt at a different feature does not consume the project's
+            // earlier verified token. Do not label that token with the failed feature.
+            if case .failed = state, store.canUndoCompletion(in: id),
+               let undoID = store.undoFeatureID(in: id) {
+                let undoTitle = ProjectDetailsView.safeLabel(row.inspection?.features.first {
+                    $0.id == undoID
+                }?.title ?? undoID)
+                UndoAffordance("Completion of \(undoTitle) in \(project) was saved and verified and remains undoable.",
+                               undoTitle: Self.undoActionTitle(feature: undoTitle, project: project)) {
+                    Task { await store.undoCompletion(in: id) }
+                }
+                .accessibilityIdentifier("project-completion-previous-undo-\(undoID)")
+            }
+            if case .undoFailed = state, store.canUndoCompletion(in: id) {
+                ActionButton("Retry Undo", variant: .secondary) {
+                    Task { await store.undoCompletion(in: id) }
+                }
+                .accessibilityLabel("Retry Undo for \(title) in \(project)")
+                .accessibilityIdentifier("project-completion-retry-undo")
+            }
+            if let recovery = Self.completionRecovery(state) {
+                ActionButton(recovery == .reconnect ? "Reconnect project" : "Refresh project", variant: .secondary) {
+                    if recovery == .reconnect { chooseReconnectFolder(for: id) }
+                    else { store.refresh(id) }
+                }
+                .accessibilityLabel("\(recovery == .reconnect ? "Reconnect" : "Refresh") \(project) after completion result for \(title)")
+                .accessibilityIdentifier("project-completion-recovery")
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("project-completion-feedback-\(id.uuidString)-\(featureID)")
     }
 
     private var list: some View {
