@@ -354,6 +354,37 @@ final class ProjectsPresentationTests: XCTestCase {
             featureID: "detail", reason: .validationExcluded)).contains("failed validation"))
     }
 
+    func testKeyboardFocusReturnAndAccessibleActionLabelsCompile() {
+        let id = UUID()
+        let feature = card("next", status: .ready)
+        let inspection = cardInspection([feature, card("planned", status: .planned)])
+        let row = ProjectRowState(reference: reference(id, order: 0), inspection: inspection)
+        let cardOrigin: ProjectsView.NavigationFocus = .card(id, "next")
+        let roadmapOrigin: ProjectsView.NavigationFocus = .roadmap(id, "planned")
+        XCTAssertEqual(ProjectsView.returnFocus(origin: cardOrigin, row: row, roadmap: false), cardOrigin)
+        XCTAssertEqual(ProjectsView.returnFocus(origin: roadmapOrigin, row: row, roadmap: true), roadmapOrigin)
+        XCTAssertEqual(ProjectsView.returnFocus(origin: cardOrigin, row: row, roadmap: true), .projectHeading(id))
+        XCTAssertEqual(ProjectsView.folderLabel(row), "Select project Disk project, Ready · 0 of 2 features completed")
+        XCTAssertEqual(ProjectsView.cardLabel(feature), "View feature Disk title next, ready, medium priority, small effort")
+        XCTAssertEqual(ProjectDetailsView.roadmapLabel(inspection.features[1]),
+                       "View feature Disk title planned, planned, ID planned in validated roadmap")
+        let detail = NSHostingView(rootView: ProjectFeatureDetailView(row: row, featureID: "next",
+            backToRoadmap: false, back: {}))
+        XCTAssertEqual(detail.rootView.backLabel, "Back to projects from feature Disk title next")
+        var removed = row
+        removed.inspection = cardInspection([inspection.features[1]])
+        XCTAssertEqual(ProjectsView.returnFocus(origin: cardOrigin, row: removed, roadmap: false), .projectHeading(id),
+                       "A deleted card must not receive keyboard focus")
+        XCTAssertEqual(ProjectsView.returnFocus(origin: roadmapOrigin, row: removed, roadmap: true), roadmapOrigin)
+        removed.inspection = cardInspection([])
+        XCTAssertEqual(ProjectsView.returnFocus(origin: roadmapOrigin, row: removed, roadmap: true), .projectHeading(id),
+                       "An excluded roadmap item must fall back to the selected-project heading")
+        removed.inspection = nil
+        XCTAssertEqual(ProjectsView.returnFocus(origin: cardOrigin, row: removed, roadmap: false), .projectHeading(id))
+        XCTAssertNil(ProjectsView.returnFocus(origin: cardOrigin, row: nil, roadmap: false))
+        // Native keyboard, VoiceOver, zoom and window-size observations remain F13 checks.
+    }
+
     func testFolderOnlyPickerAndPreviewHostCompile() {
         let panel = ProjectAddView.configuredPicker()
         XCTAssertTrue(panel.canChooseDirectories)

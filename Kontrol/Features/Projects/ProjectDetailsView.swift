@@ -10,6 +10,12 @@ struct ProjectDetailsView: View {
     var reconnect: () -> Void = {}
     var recoveryMessage: String? = nil
     var isReconnecting = false
+    var navigationFocus: FocusState<ProjectsView.NavigationFocus?>.Binding? = nil
+    @FocusState private var localFocus: ProjectsView.NavigationFocus?
+
+    static func roadmapLabel(_ feature: ProjectFeature) -> String {
+        "View feature \(feature.title), \(feature.status.rawValue), ID \(feature.id) in validated roadmap"
+    }
 
     /// Inspection diagnostics carry codes and relative paths, never OS error descriptions.
     /// Keep the explanation finite and safe even when the selected source is malformed.
@@ -116,6 +122,10 @@ struct ProjectDetailsView: View {
                     VStack(alignment: .leading, spacing: AppMetrics.space2) { actions }
                 }
             }
+            .focusable()
+            .focused(navigationFocus ?? $localFocus, equals: .projectHeading(row.reference.id))
+            .accessibilityAddTraits(.isHeader)
+            .accessibilityIdentifier("project-details-heading")
             if row.isStale {
                 Text("Stale · Last read: \(row.lastReadAt?.formatted(date: .abbreviated, time: .shortened) ?? "unavailable") · Not fully verified now")
                     .appTypography(.body)
@@ -201,6 +211,8 @@ struct ProjectDetailsView: View {
                                            status: StatusPill(feature.status.rawValue.capitalized,
                                                               kind: feature.status == .completed ? .success : .warning)) {
                                     ActionButton("View feature") { viewFeature(feature.id) }
+                                        .focused(navigationFocus ?? $localFocus, equals: .roadmap(row.reference.id, feature.id))
+                                        .accessibilityLabel(Self.roadmapLabel(feature))
                                         .accessibilityIdentifier("project-roadmap-feature-open-\(feature.id)")
                                 }
                                 .accessibilityIdentifier("project-roadmap-feature-\(feature.id)")
@@ -234,13 +246,16 @@ struct ProjectDetailsView: View {
     private var actions: some View {
         Group {
             ActionButton("Back to projects", variant: .secondary, action: back)
+                .accessibilityLabel("Back to projects from \(row.reference.displayNameHint) details")
                 .accessibilityIdentifier("project-details-back")
             if row.refreshFailure?.recovery == .reconnect {
                 ActionButton("Reconnect project", variant: .secondary, action: reconnect)
                     .disabled(isReconnecting)
+                    .accessibilityLabel("Reconnect \(row.reference.displayNameHint) to restore folder access")
                     .accessibilityIdentifier("project-details-reconnect")
             } else {
                 ActionButton("Refresh project", variant: .secondary, action: refresh)
+                    .accessibilityLabel("Refresh \(row.reference.displayNameHint) details from disk")
                     .accessibilityIdentifier("project-details-refresh")
             }
         }

@@ -7,6 +7,12 @@ struct ProjectFeatureDetailView: View {
     let featureID: String
     let backToRoadmap: Bool
     let back: () -> Void
+    var navigationFocus: FocusState<ProjectsView.NavigationFocus?>.Binding? = nil
+    @FocusState private var localFocus: ProjectsView.NavigationFocus?
+
+    var backLabel: String {
+        "Back to \(backToRoadmap ? "roadmap" : "projects") from feature \(feature?.title ?? featureID)"
+    }
 
     var feature: ProjectFeature? {
         row.inspection?.features.first { $0.id == featureID }
@@ -26,8 +32,13 @@ struct ProjectFeatureDetailView: View {
             if let feature, let inspection = row.inspection {
                 PageHeader(feature.title, metadata: "Feature \(feature.id) · Read-only") {
                     ActionButton(backToRoadmap ? "Back to roadmap" : "Back to projects", variant: .secondary, action: back)
+                        .accessibilityLabel(backLabel)
                         .accessibilityIdentifier("project-feature-back")
                 }
+                .focusable()
+                .focused(navigationFocus ?? $localFocus, equals: .featureHeading)
+                .accessibilityAddTraits(.isHeader)
+                .accessibilityIdentifier("project-feature-heading")
                 if row.isRetainedInspection {
                     Text("Stale reference · Last read: \(row.lastReadAt?.formatted(date: .abbreviated, time: .shortened) ?? "unavailable") · Refresh or Reconnect to verify this feature.")
                         .appTypography(.body)
@@ -57,6 +68,8 @@ struct ProjectFeatureDetailView: View {
                     .accessibilityIdentifier("project-feature-body")
             } else {
                 ActionButton(backToRoadmap ? "Back to roadmap" : "Back to projects", variant: .secondary, action: back)
+                    .accessibilityLabel(backLabel)
+                    .accessibilityIdentifier("project-feature-back")
                 Text("Feature details unavailable. Return to the project for validation or Refresh.")
                     .appTypography(.body)
             }

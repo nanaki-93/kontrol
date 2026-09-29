@@ -8,10 +8,43 @@ struct ProjectsView: View {
     @State private var showingAdd = false
     @State private var detailID: UUID?
     @FocusState private var addFocused: Bool
+    @FocusState private var navigationFocus: NavigationFocus?
+    @State private var featureOrigin: NavigationFocus?
+    @State private var pendingReturnFocus: NavigationFocus?
     @State private var reconnectPicker: NSOpenPanel?
     @State private var reconnectingID: UUID?
     @State private var recoveryMessage: (id: UUID, text: String)?
 
+    enum NavigationFocus: Hashable {
+        case projectHeading(UUID)
+        case featureHeading
+        case card(UUID, String)
+        case roadmap(UUID, String)
+    }
+
+    /// An origin may disappear after refresh. Never focus a stale recommendation or an
+    /// excluded roadmap record; the selected project's heading is the stable fallback.
+    static func returnFocus(origin: NavigationFocus?, row: ProjectRowState?, roadmap: Bool) -> NavigationFocus? {
+        guard let row else { return nil }
+        let heading: NavigationFocus = .projectHeading(row.reference.id)
+        guard let origin, let inspection = row.inspection else { return heading }
+        switch origin {
+        case let .card(id, featureID) where !roadmap && id == row.reference.id:
+            return recommendations(row).contains(where: { $0.id == featureID }) ? origin : heading
+        case let .roadmap(id, featureID) where roadmap && id == row.reference.id:
+            return inspection.featureEnumeration == .complete &&
+                inspection.features.contains(where: { $0.id == featureID }) ? origin : heading
+        default: return heading
+        }
+    }
+
+    static func folderLabel(_ row: ProjectRowState) -> String {
+        "Select project \(row.inspection?.manifest?.name ?? row.reference.displayNameHint), \(status(row))"
+    }
+
+    static func cardLabel(_ feature: ProjectFeature) -> String {
+        "View feature \(feature.title), \(feature.status.rawValue), \(feature.priority.rawValue) priority, \(feature.effort.rawValue) effort"
+    }
     static func ordered(_ rows: [ProjectRowState]) -> [ProjectRowState] {
         rows.sorted {
             if $0.reference.displayOrder != $1.reference.displayOrder {
@@ -119,20 +152,28 @@ struct ProjectsView: View {
                let row = store.rows.first(where: { $0.reference.id == identity.projectID }),
                store.selectedFeatureContent != nil {
                 ProjectFeatureDetailView(row: row, featureID: identity.featureID,
-                                         backToRoadmap: detailID == row.reference.id) {
-                    store.closeFeature()
+                                         backToRoadmap: detailID == row.reference.id, back: closeFeature,
+                                         navigationFocus: $navigationFocus)
+                .onAppear {
+                    Task { @MainActor in
+                        await Task.yield()
+                        if store.selectedFeature == identity { navigationFocus = .featureHeading }
+                    }
                 }
             } else if let detailID, let row = store.rows.first(where: { $0.reference.id == detailID }) {
-                ProjectDetailsView(row: row, back: { self.detailID = nil },
+                ProjectDetailsView(row: row, back: { self.detailID = nil; restoreFocus(in: detailID, roadmap: false) },
                                    refresh: { store.refresh(detailID) },
                                    viewFeature: { featureID in
+                                       featureOrigin = .roadmap(detailID, featureID)
                                        store.selectFeature(featureID, in: detailID)
                                    },
                                    reconnect: { chooseReconnectFolder(for: detailID) },
                                    recoveryMessage: recoveryMessage?.id == detailID ? recoveryMessage?.text : nil,
-                                   isReconnecting: reconnectingID == detailID)
+                                   isReconnecting: reconnectingID == detailID,
+                                   navigationFocus: $navigationFocus)
+                .onAppear { applyReturnFocus() }
             } else {
-                list
+                list.onAppear { applyReturnFocus() }
             }
         }
         .safeAreaInset(edge: .top) {
@@ -145,6 +186,12 @@ struct ProjectsView: View {
             }
         }
         .onAppear { enter() }
+        .onChange(of: store.selectedFeature) { old, new in
+            if let old, new == nil {
+                let projectID = store.selectedID ?? old.projectID
+                restoreFocus(in: projectID, roadmap: detailID == projectID)
+            }
+        }
         .sheet(isPresented: $showingAdd, onDismiss: { addFocused = true }) {
             ProjectAddView(store: store) { showingAdd = false }
         }
@@ -159,7 +206,10 @@ struct ProjectsView: View {
                     .accessibilityIdentifier("projects-add")
             }
             if store.loadFailed {
-                ErrorBanner(.readFailed, recoveryTitle: "Retry projects") { enter() }
+                ErrorBanner(.readFailed)
+                ActionButton("Retry projects") { enter() }
+                    .accessibilityLabel("Retry loading saved project folders")
+                    .accessibilityIdentifier("projects-retry-load")
                 Text("Project references could not be loaded. Other areas remain available.")
                     .appTypography(.body)
             } else if !store.isLoaded {
@@ -176,7 +226,7 @@ struct ProjectsView: View {
                                status: StatusPill(Self.status(row), kind: row.refreshFailure?.recovery == .reconnect ? .error :
                                                   (row.isRefreshing || row.isStale || row.inspection == nil ? .warning : .success))) {
                         Button(selected ? "Selected" : "Select project") { store.select(row.reference.id) }
-                            .accessibilityLabel("Select project \(row.inspection?.manifest?.name ?? row.reference.displayNameHint), \(Self.location(row))")
+                            .accessibilityLabel(Self.folderLabel(row))
                             .accessibilityIdentifier("project-select-\(row.reference.id.uuidString)")
                             .disabled(selected)
                         Button("View details") {
@@ -193,11 +243,13 @@ struct ProjectsView: View {
                             chooseReconnectFolder(for: row.reference.id)
                         }
                         .disabled(reconnectingID != nil)
+                        .accessibilityLabel("Reconnect folder \(row.reference.displayNameHint) to restore access")
                         .accessibilityIdentifier("project-row-reconnect-\(row.reference.id.uuidString)")
                     } else if row.refreshFailure != nil || row.isStale {
                         ActionButton("Refresh \(row.reference.displayNameHint)", variant: .secondary) {
                             store.refresh(row.reference.id)
                         }
+                        .accessibilityLabel("Refresh folder \(row.reference.displayNameHint) after a failed or partial read")
                         .accessibilityIdentifier("project-row-refresh-\(row.reference.id.uuidString)")
                     }
                     if recoveryMessage?.id == row.reference.id, let message = recoveryMessage?.text {
@@ -226,6 +278,9 @@ struct ProjectsView: View {
                     VStack(alignment: .leading, spacing: AppMetrics.space2) { workspaceActions(for: row) }
                 }
             }
+            .focusable()
+            .focused($navigationFocus, equals: .projectHeading(row.reference.id))
+            .accessibilityAddTraits(.isHeader)
             .accessibilityIdentifier("projects-selected")
             if row.isRefreshing {
                 Text("Refreshing project · showing last inspected information until the read completes")
@@ -238,7 +293,7 @@ struct ProjectsView: View {
                     .accessibilityIdentifier("projects-workspace-stale")
             }
             if row.isRetainedInspection {
-                ErrorBanner(.readFailed, recoveryTitle: recoveryTitle(for: row)) { recover(row) }
+                recoveryAction(for: row)
                     .accessibilityIdentifier("projects-workspace-unavailable")
             } else if let inspection = row.inspection {
                 let selection = FeatureSelector().select(from: inspection)
@@ -267,8 +322,11 @@ struct ProjectsView: View {
                                     // Recheck freshness at activation, not just when the card was built.
                                     guard let current = store.rows.first(where: { $0.reference.id == row.reference.id }),
                                           !current.isRetainedInspection else { return }
+                                    featureOrigin = .card(row.reference.id, candidate.id)
                                     store.selectFeature(candidate.id, in: row.reference.id)
                                 }
+                                .focused($navigationFocus, equals: .card(row.reference.id, candidate.id))
+                                .accessibilityLabel(Self.cardLabel(feature))
                                 .accessibilityIdentifier("project-feature-open-\(candidate.id)")
                             }
                             .accessibilityIdentifier("project-feature-card-\(candidate.id)")
@@ -317,12 +375,22 @@ struct ProjectsView: View {
 
     private func unavailableState(_ row: ProjectRowState, guidance: String) -> some View {
         VStack(alignment: .leading, spacing: AppMetrics.space3) {
-            ErrorBanner(.readFailed, recoveryTitle: recoveryTitle(for: row)) { recover(row) }
+            recoveryAction(for: row)
+                .accessibilityIdentifier("projects-workspace-recovery")
             Text(guidance).appTypography(.body)
             Text("Progress unavailable · View project details for validation and recovery information.")
                 .appTypography(.body)
         }
         .accessibilityIdentifier("projects-workspace-unavailable")
+    }
+
+    private func recoveryAction(for row: ProjectRowState) -> some View {
+        VStack(alignment: .leading, spacing: AppMetrics.space3) {
+            ErrorBanner(.readFailed)
+            ActionButton(recoveryTitle(for: row)) { recover(row) }
+                .accessibilityLabel("\(recoveryTitle(for: row)) \(row.reference.displayNameHint) to verify project information")
+                .accessibilityIdentifier("projects-workspace-recovery-action-\(row.reference.id.uuidString)")
+        }
     }
 
     private func recoveryTitle(for row: ProjectRowState) -> String {
@@ -342,15 +410,45 @@ struct ProjectsView: View {
             ActionButton("View project details") {
                 detailID = row.reference.id
             }
+            .accessibilityLabel("View project details and validated roadmap for \(row.reference.displayNameHint)")
             .accessibilityIdentifier("projects-workspace-details")
             if row.refreshFailure?.recovery == .reconnect {
                 ActionButton("Reconnect project") { chooseReconnectFolder(for: row.reference.id) }
                     .disabled(reconnectingID != nil)
+                    .accessibilityLabel("Reconnect \(row.reference.displayNameHint) to restore folder access")
                     .accessibilityIdentifier("projects-workspace-reconnect")
             } else {
                 ActionButton("Refresh project") { store.refresh(row.reference.id) }
+                    .accessibilityLabel("Refresh \(row.reference.displayNameHint) from disk")
                     .accessibilityIdentifier("projects-workspace-refresh")
             }
+        }
+    }
+
+    private func closeFeature() {
+        store.closeFeature()
+        // The selection observer also handles automatic closure after deletion/validation.
+    }
+
+    private func restoreFocus(in projectID: UUID, roadmap: Bool) {
+        let row = store.rows.first { $0.reference.id == projectID }
+        pendingReturnFocus = Self.returnFocus(origin: featureOrigin, row: row, roadmap: roadmap)
+        featureOrigin = nil
+        // Refresh publication can remove detail before the destination's onAppear runs.
+        // Also retry when that branch has already appeared in the same update cycle.
+        Task { @MainActor in
+            await Task.yield()
+            applyReturnFocus()
+        }
+    }
+
+    private func applyReturnFocus() {
+        guard let target = pendingReturnFocus else { return }
+        pendingReturnFocus = nil
+        // Focus only after the destination branch has appeared.
+        Task { @MainActor in
+            await Task.yield()
+            navigationFocus = target
         }
     }
 
