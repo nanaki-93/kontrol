@@ -40,6 +40,8 @@ Each row links a function to an actual PNG mockup. SVG sources sit beside the PN
 | [F07](../features/F07-history-coverage.md) | Restore a dismissed lesson | [M23 · History](M23-learning-history.png) |
 | [F07](../features/F07-history-coverage.md) | Inspect coverage and concepts | [M24 · Coverage](M24-concept-coverage.png) |
 | [F07](../features/F07-history-coverage.md) | Deduplicate and select replacement | [M21 · Learning](M21-lesson-completion-rotation.png) |
+| [F07](../features/F07-history-coverage.md) | Invalid custom range and filtered-empty History | [F07 state overview](../../.mockups/screens/f07/index.html) · [Reversed date range](../../.mockups/screens/f07/invalid-custom-range.html) · [No matching lessons](../../.mockups/screens/f07/filtered-empty-history.html) |
+| [F07](../features/F07-history-coverage.md) | Coverage read failure, incomplete legacy evidence, and no eligible concept lessons | [Coverage unavailable](../../.mockups/screens/f07/coverage-read-failure.html) · [Partial historical evidence](../../.mockups/screens/f07/incomplete-legacy-evidence.html) · [No eligible lessons](../../.mockups/screens/f07/no-eligible-concept-lessons.html) |
 | [F08](../features/F08-ai-expansion.md) | Configure, enable, test or remove provider key | [M39 · AI lessons](M39-ai-settings.png) |
 | [F08](../features/F08-ai-expansion.md) | Generate a candidate | [M25 · Generate lesson](M25-generate-lesson.png) |
 | [F08](../features/F08-ai-expansion.md) | Handle invalid, duplicate or failed generation | [M26 · Learning](M26-generation-failure.png) |
@@ -67,6 +69,10 @@ Each row links a function to an actual PNG mockup. SVG sources sit beside the PN
 ## F06 supplemental flow boundaries
 
 [Open the F06 navigator](../../.mockups/flows/f06-lesson-experience/index.html) for a choices/History hub, exercise → solution → completion path, and recovery / cross-feature branches. These static references supplement M16–M22, M07 and the *minimal* list/detail/Restore subset of M23; they do not replace the approved normal-state imagery. The F06 History has no F07 filters or coverage controls. Exhaustion shows real inventory and a Generate… **availability notice only**; provider setup, generation, validation, failures and any actual generated lesson are **F08-only** (M25–M26). The HTML links preview states, not working save/Restore/Focus actions. No interactive approval or rendered native acceptance is claimed for these new references.
+
+## F07 supplemental state boundaries
+
+[Open the F07 state overview](../../.mockups/screens/f07/index.html) for five static extensions of M23 (History), M24 (Coverage), and M21 (Learning replacement). A reversed local-date range has inline validation and is not silently swapped. A filtered-empty History has saved records but no matches and offers Clear filters; it is not “No history yet.” A failed Coverage read shows neither an empty catalog nor `0 of 0`, and Retry affects only coverage. Legacy records with missing studied metadata or concept evidence show what is known without borrowing new definitions or claiming zero practice. An empty eligible-lesson list does not Restore dismissals, assign work, or offer excluded duplicates. Sample names, dates and counts are illustrative. Interactive review, native/keyboard/VoiceOver checks, enlarged text and visual comparisons at 1000×700 and 1440×940 remain **open for F13**; these standalone references are not interactive approval.
 
 ## All 44 visual states
 

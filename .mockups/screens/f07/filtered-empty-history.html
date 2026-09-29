@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>F07 · No matching History lessons</title>
+<link rel="stylesheet" href="../../design-system/tokens.css"><link rel="stylesheet" href="../../design-system/components.css">
+<style>
+ body { margin:0; background:var(--color-background); color:var(--color-text-primary); font:var(--type-body)/var(--leading-body) var(--font-mono); }
+ .mock-meta { padding:var(--space-2) var(--space-6); border-bottom:1px solid var(--color-border); color:var(--color-text-secondary); font-size:var(--type-metadata); }
+ a { color:var(--color-text-primary); } a:focus-visible, select:focus-visible { outline:2px solid var(--color-focus-ring); outline-offset:3px; }
+ main { max-width:1100px; margin:auto; padding:var(--space-6); }
+ .filters { display:flex; flex-wrap:wrap; gap:var(--space-3); margin:var(--space-6) 0; }
+ label { display:grid; gap:var(--space-1); }
+ select { min-height:36px; padding:var(--space-2); border:1px solid var(--color-control-boundary); border-radius:var(--radius-small); background:var(--color-surface); color:var(--color-text-primary); font:inherit; }
+ .empty-state { margin-top:var(--space-6); }
+ @media(max-width:700px) { main { padding:var(--space-4); } }
+</style>
+</head>
+<body>
+<header class="mock-meta"><a href="index.html">F07 state index</a> · M23 extension · Static filtered-empty reference; filters preview a combination with no matches.</header>
+<main>
+ <header class="page-header"><div class="page-header__content"><h3>History</h3><span class="page-header__meta">Saved completed and dismissed lessons · filters apply together</span></div></header>
+ <section aria-label="History filters" class="filters"><label>Topic<select><option>Security</option><option>All topics</option><option>Unknown topic</option></select></label><label>Status<select><option>Dismissed</option><option>All statuses</option><option>Completed</option></select></label><label>Date<select><option>Today</option><option>All time</option><option>Last 7 days</option><option>Custom range</option></select></label></section>
+ <section class="empty-state" aria-labelledby="empty-title"><div class="empty-state__copy"><h2 id="empty-title" class="type-section">No matching lessons</h2><p>Saved History exists, but no dismissed Security lessons match Today. Try a wider date or clear filters to see your saved records.</p></div><button class="btn" type="button">Clear filters</button></section>
+ <p class="page-header__meta">This is different from “No history yet” (no saved terminal lessons). A read failure is not an empty result; it needs Retry instead.</p>
+</main>
+</body>
+</html>
