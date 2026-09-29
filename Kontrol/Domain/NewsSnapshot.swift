@@ -64,8 +64,12 @@ struct NewsPreferencesEdit: Equatable {
 struct NewsSnapshot: Equatable {
     let topics: [NewsTopic]
     let feeds: [FeedSourceSnapshot]
-    let articles: [ArticleMetadata]
+    /// Complete retained per-feed metadata and aliases for source-aware projection.
+    /// Persist and restore these states rather than reconstructing them from flattened rows.
+    let articleStates: [NewsSelection.State]
     let preferences: NewsPreferences
+
+    var articles: [ArticleMetadata] { articleStates.map(\.article) }
 }
 
 /// Stable, safe classifications; never store raw URLs, credentials, bodies or transport errors.
