@@ -240,6 +240,77 @@ final class ProjectManifestParserTests: XCTestCase {
         assertFeatureError("---\nschema_version: 2\nunknown: *alias\n---\n", .malformedYAML)
     }
 
+    func testFeatureLocationsAreParserGuidedUTF8ByteOffsets() throws {
+        let raw = "---\r\n# status: ignored\r\nid: real\r\ntitle: 東京 🧭\r\n'note': {status: nested}\r\n'status': 'ready' # status: comment\r\npriority: high\r\neffort: medium\r\ncompleted_at: null # preserve\r\n---\r\n# status: Markdown\r\nstatus: body\r\n"
+        let document = featureSource(raw)
+        let locations = try parser.featureFrontmatterLocations(document)
+        let bytes = [UInt8](document.bytes)
+        func slice(_ range: Range<Int>?) -> String? {
+            range.map { String(decoding: bytes[$0], as: UTF8.self) }
+        }
+        XCTAssertTrue(locations.isBlockMapping)
+        XCTAssertEqual(slice(locations.yamlRange), raw.components(separatedBy: "---\r\n")[1]) // YAML starts after opening CRLF.
+        XCTAssertEqual(slice(locations.closingDelimiterRange), "---")
+        XCTAssertEqual(Set(locations.topLevel.keys), ["id", "title", "note", "status", "priority", "effort", "completed_at"])
+        XCTAssertEqual(slice(locations.topLevel["status"]?.keyRange), "'status'")
+        XCTAssertEqual(slice(locations.topLevel["status"]?.valueRange), "'ready'")
+        XCTAssertEqual(slice(locations.topLevel["completed_at"]?.valueRange), "null")
+        XCTAssertNil(locations.topLevel["note"]?.valueRange) // Nested mapping is not a scalar.
+        XCTAssertLessThan(locations.topLevel["status"]!.valueRange!.upperBound, locations.closingDelimiterRange.lowerBound)
+        XCTAssertEqual(bytes[locations.yamlRange.lowerBound], UInt8(ascii: "#"))
+    }
+
+    func testBlockNestedStatusDoesNotShadowRootScalar() throws {
+        let raw = "---\nid: x\ntitle: 🌙\nunknown:\n  status: nested\nstatus: \"active\" # keep\npriority: high\neffort: small\n---\nstatus: Markdown\n"
+        let locations = try parser.featureFrontmatterLocations(featureSource(raw))
+        XCTAssertEqual(locations.topLevel.keys.filter { $0 == "status" }.count, 1)
+        let bytes = [UInt8](raw.utf8)
+        XCTAssertEqual(String(decoding: bytes[locations.topLevel["status"]!.valueRange!], as: UTF8.self), "\"active\"")
+        XCTAssertNil(locations.topLevel["unknown"]?.valueRange)
+        XCTAssertEqual(String(decoding: bytes[locations.closingDelimiterRange], as: UTF8.self), "---")
+    }
+
+    func testDetachedMutationContractCarriesExactRevisionAndRelativePath() {
+        let source = featureSource("---\nid: x\ntitle: X\nstatus: ready\npriority: high\neffort: small\n---")
+        let reference = ProjectReferenceSnapshot(id: UUID(), manifestID: "project", bookmarkData: Data([1, 2]),
+                                                 displayOrder: 0, displayNameHint: "Demo", lastSuccessfulReadAt: nil,
+                                                 revision: UUID())
+        let request = FeatureCompletionRequest(reference: reference, featureID: "x", source: source,
+                                               completedAt: Date(timeIntervalSince1970: 0))
+        let completed = featureSource("---\nid: x\ntitle: X\nstatus: completed\npriority: high\neffort: small\ncompleted_at: \"1970-01-01T00:00:00Z\"\n---")
+        let inverse = FeatureInversePatch(relativePath: source.relativePath, originalSHA256: source.sha256,
+                                          completedSHA256: completed.sha256,
+                                          edits: [FeatureInverseEdit(completedRange: 5..<14,
+                                                                     originalBytes: Data("ready".utf8))])
+        let receipt = FeatureMutationReceipt(projectID: reference.id, featureID: request.featureID,
+                                             verifiedSource: completed, inverse: inverse)
+        let undo = FeatureUndoRequest(reference: reference, receipt: receipt)
+        XCTAssertEqual(request.source.bytes, source.bytes)
+        XCTAssertEqual(undo.receipt.inverse.originalSHA256, source.sha256)
+        XCTAssertEqual(undo.receipt.verifiedSource.bytes, completed.bytes)
+        XCTAssertEqual(undo.receipt.verifiedSHA256, completed.sha256)
+        XCTAssertEqual(undo.receipt.verifiedSHA256, inverse.completedSHA256)
+        XCTAssertEqual(undo.receipt.relativePath, completed.relativePath)
+        XCTAssertEqual(undo.receipt.projectID, reference.id)
+    }
+
+    func testLocationsRetainReadOnlyValidationAndRejectUnsupportedSources() throws {
+        let valid = "---\nid: x\ntitle: X\nstatus: ready\npriority: high\neffort: small\n---"
+        let location = try parser.featureFrontmatterLocations(featureSource(valid))
+        XCTAssertEqual(location.closingDelimiterRange.upperBound, Data(valid.utf8).count)
+        XCTAssertEqual(location.topLevel["status"]?.valueRange.map {
+            String(decoding: Array(valid.utf8)[$0], as: UTF8.self)
+        }, "ready")
+        for raw in [valid.replacingOccurrences(of: "status: ready", with: "status: ready\nstatus: ready"),
+                    valid.replacingOccurrences(of: "status: ready", with: "status: *alias"),
+                    valid.replacingOccurrences(of: "status: ready", with: "status: wrong"),
+                    valid.replacingOccurrences(of: "id: x", with: "schema_version: 2\nid: x")] {
+            XCTAssertThrowsError(try parser.featureFrontmatterLocations(featureSource(raw)))
+        }
+        let invalid = ProjectSourceDocument(relativePath: ".kontrol/features/x.md", bytes: Data([0xff]))
+        XCTAssertThrowsError(try parser.featureFrontmatterLocations(invalid))
+    }
+
     func testRoadmapOrderStatusesAndInvalidMilestones() throws {
         let path = ".kontrol/roadmap.yaml"
         let valid = source("schema_version: 1\nmilestones:\n  - id: second\n    title: Étape\n    status: custom-state\n  - id: first\n    title: Start\n    status: active\n", path: path)

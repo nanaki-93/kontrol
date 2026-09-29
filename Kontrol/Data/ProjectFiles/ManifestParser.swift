@@ -17,7 +17,135 @@ struct ProjectParseError: Error, Equatable {
     let field: String
 }
 
+/// Byte offsets are in the *complete* source document, not YAML character indices.
+/// A nil value range denotes a collection (or an implicit empty scalar); the patcher
+/// must establish patchability before using a location as a replacement target.
+struct FeatureScalarLocation: Equatable {
+    let keyRange: Range<Int>
+    let valueRange: Range<Int>?
+}
+
+struct FeatureFrontmatterLocations: Equatable {
+    let yamlRange: Range<Int>
+    let closingDelimiterRange: Range<Int>
+    let isBlockMapping: Bool
+    let topLevel: [String: FeatureScalarLocation]
+}
+
 struct ManifestParser {
+    /// Share the existing feature validation before exposing parser-event locations.
+    /// Events, not text matching, identify root mapping keys; nested keys, comments and
+    /// Markdown cannot become replacement sites. Unsafe/unsupported documents fail closed.
+    func featureFrontmatterLocations(_ source: ProjectSourceDocument) throws -> FeatureFrontmatterLocations {
+        guard case .supported = try feature(source) else {
+            throw failure(.unsupportedVersion, "schema_version", source)
+        }
+        let bytes = [UInt8](source.bytes)
+        let start = bytes[3] == 0x0d ? 5 : 4
+        var cursor = start
+        var closing: Int?
+        while cursor < bytes.count {
+            let lineStart = cursor
+            while cursor < bytes.count && bytes[cursor] != 0x0a { cursor += 1 }
+            let end = cursor > lineStart && bytes[cursor - 1] == 0x0d ? cursor - 1 : cursor
+            if bytes[lineStart..<end].elementsEqual([0x2d, 0x2d, 0x2d]) {
+                closing = lineStart
+                break
+            }
+            if cursor < bytes.count { cursor += 1 }
+        }
+        guard let closing else { throw failure(.invalidFrontmatter, "closing delimiter", source) }
+        let yamlBytes = Array(bytes[start..<closing])
+        // libyaml marks count Unicode scalar columns, not UTF-8 bytes. Build a checked
+        // line/column -> byte table, including CRLF as a single line break.
+        guard let yamlText = String(bytes: yamlBytes, encoding: .utf8) else {
+            throw failure(.invalidUTF8, "document", source)
+        }
+        var columns: [[Int]] = [[start]]
+        var offset = start
+        let scalars = Array(yamlText.unicodeScalars)
+        var index = 0
+        while index < scalars.count {
+            let scalar = scalars[index]
+            offset += String(scalar).utf8.count
+            if scalar == "\r" {
+                if index + 1 < scalars.count && scalars[index + 1] == "\n" {
+                    offset += 1
+                    index += 1
+                }
+                columns.append([offset])
+            } else if scalar == "\n" {
+                columns.append([offset])
+            } else {
+                columns[columns.count - 1].append(offset)
+            }
+            index += 1
+        }
+        func byteOffset(_ mark: yaml_mark_t) throws -> Int {
+            let line = Int(mark.line), column = Int(mark.column)
+            guard columns.indices.contains(line), columns[line].indices.contains(column) else {
+                throw failure(.invalidFrontmatter, "scalar location", source)
+            }
+            return columns[line][column]
+        }
+        var parser = yaml_parser_t()
+        guard yaml_parser_initialize(&parser) != 0 else { throw failure(.malformedYAML, "document", source) }
+        defer { yaml_parser_delete(&parser) }
+        var depth = 0
+        var pendingKey: (String, Range<Int>)?
+        var fields: [String: FeatureScalarLocation] = [:]
+        var block = false
+        try yamlBytes.withUnsafeBufferPointer { buffer in
+            yaml_parser_set_input_string(&parser, buffer.baseAddress, buffer.count)
+            while true {
+                var event = yaml_event_t()
+                guard yaml_parser_parse(&parser, &event) != 0 else {
+                    throw failure(.malformedYAML, "document", source)
+                }
+                defer { yaml_event_delete(&event) }
+                let type = event.type
+                switch type {
+                case YAML_MAPPING_START_EVENT:
+                    if depth == 0 { block = event.data.mapping_start.style == YAML_BLOCK_MAPPING_STYLE }
+                    if depth == 1, let (key, range) = pendingKey {
+                        fields[key] = FeatureScalarLocation(keyRange: range, valueRange: nil)
+                        pendingKey = nil
+                    }
+                    depth += 1
+                case YAML_SEQUENCE_START_EVENT:
+                    if depth == 1, let (key, range) = pendingKey {
+                        fields[key] = FeatureScalarLocation(keyRange: range, valueRange: nil)
+                        pendingKey = nil
+                    }
+                    depth += 1
+                case YAML_MAPPING_END_EVENT, YAML_SEQUENCE_END_EVENT:
+                    depth -= 1
+                case YAML_SCALAR_EVENT where depth == 1:
+                    let lower = try byteOffset(event.start_mark)
+                    let upper = try byteOffset(event.end_mark)
+                    guard lower <= upper, upper <= closing else {
+                        throw failure(.invalidFrontmatter, "scalar location", source)
+                    }
+                    if let (key, keyRange) = pendingKey {
+                        fields[key] = FeatureScalarLocation(keyRange: keyRange, valueRange: lower..<upper)
+                        pendingKey = nil
+                    } else {
+                        let value = event.data.scalar.value
+                        let length = Int(event.data.scalar.length)
+                        guard let value, let key = String(bytes: UnsafeBufferPointer(start: value, count: length), encoding: .utf8) else {
+                            throw failure(.invalidUTF8, "mapping key", source)
+                        }
+                        pendingKey = (key, lower..<upper)
+                    }
+                default: break
+                }
+                if type == YAML_STREAM_END_EVENT { break }
+            }
+        }
+        return FeatureFrontmatterLocations(yamlRange: start..<closing,
+                                           closingDelimiterRange: closing..<(closing + 3),
+                                           isBlockMapping: block, topLevel: fields)
+    }
     func project(_ source: ProjectSourceDocument) throws -> ProjectDocumentResult<ProjectManifest> {
         let fields = try mapping(source)
         let version = try schemaVersion(fields, source)
