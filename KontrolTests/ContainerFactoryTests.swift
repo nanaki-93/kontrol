@@ -4,6 +4,7 @@ import SQLite3
 import XCTest
 @testable import Kontrol
 
+@MainActor
 final class ContainerFactoryTests: XCTestCase {
     private let factory = ModelContainerFactory()
 
@@ -18,7 +19,7 @@ final class ContainerFactoryTests: XCTestCase {
         try ModelContext(container).fetch(FetchDescriptor<TaskItem>()).map(\.id)
     }
 
-    func testV5DiskMigratesAdditivelyAndV6EvidenceSurvivesReopen() throws {
+    func testV5DiskMigratesAdditivelyAndV6EvidenceSurvivesV7Reopen() throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let url = directory.appendingPathComponent("Kontrol.store")
@@ -40,6 +41,7 @@ final class ContainerFactoryTests: XCTestCase {
             let context = ModelContext(container)
             XCTAssertTrue(try context.fetch(FetchDescriptor<LessonTerminalRecord>()).isEmpty)
             XCTAssertTrue(try context.fetch(FetchDescriptor<CatalogMembership>()).isEmpty)
+            XCTAssertEqual(try SwiftDataAISettingsRepository(container: container).load(), .disabled)
             context.insert(try LessonTerminalRecord(metadata: LessonTerminalMetadata(
                 lessonID: "old", provenance: .legacyCompletedPartial, title: "Past",
                 topicID: nil, subtopicID: nil, contentVersion: 1, objectiveKey: nil,
@@ -53,6 +55,7 @@ final class ContainerFactoryTests: XCTestCase {
         try migrateAndWrite()
         let reopened = try factory.makeContainer(mode: .persistent(url))
         let context = ModelContext(reopened)
+        XCTAssertEqual(try SwiftDataAISettingsRepository(container: reopened).load(), .disabled)
         XCTAssertEqual(try context.fetch(FetchDescriptor<LessonTerminalRecord>()).count, 1)
         XCTAssertNil(try context.fetch(FetchDescriptor<LessonTerminalRecord>()).first?.metadata().topicID)
         XCTAssertEqual(try context.fetch(FetchDescriptor<CatalogMembership>()).first?.membership().topicIDs, ["go"])
@@ -70,6 +73,8 @@ final class ContainerFactoryTests: XCTestCase {
         try context.save()
         XCTAssertEqual(try taskIDs(in: first), [id])
         XCTAssertTrue(try taskIDs(in: second).isEmpty)
+        XCTAssertEqual(try SwiftDataAISettingsRepository(container: first).load(), .disabled)
+        XCTAssertEqual(try SwiftDataAISettingsRepository(container: second).load(), .disabled)
     }
 
     func testClosedDiskStoreReopensAtSameLocationButNotOtherDiskOrMemory() throws {

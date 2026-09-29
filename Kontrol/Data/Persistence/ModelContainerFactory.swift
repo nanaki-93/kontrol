@@ -12,7 +12,7 @@ struct ModelContainerFactory {
     }
 
     func makeContainer(mode: StoreMode) throws -> ModelContainer {
-        let schema = Schema(versionedSchema: KontrolSchemaV6.self)
+        let schema = Schema(versionedSchema: KontrolSchemaV7.self)
         let configuration: ModelConfiguration
         switch mode {
         case .inMemory:

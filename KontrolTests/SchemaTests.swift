@@ -8,21 +8,23 @@ final class SchemaTests: XCTestCase {
         try ModelContainerFactory().makeContainer(mode: .inMemory)
     }
 
-    func testReleasedIdentitiesRemainAndV6OnlyAddsEvidence() {
+    func testReleasedIdentitiesRemainAndV7OnlyAddsSettings() {
         XCTAssertEqual(KontrolSchemaV1.versionIdentifier, Schema.Version(1, 0, 0))
         XCTAssertEqual(KontrolSchemaV2.versionIdentifier, Schema.Version(2, 0, 0))
         XCTAssertEqual(KontrolSchemaV3.versionIdentifier, Schema.Version(3, 0, 0))
         XCTAssertEqual(KontrolSchemaV4.versionIdentifier, Schema.Version(4, 0, 0))
         XCTAssertEqual(KontrolSchemaV5.versionIdentifier, Schema.Version(5, 0, 0))
         XCTAssertEqual(KontrolSchemaV6.versionIdentifier, Schema.Version(6, 0, 0))
-        XCTAssertEqual(KontrolMigrationPlan.schemas.count, 6)
+        XCTAssertEqual(KontrolSchemaV7.versionIdentifier, Schema.Version(7, 0, 0))
+        XCTAssertEqual(KontrolMigrationPlan.schemas.count, 7)
         XCTAssertTrue(KontrolMigrationPlan.schemas[0] == KontrolSchemaV1.self)
         XCTAssertTrue(KontrolMigrationPlan.schemas[1] == KontrolSchemaV2.self)
         XCTAssertTrue(KontrolMigrationPlan.schemas[2] == KontrolSchemaV3.self)
         XCTAssertTrue(KontrolMigrationPlan.schemas[3] == KontrolSchemaV4.self)
         XCTAssertTrue(KontrolMigrationPlan.schemas[4] == KontrolSchemaV5.self)
         XCTAssertTrue(KontrolMigrationPlan.schemas[5] == KontrolSchemaV6.self)
-        XCTAssertEqual(KontrolMigrationPlan.stages.count, 5)
+        XCTAssertTrue(KontrolMigrationPlan.schemas[6] == KontrolSchemaV7.self)
+        XCTAssertEqual(KontrolMigrationPlan.stages.count, 6)
         let v1 = KontrolSchemaV1.models
         XCTAssertEqual(Set(v1.map { String(describing: $0) }),
                        Set(["TaskItem", "Topic", "Subtopic", "Concept",
@@ -61,6 +63,10 @@ final class SchemaTests: XCTestCase {
         for (original, retained) in zip(v5, v6) { XCTAssertTrue(original == retained) }
         XCTAssertTrue(v6.contains { $0 == LessonTerminalRecord.self })
         XCTAssertTrue(v6.contains { $0 == CatalogMembership.self })
+        let v7 = KontrolSchemaV7.models
+        XCTAssertEqual(v7.count, v6.count + 1)
+        for (original, retained) in zip(v6, v7) { XCTAssertTrue(original == retained) }
+        XCTAssertTrue(v7.last == AISettingsRecord.self)
     }
 
     func testEvidencePayloadValidationClassificationAndIdentity() throws {
