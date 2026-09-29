@@ -678,6 +678,71 @@ final class LessonExperiencePresentationTests: XCTestCase {
         }
     }
 
+    func testSavedUnslottedGeneratedResumeButtonOpensWithoutReplacingChoices() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataCatalogRepository(container: container)
+        _ = try repository.importIfNeeded(BundledCatalogLoader.load(from: Bundle.main))
+        let initial = try repository.loadSnapshot()
+        let lesson = try XCTUnwrap(initial.definitions.first { definition in
+            definition.topicID == "go" && !initial.slots.contains { $0.lessonID == definition.id }
+        })
+        let context = ModelContext(container)
+        let row = try XCTUnwrap(context.fetch(FetchDescriptor<LessonDefinition>()).first { $0.id == lesson.id })
+        row.source = "generated"
+        let attemptID = UUID()
+        context.insert(LessonProgress(lessonID: lesson.id, status: .started))
+        context.insert(LessonAttempt(id: attemptID, lessonID: lesson.id, contentVersion: lesson.contentVersion,
+            pinnedContentData: try PinnedLessonContent(definition: lesson).encoded()))
+        try context.save()
+        let graph = AppDependencies(container: container, catalogRepository: repository)
+        let store = graph.learningCatalogStore
+        store.loadIfNeeded()
+        let navigation = NavigationStore()
+        navigation.attachDrafts(graph.lessonDraftStore)
+        navigation.select(.learning)
+        try inspect(LearningView(store: store, navigation: navigation)) { elements, _ in
+            let resume = try XCTUnwrap(elements.first {
+                attribute($0, kAXIdentifierAttribute) as? String == "learning-restored-resume-\(lesson.id)"
+            })
+            XCTAssertEqual(AXUIElementPerformAction(resume, kAXPressAction as CFString), .success)
+            XCTAssertEqual(navigation.learningRoute, .detail(lesson.id))
+        }
+        XCTAssertEqual(try repository.loadSnapshot().slots, initial.slots)
+        XCTAssertEqual(try repository.loadLesson(lessonID: lesson.id).attempt?.id, attemptID)
+    }
+
+    func testOpenedGeneratedLessonShowsProviderModelAndAccuracyCaveatOffline() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataCatalogRepository(container: container)
+        _ = try repository.importIfNeeded(BundledCatalogLoader.load(from: Bundle.main))
+        let id = try XCTUnwrap(repository.loadSnapshot().slots.first?.lessonID)
+        let context = ModelContext(container)
+        let definition = try XCTUnwrap(context.fetch(FetchDescriptor<LessonDefinition>()).first { $0.id == id })
+        definition.source = "generated"
+        definition.provenance = "{\"provider\":\"openai\",\"requestedModel\":\"gpt-4o-2024-08-06\"}"
+        try context.save()
+        let graph = AppDependencies(container: container, catalogRepository: repository)
+        graph.learningCatalogStore.loadIfNeeded()
+        let opened = try graph.learningCatalogStore.openLesson(lessonID: id)
+        graph.lessonDraftStore.observe(opened.detail)
+        let navigation = NavigationStore()
+        navigation.attachDrafts(graph.lessonDraftStore)
+        try inspect(LessonExperienceView(lessonID: id, store: graph.learningCatalogStore,
+                                         drafts: graph.lessonDraftStore, navigation: navigation)) { elements, _ in
+            let label = try XCTUnwrap(elements.first {
+                attribute($0, kAXIdentifierAttribute) as? String == "lesson-generated-provenance"
+            })
+            let value = [kAXValueAttribute, kAXDescriptionAttribute]
+                .compactMap { attribute(label, $0) as? String }.joined(separator: " ")
+            XCTAssertTrue(value.contains("OpenAI · Model gpt-4o-2024-08-06"))
+            XCTAssertTrue(value.contains("not certified or mastery evidence"))
+            XCTAssertTrue(elements.contains {
+                attribute($0, kAXIdentifierAttribute) as? String == "lesson-response-\(id)"
+            })
+        }
+        XCTAssertFalse(graph.aiSettingsStore.presentation.enabled)
+    }
+
     func testFourFormatsShowStudiedSectionsAndLabeledResponseWithoutReferenceDisclosure() throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         let repository = SwiftDataCatalogRepository(container: container)

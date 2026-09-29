@@ -103,6 +103,7 @@ final class LessonExperienceStoreTests: XCTestCase {
         fail = false
         let receipt = try store.acceptGeneratedLesson(lesson, now: Date(timeIntervalSince1970: 40))
         XCTAssertNil(receipt.assignedSlot)
+        XCTAssertEqual(LessonGenerationSheet.successMessage(for: receipt), "Saved; current choices unchanged")
         XCTAssertEqual(publications.count, 1)
         XCTAssertEqual(store.state.snapshot, receipt.catalog)
         XCTAssertEqual(store.state.snapshot?.slots, choices)
@@ -118,6 +119,133 @@ final class LessonExperienceStoreTests: XCTestCase {
         XCTAssertEqual(publications.count, 1)
         XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<LessonDefinition>())
             .filter { $0.id == lesson.definition.id }.count, 1)
+        // A full topic does not need an assignment to open the committed ID.
+        let navigation = NavigationStore()
+        navigation.attachDrafts(drafts)
+        navigation.select(.learning)
+        fail = true
+        XCTAssertThrowsError(try LessonGenerationSheet.openAcceptedLesson(receipt, learning: store,
+                                                                            navigation: navigation))
+        XCTAssertEqual(navigation.learningRoute, .choices)
+        XCTAssertEqual(navigation.saveError, .persistenceFailure)
+        XCTAssertEqual(drafts.buffers[attempt.id]?.text, "  unfinished 🧪\n")
+        XCTAssertTrue(try XCTUnwrap(drafts.buffers[attempt.id]).isDirty)
+        XCTAssertNil(try repository.loadLesson(lessonID: receipt.lessonID).attempt)
+        fail = false
+        let stale = GeneratedLessonInsertionResult(lessonID: "generated.stale-id", assignedSlot: nil,
+            catalog: receipt.catalog, history: receipt.history, coverage: receipt.coverage)
+        XCTAssertThrowsError(try LessonGenerationSheet.openAcceptedLesson(stale, learning: store,
+                                                                            navigation: navigation)) {
+            XCTAssertEqual($0 as? LessonExperienceError, .staleSlot)
+        }
+        XCTAssertEqual(navigation.learningRoute, .choices)
+        XCTAssertNil(try repository.loadLesson(lessonID: receipt.lessonID).attempt)
+        try LessonGenerationSheet.openAcceptedLesson(receipt, learning: store, navigation: navigation)
+        XCTAssertEqual(navigation.learningRoute, .detail(receipt.lessonID))
+        XCTAssertEqual(store.state.snapshot?.slots, choices)
+        XCTAssertEqual(try repository.loadLesson(lessonID: opened.detail.id).attempt?.answerDraft,
+                       "  unfinished 🧪\n")
+        let generatedDetail = try repository.loadLesson(lessonID: receipt.lessonID)
+        XCTAssertEqual(generatedDetail.progress?.status, .started)
+        XCTAssertNotNil(generatedDetail.attempt?.pinnedContentData)
+        XCTAssertEqual(LearningView.restoredUnslotted(for: "go", in: try XCTUnwrap(store.state.snapshot))
+            .map(\.lessonID), [receipt.lessonID], "An unslotted started lesson remains resumable after closing")
+        // This is the action wired to Saved work's Resume button, not just the
+        // visibility predicate. A failed draft flush must keep both attempts intact.
+        navigation.backToChoices()
+        let generatedAttempt = try XCTUnwrap(generatedDetail.attempt)
+        drafts.observe(generatedDetail)
+        drafts.edit("unslotted answer 🧪", attemptID: generatedAttempt.id)
+        fail = true
+        XCTAssertThrowsError(try LearningView.open(receipt.lessonID, in: store, using: navigation)) {
+            XCTAssertEqual($0 as? LessonExperienceError, .persistenceFailure)
+        }
+        XCTAssertEqual(navigation.learningRoute, .choices)
+        XCTAssertTrue(try XCTUnwrap(drafts.buffers[generatedAttempt.id]).isDirty)
+        XCTAssertEqual(try repository.loadLesson(lessonID: receipt.lessonID).attempt?.answerDraft, "")
+        fail = false
+        XCTAssertThrowsError(try LearningView.open("generated.stale-id", in: store, using: navigation)) {
+            XCTAssertEqual($0 as? LessonExperienceError, .staleSlot)
+        }
+        XCTAssertEqual(navigation.learningRoute, .choices)
+        try LearningView.open(receipt.lessonID, in: store, using: navigation)
+        XCTAssertEqual(navigation.learningRoute, .detail(receipt.lessonID))
+        XCTAssertEqual(try repository.loadLesson(lessonID: receipt.lessonID).attempt?.id, generatedAttempt.id)
+        XCTAssertEqual(try repository.loadLesson(lessonID: receipt.lessonID).attempt?.answerDraft, "unslotted answer 🧪")
+        XCTAssertEqual(store.state.snapshot?.slots, choices)
+        XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).count, 3)
+        XCTAssertTrue(try XCTUnwrap(LessonExperienceView.generationLabel(for: lesson.definition))
+            .contains("OpenAI · Model gpt-4o-2024-08-06"))
+        let reopened = AppDependencies(container: container, catalogRepository: repository)
+        reopened.learningCatalogStore.loadIfNeeded()
+        let offline = try reopened.learningCatalogStore.loadDetail(lessonID: receipt.lessonID)
+        XCTAssertEqual(LessonExperienceView.studiedDefinition(offline, lessonID: receipt.lessonID), lesson.definition)
+        XCTAssertEqual(LearningView.restoredUnslotted(for: "go",
+            in: try XCTUnwrap(reopened.learningCatalogStore.state.snapshot)).map(\.lessonID), [receipt.lessonID])
+        XCTAssertFalse(reopened.aiSettingsStore.presentation.enabled)
+        let offlineNavigation = NavigationStore()
+        offlineNavigation.attachDrafts(reopened.lessonDraftStore)
+        try LearningView.open(receipt.lessonID, in: reopened.learningCatalogStore, using: offlineNavigation)
+        XCTAssertEqual(offlineNavigation.learningRoute, .detail(receipt.lessonID))
+        XCTAssertEqual(try repository.loadLesson(lessonID: receipt.lessonID).attempt?.id, generatedAttempt.id)
+    }
+
+    func testVacancyGeneratedReceiptOpensByStableIDWithoutStartingDuringInsertion() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataCatalogRepository(container: container)
+        _ = try repository.importIfNeeded(BundledCatalogLoader.load())
+        let source = try XCTUnwrap(repository.generationContext(topicID: "go").definitions.first {
+            $0.conceptIDs.contains("go.concurrency.cancel-work")
+        })
+        let writer = ModelContext(container)
+        let date = Date(timeIntervalSince1970: 20)
+        writer.insert(LessonProgress(lessonID: source.id, status: .completed, completedAt: date))
+        writer.insert(LessonAttempt(id: UUID(), lessonID: source.id, contentVersion: source.contentVersion,
+            completedAt: date, pinnedContentData: try PinnedLessonContent(definition: source).encoded()))
+        writer.insert(try LessonTerminalRecord(metadata: LessonTerminalMetadata(lessonID: source.id,
+            provenance: .studiedPin, title: source.title, topicID: source.topicID,
+            subtopicID: source.subtopicID, contentVersion: source.contentVersion,
+            objectiveKey: source.objectiveKey, conceptIDs: source.conceptIDs.sorted(),
+            normalizedContentHash: source.normalizedContentHash, format: source.format,
+            dismissalTimeDefinition: nil)))
+        try writer.save()
+        for index in 0..<8 {
+            let current = try repository.loadSnapshot().slots.filter { $0.topicID == "go" }
+            if current.count < 4 { break }
+            let slot = try XCTUnwrap(current.last)
+            _ = try repository.dismiss(lessonID: slot.lessonID, expectedSlot: slot,
+                                       now: Date(timeIntervalSince1970: 2_000_000_000 + Double(index)))
+        }
+        let before = try repository.loadSnapshot().slots
+        XCTAssertLessThan(before.filter { $0.topicID == "go" }.count, 4)
+        let graph = AppDependencies(container: container, catalogRepository: repository)
+        let store = graph.learningCatalogStore
+        store.loadIfNeeded()
+        let context = try repository.generationContext(topicID: "go")
+        let registry = try GenerationObjectivesLoader.load(catalog: context.catalog, membership: context.membership)
+        let request = try LessonGenerationRequestBuilder.make(selection: LessonGenerationSelection(topicID: "go",
+            objectiveKey: "expansion.go.concurrency.cancellation-race", format: "code",
+            difficulty: "intermediate"), operationID: UUID(), context: context, registry: registry)
+        let candidate = CandidateLesson(title: "Vacancy race", objectiveKey: request.objectiveKey,
+            objective: request.objective, topicID: request.topicID, subtopicID: request.subtopicID,
+            conceptIDs: request.conceptIDs, difficulty: request.difficulty, format: request.format,
+            estimatedMinutes: 20, prerequisiteConceptIDs: request.prerequisiteConceptIDs,
+            explanation: "Vacancy explanation", workedExample: "Vacancy example",
+            exercise: "Vacancy exercise", referenceAnswer: "Vacancy reference",
+            selfCheckCriteria: ["Check the race"])
+        let lesson = try GeneratedLessonValidator.validate(candidate, request: request, context: context,
+            registry: registry, requestedModel: "gpt-4o-2024-08-06", now: date)
+        let receipt = try store.acceptGeneratedLesson(lesson)
+        XCTAssertNotNil(receipt.assignedSlot)
+        XCTAssertEqual(LessonGenerationSheet.successMessage(for: receipt), "Added to choices")
+        XCTAssertEqual(try repository.loadSnapshot().slots.filter { $0.lessonID != receipt.lessonID }, before)
+        XCTAssertNil(try repository.loadLesson(lessonID: receipt.lessonID).attempt)
+        let navigation = NavigationStore()
+        navigation.attachDrafts(graph.lessonDraftStore)
+        try LessonGenerationSheet.openAcceptedLesson(receipt, learning: store, navigation: navigation)
+        XCTAssertEqual(navigation.learningRoute, .detail(receipt.lessonID))
+        XCTAssertEqual(try repository.loadLesson(lessonID: receipt.lessonID).progress?.status, .started)
+        XCTAssertNotNil(try repository.loadLesson(lessonID: receipt.lessonID).attempt)
     }
 
     func testExplicitChoiceEntryPinsOnceAndBrowsingRemainsReadOnly() throws {

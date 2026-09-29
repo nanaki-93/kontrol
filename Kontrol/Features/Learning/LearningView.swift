@@ -53,9 +53,10 @@ struct LearningView: View {
 
     static func restoredUnslotted(for topicID: String, in snapshot: LearningCatalogSnapshot) -> [LessonProgressSnapshot] {
         snapshot.progress.filter { progress in
-            progress.status == .started && progress.dismissedAt != nil &&
+            progress.status == .started &&
             !snapshot.slots.contains(where: { $0.lessonID == progress.lessonID }) &&
-            snapshot.definitions.contains(where: { $0.id == progress.lessonID && $0.topicID == topicID })
+            snapshot.definitions.contains(where: { $0.id == progress.lessonID && $0.topicID == topicID &&
+                (progress.dismissedAt != nil || $0.source == "generated") })
         }.sorted { $0.lessonID < $1.lessonID }
     }
 
@@ -164,7 +165,8 @@ struct LearningView: View {
                              set: { generationTopicID = $0?.id })) { topic in
             if let generation, let aiSettings, let generationRepository {
                 LessonGenerationSheet(topicID: topic.id, repository: generationRepository,
-                                      settings: aiSettings, generation: generation, navigation: navigation)
+                                      learning: store, settings: aiSettings, generation: generation,
+                                      navigation: navigation)
             } else {
                 Text("Generation is not configured in this preview.")
                     .padding(AppMetrics.space6)
@@ -253,6 +255,10 @@ struct LearningView: View {
                             VStack(alignment: .leading, spacing: AppMetrics.space2) {
                                 AppListRow(lesson.title,
                                            metadata: "\(lesson.format.capitalized) · \(lesson.difficulty.capitalized) · \(lesson.estimatedMinutes) min")
+                                if let label = LessonExperienceView.generationLabel(for: lesson) {
+                                    Text(label).appTypography(.metadata)
+                                        .foregroundStyle(AppColors.textSecondary)
+                                }
                                 Text(lesson.displayObjective)
                                     .appTypography(.body)
                                     .foregroundStyle(AppColors.textPrimary)
@@ -294,11 +300,11 @@ struct LearningView: View {
                         .clipShape(RoundedRectangle(cornerRadius: AppMetrics.smallRadius))
                     }
                 }
-                // Restored work can be started but unslotted when all four assignments
-                // remain valid. Keep it reachable without counting it as a fifth choice.
+                // Restored or explicitly opened generated work can be started but
+                // unslotted. Keep it reachable without counting it as a fifth choice.
                 let unslotted = Self.restoredUnslotted(for: selected.id, in: snapshot)
                 if !unslotted.isEmpty, let navigation {
-                    SectionHeader("Restored work")
+                    SectionHeader("Saved work")
                     ForEach(unslotted) { progress in
                         let title = snapshot.definitions.first { $0.id == progress.lessonID }?.title ?? progress.lessonID
                         Button("Resume \(title)") { open(progress.lessonID, using: navigation) }
@@ -332,21 +338,26 @@ struct LearningView: View {
         let id: String
     }
 
-    private func open(_ id: String, using navigation: NavigationStore) {
-        // Recheck the current committed slot before mutating a choice rendered earlier.
-        guard let snapshot = store.state.snapshot, store.state.isAuthoritative,
-              (snapshot.slots.contains(where: { $0.lessonID == id }) ||
-               snapshot.progress.contains(where: { $0.lessonID == id && $0.status == .started && $0.dismissedAt != nil })) else {
-            entryError = .staleSlot
-            return
+    /// Shared by choice Open and Saved work Resume. The same committed-state
+    /// check runs after the draft barrier, before starting or routing work.
+    static func open(_ id: String, in store: LearningCatalogStore,
+                     using navigation: NavigationStore) throws {
+        try navigation.openLesson(id: id) {
+            guard let snapshot = store.state.snapshot, store.state.isAuthoritative,
+                  let definition = snapshot.definitions.first(where: { $0.id == id }),
+                  (snapshot.slots.contains(where: { $0.lessonID == id }) ||
+                   snapshot.progress.contains(where: { $0.lessonID == id && $0.status == .started &&
+                       ($0.dismissedAt != nil || definition.source == "generated") })) else {
+                throw LessonExperienceError.staleSlot
+            }
+            return try store.openLesson(lessonID: id)
         }
-        // A failed draft barrier must not create an attempt or move the route.
-        guard navigation.flushForLifecycle() else { return }
+    }
+
+    private func open(_ id: String, using navigation: NavigationStore) {
         do {
-            let receipt = try store.openLesson(lessonID: id)
-            guard receipt.detail.id == id else { throw LessonExperienceError.invalidStoredData }
+            try Self.open(id, in: store, using: navigation)
             entryError = nil
-            navigation.enterLesson(id: id)
         } catch {
             entryError = (error as? LessonExperienceError) ?? .persistenceFailure
         }

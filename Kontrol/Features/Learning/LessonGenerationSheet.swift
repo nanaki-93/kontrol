@@ -26,6 +26,7 @@ struct GenerationSheetSubmission {
 struct LessonGenerationSheet: View {
     let topicID: String
     let repository: any CatalogRepository
+    @ObservedObject var learning: LearningCatalogStore
     @ObservedObject var settings: AISettingsStore
     @ObservedObject var generation: LessonGenerationStore
     var navigation: NavigationStore? = nil
@@ -40,9 +41,32 @@ struct LessonGenerationSheet: View {
     @State private var failure: LessonGenerationError?
     @State private var retryNotBefore: Date?
     @State private var result: GeneratedLessonInsertionResult?
+    @State private var openError: String?
     @State private var submission = GenerationSheetSubmission()
 
     private var running: Bool { submission.isRunning }
+
+    static func successMessage(for receipt: GeneratedLessonInsertionResult) -> String {
+        receipt.assignedSlot == nil ? "Saved; current choices unchanged" : "Added to choices"
+    }
+
+    /// Accept only the committed ID, including when it has no slot. A stale
+    /// projection or a failed draft flush must never start an attempt or route.
+    static func openAcceptedLesson(_ receipt: GeneratedLessonInsertionResult,
+                                   learning: LearningCatalogStore, navigation: NavigationStore) throws {
+        guard let accepted = receipt.catalog.definitions.first(where: { $0.id == receipt.lessonID }),
+              accepted.source == "generated" else { throw LessonExperienceError.staleSlot }
+        try navigation.openLesson(id: receipt.lessonID) {
+            guard learning.state.isAuthoritative,
+                  let current = learning.state.snapshot,
+                  current.definitions.first(where: { $0.id == receipt.lessonID }) == accepted,
+                  !current.progress.contains(where: { $0.lessonID == receipt.lessonID &&
+                      ($0.status == .completed || $0.status == .dismissed) }) else {
+                throw LessonExperienceError.staleSlot
+            }
+            return try learning.openLesson(lessonID: receipt.lessonID)
+        }
+    }
 
     static func available(_ context: LessonGenerationContext, registry: GenerationObjectives,
                           topicID: String) -> [GenerationObjective] {
@@ -143,9 +167,25 @@ struct LessonGenerationSheet: View {
                     Button("Cancel generation") { cancelSubmission() }
                         .accessibilityIdentifier("generation-cancel")
                 } else if let result {
-                    Text(result.assignedSlot == nil ? "Saved; current choices unchanged" : "Added to choices")
+                    Text(Self.successMessage(for: result))
                         .accessibilityIdentifier("generation-result")
-                    Text("Saved locally. Close to return to Learning.")
+                    Text("Saved locally. Opening starts your work; generation itself does not mark practice or certify accuracy.")
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let navigation {
+                        Button("Open lesson") {
+                            do {
+                                try Self.openAcceptedLesson(result, learning: learning, navigation: navigation)
+                                dismiss()
+                            } catch {
+                                openError = "Lesson could not be opened. Your unfinished work is retained. Retry after saving your draft or return to choices."
+                            }
+                        }
+                        .accessibilityIdentifier("generation-open")
+                    }
+                    if let openError {
+                        Text(openError).foregroundStyle(AppColors.error)
+                            .accessibilityIdentifier("generation-open-error")
+                    }
                 } else {
                     if let failure {
                         Text("Lesson not added").appTypography(.section).accessibilityAddTraits(.isHeader)
@@ -238,7 +278,9 @@ struct LessonGenerationSheet: View {
             catch { outcome = .failure(error) }
             guard submission.finish(submissionID) else { return }
             switch outcome {
-            case .success(let receipt): result = receipt
+            case .success(let receipt):
+                openError = nil
+                result = receipt
             case .failure(let error as LessonGenerationError) where error == .cancelled:
                 break // Dismissal is not a failure.
             case .failure(let error):

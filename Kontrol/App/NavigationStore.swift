@@ -84,6 +84,21 @@ final class NavigationStore: ObservableObject {
         transition(to: .lessonEntry(id))
     }
 
+    /// An explicit Open command may start work only after the draft barrier succeeds.
+    /// Route publication follows the committed attempt without a second, fallible flush.
+    func openLesson(id: String, perform: () throws -> LessonMutationResult) throws {
+        guard flushForLifecycle() else { throw saveError ?? .persistenceFailure }
+        let receipt = try perform()
+        guard receipt.detail.id == id, receipt.detail.progress?.status == .started,
+              receipt.detail.attempt?.lessonID == id, receipt.detail.attempt?.completedAt == nil else {
+            throw LessonExperienceError.staleSlot
+        }
+        pendingTransition = nil
+        let changesDestination = selectedDestination != .learning
+        location = Location(destination: .learning, route: .detail(id))
+        if changesDestination { preferences.savedDestination = AppDestination.learning.rawValue }
+    }
+
     func showLesson(id: String) {
         enterLesson(id: id)
     }

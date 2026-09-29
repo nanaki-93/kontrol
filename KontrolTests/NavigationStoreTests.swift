@@ -298,6 +298,44 @@ final class NavigationStoreTests: XCTestCase {
         XCTAssertEqual(try repository.loadLesson(lessonID: id).attempt?.answerDraft, "recover me")
     }
 
+    func testGuardedOpenNeverRoutesOnStaleIDOrFailedDraftFlush() throws {
+        enum Injected: Error { case save }
+        var fail = false
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataCatalogRepository(container: container, beforeSave: {
+            if fail { throw Injected.save }
+        })
+        _ = try repository.importIfNeeded(BundledCatalogLoader.load())
+        let graph = AppDependencies(container: container, catalogRepository: repository)
+        graph.learningCatalogStore.loadIfNeeded()
+        let id = try XCTUnwrap(graph.learningCatalogStore.state.snapshot?.slots.first?.lessonID)
+        let opened = try graph.learningCatalogStore.openLesson(lessonID: id)
+        let attempt = try XCTUnwrap(opened.detail.attempt)
+        graph.lessonDraftStore.observe(opened.detail)
+        graph.lessonDraftStore.edit("  keep 🧪\n", attemptID: attempt.id)
+        let navigation = NavigationStore(preferences: CountingPreferences())
+        navigation.attachDrafts(graph.lessonDraftStore)
+        var calls = 0
+        fail = true
+        XCTAssertThrowsError(try navigation.openLesson(id: "stale-id") {
+            calls += 1
+            return try graph.learningCatalogStore.openLesson(lessonID: "stale-id")
+        })
+        XCTAssertEqual(calls, 0)
+        XCTAssertEqual(navigation.learningRoute, .choices)
+        XCTAssertTrue(try XCTUnwrap(graph.lessonDraftStore.buffers[attempt.id]).isDirty)
+        fail = false
+        XCTAssertThrowsError(try navigation.openLesson(id: "stale-id") {
+            calls += 1
+            return try graph.learningCatalogStore.openLesson(lessonID: "stale-id")
+        })
+        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(navigation.learningRoute, .choices)
+        XCTAssertEqual(navigation.selectedDestination, .today)
+        XCTAssertEqual(try repository.loadLesson(lessonID: id).attempt?.answerDraft, "  keep 🧪\n")
+        XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).count, 1)
+    }
+
     func testUnknownValueFallsBackWithoutChangingPreferencesOrSwiftDataStore() throws {
         let (defaults, suite) = isolatedDefaults()
         defer { defaults.removePersistentDomain(forName: suite) }
