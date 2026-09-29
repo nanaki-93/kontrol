@@ -48,9 +48,9 @@ Each row links a function to an actual PNG mockup. SVG sources sit beside the PN
 | [F08](../features/F08-ai-expansion.md) | Disabled / no key; configuration, connection-test and removal failures | [Disabled / no key](../../.mockups/flows/f08-ai-expansion/01-disabled-no-key.html) · [Settings recovery](../../.mockups/flows/f08-ai-expansion/02-settings-recovery.html) |
 | [F08](../features/F08-ai-expansion.md) | Canonical scope, no objective, generating / cancel | [Scope / no objective](../../.mockups/flows/f08-ai-expansion/03-scope.html) · [Generating / cancel](../../.mockups/flows/f08-ai-expansion/04-generating.html) |
 | [F08](../features/F08-ai-expansion.md) | Committed vacancy vs full-slot save | [Saved outcomes](../../.mockups/flows/f08-ai-expansion/05-saved.html) |
-| [F09](../features/F09-local-projects.md) | Add a project folder | [M28 · Projects](M28-project-add.png) |
-| [F09](../features/F09-local-projects.md) | Read project details, roadmap, context and rules | [M29 · Kontrol](M29-project-details.png) |
-| [F09](../features/F09-local-projects.md) | Refresh, validate or reconnect | [M33 · Projects](M33-project-validation-access.png) |
+| [F09](../features/F09-local-projects.md) | Add a project folder | [M28 · Projects](M28-project-add.png) · [Add sequence and failure branch](../../.mockups/flows/f09-local-projects/index.html) |
+| [F09](../features/F09-local-projects.md) | Read project details, roadmap, context and rules | [M29 · Kontrol](M29-project-details.png) · [Partial details](../../.mockups/flows/f09-local-projects/04-partial.html) |
+| [F09](../features/F09-local-projects.md) | Refresh, validate or reconnect | [M33 · Projects](M33-project-validation-access.png) · [Unsupported source](../../.mockups/flows/f09-local-projects/05-unsupported.html) · [Reconnect mismatch](../../.mockups/flows/f09-local-projects/06-reconnect-mismatch.html) |
 | [F10](../features/F10-next-features.md) | Choose a project and next feature card | [M27 · Projects](M27-projects.png) |
 | [F10](../features/F10-next-features.md) | Read full feature details | [M30 · Learning history](M30-feature-detail.png) |
 | [F10](../features/F10-next-features.md) | No eligible features or all complete | [M34 · Kontrol](M34-project-empty-blocked.png) |
@@ -80,6 +80,10 @@ Each row links a function to an actual PNG mockup. SVG sources sit beside the PN
 ## F08 supplemental state boundaries
 
 [Open the F08 state map](../../.mockups/flows/f08-ai-expansion/index.html) for the Learning → explicit Generate → committed or unsaved branches, with Settings ↔ Learning cross-jumps. These static HTML references extend M25 (scope), M26 (failure), and M39 (Settings), not replace their approved compositions. Disabled/no-key and exhausted objectives cannot submit. Saving configuration and enabling AI do not submit; only an explicit Test connection uses the non-generating metadata endpoint. Cancel, local-save failure, timeout and rate limit do **not** save a lesson or move current choices. A committed vacancy adds one choice; a committed full-slot lesson is saved unslotted with guarded Open. Retry-After disables Retry until permitted and never schedules a request. Examples are illustrative; links preview states, not working provider calls or persistence. Interactive review, native accessibility and rendered comparisons remain **deferred to F13**, not approved.
+
+## F09 supplemental flow boundaries
+
+[Open the F09 state map](../../.mockups/flows/f09-local-projects/index.html) for empty versus loading, the folder-selection → inspection → explicit Add sequence, persistent navigation between saved folders, partial counts, unsupported read-only source, reconnect mismatch and failed Add. These standalone references supplement M28, M29 and M33; they do not replace the approved parent compositions. Refresh is for repaired content or inconsistent reads; Reconnect is for unavailable authorization; choose another folder in Add preview is reselection, not restoration; a failed bookmark/save does not create a row. Same-ID folders remain distinct by location. Sample names, paths and counts are illustrative, never production defaults. Created unattended as design references, **not interactive sign-off**. Native picker, signed sandbox, keyboard/VoiceOver, enlarged-text and rendered comparisons remain deferred to F13.
 
 ## All 44 visual states
 
