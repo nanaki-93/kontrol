@@ -6,6 +6,13 @@ struct FeatureFrontmatterPatcher {
     private let parser = ManifestParser()
 
     func complete(_ source: ProjectSourceDocument, featureID: String, at instant: Date) throws -> ProjectSourceDocument {
+        try completeWithInverse(source, featureID: featureID, at: instant).source
+    }
+
+    /// Capture lexical source slices before editing; ranges in the inverse refer to the
+    /// completed document, after all preceding edits have shifted their offsets.
+    func completeWithInverse(_ source: ProjectSourceDocument, featureID: String, at instant: Date) throws
+        -> (source: ProjectSourceDocument, inverse: FeatureInversePatch) {
         do {
             guard case let .supported(before) = try parser.feature(source),
                   before.id == featureID, before.status != .completed else {
@@ -61,9 +68,24 @@ struct FeatureFrontmatterPatcher {
                 edits.append((locations.closingDelimiterRange.lowerBound..<locations.closingDelimiterRange.lowerBound,
                               Array("completed_at: \(timestamp)\(newline)".utf8)))
             }
+            let ordered = edits.sorted { $0.0.lowerBound < $1.0.lowerBound }
+            var shift = 0
+            var previousEnd = 0
+            var inverseEdits: [FeatureInverseEdit] = []
+            for (range, replacement) in ordered {
+                guard range.lowerBound >= previousEnd, range.upperBound <= bytes.count,
+                      !replacement.isEmpty else {
+                    throw FeatureMutationFailure.unpatchableSource
+                }
+                let start = range.lowerBound + shift
+                inverseEdits.append(FeatureInverseEdit(completedRange: start..<(start + replacement.count),
+                                                       originalBytes: Data(bytes[range])))
+                shift += replacement.count - range.count
+                previousEnd = range.upperBound
+            }
             // Descending offsets keep all parser-derived ranges anchored to the original.
             var result = bytes
-            for (range, replacement) in edits.sorted(by: { $0.0.lowerBound > $1.0.lowerBound }) {
+            for (range, replacement) in ordered.reversed() {
                 result.replaceSubrange(range, with: replacement)
             }
             let patched = ProjectSourceDocument(relativePath: source.relativePath, bytes: Data(result))
@@ -76,9 +98,53 @@ struct FeatureFrontmatterPatcher {
                   after.sourcePath == before.sourcePath else {
                 throw FeatureMutationFailure.unpatchableSource
             }
-            return patched
+            return (patched, FeatureInversePatch(relativePath: source.relativePath,
+                                                 originalSHA256: source.sha256,
+                                                 completedSHA256: patched.sha256,
+                                                 edits: inverseEdits))
         } catch {
             // Parser errors and source fragments are not exposed across the mutation boundary.
+            throw FeatureMutationFailure.unpatchableSource
+        }
+    }
+
+    /// A revision guard prevents undo from overwriting any subsequent byte change.
+    /// The original digest and parser check also reject corrupted inverse payloads.
+    func restore(_ completed: ProjectSourceDocument, using inverse: FeatureInversePatch) throws -> ProjectSourceDocument {
+        guard completed.relativePath == inverse.relativePath,
+              completed.sha256 == inverse.completedSHA256 else {
+            throw FeatureMutationFailure.undoConflict
+        }
+        do {
+            guard case let .supported(before) = try parser.feature(completed), before.status == .completed else {
+                throw FeatureMutationFailure.unpatchableSource
+            }
+            var bytes = [UInt8](completed.bytes)
+            var previousEnd = 0
+            for edit in inverse.edits {
+                let range = edit.completedRange
+                guard range.lowerBound >= previousEnd, range.upperBound <= bytes.count,
+                      range.lowerBound < range.upperBound else {
+                    throw FeatureMutationFailure.unpatchableSource
+                }
+                previousEnd = range.upperBound
+            }
+            guard !inverse.edits.isEmpty else { throw FeatureMutationFailure.unpatchableSource }
+            for edit in inverse.edits.reversed() {
+                bytes.replaceSubrange(edit.completedRange, with: edit.originalBytes)
+            }
+            let restored = ProjectSourceDocument(relativePath: completed.relativePath, bytes: Data(bytes))
+            guard restored.sha256 == inverse.originalSHA256,
+                  case let .supported(after) = try parser.feature(restored),
+                  after.id == before.id, after.status != .completed,
+                  after.title == before.title, after.priority == before.priority,
+                  after.effort == before.effort, after.dependsOn == before.dependsOn,
+                  after.areas == before.areas, after.body == before.body,
+                  after.sourcePath == before.sourcePath else {
+                throw FeatureMutationFailure.unpatchableSource
+            }
+            return restored
+        } catch {
             throw FeatureMutationFailure.unpatchableSource
         }
     }

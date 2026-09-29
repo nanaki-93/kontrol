@@ -75,6 +75,40 @@ final class FeatureFrontmatterPatcherTests: XCTestCase {
         }
     }
 
+    func testInverseRestoresExactLexicalBytesForExistingAndInsertedDates() throws {
+        let cases = [
+            "---\nid: work\ntitle: 東京 🧭\nstatus: 'ready'  # leave\npriority: high\neffort: small\n---\n# status: planned\n",
+            "---\r\nid: work\r\ntitle: Café\r\n\"status\": \"active\" # note\r\npriority: low\r\neffort: medium\r\n'completed_at': '2024-02-29T10:00:00+02:00' # old\r\n---",
+            "---\nid: work\ntitle: X\nstatus: blocked\npriority: high\neffort: small\ncompleted_at: null  # old\n---",
+            "---\nid: work\ntitle: X\nstatus: ready\npriority: high\neffort: small\ncompleted_at:   # empty\n---",
+            "---\nid: work\ntitle: X\nstatus: ready\npriority: high\neffort: small\ncompleted_at:\n---",
+            "---\nid: work\ntitle: X\nstatus: ready\npriority: high\neffort: small\ncompleted_at: ~\n---"
+        ]
+        for input in cases {
+            let original = document(input)
+            let (completed, inverse) = try patcher.completeWithInverse(original, featureID: "work", at: instant)
+            XCTAssertEqual(inverse.originalSHA256, original.sha256)
+            XCTAssertEqual(inverse.completedSHA256, completed.sha256)
+            XCTAssertEqual(inverse.relativePath, path)
+            XCTAssertEqual(try patcher.restore(completed, using: inverse).bytes, original.bytes, input)
+            XCTAssertEqual(original.bytes, Data(input.utf8))
+        }
+    }
+
+    func testInverseRefusesChangedRevisionOrPathWithoutProducingBytes() throws {
+        let original = document("---\nid: work\ntitle: X\nstatus: 'planned'\npriority: high\neffort: small\n---")
+        let (completed, inverse) = try patcher.completeWithInverse(original, featureID: "work", at: instant)
+        let edited = ProjectSourceDocument(relativePath: path, bytes: completed.bytes + Data("\nexternal edit".utf8))
+        XCTAssertThrowsError(try patcher.restore(edited, using: inverse)) {
+            XCTAssertEqual($0 as? FeatureMutationFailure, .undoConflict)
+        }
+        let moved = ProjectSourceDocument(relativePath: ".kontrol/features/moved.md", bytes: completed.bytes)
+        XCTAssertThrowsError(try patcher.restore(moved, using: inverse)) {
+            XCTAssertEqual($0 as? FeatureMutationFailure, .undoConflict)
+        }
+        XCTAssertEqual(try patcher.restore(completed, using: inverse).bytes, original.bytes)
+    }
+
     func testUnsafeInputsReturnNoOutput() throws {
         let base = "---\nid: work\ntitle: X\nstatus: ready\npriority: high\neffort: small\n---\n"
         let invalid = [
