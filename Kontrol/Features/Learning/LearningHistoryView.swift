@@ -45,6 +45,7 @@ struct LearningHistoryView: View {
     static func matchedDetail(_ entry: LessonHistorySnapshot?, state: LessonDetailReadState) -> LessonDetailSnapshot? {
         guard let entry, case .current(let detail) = state,
               detail.id == entry.lessonID, detail.progress?.status == entry.status,
+              (entry.status == .completed ? detail.progress?.completedAt : detail.progress?.dismissedAt) == entry.date,
               detail.attempt == entry.attempt else { return nil }
         if entry.attempt == nil, entry.status == .dismissed {
             // Detail may preview a newer installed definition. Only the archive
@@ -60,7 +61,35 @@ struct LearningHistoryView: View {
     }
 
     static func canRestore(_ entry: LessonHistorySnapshot?, detail: LessonDetailSnapshot?) -> Bool {
-        entry?.status == .dismissed && detail?.id == entry?.lessonID && detail?.progress?.status == .dismissed
+        guard let entry, let detail else { return false }
+        return entry.status == .dismissed && detail.id == entry.lessonID &&
+            detail.progress?.status == .dismissed && detail.progress?.dismissedAt == entry.date &&
+            detail.attempt == entry.attempt
+    }
+
+    /// Only archived evidence can supply sections. A current definition is never
+    /// studied history; the sole permitted current-shaped value is an exact
+    /// dismissal-time reference retained in terminal metadata.
+    enum ArchivedDisplay: Equatable {
+        case studied(LessonDefinitionSnapshot)
+        case legacyCompleted(KontrolSchemaV1.LessonContentSnapshot)
+        case reference(LessonDefinitionSnapshot, recovered: Bool)
+        case unavailable
+    }
+
+    static func archivedDisplay(_ entry: LessonHistorySnapshot) -> ArchivedDisplay {
+        switch entry.content {
+        case .pinned(let pin) where entry.attempt != nil:
+            return .studied(pin)
+        case .legacyCompleted(let snapshot) where entry.status == .completed && entry.attempt != nil:
+            return .legacyCompleted(snapshot)
+        case .current(let definition) where entry.status == .dismissed && entry.attempt == nil &&
+            (entry.provenance == .dismissalReference || entry.provenance == .legacyRecoveredReference) &&
+            entry.metadata?.dismissalTimeDefinition == definition:
+            return .reference(definition, recovered: entry.provenance == .legacyRecoveredReference)
+        default:
+            return .unavailable
+        }
     }
 
     var body: some View {
@@ -340,26 +369,40 @@ struct LearningHistoryView: View {
                 Text("Dismissed before study. No studied version was archived.")
                     .appTypography(.body)
                     .accessibilityIdentifier("learning-history-before-study")
-            } else {
-            switch entry.content {
-            case .pinned(let studied):
-                archivedSections(explanation: studied.explanation, example: studied.workedExample,
-                                 exercise: studied.exercise, reference: studied.referenceAnswer,
-                                 criteria: studied.selfCheckCriteria)
-                Text("Studied version \(studied.contentVersion)").appTypography(.metadata)
-            case .legacyCompleted(let studied):
-                archivedSections(explanation: studied.explanation, example: studied.workedExample,
-                                 exercise: studied.exercise, reference: studied.referenceAnswer,
-                                 criteria: studied.selfCheckCriteria)
-                Text("Saved completed snapshot").appTypography(.metadata)
-            case .current:
-                Text("Archived content unavailable. Current catalog content is not substituted.")
+            }
+            if let version = entry.contentVersion {
+                Text("Content version \(version)")
+                    .appTypography(.metadata)
+                    .accessibilityIdentifier("learning-history-content-version")
+            }
+            switch Self.archivedDisplay(entry) {
+            case .studied(let studied):
+                Text(entry.status == .completed ? "Studied content · completed" : "Studied content · dismissed after starting")
                     .appTypography(.body)
+                    .accessibilityIdentifier("learning-history-studied")
+                archivedSections(explanation: studied.explanation, example: studied.workedExample,
+                                 exercise: studied.exercise, reference: studied.referenceAnswer,
+                                 criteria: studied.selfCheckCriteria)
+            case .legacyCompleted(let studied):
+                Text("Legacy completed snapshot · saved sections only. Topic and other missing historical metadata are unavailable; current catalog content is not substituted.")
+                    .appTypography(.body)
+                    .accessibilityIdentifier("learning-history-legacy-partial")
+                archivedSections(explanation: studied.explanation, example: studied.workedExample,
+                                 exercise: studied.exercise, reference: studied.referenceAnswer,
+                                 criteria: studied.selfCheckCriteria)
+            case .reference(let reference, let recovered):
+                Text(recovered
+                     ? "Legacy recovered reference · retained definition at recovery, not proof of the original dismissal version. Not studied content."
+                     : "Dismissal-time reference · not studied content.")
+                    .appTypography(.body)
+                    .accessibilityIdentifier(recovered ? "learning-history-legacy-reference" : "learning-history-dismissal-reference")
+                archivedSections(explanation: reference.explanation, example: reference.workedExample,
+                                 exercise: reference.exercise, reference: reference.referenceAnswer,
+                                 criteria: reference.selfCheckCriteria)
             case .unavailable:
-                Text("Archived content unavailable. Current catalog content is not substituted.")
+                Text("Historical content unavailable. Current catalog content is not substituted.")
                     .appTypography(.body)
                     .accessibilityIdentifier("learning-history-content-unavailable")
-            }
             }
             if let attempt = detail.attempt {
                 SectionHeader("Saved answer")
@@ -408,13 +451,24 @@ struct LearningHistoryView: View {
     }
 
     private func restore(_ entry: LessonHistorySnapshot) {
-        guard Self.canRestore(Self.entry(entry.lessonID, in: store.historyState),
-                              detail: Self.matchedDetail(entry, state: store.detailState)) else {
+        guard case .current(let rows) = store.historyState,
+              case .success(let groups) = selection(for: rows),
+              Self.visibleEntry(entry.lessonID, in: store.historyState, groups: groups) == entry,
+              Self.canRestore(entry, detail: Self.matchedDetail(entry, state: store.detailState)) else {
             actionError = .invalidTransition
             return
         }
         guard navigation.flushForLifecycle() else {
             actionError = navigation.saveError ?? .persistenceFailure
+            return
+        }
+        // The flush may publish a newer projection. Never apply a captured row's
+        // action to a changed or filtered-out terminal record.
+        guard case .current(let refreshed) = store.historyState,
+              case .success(let groups) = selection(for: refreshed),
+              Self.visibleEntry(entry.lessonID, in: store.historyState, groups: groups) == entry,
+              Self.canRestore(entry, detail: Self.matchedDetail(entry, state: store.detailState)) else {
+            actionError = .invalidTransition
             return
         }
         do {

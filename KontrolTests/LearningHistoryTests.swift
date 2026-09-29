@@ -51,6 +51,8 @@ final class LearningHistoryTests: XCTestCase {
             XCTAssertNotNil(archived.first?.topicID)
             XCTAssertEqual(archived.first?.provenance, .dismissalPin)
             XCTAssertEqual(archived.last?.provenance, .studiedPin)
+            XCTAssertEqual(LearningHistoryView.archivedDisplay(try XCTUnwrap(archived.last)),
+                           .studied(try XCTUnwrap(baseline.definitions.first { $0.id == last })))
             XCTAssertEqual(archived.last?.contentVersion, archived.last?.attempt?.contentVersion)
             XCTAssertEqual(archived.last?.metadata?.conceptIDs,
                            baseline.definitions.first { $0.id == last }?.conceptIDs.sorted())
@@ -274,6 +276,11 @@ final class LearningHistoryTests: XCTestCase {
         XCTAssertEqual(entry.attempt?.answerDraft, "  archived 🧪\n")
         XCTAssertNil(LearningHistoryView.matchedDetail(entry, state: .current(
             try repository.loadLesson(lessonID: secondSlot.lessonID))))
+        var changedDate = try repository.loadLesson(lessonID: firstSlot.lessonID)
+        changedDate = LessonDetailSnapshot(id: changedDate.id,
+            progress: LessonProgressSnapshot(lessonID: firstSlot.lessonID, status: .dismissed,
+                dismissedAt: first), attempt: changedDate.attempt, content: changedDate.content)
+        XCTAssertNil(LearningHistoryView.matchedDetail(entry, state: .current(changedDate)))
         let detail = try store.loadDetail(lessonID: firstSlot.lessonID)
         XCTAssertEqual(LearningHistoryView.matchedDetail(entry, state: store.detailState), detail)
         XCTAssertTrue(LearningHistoryView.canRestore(entry, detail: detail))
@@ -286,6 +293,22 @@ final class LearningHistoryTests: XCTestCase {
             return XCTFail("Expected dismissal-time reference, not studied content")
         }
         XCTAssertEqual(reference.id, secondSlot.lessonID)
+        XCTAssertEqual(LearningHistoryView.archivedDisplay(beforeStudy), .reference(reference, recovered: false))
+        let upgraded = LessonHistorySnapshot(lessonID: beforeStudy.lessonID, status: beforeStudy.status,
+            date: beforeStudy.date, title: beforeStudy.title, topicID: beforeStudy.topicID,
+            contentVersion: beforeStudy.contentVersion, provenance: beforeStudy.provenance,
+            metadata: beforeStudy.metadata, content: .current(try XCTUnwrap(original.definitions.first {
+                $0.id != secondSlot.lessonID
+            })), attempt: nil)
+        XCTAssertEqual(LearningHistoryView.archivedDisplay(upgraded), .unavailable)
+        let recovered = LessonHistorySnapshot(lessonID: beforeStudy.lessonID, status: .dismissed,
+            date: beforeStudy.date, title: beforeStudy.title, topicID: beforeStudy.topicID,
+            contentVersion: beforeStudy.contentVersion, provenance: .legacyRecoveredReference,
+            metadata: beforeStudy.metadata, content: beforeStudy.content, attempt: nil)
+        XCTAssertEqual(LearningHistoryView.archivedDisplay(recovered), .reference(reference, recovered: true))
+        let missing = LessonHistorySnapshot(lessonID: beforeStudy.lessonID, status: .dismissed,
+            date: beforeStudy.date, title: beforeStudy.title, topicID: nil, content: .unavailable, attempt: nil)
+        XCTAssertEqual(LearningHistoryView.archivedDisplay(missing), .unavailable)
         let unstudied = try store.loadDetail(lessonID: secondSlot.lessonID)
         XCTAssertNotNil(LearningHistoryView.matchedDetail(beforeStudy, state: .current(unstudied)))
         XCTAssertNil(unstudied.attempt)
@@ -433,6 +456,8 @@ final class LearningHistoryTests: XCTestCase {
             return XCTFail("Expected legacy completed snapshot")
         }
         XCTAssertEqual(archived.selfCheckCriteria, ["Archived design rubric", "Saved second criterion"])
+        XCTAssertEqual(LearningHistoryView.archivedDisplay(try XCTUnwrap(writer.loadHistory().first)),
+                       .legacyCompleted(studied))
         XCTAssertThrowsError(try writer.restoreDismissed(lessonID: slot.lessonID, now: later)) {
             XCTAssertEqual($0 as? LessonExperienceError, .invalidTransition)
         }

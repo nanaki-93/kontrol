@@ -65,6 +65,7 @@ final class LessonExperiencePresentationTests: XCTestCase {
             RunLoop.main.run(until: Date().addingTimeInterval(0.1))
             let selected = currentElements()
             XCTAssertTrue(selected.contains { attribute($0, kAXIdentifierAttribute) as? String == "learning-history-answer" })
+            XCTAssertTrue(selected.contains { attribute($0, kAXIdentifierAttribute) as? String == "learning-history-studied" })
             XCTAssertTrue(selected.contains { attribute($0, kAXIdentifierAttribute) as? String == "learning-history-exercise" })
             guard case .pinned(let studied) = try repository.loadLesson(lessonID: slot.lessonID).content else {
                 return XCTFail("Missing dismissed study")
@@ -84,6 +85,89 @@ final class LessonExperiencePresentationTests: XCTestCase {
             XCTAssertFalse(currentElements().contains {
                 attribute($0, kAXIdentifierAttribute) as? String == "learning-history-row-\(slot.lessonID)"
             })
+        }
+    }
+
+    func testPreStudyDismissalShowsOnlyArchivedReferenceAfterUpgrade() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataCatalogRepository(container: container)
+        _ = try repository.importIfNeeded(BundledCatalogLoader.load(from: Bundle.main))
+        let graph = AppDependencies(container: container, catalogRepository: repository)
+        let store = graph.learningCatalogStore
+        store.loadIfNeeded()
+        let slot = try XCTUnwrap(store.state.snapshot?.slots.first)
+        let archived = try XCTUnwrap(store.state.snapshot?.definitions.first { $0.id == slot.lessonID })
+        _ = try store.dismiss(lessonID: slot.lessonID, expectedSlot: slot)
+        let context = ModelContext(container)
+        let installed = try XCTUnwrap(context.fetch(FetchDescriptor<LessonDefinition>()).first { $0.id == slot.lessonID })
+        installed.exercise = "New installed exercise"
+        installed.contentVersion += 1
+        try context.save()
+        try inspect(LearningHistoryView(store: store, navigation: NavigationStore())) { elements, currentElements in
+            let row = try XCTUnwrap(elements.first {
+                attribute($0, kAXIdentifierAttribute) as? String == "learning-history-row-\(slot.lessonID)"
+            })
+            XCTAssertEqual(AXUIElementPerformAction(row, kAXPressAction as CFString), .success)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+            let detail = currentElements()
+            let ids = detail.compactMap { attribute($0, kAXIdentifierAttribute) as? String }
+            let values = detail.compactMap { attribute($0, kAXValueAttribute) as? String }.joined(separator: "\n")
+            XCTAssertTrue(ids.contains("learning-history-dismissal-reference"))
+            XCTAssertTrue(ids.contains("learning-history-before-study"))
+            XCTAssertTrue(ids.contains("learning-history-content-version"))
+            XCTAssertFalse(ids.contains("learning-history-answer"))
+            XCTAssertFalse(ids.contains("learning-history-studied"))
+            XCTAssertTrue(values.contains(archived.exercise))
+            XCTAssertFalse(values.contains("New installed exercise"))
+            XCTAssertTrue(ids.contains("learning-history-restore-\(slot.lessonID)"))
+        }
+    }
+
+    func testFailedDraftFlushBlocksHistoryRestoreWithoutLosingAnswerOrFilters() throws {
+        enum Injected: Error { case save }
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        var fail = false
+        let repository = SwiftDataCatalogRepository(container: container, beforeSave: {
+            if fail { throw Injected.save }
+        })
+        _ = try repository.importIfNeeded(BundledCatalogLoader.load(from: Bundle.main))
+        let graph = AppDependencies(container: container, catalogRepository: repository)
+        let store = graph.learningCatalogStore
+        store.loadIfNeeded()
+        let slots = try XCTUnwrap(store.state.snapshot).slots
+        let dismissed = try XCTUnwrap(slots.first)
+        let other = try XCTUnwrap(slots.first { $0.lessonID != dismissed.lessonID })
+        _ = try store.dismiss(lessonID: dismissed.lessonID, expectedSlot: dismissed)
+        let opened = try store.openLesson(lessonID: other.lessonID)
+        let attempt = try XCTUnwrap(opened.detail.attempt)
+        let drafts = graph.lessonDraftStore
+        drafts.observe(opened.detail)
+        drafts.edit("  unsaved answer 🧪\n", attemptID: attempt.id)
+        fail = true // also block any debounce save while the hosted window is settling
+        let navigation = NavigationStore()
+        navigation.attachDrafts(drafts)
+        let filter = LearningHistoryFilters(status: .dismissed)
+        try inspect(LearningHistoryView(store: store, navigation: navigation, initialFilters: filter)) { elements, currentElements in
+            let row = try XCTUnwrap(elements.first {
+                attribute($0, kAXIdentifierAttribute) as? String == "learning-history-row-\(dismissed.lessonID)"
+            })
+            XCTAssertEqual(AXUIElementPerformAction(row, kAXPressAction as CFString), .success)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+            let restore = try XCTUnwrap(currentElements().first {
+                attribute($0, kAXIdentifierAttribute) as? String == "learning-history-restore-\(dismissed.lessonID)"
+            })
+            XCTAssertEqual(AXUIElementPerformAction(restore, kAXPressAction as CFString), .success)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+            let ids = currentElements().compactMap { attribute($0, kAXIdentifierAttribute) as? String }
+            XCTAssertTrue(ids.contains("learning-history-action-error"))
+            XCTAssertTrue(ids.contains("learning-history-row-\(dismissed.lessonID)"))
+            XCTAssertTrue(ids.contains("learning-history-status-filter"))
+            XCTAssertEqual(try repository.loadLesson(lessonID: dismissed.lessonID).progress?.status, .dismissed)
+            XCTAssertEqual(drafts.buffers[attempt.id]?.text, "  unsaved answer 🧪\n")
+            fail = false
+            XCTAssertTrue(navigation.flushForLifecycle())
+            XCTAssertEqual(try repository.loadLesson(lessonID: other.lessonID).attempt?.answerDraft,
+                           "  unsaved answer 🧪\n")
         }
     }
 
@@ -198,6 +282,8 @@ final class LessonExperiencePresentationTests: XCTestCase {
             RunLoop.main.run(until: Date().addingTimeInterval(0.1))
             let details = currentElements()
             let values = details.compactMap { attribute($0, kAXValueAttribute) as? String }.joined(separator: "\n")
+            XCTAssertTrue(details.contains { attribute($0, kAXIdentifierAttribute) as? String == "learning-history-studied" })
+            XCTAssertTrue(details.contains { attribute($0, kAXIdentifierAttribute) as? String == "learning-history-content-version" })
             XCTAssertTrue(values.contains(studied.exercise))
             XCTAssertFalse(values.contains("New installed exercise"))
             for criterion in studied.selfCheckCriteria { XCTAssertTrue(values.contains(criterion)) }
@@ -236,6 +322,7 @@ final class LessonExperiencePresentationTests: XCTestCase {
             RunLoop.main.run(until: Date().addingTimeInterval(0.1))
             let details = currentElements()
             let values = details.compactMap { attribute($0, kAXValueAttribute) as? String }.joined(separator: "\n")
+            XCTAssertTrue(details.contains { attribute($0, kAXIdentifierAttribute) as? String == "learning-history-legacy-partial" })
             XCTAssertTrue(values.contains(saved.exercise))
             for criterion in saved.selfCheckCriteria { XCTAssertTrue(values.contains(criterion)) }
             XCTAssertEqual(details.filter { attribute($0, kAXIdentifierAttribute) as? String == "learning-history-criterion" }.count,
