@@ -25,6 +25,9 @@ struct FeatureInversePatch: Equatable {
 
 struct FeatureMutationReceipt {
     let projectID: UUID
+    /// Opaque authorization used for this write. Unlike reference.revision, this stays
+    /// unchanged across successful-read metadata updates; keep it session-local.
+    let grantBookmarkData: Data
     let featureID: String
     /// Exact bytes reread from the destination after replacement, not the intended output.
     /// Session-local only; never persist the source or inverse patch in app storage.

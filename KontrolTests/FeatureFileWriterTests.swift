@@ -290,6 +290,182 @@ final class FeatureFileWriterTests: XCTestCase {
         }
         XCTAssertEqual(grant.starts, grant.stops)
     }
+    func testUndoRestoresLexicalBytesPermissionsAndLeavesNoArtifact() async throws {
+        let (root, grant, ref, source) = try fixture()
+        let target = root.appendingPathComponent(source.relativePath)
+        let originalWithDate = Data(original.replacingOccurrences(of: "unknown: retained",
+            with: "completed_at: null # preserve\nunknown: retained").utf8)
+        try originalWithDate.write(to: target)
+        XCTAssertEqual(chmod(target.path, 0o640), 0)
+        let inspected = ProjectSourceDocument(relativePath: source.relativePath, bytes: originalWithDate)
+        let service = writer(grant)
+        let completion = try await service.complete(request(ref, inspected))
+        let undo = try await service.undo(FeatureUndoRequest(reference: ref, receipt: completion))
+        XCTAssertEqual(undo.verifiedSource.bytes, originalWithDate)
+        XCTAssertEqual(undo.verifiedSHA256, inspected.sha256)
+        XCTAssertEqual(try Data(contentsOf: target), originalWithDate)
+        XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: target.path)[.posixPermissions] as? NSNumber, 0o640)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: target.deletingLastPathComponent().path), ["feature.md"])
+        XCTAssertEqual(grant.starts, 2)
+        XCTAssertEqual(grant.stops, 2)
+    }
+    func testUndoExternalEditConflictsBeforeCreatingTemporaryFile() async throws {
+        let (root, grant, ref, source) = try fixture()
+        let service = writer(grant)
+        let receipt = try await service.complete(request(ref, source))
+        let target = root.appendingPathComponent(source.relativePath)
+        let external = Data(String(decoding: receipt.verifiedSource.bytes, as: UTF8.self)
+            .replacingOccurrences(of: "unknown: retained", with: "unknown: external").utf8)
+        try external.write(to: target)
+        let io = IO()
+        io.failCreate = true // Digest mismatch must precede even an attempted temp creation.
+        await assertFailure(.undoConflict) {
+            _ = try await writer(grant, io: io).undo(FeatureUndoRequest(reference: ref, receipt: receipt))
+        }
+        XCTAssertEqual(try Data(contentsOf: target), external)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: target.deletingLastPathComponent().path), ["feature.md"])
+    }
+    func testUndoIdentityAuthorizationAndCoordinatorGuards() async throws {
+        let (root, grant, ref, source) = try fixture()
+        let receipt = try await writer(grant).complete(request(ref, source))
+        let target = root.appendingPathComponent(source.relativePath)
+        let otherRef = ProjectReferenceSnapshot(id: UUID(), manifestID: ref.manifestID,
+            bookmarkData: ref.bookmarkData, displayOrder: 0, displayNameHint: "Other",
+            lastSuccessfulReadAt: nil, revision: UUID())
+        await assertFailure(.changedIdentity) {
+            _ = try await writer(grant).undo(FeatureUndoRequest(reference: otherRef, receipt: receipt))
+        }
+        await assertFailure(.unsafePath) {
+            _ = try await writer(grant, coordinator: Coordinator(relocate: true))
+                .undo(FeatureUndoRequest(reference: ref, receipt: receipt))
+        }
+        grant.stale = true
+        await assertFailure(.accessDenied) {
+            _ = try await writer(grant).undo(FeatureUndoRequest(reference: ref, receipt: receipt))
+        }
+        grant.stale = false
+        let manifest = root.appendingPathComponent(".kontrol/project.yaml")
+        try Data("schema_version: 1\nid: other\nname: Other\n".utf8).write(to: manifest)
+        await assertFailure(.manifestMismatch) {
+            _ = try await writer(grant).undo(FeatureUndoRequest(reference: ref, receipt: receipt))
+        }
+        XCTAssertEqual(try Data(contentsOf: target), receipt.verifiedSource.bytes)
+    }
+    func testUndoRejectsReplacementGrantEvenWhenManifestAndFeatureBytesMatch() async throws {
+        let (_, originalGrant, ref, source) = try fixture()
+        let completion = try await writer(originalGrant).complete(request(ref, source))
+        XCTAssertEqual(completion.grantBookmarkData, ref.bookmarkData)
+
+        let (otherRoot, replacementGrant, _, _) = try fixture()
+        let otherTarget = otherRoot.appendingPathComponent(source.relativePath)
+        // A new folder has the same manifest ID and the exact completed revision.
+        try completion.verifiedSource.bytes.write(to: otherTarget)
+        let replacement = ProjectReferenceSnapshot(id: ref.id, manifestID: ref.manifestID,
+            bookmarkData: Data([2]), displayOrder: ref.displayOrder, displayNameHint: ref.displayNameHint,
+            lastSuccessfulReadAt: ref.lastSuccessfulReadAt, revision: UUID())
+        await assertFailure(.changedIdentity) {
+            _ = try await writer(replacementGrant).undo(FeatureUndoRequest(reference: replacement, receipt: completion))
+        }
+        XCTAssertEqual(replacementGrant.starts, 0) // Refuse before resolving or entering the new grant.
+        XCTAssertEqual(try Data(contentsOf: otherTarget), completion.verifiedSource.bytes)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: otherTarget.deletingLastPathComponent().path), ["feature.md"])
+
+        // Recording a successful read changes only metadata revision, not authorization.
+        let refreshed = ProjectReferenceSnapshot(id: ref.id, manifestID: ref.manifestID,
+            bookmarkData: ref.bookmarkData, displayOrder: ref.displayOrder, displayNameHint: ref.displayNameHint,
+            lastSuccessfulReadAt: Date(), revision: UUID())
+        let restored = try await writer(originalGrant).undo(FeatureUndoRequest(reference: refreshed, receipt: completion))
+        XCTAssertEqual(restored.verifiedSource.bytes, source.bytes)
+    }
+    func testUndoInjectedFailuresAndRacesNeverReturnSuccessfulReceipt() async throws {
+        for failure in ["create", "write", "flush", "replace", "race", "verify"] {
+            let (root, grant, ref, source) = try fixture()
+            let receipt = try await writer(grant).complete(request(ref, source))
+            let target = root.appendingPathComponent(source.relativePath)
+            let io = IO()
+            switch failure {
+            case "create": io.failCreate = true
+            case "write": io.failWrite = true; io.shortWrite = true
+            case "flush": io.failFlush = true
+            case "replace": io.failReplace = true
+            case "race": io.before = { try? Data("external editor\n".utf8).write(to: target) }
+            default: io.verify = { try? Data("external editor\n".utf8).write(to: target) }
+            }
+            let expected: FeatureMutationFailure
+            switch failure {
+            case "create": expected = .temporaryFileFailed
+            case "write": expected = .temporaryWriteFailed
+            case "flush": expected = .flushFailed
+            case "race": expected = .changedIdentity
+            default: expected = .unverifiedWrite
+            }
+            await assertFailure(expected) {
+                _ = try await writer(grant, io: io).undo(FeatureUndoRequest(reference: ref, receipt: receipt))
+            }
+            XCTAssertEqual(try Data(contentsOf: target),
+                           ["race", "verify"].contains(failure) ? Data("external editor\n".utf8) : receipt.verifiedSource.bytes)
+            XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: target.deletingLastPathComponent().path), ["feature.md"])
+            XCTAssertEqual(grant.starts, grant.stops)
+        }
+    }
+    func testUndoUnsafeTargetAndLateDirectorySubstitutionNeverWriteOutsideRoot() async throws {
+        let (root, grant, ref, source) = try fixture()
+        let receipt = try await writer(grant).complete(request(ref, source))
+        let target = root.appendingPathComponent(source.relativePath)
+        let outside = root.appendingPathComponent("outside.md")
+        try receipt.verifiedSource.bytes.write(to: outside)
+        try FileManager.default.removeItem(at: target)
+        try FileManager.default.createSymbolicLink(at: target, withDestinationURL: outside)
+        await assertFailure(.unsafePath) {
+            _ = try await writer(grant).undo(FeatureUndoRequest(reference: ref, receipt: receipt))
+        }
+        XCTAssertEqual(try Data(contentsOf: outside), receipt.verifiedSource.bytes)
+        try FileManager.default.removeItem(at: target)
+        try receipt.verifiedSource.bytes.write(to: target)
+        let features = target.deletingLastPathComponent()
+        let moved = root.appendingPathComponent("moved")
+        let io = IO()
+        io.before = {
+            try? FileManager.default.moveItem(at: features, to: moved)
+            try? FileManager.default.createSymbolicLink(at: features, withDestinationURL: moved)
+        }
+        await assertFailure(.changedIdentity) {
+            _ = try await writer(grant, io: io).undo(FeatureUndoRequest(reference: ref, receipt: receipt))
+        }
+        XCTAssertEqual(try Data(contentsOf: moved.appendingPathComponent("feature.md")), receipt.verifiedSource.bytes)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: moved.path), ["feature.md"])
+    }
+    func testUndoCanceledBeforeCommitAndAfterCommitVerification() async throws {
+        let (root, grant, ref, source) = try fixture()
+        let receipt = try await writer(grant).complete(request(ref, source))
+        let target = root.appendingPathComponent(source.relativePath)
+        let io = IO()
+        let operation = Task {
+            await assertFailure(.canceled) {
+                _ = try await writer(grant, io: io).undo(FeatureUndoRequest(reference: ref, receipt: receipt))
+            }
+        }
+        io.before = { operation.cancel() }
+        await operation.value
+        XCTAssertEqual(try Data(contentsOf: target), receipt.verifiedSource.bytes)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: target.deletingLastPathComponent().path), ["feature.md"])
+        let io2 = IO()
+        let committed = Task { try await writer(grant, io: io2).undo(FeatureUndoRequest(reference: ref, receipt: receipt)) }
+        io2.verify = { committed.cancel() }
+        let undo = try await committed.value
+        XCTAssertEqual(undo.verifiedSource.bytes, source.bytes)
+        XCTAssertEqual(try Data(contentsOf: target), source.bytes)
+    }
+    func testUndoCoordinatorFailureAfterReplacementIsNotVerified() async throws {
+        let (root, grant, ref, source) = try fixture()
+        let receipt = try await writer(grant).complete(request(ref, source))
+        await assertFailure(.unverifiedWrite) {
+            _ = try await writer(grant, coordinator: Coordinator(failAfterBody: true))
+                .undo(FeatureUndoRequest(reference: ref, receipt: receipt))
+        }
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(source.relativePath)), source.bytes)
+        XCTAssertEqual(grant.starts, grant.stops)
+    }
     func testRevokedGrantAndSubstitutionBeforeReplace() async throws {
         let (root, grant, ref, source) = try fixture()
         grant.stale = true

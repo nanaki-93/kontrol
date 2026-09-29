@@ -73,18 +73,39 @@ struct FeatureFileWriter: FeatureFileWriting {
     }
 
     func complete(_ request: FeatureCompletionRequest) async throws -> FeatureMutationReceipt {
+        try await mutate(reference: request.reference, featureID: request.featureID,
+                         expected: request.source, inverse: nil, completedAt: request.completedAt)
+    }
+
+    func undo(_ request: FeatureUndoRequest) async throws -> FeatureMutationReceipt {
+        let receipt = request.receipt
+        guard receipt.projectID == request.reference.id,
+              receipt.grantBookmarkData == request.reference.bookmarkData,
+              receipt.relativePath == receipt.inverse.relativePath,
+              receipt.verifiedSHA256 == receipt.inverse.completedSHA256 else {
+            throw FeatureMutationFailure.changedIdentity
+        }
+        return try await mutate(reference: request.reference, featureID: receipt.featureID,
+                                expected: receipt.verifiedSource, inverse: receipt.inverse, completedAt: nil)
+    }
+
+    private func mutate(reference: ProjectReferenceSnapshot, featureID: String,
+                        expected: ProjectSourceDocument, inverse: FeatureInversePatch?,
+                        completedAt: Date?) async throws -> FeatureMutationReceipt {
         do {
-            let name = try Self.filename(request.source.relativePath)
-            return try await access.withMutationBookmark(request.reference.bookmarkData) { root in
+            let name = try Self.filename(expected.relativePath)
+            return try await access.withMutationBookmark(reference.bookmarkData) { root in
                 try Task.checkCancellation()
-                let target = root.appendingPathComponent(request.source.relativePath)
+                let target = root.appendingPathComponent(expected.relativePath)
                 var replacementBegan = false
                 do {
                     return try coordinator.coordinate(target) { coordinated in
                         guard coordinated.standardizedFileURL == target.standardizedFileURL else {
                             throw FeatureMutationFailure.unsafePath
                         }
-                        return try completeAnchored(root, name: name, request: request) {
+                        return try mutateAnchored(root, name: name, reference: reference,
+                                                  featureID: featureID, expected: expected,
+                                                  inverse: inverse, completedAt: completedAt) {
                             replacementBegan = true
                         }
                     }
@@ -92,8 +113,7 @@ struct FeatureFileWriter: FeatureFileWriting {
                     // A coordinator that fails after the accessor has entered replacement
                     // cannot turn an ambiguous outcome into a pre-commit error.
                     throw replacementBegan ? FeatureMutationFailure.unverifiedWrite : failure
-                }
-                  catch is CancellationError {
+                } catch is CancellationError {
                     if replacementBegan { throw FeatureMutationFailure.unverifiedWrite }
                     throw CancellationError()
                 } catch {
@@ -101,15 +121,9 @@ struct FeatureFileWriter: FeatureFileWriting {
                 }
             }
         } catch let failure as FeatureMutationFailure { throw failure }
-          catch is ProjectFolderAccessError {
-            throw FeatureMutationFailure.accessDenied
-        } catch is CancellationError { throw FeatureMutationFailure.canceled }
+          catch is ProjectFolderAccessError { throw FeatureMutationFailure.accessDenied }
+          catch is CancellationError { throw FeatureMutationFailure.canceled }
           catch { throw FeatureMutationFailure.writeFailed }
-    }
-
-    // Undo is implemented in Step 2.4; no revision-unsafe fallback is permitted.
-    func undo(_ request: FeatureUndoRequest) async throws -> FeatureMutationReceipt {
-        throw FeatureMutationFailure.unpatchableSource
     }
 
     private static func filename(_ path: String) throws -> String {
@@ -190,9 +204,10 @@ struct FeatureFileWriter: FeatureFileWriting {
         guard output.count == Int(size) else { throw FeatureMutationFailure.changedIdentity }
         return output
     }
-    private func completeAnchored(_ folder: URL, name: String,
-                                  request: FeatureCompletionRequest,
-                                  replacementBegan: () -> Void) throws -> FeatureMutationReceipt {
+    private func mutateAnchored(_ folder: URL, name: String,
+                                reference: ProjectReferenceSnapshot, featureID: String,
+                                expected: ProjectSourceDocument, inverse: FeatureInversePatch?,
+                                completedAt: Date?, replacementBegan: () -> Void) throws -> FeatureMutationReceipt {
         try Task.checkCancellation()
         let root = open(folder.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard root >= 0 else { throw FeatureMutationFailure.unsafePath }
@@ -212,7 +227,7 @@ struct FeatureFileWriter: FeatureFileWriting {
         }
         let manifestSource = ProjectSourceDocument(relativePath: ".kontrol/project.yaml", bytes: manifestBytes)
         guard case let .supported(project) = try? parser.project(manifestSource),
-              project.schemaVersion == 1, project.id == request.reference.manifestID else {
+              project.schemaVersion == 1, project.id == reference.manifestID else {
             throw FeatureMutationFailure.manifestMismatch
         }
         let (target, originalID) = try regular(features, name)
@@ -221,17 +236,30 @@ struct FeatureFileWriter: FeatureFileWriting {
         guard try info(target) == originalID, entry(features, name, originalID) else {
             throw FeatureMutationFailure.changedIdentity
         }
-        let current = ProjectSourceDocument(relativePath: request.source.relativePath, bytes: originalBytes)
-        guard current.sha256 == request.source.sha256, current.bytes == request.source.bytes else {
-            throw FeatureMutationFailure.conflict
+        let current = ProjectSourceDocument(relativePath: expected.relativePath, bytes: originalBytes)
+        // This comparison is inside coordination, before any replacement artifact is created.
+        guard current.sha256 == expected.sha256, current.bytes == expected.bytes else {
+            throw inverse == nil ? FeatureMutationFailure.conflict : .undoConflict
         }
         guard case let .supported(feature) = try? parser.feature(current) else {
             throw FeatureMutationFailure.unpatchableSource
         }
-        guard feature.id == request.featureID else { throw FeatureMutationFailure.changedIdentity }
-        guard feature.status != .completed else { throw FeatureMutationFailure.unpatchableSource }
-        let patched = try patcher.completeWithInverse(current, featureID: request.featureID, at: request.completedAt)
-        guard patched.source.bytes.count <= ProjectFileReader.fileLimit else {
+        guard feature.id == featureID else { throw FeatureMutationFailure.changedIdentity }
+        let output: ProjectSourceDocument
+        let receiptInverse: FeatureInversePatch
+        if let inverse {
+            guard feature.status == .completed else { throw FeatureMutationFailure.unpatchableSource }
+            output = try patcher.restore(current, using: inverse)
+            receiptInverse = inverse
+        } else {
+            guard feature.status != .completed, let completedAt else {
+                throw FeatureMutationFailure.unpatchableSource
+            }
+            let patched = try patcher.completeWithInverse(current, featureID: featureID, at: completedAt)
+            output = patched.source
+            receiptInverse = patched.inverse
+        }
+        guard output.bytes.count <= ProjectFileReader.fileLimit else {
             throw FeatureMutationFailure.unpatchableSource
         }
         let temporary = ".kontrol-write-\(UUID().uuidString).tmp"
@@ -254,7 +282,7 @@ struct FeatureFileWriter: FeatureFileWriting {
               fchmod(temp, originalID.mode & 0o7777) == 0 else {
             throw FeatureMutationFailure.writeFailed
         }
-        try patched.source.bytes.withUnsafeBytes { raw in
+        try output.bytes.withUnsafeBytes { raw in
             guard let base = raw.baseAddress else { throw FeatureMutationFailure.writeFailed }
             var offset = 0
             while offset < raw.count {
@@ -295,7 +323,7 @@ struct FeatureFileWriter: FeatureFileWriting {
         guard lseek(target, 0, SEEK_SET) == 0,
               try bytes(target, originalID.size) == originalBytes,
               try info(target) == originalID, entry(features, name, originalID) else {
-            throw FeatureMutationFailure.conflict
+            throw inverse == nil ? FeatureMutationFailure.conflict : .undoConflict
         }
         try Task.checkCancellation()
         replacementBegan()
@@ -319,16 +347,17 @@ struct FeatureFileWriter: FeatureFileWriting {
             defer { close(destination) }
             let written = try bytesAfterCommit(destination, destID.size)
             guard try info(destination) == destID, entry(features, name, destID),
-                  written == patched.source.bytes,
+                  written == output.bytes,
                   case let .supported(verified) = try parser.feature(
                     ProjectSourceDocument(relativePath: current.relativePath, bytes: written)),
-                  verified.id == request.featureID, verified.status == .completed else {
+                  verified.id == featureID,
+                  (inverse == nil ? verified.status == .completed : verified.status != .completed) else {
                 throw FeatureMutationFailure.unverifiedWrite
             }
             guard replaced else { throw FeatureMutationFailure.unverifiedWrite }
             let source = ProjectSourceDocument(relativePath: current.relativePath, bytes: written)
-            return FeatureMutationReceipt(projectID: request.reference.id, featureID: request.featureID,
-                                          verifiedSource: source, inverse: patched.inverse)
+            return FeatureMutationReceipt(projectID: reference.id, grantBookmarkData: reference.bookmarkData,
+                                          featureID: featureID, verifiedSource: source, inverse: receiptInverse)
         } catch { throw FeatureMutationFailure.unverifiedWrite }
     }
     private func sameFileEntry(_ parent: Int32, _ name: String, _ expected: Identity) -> Bool {

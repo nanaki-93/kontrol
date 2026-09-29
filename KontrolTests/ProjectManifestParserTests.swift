@@ -282,8 +282,8 @@ final class ProjectManifestParserTests: XCTestCase {
                                           completedSHA256: completed.sha256,
                                           edits: [FeatureInverseEdit(completedRange: 5..<14,
                                                                      originalBytes: Data("ready".utf8))])
-        let receipt = FeatureMutationReceipt(projectID: reference.id, featureID: request.featureID,
-                                             verifiedSource: completed, inverse: inverse)
+        let receipt = FeatureMutationReceipt(projectID: reference.id, grantBookmarkData: reference.bookmarkData,
+                                             featureID: request.featureID, verifiedSource: completed, inverse: inverse)
         let undo = FeatureUndoRequest(reference: reference, receipt: receipt)
         XCTAssertEqual(request.source.bytes, source.bytes)
         XCTAssertEqual(undo.receipt.inverse.originalSHA256, source.sha256)
@@ -292,6 +292,7 @@ final class ProjectManifestParserTests: XCTestCase {
         XCTAssertEqual(undo.receipt.verifiedSHA256, inverse.completedSHA256)
         XCTAssertEqual(undo.receipt.relativePath, completed.relativePath)
         XCTAssertEqual(undo.receipt.projectID, reference.id)
+        XCTAssertEqual(undo.receipt.grantBookmarkData, reference.bookmarkData)
     }
 
     func testLocationsRetainReadOnlyValidationAndRejectUnsupportedSources() throws {
