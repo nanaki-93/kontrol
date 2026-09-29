@@ -8,7 +8,7 @@ final class SchemaTests: XCTestCase {
         try ModelContainerFactory().makeContainer(mode: .inMemory)
     }
 
-    func testReleasedIdentitiesRemainAndV8OnlyAddsProjectReferences() {
+    func testReleasedIdentitiesRemainAndV9OnlyAddsNewsRecords() {
         XCTAssertEqual(KontrolSchemaV1.versionIdentifier, Schema.Version(1, 0, 0))
         XCTAssertEqual(KontrolSchemaV2.versionIdentifier, Schema.Version(2, 0, 0))
         XCTAssertEqual(KontrolSchemaV3.versionIdentifier, Schema.Version(3, 0, 0))
@@ -17,7 +17,8 @@ final class SchemaTests: XCTestCase {
         XCTAssertEqual(KontrolSchemaV6.versionIdentifier, Schema.Version(6, 0, 0))
         XCTAssertEqual(KontrolSchemaV7.versionIdentifier, Schema.Version(7, 0, 0))
         XCTAssertEqual(KontrolSchemaV8.versionIdentifier, Schema.Version(8, 0, 0))
-        XCTAssertEqual(KontrolMigrationPlan.schemas.count, 8)
+        XCTAssertEqual(KontrolSchemaV9.versionIdentifier, Schema.Version(9, 0, 0))
+        XCTAssertEqual(KontrolMigrationPlan.schemas.count, 9)
         XCTAssertTrue(KontrolMigrationPlan.schemas[0] == KontrolSchemaV1.self)
         XCTAssertTrue(KontrolMigrationPlan.schemas[1] == KontrolSchemaV2.self)
         XCTAssertTrue(KontrolMigrationPlan.schemas[2] == KontrolSchemaV3.self)
@@ -26,7 +27,8 @@ final class SchemaTests: XCTestCase {
         XCTAssertTrue(KontrolMigrationPlan.schemas[5] == KontrolSchemaV6.self)
         XCTAssertTrue(KontrolMigrationPlan.schemas[6] == KontrolSchemaV7.self)
         XCTAssertTrue(KontrolMigrationPlan.schemas[7] == KontrolSchemaV8.self)
-        XCTAssertEqual(KontrolMigrationPlan.stages.count, 7)
+        XCTAssertTrue(KontrolMigrationPlan.schemas[8] == KontrolSchemaV9.self)
+        XCTAssertEqual(KontrolMigrationPlan.stages.count, 8)
         let v1 = KontrolSchemaV1.models
         XCTAssertEqual(Set(v1.map { String(describing: $0) }),
                        Set(["TaskItem", "Topic", "Subtopic", "Concept",
@@ -73,6 +75,41 @@ final class SchemaTests: XCTestCase {
         XCTAssertEqual(v8.count, v7.count + 1)
         for (original, retained) in zip(v7, v8) { XCTAssertTrue(original == retained) }
         XCTAssertTrue(v8.last == ProjectReference.self)
+        let v9 = KontrolSchemaV9.models
+        XCTAssertEqual(v9.count, v8.count + 3)
+        for (original, retained) in zip(v8, v9) { XCTAssertTrue(original == retained) }
+        XCTAssertTrue(v9[v8.count] == NewsPreferencesRecord.self)
+        XCTAssertTrue(v9[v8.count + 1] == NewsFeedRecord.self)
+        XCTAssertTrue(v9[v8.count + 2] == NewsArticleRecord.self)
+    }
+
+    func testNewsAssociationPayloadsAreVersionedBoundedAndSurviveReopen() throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let topics = try NewsRecordPayload.encodeTopics(["go", "security"])
+        let feedID = UUID()
+        let sources = try NewsRecordPayload.encodeContributions([
+            .init(feedID: feedID, feedName: "Source", topicIDs: ["go"], guids: ["guid-1"])
+        ])
+        context.insert(NewsPreferencesRecord(catalogVersion: 1, selectedTopicIDsPayload: topics))
+        context.insert(NewsFeedRecord(id: feedID, name: "Source", endpoint: "https://example.com/rss",
+                                      topicIDsPayload: topics))
+        context.insert(NewsArticleRecord(url: "https://example.com/a", canonicalURL: "https://example.com/a",
+                                         title: "Title", firstFetchedAt: Date(timeIntervalSince1970: 100),
+                                         provenancePayload: sources))
+        try context.save()
+        let read = ModelContext(container)
+        XCTAssertEqual(try NewsRecordPayload.topics(XCTUnwrap(read.fetch(FetchDescriptor<NewsPreferencesRecord>()).first).selectedTopicIDsPayload), ["go", "security"])
+        XCTAssertEqual(try NewsRecordPayload.topics(XCTUnwrap(read.fetch(FetchDescriptor<NewsFeedRecord>()).first).topicIDsPayload), ["go", "security"])
+        XCTAssertEqual(try NewsRecordPayload.contributions(XCTUnwrap(read.fetch(FetchDescriptor<NewsArticleRecord>()).first).provenancePayload).first?.feedID, feedID)
+        XCTAssertThrowsError(try NewsRecordPayload.encodeTopics(["go", "go"]))
+        XCTAssertThrowsError(try NewsRecordPayload.encodeContributions([]))
+        XCTAssertThrowsError(try NewsRecordPayload.topics(Data(#"{"version":2,"value":[]}"#.utf8))) {
+            XCTAssertEqual($0 as? NewsRecordPayload.Error, .unsupportedVersion)
+        }
+        XCTAssertThrowsError(try NewsRecordPayload.contributions(Data(repeating: 0, count: 1_200_001))) {
+            XCTAssertEqual($0 as? NewsRecordPayload.Error, .oversized)
+        }
     }
 
     func testEvidencePayloadValidationClassificationAndIdentity() throws {
