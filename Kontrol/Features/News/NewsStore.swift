@@ -87,9 +87,19 @@ final class NewsStore: ObservableObject {
     /// Resolve the current cached row by identity on every attempt, including Retry. An
     /// altered persisted link cannot be replaced by a view-supplied destination. Opening
     /// is not a read-history mutation and cannot evict or rewrite the cached article.
-    func openArticle(id: UUID) {
-        guard let article = snapshot?.articles.first(where: { $0.id == id }) else { return }
-        guard let safeURL = try? NewsURLPolicy.articleURL(article.url) else {
+    func openArticle(id: UUID, sourceFeedID: UUID? = nil) {
+        guard let snapshot, let state = snapshot.articleStates.first(where: { $0.article.id == id }) else { return }
+        let destination: URL
+        if let sourceFeedID {
+            guard let feed = snapshot.feeds.first(where: { $0.id == sourceFeedID }), feed.isEnabled,
+                  !feed.topicIDs.isDisjoint(with: snapshot.preferences.selectedTopicIDs),
+                  state.article.sources.contains(where: { $0.feedID == sourceFeedID }),
+                  let contribution = state.contributions[sourceFeedID] else { return }
+            destination = contribution.url
+        } else {
+            destination = state.article.url
+        }
+        guard let safeURL = try? NewsURLPolicy.articleURL(destination) else {
             browserOpenFailure = NewsBrowserFailure(articleID: id, code: .unsafeURL)
             return
         }

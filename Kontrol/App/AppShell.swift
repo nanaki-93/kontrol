@@ -208,27 +208,14 @@ struct AppShell: View {
     }
 }
 
-/// Routing bridge until the headline presentation replaces this surface in Step 4.3.
+/// Routing bridge owns per-window visibility while the shared store owns cached news.
 /// The shared owner publishes local cache before its foreground refresh starts.
 private struct NewsRouteView: View {
     @ObservedObject var store: NewsStore
     @State private var windowID = UUID()
 
     var body: some View {
-        VStack(alignment: .leading, spacing: AppMetrics.space4) {
-            PageHeader("News")
-            if store.localFailure == .catalog {
-                Text("The bundled News catalog could not be loaded. Restart Kontrol to try again.")
-            } else if store.localFailure == .read {
-                Text("Could not load saved news. Try opening News again.")
-            } else if let snapshot = store.snapshot {
-                Text("\(snapshot.articles.count) cached articles")
-            } else {
-                LoadingState("Loading saved news")
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(AppMetrics.horizontalInset)
+        NewsView(store: store)
         .onAppear {
             store.setAppActive(NSApp.isActive)
             store.setVisible(true, windowID: windowID)

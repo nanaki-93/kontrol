@@ -307,6 +307,43 @@ final class NewsStoreTests: XCTestCase {
         XCTAssertNil(store.browserOpenFailure)
     }
 
+    func testFilteredReadOpensOnlyItsCurrentEnabledSourceContribution() {
+        let (catalog, base) = fixture()
+        let original = base.articles[0]
+        let sources = [NewsArticleSource(feedID: firstID, feedName: "Feed 0", topicIDs: ["go"], guid: nil),
+                       NewsArticleSource(feedID: secondID, feedName: "Feed 1", topicIDs: ["ai"], guid: nil)]
+        let shared = ArticleMetadata(id: original.id, url: original.url,
+            canonicalURL: original.canonicalURL, title: original.title,
+            publishedAt: original.publishedAt, firstFetchedAt: original.firstFetchedAt,
+            summary: nil, sources: sources)
+        let alternate = URL(string: "https://other.example.com/story")!
+        let state = NewsSelection.State(article: shared, aliases: [:], contributions: [
+            firstID: .init(url: original.url, canonicalURL: original.canonicalURL,
+                           title: original.title, publishedAt: original.publishedAt, summary: nil),
+            secondID: .init(url: alternate, canonicalURL: alternate.absoluteString,
+                            title: "Other source", publishedAt: nil, summary: nil)
+        ])
+        let snapshot = NewsSnapshot(topics: base.topics, feeds: base.feeds,
+            articleStates: [state], preferences: base.preferences)
+        let repo = StubNewsRepository(snapshot)
+        let opener = StubNewsBrowserOpener()
+        let store = NewsStore(repository: repo, service: HeldNewsService(), catalog: catalog,
+                              browserOpener: opener)
+        store.loadIfNeeded()
+        store.openArticle(id: shared.id, sourceFeedID: secondID)
+        XCTAssertEqual(opener.urls, [alternate])
+        let disabled = FeedSourceSnapshot(id: base.feeds[1].id, name: base.feeds[1].name,
+            url: base.feeds[1].url, topicIDs: base.feeds[1].topicIDs, isEnabled: false,
+            configurationRevision: base.feeds[1].configurationRevision, etag: nil,
+            lastModified: nil, lastAttemptAt: nil, lastSuccessAt: nil,
+            lastError: nil, retryNotBefore: nil)
+        repo.value = NewsSnapshot(topics: base.topics, feeds: [base.feeds[0], disabled],
+            articleStates: [state], preferences: base.preferences)
+        store.reload()
+        store.openArticle(id: shared.id, sourceFeedID: secondID)
+        XCTAssertEqual(opener.urls, [alternate], "A stale filtered row cannot open a disabled source")
+    }
+
     func testBrowserFailureCanRetryWithoutChangingCachedArticleOrRefreshMetadata() {
         let (catalog, cached) = fixture()
         let repo = StubNewsRepository(cached)
