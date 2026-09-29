@@ -195,4 +195,151 @@ final class ProjectFileReaderTests: XCTestCase {
         XCTAssertEqual(missing.featureEnumeration, .failed)
         XCTAssertEqual(codes(missing, ".kontrol/project.yaml"), [.missingManifest])
     }
+
+    func testInspectorSelectedAndBookmarkUseScopedReadsAndReleaseOnFailure() async throws {
+        let root = try fixture()
+        let grant = InspectorGrant(root: root)
+        let inspector = ProjectInspector(access: ProjectFolderAccess(operations: grant))
+        let selected = try await inspector.inspect(selectedFolder: root)
+        XCTAssertTrue(ProjectInspector.canAdd(selected))
+        XCTAssertEqual(selected.featureCount, .complete(completed: 0, total: 0))
+        let bookmarked = try await inspector.inspect(bookmarkData: Data([7]))
+        XCTAssertEqual(bookmarked.manifest, selected.manifest)
+        XCTAssertEqual(grant.starts, 2)
+        XCTAssertEqual(grant.stops, 2)
+        let bookmark = try await inspector.makeBookmark(selectedFolder: root)
+        XCTAssertEqual(bookmark, Data([7]))
+        XCTAssertEqual(grant.starts, 3)
+        XCTAssertEqual(grant.stops, 3)
+        grant.stale = true
+        do {
+            _ = try await inspector.inspect(bookmarkData: Data([7]))
+            XCTFail("stale bookmark must not read")
+        } catch let failure as ProjectInspectionFailure {
+            XCTAssertEqual(failure, .access(.staleBookmark))
+            XCTAssertEqual(failure.recovery, .reconnect)
+        }
+        XCTAssertEqual(grant.starts, 3)
+        grant.stale = false
+        grant.allowed = false
+        do {
+            _ = try await inspector.inspect(bookmarkData: Data([7]))
+            XCTFail("revoked access must not read")
+        } catch let failure as ProjectInspectionFailure {
+            XCTAssertEqual(failure, .access(.accessDenied))
+        }
+        do {
+            _ = try await inspector.inspect(selectedFolder: root)
+            XCTFail("denied selection must not read")
+        } catch let failure as ProjectInspectionFailure {
+            XCTAssertEqual(failure.recovery, .reselectFolder)
+        }
+        XCTAssertEqual(grant.stops, 3)
+    }
+
+    func testInspectorMissingRequiredOptionalFailuresAndUnsupportedAreDistinct() async throws {
+        let root = try fixture()
+        let inspector = ProjectInspector(access: ProjectFolderAccess(operations: InspectorGrant(root: root)))
+        try FileManager.default.removeItem(at: path(root, "project.yaml"))
+        var snapshot = try await inspector.inspect(selectedFolder: root)
+        XCTAssertFalse(ProjectInspector.canAdd(snapshot))
+        XCTAssertNil(snapshot.manifest)
+        XCTAssertEqual(snapshot.featureCount, .unavailable)
+        XCTAssertTrue(snapshot.diagnostics.contains { $0.code == .missingManifest })
+        try Data("schema_version: 1\nid: demo\nname: Demo\n".utf8).write(to: path(root, "project.yaml"))
+        try Data("notes\r\n".utf8).write(to: path(root, "context.md"))
+        try Data("rules".utf8).write(to: path(root, "rules.md"))
+        try Data("status: completed".utf8).write(to: path(root, "history.yaml"))
+        snapshot = try await inspector.inspect(selectedFolder: root)
+        XCTAssertTrue(ProjectInspector.canAdd(snapshot))
+        XCTAssertEqual(snapshot.featureCount, .complete(completed: 0, total: 0))
+        if case let .present(notes) = snapshot.context { XCTAssertEqual(notes.bytes, Data("notes\r\n".utf8)) }
+        else { XCTFail("context missing") }
+        try Data([0xff]).write(to: path(root, "rules.md"))
+        snapshot = try await inspector.inspect(selectedFolder: root)
+        XCTAssertFalse(ProjectInspector.canAdd(snapshot))
+        XCTAssertTrue(snapshot.diagnostics.contains { $0.code == .invalidUTF8 && $0.relativePath == ".kontrol/rules.md" })
+        if case .failed = snapshot.rules {} else { XCTFail("unreadable optional is not absent") }
+        try Data("schema_version: 9\nid: future\nname: Future\n".utf8).write(to: path(root, "project.yaml"))
+        snapshot = try await inspector.inspect(selectedFolder: root)
+        XCTAssertNil(snapshot.manifest)
+        XCTAssertEqual(snapshot.featureCount, .unavailable)
+        XCTAssertFalse(ProjectInspector.canAdd(snapshot))
+        XCTAssertEqual(snapshot.sources.first?.text, "schema_version: 9\nid: future\nname: Future\n")
+        XCTAssertTrue(snapshot.diagnostics.contains { $0.code == .unsupportedVersion && $0.recovery == .upgradeSource })
+    }
+
+    func testInspectorExcludesUnreadableFeatureWithoutClaimingCompleteCount() async throws {
+        let root = try fixture()
+        let grant = InspectorGrant(root: root)
+        let healthy = "---\nid: healthy\ntitle: Healthy\nstatus: completed\npriority: high\neffort: small\n---\n"
+        try Data(healthy.utf8).write(to: path(root, "features/healthy.md"))
+        let bad = path(root, "features/bad.md")
+        try Data(healthy.utf8).write(to: bad)
+        XCTAssertEqual(chmod(bad.path, 0), 0)
+        defer { _ = chmod(bad.path, S_IRUSR | S_IWUSR) }
+        let snapshot = try await ProjectInspector(access: ProjectFolderAccess(operations: grant))
+            .inspect(selectedFolder: root)
+        XCTAssertEqual(snapshot.featureCount, .partial(completed: 1, total: 1, excludedFiles: 1))
+        XCTAssertEqual(snapshot.excludedFeaturePaths, [".kontrol/features/bad.md"])
+        XCTAssertTrue(snapshot.diagnostics.contains { $0.code == .unreadableFile && $0.relativePath == ".kontrol/features/bad.md" })
+        XCTAssertFalse(ProjectInspector.canAdd(snapshot))
+        XCTAssertEqual(grant.starts, grant.stops)
+    }
+
+    func testInspectorDoesNotPromoteChangedReadAndPropagatesCancellation() async throws {
+        let root = try fixture()
+        let grant = InspectorGrant(root: root)
+        let changed = ProjectFileReader(beforeVerification: { path in
+            if path == ".kontrol/project.yaml" {
+                try? Data("changed".utf8).write(to: self.path(root, "project.yaml"))
+            }
+        })
+        do {
+            _ = try await ProjectInspector(access: ProjectFolderAccess(operations: grant), reader: changed)
+                .inspect(selectedFolder: root)
+            XCTFail("inconsistent read must be retryable failure")
+        } catch let failure as ProjectInspectionFailure {
+            XCTAssertEqual(failure, .inconsistentRead)
+            XCTAssertEqual(failure.recovery, .refresh)
+        }
+        XCTAssertEqual(grant.starts, grant.stops)
+        let duringRead = ProjectInspector(access: ProjectFolderAccess(operations: grant),
+                                          reader: CancellingProjectReader())
+        do {
+            _ = try await duringRead.inspect(selectedFolder: root)
+            XCTFail("cancellation during IO must not publish a snapshot")
+        } catch is CancellationError {}
+        XCTAssertEqual(grant.starts, grant.stops)
+        let task = Task { () -> ProjectInspection in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await ProjectInspector(access: ProjectFolderAccess(operations: grant)).inspect(selectedFolder: root)
+        }
+        do { _ = try await task.value; XCTFail("cancelled inspection returned") }
+        catch is CancellationError {}
+    }
+}
+
+private struct CancellingProjectReader: ProjectFileReading {
+    func read(folder: URL) throws -> ProjectFileRead {
+        withUnsafeCurrentTask { $0?.cancel() }
+        return try ProjectFileReader().read(folder: folder)
+    }
+}
+
+private final class InspectorGrant: ProjectBookmarkOperations {
+    let root: URL
+    var starts = 0
+    var stops = 0
+    var stale = false
+    var allowed = true
+    init(root: URL) { self.root = root }
+    func resolve(_ data: Data) throws -> (folder: URL, isStale: Bool) { (root, stale) }
+    func createBookmark(for selectedFolder: URL) throws -> Data { Data([7]) }
+    func startAccessing(_ folder: URL) -> Bool {
+        guard allowed else { return false }
+        starts += 1
+        return true
+    }
+    func stopAccessing(_ folder: URL) { stops += 1 }
 }

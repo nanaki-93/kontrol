@@ -163,4 +163,83 @@ final class ProjectValidationTests: XCTestCase {
         XCTAssertEqual(diagnostic.affectedIDs, ["peer"])
         XCTAssertEqual(diagnostic.recovery, .editSource)
     }
+
+    func testInspectorEscapesControlCharactersInDisplayedDiagnostics() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let features = root.appendingPathComponent(".kontrol/features")
+        try FileManager.default.createDirectory(at: features, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("schema_version: 1\nid: demo\nname: Demo\n".utf8)
+            .write(to: root.appendingPathComponent(".kontrol/project.yaml"))
+        let name = "bad\nname.md"
+        try Data("not frontmatter".utf8).write(to: features.appendingPathComponent(name))
+        let snapshot = try await ProjectInspector(access: ProjectFolderAccess(operations: ValidationGrant()))
+            .inspect(selectedFolder: root)
+        XCTAssertEqual(snapshot.excludedFeaturePaths, [".kontrol/features/" + name])
+        XCTAssertEqual(snapshot.diagnostics.first?.relativePath, ".kontrol/features/bad\\u{A}name.md")
+        XCTAssertFalse(snapshot.diagnostics.first!.relativePath.contains("\n"))
+    }
+
+    func testUnsupportedProjectSchemaKeepsPeersRawWithoutTrustedV1Records() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let directory = root.appendingPathComponent(".kontrol/features")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let manifest = Data("schema_version: 9\nid: future\nname: Future\n".utf8)
+        let roadmap = Data("schema_version: 1\nmilestones: []\n".utf8)
+        let feature = Data("---\nid: done\ntitle: Done\nstatus: completed\npriority: high\neffort: small\n---\nBody\r\n".utf8)
+        let featurePath = ".kontrol/features/done.md"
+        try manifest.write(to: root.appendingPathComponent(".kontrol/project.yaml"))
+        try roadmap.write(to: root.appendingPathComponent(".kontrol/roadmap.yaml"))
+        try feature.write(to: root.appendingPathComponent(featurePath))
+
+        let result = try await ProjectInspector(access: ProjectFolderAccess(operations: ValidationGrant()))
+            .inspect(selectedFolder: root)
+        XCTAssertNil(result.manifest)
+        if case .failed = result.roadmap {} else { XCTFail("roadmap cannot be trusted without V1 manifest") }
+        XCTAssertTrue(result.features.isEmpty)
+        XCTAssertEqual(result.excludedFeaturePaths, [featurePath])
+        XCTAssertEqual(result.featureCount, .unavailable)
+        XCTAssertFalse(ProjectInspector.canAdd(result))
+        XCTAssertEqual(result.diagnostics.map(\.code), [.unsupportedVersion])
+        XCTAssertEqual(result.sources.map(\.bytes), [manifest, roadmap, feature])
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(featurePath)), feature)
+    }
+
+    func testInspectorKeepsValidPeersAfterMalformedAndUnsupportedFiles() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let directory = root.appendingPathComponent(".kontrol/features")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        func write(_ name: String, _ value: String) throws {
+            try Data(value.utf8).write(to: root.appendingPathComponent(".kontrol/" + name))
+        }
+        try write("project.yaml", "schema_version: 1\nid: demo\nname: Demo\n")
+        try write("roadmap.yaml", "schema_version: 9\nmilestones: []\n")
+        try write("features/good.md", "---\nid: stable\ntitle: Good\nstatus: completed\npriority: high\neffort: small\n---\nBody\n")
+        try write("features/bad.md", "no frontmatter")
+        try write("features/future.md", "---\nschema_version: 2\nid: future\n---\n")
+        try write("features/dependent.md", "---\nid: dependent\ntitle: Dependent\nstatus: ready\npriority: low\neffort: large\ndepends_on: [stable]\n---\n")
+        let inspector = ProjectInspector(access: ProjectFolderAccess(operations: ValidationGrant()))
+        let result = try await inspector.inspect(selectedFolder: root)
+        XCTAssertEqual(result.manifest?.id, "demo")
+        XCTAssertEqual(result.features.map(\.id), ["dependent", "stable"])
+        XCTAssertEqual(result.featureCount, .partial(completed: 1, total: 2, excludedFiles: 2))
+        XCTAssertEqual(result.excludedFeaturePaths, [".kontrol/features/bad.md", ".kontrol/features/future.md"])
+        if case .failed = result.roadmap {} else { XCTFail("unsupported roadmap cannot be V1") }
+        XCTAssertEqual(result.diagnostics.map(\.code), [.invalidFrontmatter, .unsupportedVersion, .unsupportedVersion])
+        XCTAssertEqual(result.sources.count, 6)
+        XCTAssertFalse(ProjectInspector.canAdd(result))
+        // An optional history file is not a second source of status.
+        try write("history.yaml", "status: planned\n")
+        let reread = try await inspector.inspect(selectedFolder: root)
+        XCTAssertEqual(reread.featureCount, result.featureCount)
+    }
+}
+
+private struct ValidationGrant: ProjectBookmarkOperations {
+    func resolve(_ data: Data) throws -> (folder: URL, isStale: Bool) { throw ProjectFolderAccessError.unresolved }
+    func createBookmark(for selectedFolder: URL) throws -> Data { Data([1]) }
+    func startAccessing(_ folder: URL) -> Bool { true }
+    func stopAccessing(_ folder: URL) {}
 }
