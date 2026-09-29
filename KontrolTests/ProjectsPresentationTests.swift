@@ -9,6 +9,21 @@ private struct ListInspector: ProjectInspecting {
     func makeBookmark(selectedFolder: URL) async throws -> Data { throw CancellationError() }
 }
 
+private actor CardInspector: ProjectInspecting {
+    let inspections: [UInt8: ProjectInspection]
+    private var failing: Set<UInt8> = []
+
+    init(_ inspections: [UInt8: ProjectInspection]) { self.inspections = inspections }
+    func fail(_ key: UInt8) { failing.insert(key) }
+    func inspect(selectedFolder: URL) async throws -> ProjectInspection { throw CancellationError() }
+    func inspect(bookmarkData: Data) async throws -> ProjectInspection {
+        guard let key = bookmarkData.first, let inspection = inspections[key] else { throw CancellationError() }
+        if failing.contains(key) { throw ProjectInspectionFailure.inconsistentRead }
+        return inspection
+    }
+    func makeBookmark(selectedFolder: URL) async throws -> Data { throw CancellationError() }
+}
+
 @MainActor
 private final class ListRepository: ProjectReferenceRepository {
     let references: [ProjectReferenceSnapshot]
@@ -18,7 +33,10 @@ private final class ListRepository: ProjectReferenceRepository {
     func reconnect(id: UUID, expectedRevision: UUID,
                    input: ReconnectedProjectReference) throws -> ProjectReferenceSnapshot { throw CancellationError() }
     func recordSuccessfulRead(id: UUID, expectedRevision: UUID,
-                              nameHint: String, readAt: Date) throws -> ProjectReferenceSnapshot { throw CancellationError() }
+                              nameHint: String, readAt: Date) throws -> ProjectReferenceSnapshot {
+        guard let reference = references.first(where: { $0.id == id }) else { throw CancellationError() }
+        return reference
+    }
 }
 
 @MainActor
@@ -48,6 +66,74 @@ final class ProjectsPresentationTests: XCTestCase {
         XCTAssertEqual(store.selectedID, second, "Unknown identities cannot change selection")
         XCTAssertEqual(ProjectsView.location(store.rows[0]),
                        "Location unavailable · reference \(second.uuidString)")
+    }
+
+    private func card(_ id: String, status: ProjectFeatureStatus = .ready,
+                      priority: ProjectFeaturePriority = .medium, effort: ProjectFeatureEffort = .small,
+                      dependencies: [String] = [], areas: [String] = []) -> ProjectFeature {
+        ProjectFeature(id: id, title: "Disk title \(id)", status: status, priority: priority,
+                       effort: effort, dependsOn: dependencies, areas: areas, completedAt: nil,
+                       body: "Disk body \(id)", sourcePath: ".kontrol/features/\(id).md")
+    }
+
+    private func cardInspection(_ features: [ProjectFeature], excluded: [String] = []) -> ProjectInspection {
+        ProjectInspection(manifest: ProjectManifest(schemaVersion: 1, id: "same-id", name: "Disk project",
+            description: "", stack: [], goals: [], currentFocus: ["Focus"]), roadmap: .absent,
+            features: features, excludedFeaturePaths: excluded, featureEnumeration: .complete,
+            context: .absent, rules: .absent, history: .absent, diagnostics: [], sources: [], readAt: Date())
+    }
+
+    func testSelectedWorkspaceHostsOneThreePartialAndRetainedFailure() async throws {
+        let one = cardInspection([card("one", areas: ["Focus"])])
+        let three = cardInspection([card("z"), card("a", priority: .high),
+                                    card("m", dependencies: ["done"]), card("done", status: .completed),
+                                    card("later", priority: .low)])
+        let partial = cardInspection([card("valid"), card("finished", status: .completed)],
+                                     excluded: [".kontrol/features/invalid.md"])
+        let ids = (0..<4).map { _ in UUID() }
+        let inspector = CardInspector([1: one, 2: three, 3: partial, 4: one])
+        let store = ProjectStore(inspector: inspector, repository: ListRepository(
+            ids.enumerated().map { reference($0.element, order: $0.offset) }))
+        try store.enterProjects()
+        for _ in 0..<100 where store.rows.contains(where: { $0.isRefreshing }) {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertFalse(store.rows.contains(where: { $0.isRefreshing }), "Fixture inspections must publish")
+        let rows = ids.compactMap { id in store.rows.first { $0.reference.id == id } }
+        XCTAssertEqual(rows.count, 4)
+        XCTAssertEqual(rows.map { ProjectsView.recommendations($0).count }, [1, 3, 1, 1])
+        XCTAssertEqual(ProjectsView.recommendations(rows[1]).map(\.id), ["a", "m", "z"])
+        XCTAssertEqual(ProjectsView.cardMetadata(three.features[2], reason: .dependenciesComplete),
+                       "medium priority · small effort · Ready · dependency complete")
+        XCTAssertEqual(ProjectDetailsView.progress(partial),
+                       "1 of 2 valid features completed (partial; 1 file excluded)")
+        XCTAssertTrue(rows[2].isStale, "A current partial inspection is still actionable")
+        for id in ids {
+            store.select(id)
+            let host = NSHostingView(rootView: ProjectsView(store: store))
+            XCTAssertTrue(host.rootView.store === store)
+            XCTAssertEqual(host.rootView.store.selectedID, id)
+        }
+        store.select(ids[0])
+        store.selectFeature("one", in: ids[0])
+        XCTAssertEqual(store.selectedFeatureContent?.body, "Disk body one")
+        store.closeFeature()
+        await inspector.fail(4)
+        store.refresh(ids[3])
+        for _ in 0..<100 where store.rows.first(where: { $0.reference.id == ids[3] })?.isRefreshing == true {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let stale = try XCTUnwrap(store.rows.first { $0.reference.id == ids[3] })
+        XCTAssertEqual(stale.refreshFailure, .inspection(.inconsistentRead))
+        XCTAssertTrue(stale.isRetainedInspection)
+        XCTAssertTrue(ProjectsView.recommendations(stale).isEmpty,
+                      "Retained suggestions cannot be opened as current")
+        store.select(ids[3])
+        let staleHost = NSHostingView(rootView: ProjectsView(store: store))
+        XCTAssertTrue(staleHost.rootView.store === store)
+        store.selectFeature("one", in: ids[3])
+        XCTAssertEqual(store.selectedFeatureContent?.body, "Disk body one",
+                       "Old detail remains accessible only as a stale reference")
     }
 
     func testFolderOnlyPickerAndPreviewHostCompile() {

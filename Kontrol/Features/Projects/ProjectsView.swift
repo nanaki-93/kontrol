@@ -21,6 +21,26 @@ struct ProjectsView: View {
         }
     }
 
+    /// A failed/canceled read retains reference data, not current recommendations.
+    /// Newly inspected partial results may also be isStale and remain actionable.
+    static func recommendations(_ row: ProjectRowState) -> [FeatureCandidate] {
+        guard !row.isRetainedInspection, let inspection = row.inspection else { return [] }
+        return FeatureSelector().select(from: inspection).candidates
+    }
+
+    static func reason(_ reason: FeatureSelectionReason, dependencies: Int) -> String {
+        switch reason {
+        case .currentFocus: return "Matches current focus"
+        case .dependenciesComplete:
+            return dependencies == 1 ? "Ready · dependency complete" : "Ready · dependencies complete"
+        case .ready: return "Ready"
+        }
+    }
+
+    static func cardMetadata(_ feature: ProjectFeature, reason: FeatureSelectionReason) -> String {
+        "\(feature.priority.rawValue) priority · \(feature.effort.rawValue) effort · \(Self.reason(reason, dependencies: feature.dependsOn.count))"
+    }
+
     static func location(_ row: ProjectRowState) -> String {
         guard let hint = row.locationHint, !hint.isEmpty else {
             return "Location unavailable · reference \(row.reference.id.uuidString)"
@@ -57,7 +77,11 @@ struct ProjectsView: View {
 
     var body: some View {
         Group {
-            if let detailID, let row = store.rows.first(where: { $0.reference.id == detailID }) {
+            if let identity = store.selectedFeature,
+               let row = store.rows.first(where: { $0.reference.id == identity.projectID }),
+               let feature = store.selectedFeatureContent {
+                featureReference(feature, row: row)
+            } else if let detailID, let row = store.rows.first(where: { $0.reference.id == detailID }) {
                 ProjectDetailsView(row: row, back: { self.detailID = nil },
                                    refresh: { store.refresh(detailID) },
                                    reconnect: { chooseReconnectFolder(for: detailID) },
@@ -129,9 +153,7 @@ struct ProjectsView: View {
                     }
                 }
                 if let selected = store.rows.first(where: { $0.reference.id == store.selectedID }) {
-                    Text("Selected: \(selected.inspection?.manifest?.name ?? selected.reference.displayNameHint)")
-                        .appTypography(.body)
-                        .accessibilityIdentifier("projects-selected")
+                    workspace(for: selected)
                 }
             }
             Spacer(minLength: 0)
@@ -139,6 +161,111 @@ struct ProjectsView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, AppMetrics.horizontalInset)
         .padding(.top, AppMetrics.space8)
+        .padding(.bottom, AppMetrics.space8)
+    }
+
+    private func workspace(for row: ProjectRowState) -> some View {
+        VStack(alignment: .leading, spacing: AppMetrics.space4) {
+            PageHeader(row.inspection?.manifest?.name ?? row.reference.displayNameHint,
+                       metadata: Self.location(row)) {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: AppMetrics.space2) { workspaceActions(for: row) }
+                    VStack(alignment: .leading, spacing: AppMetrics.space2) { workspaceActions(for: row) }
+                }
+            }
+            .accessibilityIdentifier("projects-selected")
+            if row.isRefreshing {
+                Text("Refreshing project · showing last inspected information until the read completes")
+                    .appTypography(.body)
+                    .accessibilityIdentifier("projects-workspace-refreshing")
+            }
+            if row.isRetainedInspection {
+                Text("Previous inspection is stale · recommendations unavailable until a successful Refresh or Reconnect. Project details remain available for reference.")
+                    .appTypography(.body)
+                    .accessibilityIdentifier("projects-workspace-stale")
+            }
+            if let inspection = row.inspection {
+                SectionHeader("Progress")
+                Text(ProjectDetailsView.progress(inspection))
+                    .appTypography(.body)
+                    .accessibilityIdentifier("projects-workspace-progress")
+                if case let .partial(_, _, excluded) = inspection.featureCount {
+                    Text("Partial results · \(excluded) \(excluded == 1 ? "feature file" : "feature files") excluded from counts and suggestions. View project details for validation; repair externally, then Refresh.")
+                        .appTypography(.body)
+                        .accessibilityIdentifier("projects-workspace-partial")
+                }
+                if !row.isRetainedInspection {
+                    let candidates = Self.recommendations(row)
+                    if !candidates.isEmpty {
+                        SectionHeader("Next features")
+                        ForEach(candidates, id: \.id) { candidate in
+                            if let feature = inspection.features.first(where: { $0.id == candidate.id }) {
+                                NextActionCard(feature.title,
+                                               metadata: Self.cardMetadata(feature, reason: candidate.reason),
+                                               status: StatusPill(feature.status.rawValue.capitalized, kind: .success)) {
+                                    ActionButton("View feature", variant: .primary) {
+                                        // Recheck freshness at activation, not just when the card was built.
+                                        guard let current = store.rows.first(where: { $0.reference.id == row.reference.id }),
+                                              !current.isRetainedInspection else { return }
+                                        store.selectFeature(candidate.id, in: row.reference.id)
+                                    }
+                                    .accessibilityIdentifier("project-feature-open-\(candidate.id)")
+                                }
+                                .accessibilityIdentifier("project-feature-card-\(candidate.id)")
+                            }
+                        }
+                    }
+                }
+            } else if row.isRefreshing {
+                LoadingState("Loading selected project")
+            } else {
+                Text("Project inspection unavailable · Refresh or Reconnect to read the folder.")
+                    .appTypography(.body)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityIdentifier("projects-workspace")
+    }
+
+    private func workspaceActions(for row: ProjectRowState) -> some View {
+        Group {
+            ActionButton("View project details") {
+                detailID = row.reference.id
+            }
+            .accessibilityIdentifier("projects-workspace-details")
+            if row.refreshFailure?.recovery == .reconnect {
+                ActionButton("Reconnect project") { chooseReconnectFolder(for: row.reference.id) }
+                    .disabled(reconnectingID != nil)
+                    .accessibilityIdentifier("projects-workspace-reconnect")
+            } else {
+                ActionButton("Refresh project") { store.refresh(row.reference.id) }
+                    .accessibilityIdentifier("projects-workspace-refresh")
+            }
+        }
+    }
+
+    /// A small read-only reference route until the full F10 feature-detail layout is added.
+    /// Content always resolves from the store's current inspection, including retained stale reads.
+    private func featureReference(_ feature: ProjectFeature, row: ProjectRowState) -> some View {
+        VStack(alignment: .leading, spacing: AppMetrics.space4) {
+            PageHeader(feature.title, metadata: "Feature \(feature.id) · \(feature.status.rawValue.capitalized)") {
+                ActionButton("Back to projects") { store.closeFeature() }
+            }
+            if row.isRetainedInspection {
+                Text("Stale reference · Last read: \(row.lastReadAt?.formatted(date: .abbreviated, time: .shortened) ?? "unavailable") · Refresh or Reconnect to verify this feature.")
+                    .appTypography(.body)
+                    .accessibilityIdentifier("project-feature-stale")
+            }
+            Text(feature.body.isEmpty ? "No description provided" : feature.body)
+                .appTypography(.body)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, AppMetrics.horizontalInset)
+        .padding(.top, AppMetrics.space8)
+        .padding(.bottom, AppMetrics.space8)
+        .accessibilityIdentifier("project-feature-reference")
     }
 
     /// Reconnect is an explicit native selection, never an unscoped path retry. A canceled
