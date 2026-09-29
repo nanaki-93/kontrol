@@ -227,6 +227,149 @@ final class LessonSlotRepositoryTests: XCTestCase {
         }
     }
 
+    func testUpgradeRetainsStartedPinAndExcludesArchivedRepeatAndRetiredSeed() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataCatalogRepository(container: container)
+        let original = try seed()
+        try repository.importIfNeeded(original)
+        let before = try repository.loadSnapshot().slots
+        let started = try XCTUnwrap(before.first { $0.topicID == "go" })
+        let completed = try XCTUnwrap(before.first { $0.topicID == "go" && $0.key != started.key })
+        let completedDTO = try XCTUnwrap(original.value.lessons.first { $0.id == completed.lessonID })
+        let startedDTO = try XCTUnwrap(original.value.lessons.first { $0.id == started.lessonID })
+        let definitions = try repository.loadSnapshot().definitions
+        let oldCompleted = try XCTUnwrap(definitions.first { $0.id == completed.lessonID })
+        let oldStarted = try XCTUnwrap(definitions.first { $0.id == started.lessonID })
+        let date = Date(timeIntervalSinceReferenceDate: 400)
+        let personal = ModelContext(container)
+        personal.insert(LessonProgress(lessonID: started.lessonID, status: .started, startedAt: date))
+        personal.insert(LessonProgress(lessonID: completed.lessonID, status: .completed, completedAt: date))
+        personal.insert(LessonAttempt(id: UUID(), lessonID: started.lessonID,
+            contentVersion: oldStarted.contentVersion,
+            pinnedContentData: try PinnedLessonContent(definition: oldStarted).encoded()))
+        personal.insert(LessonAttempt(id: UUID(), lessonID: completed.lessonID,
+            contentVersion: oldCompleted.contentVersion, completedAt: date,
+            pinnedContentData: try PinnedLessonContent(definition: oldCompleted).encoded()))
+        // Backfill recovers the old version before import overwrites its definition.
+        try personal.save()
+        var next = original.value
+        next.version += 1
+        next.lessons.removeAll { $0.id == started.lessonID }
+        let index = try XCTUnwrap(next.lessons.firstIndex { $0.id == completed.lessonID })
+        next.lessons[index].contentVersion += 1
+        next.lessons[index].explanation = "Revised installed text"
+        next.lessons[index].normalizedContentHash = CatalogValidator.fingerprint(for: next.lessons[index])
+        let spare = try XCTUnwrap(next.lessons.firstIndex { $0.topicID == "go" &&
+            !before.map(\.lessonID).contains($0.id) })
+        let repeatedID = next.lessons[spare].id
+        next.lessons[spare].contentVersion += 1
+        next.lessons[spare].explanation = completedDTO.explanation
+        next.lessons[spare].workedExample = completedDTO.workedExample
+        next.lessons[spare].exercise = completedDTO.exercise
+        next.lessons[spare].referenceAnswer = completedDTO.referenceAnswer
+        next.lessons[spare].selfCheckCriteria = completedDTO.selfCheckCriteria
+        next.lessons[spare].normalizedContentHash = CatalogValidator.fingerprint(for: next.lessons[spare])
+        XCTAssertEqual(startedDTO.id, started.lessonID)
+        try repository.importIfNeeded(CatalogValidator.validate(next))
+        let after = try repository.loadSnapshot().slots
+        XCTAssertEqual(after.first { $0.key == started.key }, started)
+        XCTAssertFalse(after.map(\.lessonID).contains(completed.lessonID))
+        XCTAssertFalse(after.map(\.lessonID).contains(repeatedID))
+        XCTAssertEqual(try repository.reconcileSlots(now: .distantFuture).slots, after)
+    }
+
+    func testCatalogUpgradeVacatesOnlyLaterRetainedExactContentDuplicate() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataCatalogRepository(container: container)
+        let original = try seed()
+        try repository.importIfNeeded(original)
+        let initial = try repository.loadSnapshot().slots
+        let go = initial.filter { $0.topicID == "go" }
+        let first = try XCTUnwrap(go.first)
+        let laterSlot = try XCTUnwrap(go.dropFirst().first)
+        let firstDTO = try XCTUnwrap(original.value.lessons.first { $0.id == first.lessonID })
+        var upgrade = original.value
+        upgrade.version += 1
+        let index = try XCTUnwrap(upgrade.lessons.firstIndex { $0.id == laterSlot.lessonID })
+        XCTAssertNotEqual(CatalogValidator.fingerprint(for: upgrade.lessons[index]),
+                          CatalogValidator.fingerprint(for: firstDTO))
+        upgrade.lessons[index].contentVersion += 1
+        upgrade.lessons[index].explanation = firstDTO.explanation
+        upgrade.lessons[index].workedExample = firstDTO.workedExample
+        upgrade.lessons[index].exercise = firstDTO.exercise
+        upgrade.lessons[index].referenceAnswer = firstDTO.referenceAnswer
+        upgrade.lessons[index].selfCheckCriteria = firstDTO.selfCheckCriteria
+        upgrade.lessons[index].normalizedContentHash = CatalogValidator.fingerprint(for: upgrade.lessons[index])
+        XCTAssertEqual(try repository.importIfNeeded(CatalogValidator.validate(upgrade)), .imported)
+        let after = try repository.loadSnapshot().slots
+        XCTAssertEqual(after.first { $0.key == first.key }, first)
+        XCTAssertEqual(after.filter { $0.key != laterSlot.key }, initial.filter { $0.key != laterSlot.key })
+        XCTAssertFalse(after.contains { $0.lessonID == laterSlot.lessonID })
+        XCTAssertNotNil(after.first { $0.key == laterSlot.key })
+        XCTAssertEqual(try repository.importIfNeeded(CatalogValidator.validate(upgrade)), .unchanged)
+        XCTAssertEqual(try repository.reconcileSlots(now: .distantFuture).slots, after)
+    }
+
+    func testRestoreVacancyUsesStartedPinAgainstTerminalHistoryAfterUpgrade() throws {
+        let original = try seed()
+        for (matchPinned, shouldOffer) in [(true, false), (false, true)] {
+            let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+            let repository = SwiftDataCatalogRepository(container: container)
+            try repository.importIfNeeded(original)
+            let initial = try repository.loadSnapshot()
+            let goSlots = initial.slots.filter { $0.topicID == "go" }
+            let started = try XCTUnwrap(initial.definitions.first { $0.topicID == "go" &&
+                !goSlots.map(\.lessonID).contains($0.id) && $0.prerequisiteConceptIDs.isEmpty })
+            let other = try XCTUnwrap(initial.slots.first { $0.topicID == "java" })
+            let originalHash = LessonMatchMetadata(started).contentHash
+            let context = ModelContext(container)
+            context.insert(LessonProgress(lessonID: started.id, status: .dismissed))
+            context.insert(LessonAttempt(id: UUID(), lessonID: started.id,
+                contentVersion: started.contentVersion,
+                pinnedContentData: try PinnedLessonContent(definition: started).encoded()))
+            let completedAt = Date(timeIntervalSinceReferenceDate: 450)
+            context.insert(LessonProgress(lessonID: other.lessonID, status: .completed,
+                                          completedAt: completedAt))
+            context.insert(LessonAttempt(id: UUID(), lessonID: other.lessonID,
+                contentVersion: 1, completedAt: completedAt))
+            try context.save()
+
+            var upgrade = original.value
+            upgrade.version += 1
+            let index = try XCTUnwrap(upgrade.lessons.firstIndex { $0.id == started.id })
+            upgrade.lessons[index].contentVersion += 1
+            upgrade.lessons[index].explanation = "Upgraded lesson content for restore"
+            upgrade.lessons[index].normalizedContentHash = CatalogValidator.fingerprint(for: upgrade.lessons[index])
+            try repository.importIfNeeded(CatalogValidator.validate(upgrade))
+            let changed = try XCTUnwrap(try repository.loadSnapshot().definitions.first { $0.id == started.id })
+            let changedHash = LessonMatchMetadata(changed).contentHash
+            XCTAssertNotEqual(originalHash, changedHash)
+            let archive = LessonTerminalMetadata(lessonID: other.lessonID,
+                provenance: .legacyCompletedPartial, title: nil, topicID: nil, subtopicID: nil,
+                contentVersion: nil, objectiveKey: nil, conceptIDs: nil,
+                normalizedContentHash: matchPinned ? originalHash : changedHash,
+                format: nil, dismissalTimeDefinition: nil)
+            let evidence = ModelContext(container)
+            evidence.insert(try LessonTerminalRecord(metadata: archive))
+            let vacancy = try XCTUnwrap(try evidence.fetch(FetchDescriptor<LessonSlot>()).first {
+                $0.topicID == "go"
+            })
+            let key = vacancy.key
+            evidence.delete(vacancy)
+            try evidence.save()
+            let before = try repository.loadSnapshot().slots
+            XCTAssertFalse(before.contains { $0.key == key })
+            let receipt = try repository.restoreDismissed(lessonID: started.id, now: Date())
+            XCTAssertEqual(receipt.catalog.slots.first { $0.key == key }?.lessonID,
+                           shouldOffer ? started.id : nil)
+            XCTAssertEqual(receipt.catalog.slots.filter { $0.key != key }, before)
+            XCTAssertEqual(receipt.detail.progress?.status, .started)
+            let relaunched = try repository.reconcileSlots(now: .distantFuture).slots
+            XCTAssertEqual(relaunched.first { $0.lessonID == started.id }?.key,
+                           shouldOffer ? key : nil)
+        }
+    }
+
     func testDiskReopenPreservesSlotsAndAssignments() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(
             "KontrolSlot-\(UUID().uuidString)/Kontrol.store")

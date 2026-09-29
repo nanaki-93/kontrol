@@ -292,14 +292,6 @@ final class SwiftDataCatalogRepository: CatalogRepository {
         // dismissedAt and the entire attempt (including its original pin and
         // revision) are provenance. Restore must never edit either one.
         let updated = try snapshot(in: context)
-        let attempts = try context.fetch(FetchDescriptor<LessonAttempt>()).map { item in
-            LessonAttemptSnapshot(id: item.id, lessonID: item.lessonID,
-                contentVersion: item.contentVersion, answerDraft: item.answerDraft,
-                solutionRevealedAt: item.solutionRevealedAt,
-                selfCheckAcknowledgedAt: item.selfCheckAcknowledgedAt,
-                completedAt: item.completedAt, completedContentSnapshot: item.completedContentSnapshot,
-                pinnedContentData: item.pinnedContentData, revision: item.revision)
-        }
         // Unrecoverable legacy work remains accessible in detail, but must not
         // advertise an upgraded exercise as a usable active choice.
         let canOfferChoice: Bool
@@ -307,10 +299,12 @@ final class SwiftDataCatalogRepository: CatalogRepository {
         case .pinned, .current: canOfferChoice = true
         case .legacyCompleted, .unavailable: canOfferChoice = false
         }
+        let evidence = try selectionEvidence(in: context, catalog: updated)
         if canOfferChoice, let choice = try LessonSelector.restoredVacancy(lessonID: lessonID,
             definitions: updated.definitions, concepts: updated.concepts,
-            progress: updated.progress, slots: updated.slots,
-            terminalAttempts: attempts, now: now) {
+            subtopics: updated.subtopics, progress: updated.progress, slots: updated.slots,
+            terminal: evidence.terminal, completedConceptIDs: evidence.completed,
+            membership: evidence.membership, activePins: evidence.activePins, now: now) {
             context.insert(LessonSlot(topicID: choice.topicID, slotIndex: choice.slotIndex,
                                       lessonID: choice.lessonID, assignedAt: choice.assignedAt))
         }
@@ -463,15 +457,6 @@ final class SwiftDataCatalogRepository: CatalogRepository {
         // An attempt can be resumed outside the four slots after Restore. Only an
         // assignment actually held by this lesson may be consumed.
         let consumed = before.slots.first { $0.lessonID == row.lessonID }
-        let terminalAttempts = try context.fetch(FetchDescriptor<LessonAttempt>()).map { item in
-            LessonAttemptSnapshot(id: item.id, lessonID: item.lessonID,
-                contentVersion: item.contentVersion, answerDraft: item.answerDraft,
-                solutionRevealedAt: item.solutionRevealedAt,
-                selfCheckAcknowledgedAt: item.selfCheckAcknowledgedAt,
-                completedAt: item.id == attemptID ? finished.completedAt : item.completedAt,
-                completedContentSnapshot: item.id == attemptID ? finished.completedContentSnapshot : item.completedContentSnapshot,
-                pinnedContentData: item.pinnedContentData, revision: item.id == attemptID ? finished.revision : item.revision)
-        }
         let archive = try Self.terminalMetadata(lessonID: row.lessonID, attempt: finished,
                                                  provenance: .studiedPin)
         try storeTerminal(archive, in: context)
@@ -483,10 +468,12 @@ final class SwiftDataCatalogRepository: CatalogRepository {
 
         if let consumed {
             let updated = try snapshot(in: context)
+            let evidence = try selectionEvidence(in: context, catalog: updated)
             let desired = try LessonSelector.replace(consumedSlot: consumed,
                 definitions: updated.definitions, concepts: updated.concepts,
-                progress: updated.progress, slots: updated.slots,
-                terminalAttempts: terminalAttempts, now: now)
+                subtopics: updated.subtopics, progress: updated.progress, slots: updated.slots,
+                terminal: evidence.terminal, completedConceptIDs: evidence.completed,
+                membership: evidence.membership, activePins: evidence.activePins, now: now)
             let slots = try context.fetch(FetchDescriptor<LessonSlot>()).filter { $0.key == consumed.key }
             guard slots.count == 1, let slot = slots.first else { throw LessonExperienceError.staleSlot }
             if let replacement = desired.first(where: { $0.key == consumed.key }) {
@@ -558,19 +545,13 @@ final class SwiftDataCatalogRepository: CatalogRepository {
         record.dismissedAt = now
         if record.firstShownAt == nil { record.firstShownAt = now }
 
-        let terminalAttempts = try context.fetch(FetchDescriptor<LessonAttempt>()).map { item in
-            LessonAttemptSnapshot(id: item.id, lessonID: item.lessonID,
-                contentVersion: item.contentVersion, answerDraft: item.answerDraft,
-                solutionRevealedAt: item.solutionRevealedAt,
-                selfCheckAcknowledgedAt: item.selfCheckAcknowledgedAt,
-                completedAt: item.completedAt, completedContentSnapshot: item.completedContentSnapshot,
-                pinnedContentData: item.pinnedContentData, revision: item.revision)
-        }
         let updated = try snapshot(in: context)
+        let evidence = try selectionEvidence(in: context, catalog: updated)
         let desired = try LessonSelector.replace(consumedSlot: expectedSlot,
             definitions: updated.definitions, concepts: updated.concepts,
-            progress: updated.progress, slots: updated.slots,
-            terminalAttempts: terminalAttempts, now: now)
+            subtopics: updated.subtopics, progress: updated.progress, slots: updated.slots,
+            terminal: evidence.terminal, completedConceptIDs: evidence.completed,
+            membership: evidence.membership, activePins: evidence.activePins, now: now)
         let slots = try context.fetch(FetchDescriptor<LessonSlot>()).filter { $0.key == expectedSlot.key }
         guard slots.count == 1, let slot = slots.first,
               slot.lessonID == expectedSlot.lessonID, slot.assignedAt == expectedSlot.assignedAt else {
@@ -851,10 +832,52 @@ final class SwiftDataCatalogRepository: CatalogRepository {
         return LessonDetailSnapshot(id: lessonID, progress: progress, attempt: attempt, content: content)
     }
 
+    private func selectionEvidence(in context: ModelContext, catalog: LearningCatalogSnapshot) throws ->
+        (terminal: [TerminalLessonMatch], completed: Set<String>,
+         membership: CatalogMembershipAvailability, activePins: [LessonMatchMetadata]) {
+        let archives = try EvidenceIdentity.terminalMetadata(
+            context.fetch(FetchDescriptor<LessonTerminalRecord>()))
+        let progress = Dictionary(uniqueKeysWithValues: catalog.progress.map { ($0.lessonID, $0.status) })
+        let terminal = catalog.progress.filter { $0.status == .completed || $0.status == .dismissed }
+            .map { row in
+                let metadata = archives[row.lessonID]
+                return TerminalLessonMatch(status: row.status, metadata: LessonMatchMetadata(
+                    id: row.lessonID, objectiveKey: metadata?.objectiveKey,
+                    conceptIDs: metadata?.conceptIDs, contentHash: metadata?.normalizedContentHash))
+            }
+        let completed = Set(catalog.progress.filter { $0.status == .completed }
+            .flatMap { archives[$0.lessonID]?.conceptIDs ?? [] })
+        let states = try EvidenceIdentity.requireUnique(
+            context.fetch(FetchDescriptor<CatalogImportState>()), id: { $0.catalogID })
+        let memberships = try context.fetch(FetchDescriptor<CatalogMembership>())
+        let membership: CatalogMembershipAvailability
+        if let state = states.values.first {
+            membership = try EvidenceIdentity.membership(memberships, catalogID: state.catalogID,
+                                                         installedVersion: state.lastImportedVersion)
+        } else {
+            let unique = try EvidenceIdentity.requireUnique(memberships, id: { $0.catalogID })
+            for row in unique.values { _ = try row.membership() }
+            membership = .unavailable
+        }
+        var activePins: [LessonMatchMetadata] = []
+        for attempt in try context.fetch(FetchDescriptor<LessonAttempt>())
+            where progress[attempt.lessonID] == .started && attempt.completedAt == nil {
+            guard let data = attempt.pinnedContentData, !data.isEmpty else { continue }
+            let pin = try PinnedLessonContent.decode(data, lessonID: attempt.lessonID,
+                                                      contentVersion: attempt.contentVersion)
+            activePins.append(LessonMatchMetadata(pin.definition))
+        }
+        return (terminal, completed, membership, activePins)
+    }
+
     private func reconcile(in context: ModelContext, now: Date, commit: Bool = true) throws {
         let current = try snapshot(in: context)
+        let evidence = try selectionEvidence(in: context, catalog: current)
         let desired = try LessonSelector.reconcile(definitions: current.definitions,
-            concepts: current.concepts, progress: current.progress, slots: current.slots, now: now)
+            concepts: current.concepts, subtopics: current.subtopics,
+            progress: current.progress, slots: current.slots,
+            terminal: evidence.terminal, completedConceptIDs: evidence.completed,
+            membership: evidence.membership, activePins: evidence.activePins, now: now)
         guard desired != current.slots else { return }
         let desiredByKey = Dictionary(uniqueKeysWithValues: desired.map { ($0.key, $0) })
         let rows = try context.fetch(FetchDescriptor<LessonSlot>())

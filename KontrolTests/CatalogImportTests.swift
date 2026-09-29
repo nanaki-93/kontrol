@@ -96,8 +96,9 @@ final class CatalogImportTests: XCTestCase {
         XCTAssertEqual(try records(Subtopic.self, in: container).count, seed.value.subtopics.count)
         XCTAssertEqual(try records(Concept.self, in: container).count, seed.value.concepts.count)
         XCTAssertEqual(try records(LessonDefinition.self, in: container).count, seed.value.lessons.count)
-        XCTAssertEqual(try repository.loadSnapshot().slots, oldSlots,
-                       "Membership persistence must not implicitly rotate slots in Step 2.3")
+        let current = try repository.loadSnapshot().slots
+        XCTAssertEqual(current, oldSlots.filter { $0.topicID == retainedTopic },
+                       "Retained definitions in retired topics must not remain current choices")
     }
 
     func testUpgradeKeepsIdentityPersonalDataAndAbsentHistoricalDefinitions() throws {
@@ -159,8 +160,13 @@ final class CatalogImportTests: XCTestCase {
         let invalidatedKeys = Set(originalSlots.filter {
             $0.lessonID == lessonID || $0.lessonID == dismissedID
         }.map(\.key))
-        XCTAssertEqual(upgradedSlots.filter { !invalidatedKeys.contains($0.key) },
-                       originalSlots.filter { !invalidatedKeys.contains($0.key) })
+        // Membership/prerequisite changes can invalidate other unstarted choices;
+        // surviving assignments retain their exact original timestamp and key.
+        let originalByKey = Dictionary(uniqueKeysWithValues: originalSlots.map { ($0.key, $0) })
+        for slot in upgradedSlots where !invalidatedKeys.contains(slot.key) &&
+            originalByKey[slot.key]?.lessonID == slot.lessonID {
+            XCTAssertEqual(slot, originalByKey[slot.key])
+        }
         XCTAssertFalse(upgradedSlots.map(\.lessonID).contains(lessonID))
         XCTAssertFalse(upgradedSlots.map(\.lessonID).contains(dismissedID))
         let definitions = try records(LessonDefinition.self, in: container)
