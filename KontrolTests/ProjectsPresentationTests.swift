@@ -84,6 +84,75 @@ final class ProjectsPresentationTests: XCTestCase {
             context: .absent, rules: .absent, history: .absent, diagnostics: [], sources: [], readAt: Date())
     }
 
+    func testCompletionControlsCompileForCardsAndValidatedDetailStatuses() async throws {
+        let statuses: [(String, ProjectFeatureStatus)] = [
+            ("ready", .ready), ("planned", .planned), ("active", .active),
+            ("blocked", .blocked), ("done", .completed)
+        ]
+        let sources = statuses.map { id, status in
+            ProjectSourceDocument(relativePath: ".kontrol/features/\(id).md", bytes: Data(
+                "---\nid: \(id)\ntitle: Disk \(id)\nstatus: \(status.rawValue)\npriority: medium\neffort: small\n---\nSelectable body".utf8))
+        }
+        let features = try sources.map { source -> ProjectFeature in
+            guard case let .supported(feature) = try ManifestParser().feature(source) else {
+                throw ProjectStoreError.invalidPreview
+            }
+            return feature
+        }
+        let base = cardInspection(features)
+        let inspection = ProjectInspection(manifest: base.manifest, roadmap: base.roadmap,
+            features: features, excludedFeaturePaths: [], featureEnumeration: .complete,
+            context: .absent, rules: .absent, history: .absent, diagnostics: [],
+            sources: sources, readAt: Date())
+        let id = UUID()
+        let store = ProjectStore(inspector: CardInspector([1: inspection]),
+            repository: ListRepository([reference(id, order: 0)]))
+        try store.enterProjects()
+        for _ in 0..<100 where store.rows.first?.isRefreshing == true {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let row = try XCTUnwrap(store.rows.first)
+        XCTAssertEqual(ProjectsView.recommendations(row).map(\.id), ["ready"])
+        let projects = NSHostingView(rootView: ProjectsView(store: store))
+        XCTAssertTrue(projects.rootView.store === store)
+        for feature in features {
+            let eligible = feature.status != .completed
+            XCTAssertEqual(ProjectsView.completionEnabled(feature.id, row: row, store: store), eligible)
+            XCTAssertEqual(ProjectFeatureDetailView.completionTitle(for: feature.id, state: row.completion),
+                           "Mark complete")
+            XCTAssertEqual(ProjectFeatureDetailView.completionLabel(for: feature, state: row.completion),
+                           "Mark Disk \(feature.id) complete")
+            store.selectFeature(feature.id, in: id)
+            let detail = NSHostingView(rootView: ProjectFeatureDetailView(row: row, featureID: feature.id,
+                backToRoadmap: true, back: { store.closeFeature() },
+                canMarkComplete: ProjectsView.completionEnabled(feature.id, row: row, store: store)))
+            XCTAssertEqual(detail.rootView.canMarkComplete, eligible)
+            XCTAssertEqual(detail.rootView.feature?.body, "Selectable body")
+            store.closeFeature()
+        }
+        for state in [ProjectCompletionState.writing("ready"), .refreshing("ready")] {
+            var busy = row
+            busy.completion = state
+            XCTAssertEqual(ProjectFeatureDetailView.completionTitle(for: "ready", state: state), "Saving…")
+            XCTAssertEqual(ProjectFeatureDetailView.completionLabel(for: features[0], state: state),
+                           "Saving Disk ready…")
+            XCTAssertFalse(ProjectsView.completionEnabled("ready", row: busy, store: store))
+            let detail = NSHostingView(rootView: ProjectFeatureDetailView(row: busy, featureID: "ready",
+                backToRoadmap: false, back: {}, canMarkComplete: false))
+            XCTAssertFalse(detail.rootView.canMarkComplete)
+        }
+        var stale = row
+        stale.isStale = true // A freshly inspected partial result can remain actionable.
+        XCTAssertTrue(ProjectsView.completionEnabled("ready", row: stale, store: store))
+        stale.isRetainedInspection = true
+        XCTAssertFalse(ProjectsView.completionEnabled("ready", row: stale, store: store))
+        stale.isRetainedInspection = false
+        stale.isRefreshing = true
+        XCTAssertFalse(ProjectsView.completionEnabled("ready", row: stale, store: store))
+        XCTAssertFalse(ProjectsView.completionEnabled("ready", row: row, store: store, isReconnecting: true))
+        // Native button activation, selectable text and AX inspection remain hosted F13 checks.
+    }
+
     func testSelectedWorkspaceHostsOneThreePartialAndRetainedFailure() async throws {
         let one = cardInspection([card("one", areas: ["Focus"])])
         let three = cardInspection([card("z"), card("a", priority: .high),
@@ -278,7 +347,7 @@ final class ProjectsPresentationTests: XCTestCase {
                        "Roadmap selection must not change status or create work")
     }
 
-    func testFullReadOnlyFeatureDetailHostsLongMarkdownEmptyDependenciesRefreshAndStale() async throws {
+    func testFeatureDetailHostsSelectableLongMarkdownEmptyDependenciesRefreshAndStale() async throws {
         let longBody = "## Verification scenarios (not an Acceptance heading)\n" +
             String(repeating: "- Read every requirement including **literal** [local text](https://example.invalid) and ![image](remote.png).\n", count: 400) +
             "\nFinal line must remain visible."

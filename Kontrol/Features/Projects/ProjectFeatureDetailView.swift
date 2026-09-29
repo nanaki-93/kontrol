@@ -1,12 +1,14 @@
 import SwiftUI
 
-/// Read-only local Markdown: plain selectable text never interprets links, images or markup.
+/// Local Markdown remains plain selectable text; completion is delegated to the store.
 /// Resolve by ID on each render so refresh/reconnect never leaves a second content cache.
 struct ProjectFeatureDetailView: View {
     let row: ProjectRowState
     let featureID: String
     let backToRoadmap: Bool
     let back: () -> Void
+    var canMarkComplete = false
+    var markComplete: () -> Void = {}
     var navigationFocus: FocusState<ProjectsView.NavigationFocus?>.Binding? = nil
     @FocusState private var localFocus: ProjectsView.NavigationFocus?
 
@@ -16,6 +18,18 @@ struct ProjectFeatureDetailView: View {
 
     var feature: ProjectFeature? {
         row.inspection?.features.first { $0.id == featureID }
+    }
+
+    static func completionTitle(for featureID: String, state: ProjectCompletionState?) -> String {
+        if case .writing(featureID) = state { return "Saving…" }
+        if case .refreshing(featureID) = state { return "Saving…" }
+        return "Mark complete"
+    }
+
+    static func completionLabel(for feature: ProjectFeature, state: ProjectCompletionState?) -> String {
+        let title = ProjectDetailsView.safeLabel(feature.title)
+        return completionTitle(for: feature.id, state: state) == "Saving…" ?
+            "Saving \(title)…" : "Mark \(title) complete"
     }
 
     static func dependencyLabels(for feature: ProjectFeature, in inspection: ProjectInspection) -> [String] {
@@ -43,6 +57,14 @@ struct ProjectFeatureDetailView: View {
                     Text("Stale reference · Last read: \(row.lastReadAt?.formatted(date: .abbreviated, time: .shortened) ?? "unavailable") · Refresh or Reconnect to verify this feature.")
                         .appTypography(.body)
                         .accessibilityIdentifier("project-feature-stale")
+                }
+                if feature.status != .completed {
+                    ActionButton(Self.completionTitle(for: featureID, state: row.completion),
+                                 isEnabled: canMarkComplete && !row.isRefreshing && !row.isRetainedInspection) {
+                        markComplete()
+                    }
+                    .accessibilityLabel(Self.completionLabel(for: feature, state: row.completion))
+                    .accessibilityIdentifier("project-feature-complete-\(featureID)")
                 }
                 SectionHeader("Feature details")
                 detail("Stable ID", feature.id)

@@ -45,6 +45,15 @@ struct ProjectsView: View {
     static func cardLabel(_ feature: ProjectFeature) -> String {
         "View feature \(feature.title), \(feature.status.rawValue), \(feature.priority.rawValue) priority, \(feature.effort.rawValue) effort"
     }
+
+    static func completionEnabled(_ featureID: String, row: ProjectRowState,
+                                  store: ProjectStore, isReconnecting: Bool = false) -> Bool {
+        guard !isReconnecting, !row.isRefreshing, !row.isRetainedInspection else { return false }
+        switch row.completion {
+        case .writing, .undoing, .refreshing: return false
+        default: return store.canMarkComplete(featureID, in: row.reference.id)
+        }
+    }
     static func ordered(_ rows: [ProjectRowState]) -> [ProjectRowState] {
         rows.sorted {
             if $0.reference.displayOrder != $1.reference.displayOrder {
@@ -153,7 +162,11 @@ struct ProjectsView: View {
                store.selectedFeatureContent != nil {
                 ProjectFeatureDetailView(row: row, featureID: identity.featureID,
                                          backToRoadmap: detailID == row.reference.id, back: closeFeature,
-                                         navigationFocus: $navigationFocus)
+                                         canMarkComplete: Self.completionEnabled(identity.featureID, row: row,
+                                             store: store, isReconnecting: reconnectingID == row.reference.id),
+                                         markComplete: {
+                                             Task { await store.markComplete(identity.featureID, in: identity.projectID) }
+                                         }, navigationFocus: $navigationFocus)
                 .onAppear {
                     Task { @MainActor in
                         await Task.yield()
@@ -328,6 +341,15 @@ struct ProjectsView: View {
                                 .focused($navigationFocus, equals: .card(row.reference.id, candidate.id))
                                 .accessibilityLabel(Self.cardLabel(feature))
                                 .accessibilityIdentifier("project-feature-open-\(candidate.id)")
+                                ActionButton(ProjectFeatureDetailView.completionTitle(for: candidate.id,
+                                                                                       state: row.completion),
+                                             isEnabled: Self.completionEnabled(candidate.id, row: row,
+                                                 store: store, isReconnecting: reconnectingID == row.reference.id)) {
+                                    Task { await store.markComplete(candidate.id, in: row.reference.id) }
+                                }
+                                .accessibilityLabel(ProjectFeatureDetailView.completionLabel(for: feature,
+                                                                                             state: row.completion))
+                                .accessibilityIdentifier("project-feature-complete-\(candidate.id)")
                             }
                             .accessibilityIdentifier("project-feature-card-\(candidate.id)")
                         }
