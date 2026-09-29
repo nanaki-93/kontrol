@@ -18,6 +18,7 @@ protocol NewsRepository {
     func savePreferences(_ edit: NewsPreferencesEdit, expectedRevision: UUID) throws -> NewsSnapshot
     func saveFeed(_ draft: FeedDraft, validation: ValidatedFeed?) throws -> NewsSnapshot
     func removeFeed(id: UUID, expectedRevision: UUID) throws -> NewsSnapshot
+    func applyRefresh(_ outcomes: [FeedRefreshOutcome], at: Date) throws -> NewsSnapshot
 }
 
 /// All operations read authoritative rows in a new context. No model or context escapes.
@@ -308,8 +309,8 @@ final class SwiftDataNewsRepository: NewsRepository {
     }
 
     private func rewriteArticles(_ states: [NewsSelection.State], rows: [NewsArticleRecord], feeds: [FeedSourceSnapshot],
-                                 context: ModelContext) throws {
-        let kept = NewsSelection.reconcile(states, outcomes: [], feeds: feeds, at: now())
+                                 context: ModelContext, at date: Date? = nil) throws {
+        let kept = NewsSelection.reconcile(states, outcomes: [], feeds: feeds, at: date ?? now())
         let byID = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
         let retained = Set(kept.map { $0.article.id })
         for row in rows where !retained.contains(row.id) { context.delete(row) }
@@ -339,6 +340,77 @@ final class SwiftDataNewsRepository: NewsRepository {
             row.provenancePayload = payload
             if byID[article.id] == nil { context.insert(row) }
         }
+    }
+
+    /// Fence late responses against the authoritative rows, not a previously published
+    /// snapshot. One fresh context owns the entire batch and retention rewrite.
+    func applyRefresh(_ outcomes: [FeedRefreshOutcome], at date: Date) throws -> NewsSnapshot {
+        guard let catalog else { throw NewsRepositoryError.invalidCatalog }
+        guard date.timeIntervalSinceReferenceDate.isFinite else { throw NewsRepositoryError.invalidStoredData }
+        let context = context()
+        let current = try rows(context)
+        let before = try snapshot(current, catalog: catalog)
+        let feeds = Dictionary(uniqueKeysWithValues: before.feeds.map { ($0.id, $0) })
+        let records = Dictionary(uniqueKeysWithValues: current.feeds.map { ($0.id, $0) })
+        var accepted: [FeedRefreshOutcome] = []
+        var seen = Set<UUID>()
+        var succeeded = false
+        for outcome in outcomes {
+            guard let feed = feeds[outcome.feedID], feed.isEnabled,
+                  feed.configurationRevision == outcome.configurationRevision,
+                  let record = records[outcome.feedID], seen.insert(outcome.feedID).inserted else { continue }
+            switch outcome.result {
+            case .canceled, .deferred:
+                continue // Neither an attempt nor a successful check was committed.
+            case .modified(_, let etag, let lastModified):
+                guard let attempt = outcome.attemptedAt,
+                      attempt.timeIntervalSinceReferenceDate.isFinite,
+                      (etag?.utf8.count ?? 0) <= 4_096,
+                      (lastModified?.utf8.count ?? 0) <= 4_096 else {
+                    throw NewsRepositoryError.invalidStoredData
+                }
+                record.lastAttemptAt = attempt
+                record.lastSuccessAt = attempt
+                record.lastErrorCode = nil
+                record.retryNotBefore = nil
+                record.etag = etag
+                record.lastModified = lastModified
+                succeeded = true
+                accepted.append(outcome)
+            case .notModified:
+                guard let attempt = outcome.attemptedAt,
+                      attempt.timeIntervalSinceReferenceDate.isFinite else {
+                    throw NewsRepositoryError.invalidStoredData
+                }
+                record.lastAttemptAt = attempt
+                record.lastSuccessAt = attempt
+                record.lastErrorCode = nil
+                record.retryNotBefore = nil
+                // A 304 cannot replace the validators or source contributions.
+                succeeded = true
+                accepted.append(outcome)
+            case .failed(let code, let retry):
+                guard outcome.attemptedAt?.timeIntervalSinceReferenceDate.isFinite != false,
+                      retry?.timeIntervalSinceReferenceDate.isFinite != false else {
+                    throw NewsRepositoryError.invalidStoredData
+                }
+                if let attempt = outcome.attemptedAt { record.lastAttemptAt = attempt }
+                record.lastErrorCode = code.rawValue
+                record.retryNotBefore = retry
+                accepted.append(outcome)
+            }
+        }
+        guard !accepted.isEmpty else { return before }
+        if succeeded {
+            let merged = NewsSelection.reconcile(before.articleStates, outcomes: accepted,
+                                                 feeds: before.feeds, at: date)
+            try rewriteArticles(merged, rows: current.articles, feeds: before.feeds,
+                                context: context, at: date)
+            guard let preference = current.preference else { throw NewsRepositoryError.invalidStoredData }
+            preference.lastRefreshAt = max(preference.lastRefreshAt ?? date, date)
+        }
+        try commit(context)
+        return try snapshot(rows(self.context()), catalog: catalog)
     }
 
     func savePreferences(_ edit: NewsPreferencesEdit, expectedRevision: UUID) throws -> NewsSnapshot {

@@ -420,6 +420,172 @@ final class NewsRepositoryTests: XCTestCase {
         XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<NewsArticleRecord>()).count, 1)
     }
 
+    func testRefreshBatchIsAtomicAndPreservesCacheOnFailure304AndEmptySuccess() throws {
+        enum Failure: Error { case injected }
+        let (container, directory) = try store()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let repo = SwiftDataNewsRepository(container: container, now: { self.instant })
+        let initial = try repo.loadOrInitialize(catalog())
+        let first = initial.feeds[0]
+        let newDraft = draft(enabled: true)
+        let second = try XCTUnwrap(repo.saveFeed(newDraft, validation: receipt(newDraft))
+            .feeds.first { $0.name == "Custom" })
+        let attempt = instant.addingTimeInterval(60)
+        let entry = NewsFeedEntry(title: "Shared", url: URL(string: "https://news.example.com/story")!,
+            guid: "guid", publishedAt: nil, summary: "Plain")
+        func outcome(_ feed: FeedSourceSnapshot, _ result: FeedRefreshResult, at: Date? = attempt) -> FeedRefreshOutcome {
+            FeedRefreshOutcome(feedID: feed.id, configurationRevision: feed.configurationRevision,
+                attemptedAt: at, result: result)
+        }
+        let modified = outcome(first, .modified([entry], etag: "etag", lastModified: "modified"))
+        let failed = outcome(second, .failed(.rateLimited, retryNotBefore: attempt.addingTimeInterval(120)))
+        let failing = SwiftDataNewsRepository(container: container, now: { self.instant },
+            beforeSave: { throw Failure.injected })
+        _ = try failing.loadOrInitialize(catalog())
+        let failedOnly = try repo.applyRefresh([failed], at: attempt)
+        XCTAssertNil(failedOnly.preferences.lastRefreshAt)
+        XCTAssertEqual(failedOnly.feeds.first { $0.id == second.id }?.lastError, .rateLimited)
+        XCTAssertEqual(try repo.applyRefresh([
+            outcome(first, .canceled),
+            outcome(second, .deferred(retryNotBefore: attempt.addingTimeInterval(120)), at: nil)
+        ], at: attempt), failedOnly)
+        XCTAssertThrowsError(try failing.applyRefresh([modified, failed], at: attempt)) {
+            XCTAssertTrue($0 is Failure)
+        }
+        XCTAssertEqual(try repo.loadOrInitialize(catalog()), failedOnly)
+        let partial = try repo.applyRefresh([modified, failed], at: attempt)
+        XCTAssertEqual(partial.articles.map(\.title), ["Shared"])
+        XCTAssertEqual(partial.preferences.lastRefreshAt, attempt)
+        XCTAssertEqual(partial.feeds.first { $0.id == first.id }?.etag, "etag")
+        XCTAssertEqual(partial.feeds.first { $0.id == first.id }?.lastSuccessAt, attempt)
+        XCTAssertEqual(partial.feeds.first { $0.id == second.id }?.lastError, .rateLimited)
+        XCTAssertEqual(partial.feeds.first { $0.id == second.id }?.retryNotBefore,
+                       attempt.addingTimeInterval(120))
+        XCTAssertEqual(partial.feeds.first { $0.id == second.id }?.lastAttemptAt, attempt)
+        XCTAssertEqual(partial.feeds.first { $0.id == second.id }?.lastSuccessAt, instant) // editor validation
+        let failureOnly = try repo.applyRefresh([outcome(first, .failed(.offline, retryNotBefore: nil))],
+                                                at: attempt.addingTimeInterval(1))
+        XCTAssertEqual(failureOnly.articles, partial.articles)
+        XCTAssertEqual(failureOnly.preferences.lastRefreshAt, attempt)
+        XCTAssertEqual(failureOnly.feeds.first { $0.id == first.id }?.etag, "etag")
+        XCTAssertEqual(failureOnly.feeds.first { $0.id == first.id }?.lastError, .offline)
+        let checkedAt = attempt.addingTimeInterval(2)
+        let checked = try repo.applyRefresh([outcome(first, .notModified, at: checkedAt)], at: checkedAt)
+        XCTAssertEqual(checked.articles, partial.articles)
+        XCTAssertEqual(checked.preferences.lastRefreshAt, checkedAt)
+        XCTAssertEqual(checked.feeds.first { $0.id == first.id }?.lastSuccessAt, checkedAt)
+        XCTAssertEqual(checked.feeds.first { $0.id == first.id }?.etag, "etag")
+        XCTAssertNil(checked.feeds.first { $0.id == first.id }?.lastError)
+        let emptyAt = checkedAt.addingTimeInterval(1)
+        let empty = try repo.applyRefresh([outcome(first, .modified([], etag: nil, lastModified: nil), at: emptyAt)],
+                                          at: emptyAt)
+        XCTAssertEqual(empty.articles, partial.articles)
+        XCTAssertEqual(empty.preferences.lastRefreshAt, emptyAt)
+        XCTAssertNil(empty.feeds.first { $0.id == first.id }?.etag)
+        let reopened = try ModelContainerFactory().makeContainer(mode: .persistent(
+            directory.appendingPathComponent("Kontrol.store")))
+        XCTAssertEqual(try SwiftDataNewsRepository(container: reopened,
+            now: { self.instant.addingTimeInterval(120) }).loadOrInitialize(catalog()), empty)
+    }
+
+    func testPartialRefreshKeepsFailedSourcesAndReopenPreservesSharedProvenance() throws {
+        let (container, directory) = try store()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let repo = SwiftDataNewsRepository(container: container, now: { self.instant })
+        let primary = try repo.loadOrInitialize(catalog()).feeds[0]
+        let draft = draft(enabled: true)
+        let secondary = try XCTUnwrap(repo.saveFeed(draft, validation: receipt(draft))
+            .feeds.first { $0.id != primary.id })
+        let shared = URL(string: "https://news.example.com/shared")!
+        let old = URL(string: "https://news.example.com/old")!
+        func modified(_ feed: FeedSourceSnapshot, _ entries: [NewsFeedEntry], at date: Date) -> FeedRefreshOutcome {
+            FeedRefreshOutcome(feedID: feed.id, configurationRevision: feed.configurationRevision,
+                attemptedAt: date, result: .modified(entries, etag: nil, lastModified: nil))
+        }
+        let first = try repo.applyRefresh([
+            modified(secondary, [NewsFeedEntry(title: "Secondary", url: shared, guid: "s",
+                publishedAt: nil, summary: nil),
+                NewsFeedEntry(title: "Cached", url: old, guid: "old", publishedAt: nil, summary: nil)], at: instant)
+        ], at: instant)
+        let sharedID = try XCTUnwrap(first.articles.first { $0.url == shared }?.id)
+        let later = instant.addingTimeInterval(90)
+        let partial = try repo.applyRefresh([
+            modified(primary, [NewsFeedEntry(title: "Primary", url: shared, guid: "p",
+                publishedAt: nil, summary: nil)], at: later),
+            FeedRefreshOutcome(feedID: secondary.id, configurationRevision: secondary.configurationRevision,
+                attemptedAt: later, result: .failed(.offline, retryNotBefore: nil))
+        ], at: later)
+        XCTAssertEqual(partial.articles.count, 2)
+        let combined = try XCTUnwrap(partial.articleStates.first { $0.article.id == sharedID })
+        XCTAssertEqual(Set(combined.article.sources.map(\.feedID)), [primary.id, secondary.id])
+        XCTAssertEqual(combined.aliases[primary.id], ["p"])
+        XCTAssertEqual(combined.aliases[secondary.id], ["s"])
+        XCTAssertEqual(combined.article.firstFetchedAt, instant)
+        XCTAssertEqual(partial.feeds.first { $0.id == secondary.id }?.lastError, .offline)
+        XCTAssertEqual(partial.preferences.lastRefreshAt, later)
+        let reopened = try ModelContainerFactory().makeContainer(mode: .persistent(
+            directory.appendingPathComponent("Kontrol.store")))
+        XCTAssertEqual(try SwiftDataNewsRepository(container: reopened, now: { later })
+            .loadOrInitialize(catalog()), partial)
+    }
+
+    func testLateRefreshFencesRemovedDisabledAndEditedFeedsAndBoundsRepeatedMerges() throws {
+        let (container, directory) = try store()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let repo = SwiftDataNewsRepository(container: container, now: { self.instant })
+        let original = try repo.loadOrInitialize(catalog()).feeds[0]
+        let otherDraft = draft(enabled: true)
+        let added = try repo.saveFeed(otherDraft, validation: receipt(otherDraft))
+        let other = try XCTUnwrap(added.feeds.first { $0.id != original.id })
+        func result(_ feed: FeedSourceSnapshot, _ link: String) -> FeedRefreshOutcome {
+            FeedRefreshOutcome(feedID: feed.id, configurationRevision: feed.configurationRevision,
+                attemptedAt: instant, result: .modified([
+                    NewsFeedEntry(title: link, url: URL(string: link)!, guid: link,
+                                  publishedAt: nil, summary: nil)
+                ], etag: "current", lastModified: nil))
+        }
+        let old = result(original, "https://news.example.com/stale")
+        let removed = try repo.removeFeed(id: other.id, expectedRevision: other.configurationRevision)
+        let disabled = try repo.saveFeed(draft(original, url: original.url.absoluteString, enabled: false))
+        XCTAssertEqual(try repo.applyRefresh([old, result(other, "https://news.example.com/removed")],
+                                             at: instant), disabled)
+        XCTAssertEqual(removed.feeds.count, 1)
+        let disabledFeed = try XCTUnwrap(disabled.feeds.first)
+        let enableDraft = draft(disabledFeed, url: disabledFeed.url.absoluteString, enabled: true)
+        let enabled = try repo.saveFeed(enableDraft, validation: receipt(enableDraft))
+        let current = try XCTUnwrap(enabled.feeds.first)
+        let edited = try repo.saveFeed(draft(current, name: "Edited", url: current.url.absoluteString,
+                                             enabled: true))
+        XCTAssertEqual(try repo.applyRefresh([result(current, "https://news.example.com/stale")],
+                                             at: instant), edited)
+        let live = try XCTUnwrap(edited.feeds.first)
+        let endpointDraft = draft(live, url: "https://new.example.com/rss", enabled: true)
+        let moved = try repo.saveFeed(endpointDraft, validation: receipt(endpointDraft))
+        XCTAssertEqual(try repo.applyRefresh([result(live, "https://news.example.com/stale")],
+                                             at: instant), moved)
+        let currentEndpoint = try XCTUnwrap(moved.feeds.first)
+        for _ in 0..<3 {
+            let entries = (0..<520).map { index in
+                NewsFeedEntry(title: "Story \(index)",
+                    url: URL(string: "https://news.example.com/\(index)")!, guid: "id-\(index)",
+                    publishedAt: nil, summary: nil)
+            }
+            let expired = NewsFeedEntry(title: "Expired", url: URL(string: "https://news.example.com/expired")!,
+                guid: "expired", publishedAt: instant.addingTimeInterval(-31 * 86_400), summary: nil)
+            let batch = FeedRefreshOutcome(feedID: currentEndpoint.id,
+                configurationRevision: currentEndpoint.configurationRevision,
+                attemptedAt: instant,
+                result: .modified(entries + [expired], etag: nil, lastModified: nil))
+            let snapshot = try repo.applyRefresh([batch], at: instant)
+            XCTAssertEqual(snapshot.articles.count, 500)
+            XCTAssertFalse(snapshot.articles.contains { $0.title == "Expired" })
+            XCTAssertEqual(snapshot.articleStates.count, 500)
+            XCTAssertTrue(snapshot.articleStates.allSatisfy { $0.aliases[currentEndpoint.id]?.count == 1 })
+            XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<NewsArticleRecord>()).count, 500)
+        }
+        XCTAssertEqual(try repo.loadOrInitialize(catalog()).articles.count, 500)
+    }
+
     func testLoadTrimsExpiredArticlesAndFailureLeavesThemUntouched() throws {
         enum Failure: Error { case injected }
         let (container, directory) = try store()
