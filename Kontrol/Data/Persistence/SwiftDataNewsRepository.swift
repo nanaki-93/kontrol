@@ -6,12 +6,18 @@ enum NewsRepositoryError: Error, Equatable {
     case invalidSelection
     case invalidStoredData
     case staleRevision
+    case invalidFeed
+    case duplicateEndpoint
+    case feedLimitReached
+    case validationRequired
 }
 
 @MainActor
 protocol NewsRepository {
     func loadOrInitialize(_ catalog: DefaultFeedCatalog) throws -> NewsSnapshot
     func savePreferences(_ edit: NewsPreferencesEdit, expectedRevision: UUID) throws -> NewsSnapshot
+    func saveFeed(_ draft: FeedDraft, validation: ValidatedFeed?) throws -> NewsSnapshot
+    func removeFeed(id: UUID, expectedRevision: UUID) throws -> NewsSnapshot
 }
 
 /// All operations read authoritative rows in a new context. No model or context escapes.
@@ -187,6 +193,152 @@ final class SwiftDataNewsRepository: NewsRepository {
         let result = try snapshot(rows(self.context()), catalog: catalog)
         self.catalog = catalog
         return result
+    }
+
+    /// A receipt belongs to exactly one editor revision and endpoint. Only the store/service
+    /// can obtain one; a locally valid disabled draft needs no network at all.
+    func saveFeed(_ draft: FeedDraft, validation: ValidatedFeed? = nil) throws -> NewsSnapshot {
+        guard let catalog else { throw NewsRepositoryError.invalidCatalog }
+        let name = draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let endpointText = draft.urlText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let known = Set(catalog.topics.map(\.id))
+        guard !name.isEmpty, name.utf8.count <= 256, !draft.topicIDs.isEmpty,
+              draft.topicIDs.isSubset(of: known),
+              let endpoint = try? NewsURLPolicy.feedURL(endpointText),
+              let normalized = try? NewsURLPolicy.normalizedFeedURL(endpoint.absoluteString) else {
+            throw NewsRepositoryError.invalidFeed
+        }
+        let context = context()
+        let current = try rows(context)
+        let before = try snapshot(current, catalog: catalog)
+        let record: NewsFeedRecord?
+        if let id = draft.id {
+            guard let found = current.feeds.first(where: { $0.id == id }),
+                  found.configurationRevision == draft.expectedRevision else {
+                throw NewsRepositoryError.staleRevision
+            }
+            record = found
+        } else {
+            guard draft.expectedRevision == nil else { throw NewsRepositoryError.staleRevision }
+            guard current.feeds.count < 32 else { throw NewsRepositoryError.feedLimitReached }
+            record = nil
+        }
+        guard !before.feeds.contains(where: {
+            $0.id != record?.id && (try? NewsURLPolicy.normalizedFeedURL($0.url.absoluteString)) == normalized
+        }) else { throw NewsRepositoryError.duplicateEndpoint }
+        let changedEndpoint = record.map { (try? NewsURLPolicy.normalizedFeedURL($0.endpoint)) != normalized } ?? true
+        let needsValidation = draft.isEnabled && (record == nil || changedEndpoint ||
+            (record?.isEnabled == false && record?.lastSuccessAt == nil))
+        if needsValidation {
+            guard let validation, validation.draftRevision == draft.draftRevision,
+                  validation.url == endpoint, validation.validatedAt.timeIntervalSinceReferenceDate.isFinite,
+                  (validation.etag?.utf8.count ?? 0) <= 4_096,
+                  (validation.lastModified?.utf8.count ?? 0) <= 4_096 else {
+                throw NewsRepositoryError.validationRequired
+            }
+        }
+        let topics = try NewsRecordPayload.encodeTopics(draft.topicIDs.sorted())
+        if let record {
+            record.name = name
+            record.topicIDsPayload = topics
+            record.isEnabled = draft.isEnabled
+            record.endpoint = endpoint.absoluteString
+            record.configurationRevision = UUID()
+            if changedEndpoint {
+                // Even a validated endpoint has no cached entries yet. Sending its
+                // receipt's validators could yield a 304 before the first cache merge.
+                record.etag = nil
+                record.lastModified = nil
+                record.retryNotBefore = nil
+                record.lastErrorCode = nil
+                record.lastAttemptAt = nil
+                record.lastSuccessAt = nil
+            }
+            if needsValidation { record.lastSuccessAt = validation?.validatedAt }
+        } else {
+            let new = NewsFeedRecord(name: name, endpoint: endpoint.absoluteString,
+                topicIDsPayload: topics, isEnabled: draft.isEnabled,
+                lastSuccessAt: needsValidation ? validation?.validatedAt : nil)
+            context.insert(new)
+        }
+        // Endpoint changes evict this feed's old metadata. Other feeds keep their own
+        // contribution; disabled and name/topic-only edits retain the bounded cache.
+        if changedEndpoint, let id = record?.id {
+            try rewriteArticles(before.articleStates, rows: current.articles,
+                                feeds: before.feeds.filter { $0.id != id }, context: context)
+        } else if record != nil {
+            try rewriteArticles(before.articleStates, rows: current.articles,
+                                feeds: try feedSnapshots(current.feeds, catalog: catalog), context: context)
+        }
+        try commit(context)
+        return try snapshot(rows(self.context()), catalog: catalog)
+    }
+
+    func removeFeed(id: UUID, expectedRevision: UUID) throws -> NewsSnapshot {
+        guard let catalog else { throw NewsRepositoryError.invalidCatalog }
+        let context = context()
+        let current = try rows(context)
+        let before = try snapshot(current, catalog: catalog)
+        guard let record = current.feeds.first(where: { $0.id == id }),
+              record.configurationRevision == expectedRevision else {
+            throw NewsRepositoryError.staleRevision
+        }
+        try rewriteArticles(before.articleStates, rows: current.articles,
+                            feeds: before.feeds.filter { $0.id != id }, context: context)
+        context.delete(record)
+        try commit(context)
+        return try snapshot(rows(self.context()), catalog: catalog)
+    }
+
+    private func feedSnapshots(_ records: [NewsFeedRecord], catalog: DefaultFeedCatalog) throws -> [FeedSourceSnapshot] {
+        // Decoding through the normal read boundary keeps all validation in one place.
+        // Used only after an already validated snapshot, with the edited rows in this context.
+        let known = Set(catalog.topics.map(\.id))
+        return try records.map { record in
+            let topics = try NewsRecordPayload.topics(record.topicIDsPayload)
+            guard Set(topics).isSubset(of: known) else { throw NewsRepositoryError.invalidStoredData }
+            return FeedSourceSnapshot(id: record.id, name: record.name,
+                url: try NewsURLPolicy.feedURL(record.endpoint), topicIDs: Set(topics),
+                isEnabled: record.isEnabled, configurationRevision: record.configurationRevision,
+                etag: record.etag, lastModified: record.lastModified,
+                lastAttemptAt: record.lastAttemptAt, lastSuccessAt: record.lastSuccessAt,
+                lastError: record.lastErrorCode.flatMap(NewsErrorCode.init(rawValue:)),
+                retryNotBefore: record.retryNotBefore)
+        }
+    }
+
+    private func rewriteArticles(_ states: [NewsSelection.State], rows: [NewsArticleRecord], feeds: [FeedSourceSnapshot],
+                                 context: ModelContext) throws {
+        let kept = NewsSelection.reconcile(states, outcomes: [], feeds: feeds, at: now())
+        let byID = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
+        let retained = Set(kept.map { $0.article.id })
+        for row in rows where !retained.contains(row.id) { context.delete(row) }
+        for state in kept {
+            let article = state.article
+            let contributions = try article.sources.map { source -> NewsRecordPayload.Contribution in
+                guard let metadata = state.contributions[source.feedID] else {
+                    throw NewsRepositoryError.invalidStoredData
+                }
+                return .init(feedID: source.feedID, feedName: source.feedName,
+                    topicIDs: source.topicIDs.sorted(), guids: state.aliases[source.feedID] ?? [],
+                    metadata: .init(url: metadata.url.absoluteString, canonicalURL: metadata.canonicalURL,
+                        title: metadata.title, publishedAt: metadata.publishedAt, summary: metadata.summary))
+            }
+            let payload = try NewsRecordPayload.encodeContributions(contributions)
+            let row = byID[article.id] ?? NewsArticleRecord(id: article.id,
+                url: article.url.absoluteString, canonicalURL: article.canonicalURL,
+                title: article.title, publishedAt: article.publishedAt,
+                firstFetchedAt: article.firstFetchedAt, summary: article.summary,
+                provenancePayload: payload)
+            row.url = article.url.absoluteString
+            row.canonicalURL = article.canonicalURL
+            row.title = article.title
+            row.publishedAt = article.publishedAt
+            row.firstFetchedAt = article.firstFetchedAt
+            row.summary = article.summary
+            row.provenancePayload = payload
+            if byID[article.id] == nil { context.insert(row) }
+        }
     }
 
     func savePreferences(_ edit: NewsPreferencesEdit, expectedRevision: UUID) throws -> NewsSnapshot {
