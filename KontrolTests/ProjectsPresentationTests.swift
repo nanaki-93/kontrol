@@ -50,6 +50,34 @@ final class ProjectsPresentationTests: XCTestCase {
                        "Location unavailable · reference \(second.uuidString)")
     }
 
+    func testFolderOnlyPickerAndPreviewHostCompile() {
+        let panel = ProjectAddView.configuredPicker()
+        XCTAssertTrue(panel.canChooseDirectories)
+        XCTAssertFalse(panel.canChooseFiles)
+        XCTAssertFalse(panel.allowsMultipleSelection)
+        XCTAssertFalse(panel.canCreateDirectories)
+        let store = ProjectStore(inspector: ListInspector(), repository: ListRepository([]))
+        let host = NSHostingView(rootView: ProjectAddView(store: store, close: {}))
+        XCTAssertTrue(host.rootView.store === store)
+        XCTAssertNil(store.preview, "Opening a sheet does not preview or persist a project")
+    }
+
+    func testValidationSummaryUsesInspectedResultsNotPlaceholderCounts() {
+        let manifest = ProjectManifest(schemaVersion: 1, id: "fixture", name: "Fixture",
+                                       description: "", stack: [], goals: [], currentFocus: [])
+        let complete = ProjectInspection(manifest: manifest, roadmap: .absent, features: [],
+            excludedFeaturePaths: [], featureEnumeration: .complete, context: .absent,
+            rules: .absent, history: .absent, diagnostics: [], sources: [], readAt: Date())
+        XCTAssertEqual(ProjectAddView.summary(complete), "Valid · 0 of 0 features completed")
+        let invalid = ProjectInspection(manifest: nil, roadmap: .absent, features: [],
+            excludedFeaturePaths: [], featureEnumeration: .complete, context: .absent,
+            rules: .absent, history: .absent,
+            diagnostics: [ProjectDiagnostic(code: .missingManifest, severity: .error,
+                relativePath: ".kontrol/project.yaml", recovery: .reselectFolder)],
+            sources: [], readAt: Date())
+        XCTAssertEqual(ProjectAddView.summary(invalid), "Validation: 1 issue · Project cannot be added")
+    }
+
     func testPerRowStatusKeepsPartialAndGrantFailuresDistinct() {
         let id = UUID()
         let base = ProjectRowState(reference: reference(id, order: 0), inspection: nil)

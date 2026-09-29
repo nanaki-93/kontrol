@@ -397,8 +397,14 @@ final class ProjectStore: ObservableObject {
             try enterProjects()
             let inspection = try await inspector.inspect(selectedFolder: candidate.folder)
             try Task.checkCancellation()
-            guard generation == previewGeneration, ProjectInspector.canAdd(inspection),
-                  let manifest = inspection.manifest else { throw ProjectStoreError.invalidPreview }
+            guard generation == previewGeneration else { throw CancellationError() }
+            // A changed disk result replaces the preview before eligibility is checked.
+            // Never leave an obsolete Add-enabled preview after failed revalidation.
+            preview = ProjectAddPreview(folder: candidate.folder, inspection: inspection,
+                                        canAdd: ProjectInspector.canAdd(inspection))
+            guard ProjectInspector.canAdd(inspection), let manifest = inspection.manifest else {
+                throw ProjectStoreError.invalidPreview
+            }
             // Resolve identities only while each grant is active. An inaccessible old reference
             // cannot be treated as a match; it remains available for explicit Reconnect later.
             let selectedIdentity = try await identifier.selected(candidate.folder)
@@ -443,8 +449,9 @@ final class ProjectStore: ObservableObject {
         } catch {
             // Cancellation/validation is not a persistence success. Keep a valid preview only
             // when it still represents the current selection; the user may reselect/refresh.
-            if !(error is CancellationError) && generation == previewGeneration {
-                addMessage = "Project not added"
+            if generation == previewGeneration {
+                if error is ProjectInspectionFailure { preview = nil }
+                if !(error is CancellationError) { addMessage = "Project not added" }
             }
             throw error
         }

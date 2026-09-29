@@ -1,10 +1,11 @@
 import SwiftUI
 
 /// The folder list stays visible when an individual reference cannot be read.
-/// Add preview, details and reconnect controls are separate follow-up surfaces.
+/// Details and reconnect controls are separate follow-up surfaces.
 struct ProjectsView: View {
     @ObservedObject var store: ProjectStore
     @State private var showingAdd = false
+    @FocusState private var addFocused: Bool
 
     static func ordered(_ rows: [ProjectRowState]) -> [ProjectRowState] {
         rows.sorted {
@@ -45,6 +46,7 @@ struct ProjectsView: View {
         VStack(alignment: .leading, spacing: AppMetrics.space6) {
             PageHeader("Projects") {
                 ActionButton("Add project", symbol: "plus", variant: .primary) { showingAdd = true }
+                    .focused($addFocused)
                     .accessibilityIdentifier("projects-add")
             }
             if store.loadFailed {
@@ -84,15 +86,8 @@ struct ProjectsView: View {
         .padding(.horizontal, AppMetrics.horizontalInset)
         .padding(.top, AppMetrics.space8)
         .onAppear { enter() }
-        .sheet(isPresented: $showingAdd) {
-            VStack(alignment: .leading, spacing: AppMetrics.space4) {
-                PageHeader("Add project")
-                Text("Folder selection and validation preview are not available yet.")
-                    .appTypography(.body)
-                ActionButton("Close") { showingAdd = false }
-            }
-            .padding(AppMetrics.space8)
-            .frame(minWidth: 400)
+        .sheet(isPresented: $showingAdd, onDismiss: { addFocused = true }) {
+            ProjectAddView(store: store) { showingAdd = false }
         }
         .accessibilityIdentifier("projects-content")
     }

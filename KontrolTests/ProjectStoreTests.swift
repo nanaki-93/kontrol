@@ -236,6 +236,7 @@ final class ProjectStoreTests: XCTestCase {
         await io.release(refs[0].bookmarkData, result: .success(inspection()))
         await io.release(refs[3].bookmarkData, result: .success(inspection()))
         await io.release(refs[4].bookmarkData, result: .success(inspection()))
+        await eventually { repo.successfulReads == 5 }
         await eventually { await io.counts().1 == 0 }
         let firstStarts = await io.starts(for: refs[0].bookmarkData)
         let lastStarts = await io.starts(for: refs[4].bookmarkData)
@@ -462,6 +463,11 @@ final class ProjectStoreTests: XCTestCase {
         catch { XCTAssertEqual(error as? ProjectStoreError, .invalidPreview) }
         XCTAssertEqual(repo.inserts, 0)
         XCTAssertEqual(io.bookmarkCount, 0)
+        XCTAssertEqual(subject.preview?.canAdd, false,
+                       "A failed final inspection must disable the old Add preview")
+        do { _ = try await subject.addPreviewedProject(); XCTFail("Stale Add") }
+        catch { XCTAssertEqual(error as? ProjectStoreError, .invalidPreview) }
+        XCTAssertEqual(repo.inserts, 0)
     }
 
     func testUnsupportedPreviewAndCanceledSelectionAreNotDurable() async throws {
