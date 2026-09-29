@@ -226,6 +226,19 @@ final class LessonExperienceMigrationTests: XCTestCase {
             XCTAssertEqual(archived.completedContentSnapshot, snapshot())
             XCTAssertEqual(archived.contentVersion, 8)
             try assertUnrelatedData(in: reopened, catalogVersion: 18)
+            let metadata = try XCTUnwrap(context.fetch(FetchDescriptor<LessonTerminalRecord>()).first {
+                $0.lessonID == "completed"
+            }).metadata()
+            XCTAssertEqual(metadata.provenance, .legacyCompletedPartial)
+            XCTAssertEqual(metadata.title, "Studied title")
+            XCTAssertNil(metadata.topicID)
+            XCTAssertNil(metadata.subtopicID)
+            XCTAssertEqual(metadata.conceptIDs, ["concept"])
+            XCTAssertEqual(metadata.contentVersion, 8)
+            XCTAssertEqual(metadata.normalizedContentHash, CatalogValidator.fingerprint(
+                explanation: "Old explanation", workedExample: "Old example",
+                exercise: "Old exercise", referenceAnswer: "Old reference",
+                selfCheckCriteria: ["Check A", "Check B"]))
             let progress = try context.fetch(FetchDescriptor<LessonProgress>())
             XCTAssertEqual(progress.first { $0.lessonID == "draft" }?.status, .started)
             XCTAssertEqual(progress.first { $0.lessonID == "draft" }?.startedAt, started)

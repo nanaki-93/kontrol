@@ -62,7 +62,16 @@ final class SwiftDataCatalogRepository: CatalogRepository {
             if value.version == installed {
                 // An installed release can still need initial slots (e.g. a V3
                 // migration) or replacement after personal progress changes.
-                try reconcile(in: context, now: Date())
+                // A V6 container may have migrated without terminal records. Backfill
+                // even when the installed release has not changed, in one write context.
+                let recovered = try backfillTerminalEvidence(in: context)
+                let previousSlots = try snapshot(in: context).slots
+                try reconcile(in: context, now: Date(), commit: false)
+                let slotsChanged = try snapshot(in: context).slots != previousSlots
+                if recovered || slotsChanged {
+                    try beforeSave()
+                    try save(context)
+                }
                 return .unchanged
             }
         }
@@ -96,6 +105,10 @@ final class SwiftDataCatalogRepository: CatalogRepository {
                 throw CatalogImportError.unchangedContentVersionConflict
             }
         }
+
+        // Recover terminal evidence against the retained definitions, never the
+        // incoming catalog. Any failure discards this private, non-autosaving context.
+        _ = try backfillTerminalEvidence(in: context)
 
         // Capture the installed version before any definition is overwritten. A
         // migrated V4 draft has no pin; a newer catalog is never evidence of
@@ -589,6 +602,12 @@ final class SwiftDataCatalogRepository: CatalogRepository {
             let content: LessonStudiedContent
             if progress.status == .dismissed && item.attempt == nil {
                 content = metadata?.dismissalTimeDefinition.map(LessonStudiedContent.current) ?? .unavailable
+            } else if progress.status == .completed,
+                      item.attempt?.pinnedContentData?.isEmpty == true,
+                      let legacy = item.attempt?.completedContentSnapshot {
+                // An empty pin is the legacy upgrade sentinel, not a corrupt
+                // pin. Its separately recorded reduced snapshot remains usable.
+                content = .legacyCompleted(legacy)
             } else {
                 content = item.content
             }
@@ -605,6 +624,91 @@ final class SwiftDataCatalogRepository: CatalogRepository {
         return entries.sorted { lhs, rhs in
             lhs.date == rhs.date ? lhs.lessonID < rhs.lessonID : lhs.date > rhs.date
         }
+    }
+
+    // Legacy terminal recovery precedes every definition update, including a
+    // matching-version retry. An existing archive is authoritative and never
+    // rewritten. A corrupt pin is not permission to use a reduced snapshot.
+    private func backfillTerminalEvidence(in context: ModelContext) throws -> Bool {
+        let existing = try EvidenceIdentity.terminalMetadata(
+            context.fetch(FetchDescriptor<LessonTerminalRecord>()))
+        let definitions = try EvidenceIdentity.requireUnique(
+            context.fetch(FetchDescriptor<LessonDefinition>()), id: { $0.id })
+        let progress = try EvidenceIdentity.requireUnique(
+            context.fetch(FetchDescriptor<LessonProgress>()), id: { $0.lessonID })
+        let attempts = try context.fetch(FetchDescriptor<LessonAttempt>())
+        var changed = false
+        for (id, row) in progress.sorted(by: { $0.key < $1.key })
+            where (row.status == .completed || row.status == .dismissed) && existing[id] == nil {
+            let matching = attempts.filter { $0.lessonID == id }
+            guard matching.count <= 1 else { throw LessonExperienceError.invalidStoredData }
+            let metadata: LessonTerminalMetadata
+            if let attempt = matching.first {
+                guard (row.status == .completed) == (attempt.completedAt != nil) else {
+                    throw LessonExperienceError.invalidStoredData
+                }
+                let snapshot = LessonAttemptSnapshot(id: attempt.id, lessonID: id,
+                    contentVersion: attempt.contentVersion, answerDraft: attempt.answerDraft,
+                    solutionRevealedAt: attempt.solutionRevealedAt,
+                    selfCheckAcknowledgedAt: attempt.selfCheckAcknowledgedAt,
+                    completedAt: attempt.completedAt,
+                    completedContentSnapshot: attempt.completedContentSnapshot,
+                    pinnedContentData: attempt.pinnedContentData, revision: attempt.revision)
+                if let pin = attempt.pinnedContentData, !pin.isEmpty {
+                    // Decode even when a legacy snapshot exists. A malformed pin
+                    // must fail explicitly instead of being silently superseded.
+                    let definition = try PinnedLessonContent.decode(pin, lessonID: id,
+                        contentVersion: attempt.contentVersion).definition
+                    metadata = Self.recoveredMetadata(definition: definition,
+                        provenance: row.status == .completed ? .studiedPin : .dismissalPin)
+                } else if row.status == .completed, attempt.completedContentSnapshot != nil {
+                    metadata = try Self.terminalMetadata(lessonID: id, attempt:
+                        LessonAttemptSnapshot(id: snapshot.id, lessonID: id,
+                            contentVersion: snapshot.contentVersion, completedAt: snapshot.completedAt,
+                            completedContentSnapshot: snapshot.completedContentSnapshot),
+                        provenance: .legacyCompletedPartial)
+                } else {
+                    // The original version is not recoverable. Do not use today's
+                    // definition as proof of studied or dismissed content.
+                    metadata = LessonTerminalMetadata(lessonID: id,
+                        provenance: row.status == .completed ? .legacyCompletedPartial : .legacyRecoveredReference,
+                        title: nil, topicID: nil, subtopicID: nil,
+                        contentVersion: attempt.contentVersion, objectiveKey: nil,
+                        conceptIDs: nil, normalizedContentHash: nil, format: nil,
+                        dismissalTimeDefinition: nil)
+                }
+            } else if row.status == .dismissed, let definition = definitions[id] {
+                let reference = Self.definitionSnapshot(definition)
+                metadata = Self.recoveredMetadata(definition: reference,
+                    provenance: .legacyRecoveredReference, reference: reference)
+            } else {
+                metadata = LessonTerminalMetadata(lessonID: id,
+                    provenance: row.status == .completed ? .legacyCompletedPartial : .legacyRecoveredReference,
+                    title: nil, topicID: nil, subtopicID: nil, contentVersion: nil,
+                    objectiveKey: nil, conceptIDs: nil, normalizedContentHash: nil,
+                    format: nil, dismissalTimeDefinition: nil)
+            }
+            context.insert(try LessonTerminalRecord(metadata: metadata))
+            changed = true
+        }
+        return changed
+    }
+
+    // Older stored definitions can predate canonical hash validation. Their
+    // recorded teaching sections, not an arbitrary legacy digest, are the
+    // recoverable matching evidence. Never edit the original pin or definition.
+    private static func recoveredMetadata(definition: LessonDefinitionSnapshot,
+                                          provenance: TerminalMetadataProvenance,
+                                          reference: LessonDefinitionSnapshot? = nil) -> LessonTerminalMetadata {
+        LessonTerminalMetadata(lessonID: definition.id, provenance: provenance,
+            title: definition.title, topicID: definition.topicID, subtopicID: definition.subtopicID,
+            contentVersion: definition.contentVersion, objectiveKey: definition.objectiveKey,
+            conceptIDs: Array(Set(definition.conceptIDs)).sorted(),
+            normalizedContentHash: CatalogValidator.fingerprint(
+                explanation: definition.explanation, workedExample: definition.workedExample,
+                exercise: definition.exercise, referenceAnswer: definition.referenceAnswer,
+                selfCheckCriteria: definition.selfCheckCriteria), format: definition.format,
+            dismissalTimeDefinition: reference)
     }
 
     // Replace a prior dismissal archive only when the restored lesson is actually
