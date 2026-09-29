@@ -29,7 +29,7 @@ extension AppDestination {
         switch self {
         case .today: "Nothing planned yet."
         case .learning: "Included starter content is available offline."
-        case .projects: "No projects added yet."
+        case .projects: "Projects are available in the Projects tab."
         case .focus: "Focus"
         case .tasks: "No tasks captured yet."
         case .news: "News is not available yet."
@@ -46,12 +46,13 @@ struct AppShell: View {
     @Environment(\.appTextScaleOverride) private var previewTextScale
 
     /// Foundation routes remain only for features that have not shipped.
-    enum ContentKind: Equatable { case today, learning, focus, tasks, settings, foundation(AppDestination) }
+    enum ContentKind: Equatable { case today, learning, projects, focus, tasks, settings, foundation(AppDestination) }
 
     static func contentKind(for destination: AppDestination) -> ContentKind {
         switch destination {
         case .today: .today
         case .learning: .learning
+        case .projects: .projects
         case .focus: .focus
         case .tasks: .tasks
         case .settings: .settings
@@ -110,6 +111,8 @@ struct AppShell: View {
                             LearningCoverageView(store: dependencies.learningCatalogStore, navigation: navigation,
                                                  selectedSubtopicID: subtopicID)
                         }
+                    case .projects:
+                        ProjectsView(store: dependencies.projectStore)
                     case .focus:
                         FocusView(service: dependencies.focusService, taskStore: dependencies.taskStore,
                                   learningStore: dependencies.learningCatalogStore)

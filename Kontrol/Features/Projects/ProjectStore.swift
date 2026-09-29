@@ -11,6 +11,12 @@ struct ProjectFolderIdentity: Hashable {
 protocol ProjectFolderIdentifying {
     func selected(_ folder: URL) async throws -> ProjectFolderIdentity
     func bookmarked(_ data: Data) async throws -> ProjectFolderIdentity
+    func location(bookmarked data: Data) async throws -> String
+}
+
+extension ProjectFolderIdentifying {
+    // Test identifiers that do not resolve a display location still support identity checks.
+    func location(bookmarked data: Data) async throws -> String { "" }
 }
 
 struct ScopedProjectFolderIdentifier: ProjectFolderIdentifying {
@@ -24,6 +30,11 @@ struct ScopedProjectFolderIdentifier: ProjectFolderIdentifying {
 
     func bookmarked(_ data: Data) async throws -> ProjectFolderIdentity {
         try await access.withBookmark(data) { try Self.identity($0) }
+    }
+
+    func location(bookmarked data: Data) async throws -> String {
+        // A transient display hint only, resolved inside a valid grant; never persisted.
+        try await access.withBookmark(data) { $0.path }
     }
 
     private static func identity(_ folder: URL) throws -> ProjectFolderIdentity {
@@ -61,6 +72,7 @@ struct ProjectRowState {
     var isStale = false
     var lastReadAt: Date? // Last displayed inspection, distinct from lastSuccessfulReadAt.
     var refreshFailure: ProjectRefreshFailure?
+    var locationHint: String? // Transient last-seen location; not a saved authorization path.
 }
 
 struct ProjectAddPreview {
@@ -141,6 +153,11 @@ final class ProjectStore: ObservableObject {
         for row in rows { refresh(row.reference.id) }
     }
 
+    func select(_ id: UUID) {
+        guard rows.contains(where: { $0.reference.id == id }) else { return }
+        selectedID = id
+    }
+
     func refresh(_ id: UUID) {
         guard rows.contains(where: { $0.reference.id == id }) else { return }
         var operation = refreshOperations[id] ?? RefreshOperation()
@@ -183,24 +200,28 @@ final class ProjectStore: ObservableObject {
             let generation = operation.generation
             let reference = rows[index].reference
             activeRefreshes += 1
-            operation.task = Task { [inspector] in
+            operation.task = Task { [inspector, identifier] in
                 let result: Result<ProjectInspection, Error>
+                var location: String?
                 do {
                     let inspection = try await inspector.inspect(bookmarkData: reference.bookmarkData)
+                    try Task.checkCancellation()
+                    // Location is optional display metadata, never a prerequisite for inspection.
+                    location = try? await identifier.location(bookmarked: reference.bookmarkData)
                     try Task.checkCancellation()
                     result = .success(inspection)
                 } catch {
                     result = .failure(error)
                 }
                 self.finishRefresh(id: id, revision: reference.revision,
-                                   generation: generation, result: result)
+                                   generation: generation, result: result, location: location)
             }
             refreshOperations[id] = operation
         }
     }
 
     private func finishRefresh(id: UUID, revision: UUID, generation: Int,
-                               result: Result<ProjectInspection, Error>) {
+                               result: Result<ProjectInspection, Error>, location: String?) {
         guard var operation = refreshOperations[id], operation.generation == generation,
               operation.task != nil else { return }
         operation.task = nil
@@ -210,6 +231,7 @@ final class ProjectStore: ObservableObject {
            rows[index].reference.revision == revision {
             switch result {
             case let .success(inspection):
+                if let location, !location.isEmpty { rows[index].locationHint = location }
                 // A bookmark can still resolve after the selected folder's manifest was
                 // replaced. Never publish content belonging to a different project ID.
                 if let manifest = inspection.manifest, manifest.id != rows[index].reference.manifestID {
@@ -318,6 +340,7 @@ final class ProjectStore: ObservableObject {
             rows[index].reference = receipt
             rows[index].inspection = nil
             rows[index].lastReadAt = nil
+            rows[index].locationHint = nil
             rows[index].isStale = false
             rows[index].refreshFailure = nil
             reconnectMessage = nil
@@ -411,7 +434,8 @@ final class ProjectStore: ObservableObject {
             let nextOrder = (rows.map(\.reference.displayOrder).max() ?? -1) + 1
             let receipt = try repository.insert(NewProjectReference(id: UUID(), manifestID: manifest.id,
                 bookmarkData: bookmark, displayOrder: nextOrder, displayNameHint: manifest.name))
-            rows.append(ProjectRowState(reference: receipt, inspection: inspection))
+            rows.append(ProjectRowState(reference: receipt, inspection: inspection,
+                                        locationHint: candidate.folder.path))
             selectedID = receipt.id
             preview = nil
             addMessage = nil

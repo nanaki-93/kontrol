@@ -15,12 +15,15 @@ final class AppShellTests: XCTestCase {
         let dependencies = try makeDependencies()
         let shared = dependencies.taskStore
         let sharedSchedule = dependencies.scheduleStore
+        let sharedProjects = dependencies.projectStore
         let first = AppShell(navigation: NavigationStore(), dependencies: dependencies)
         let second = AppShell(navigation: NavigationStore(), dependencies: dependencies)
         XCTAssertTrue(first.dependencies.taskStore === shared)
         XCTAssertTrue(second.dependencies.taskStore === shared)
         XCTAssertTrue(first.dependencies.scheduleStore === sharedSchedule)
         XCTAssertTrue(second.dependencies.scheduleStore === sharedSchedule)
+        XCTAssertTrue(first.dependencies.projectStore === sharedProjects)
+        XCTAssertTrue(second.dependencies.projectStore === sharedProjects)
         XCTAssertTrue(first.dependencies.container === second.dependencies.container)
         XCTAssertTrue((shared.repository as AnyObject) === (dependencies.taskStore.repository as AnyObject))
         XCTAssertTrue((sharedSchedule.repository as AnyObject) === (dependencies.scheduleStore.repository as AnyObject))
@@ -33,6 +36,7 @@ final class AppShellTests: XCTestCase {
         let other = try makeDependencies()
         XCTAssertFalse(other.taskStore === shared)
         XCTAssertFalse(other.scheduleStore === sharedSchedule)
+        XCTAssertFalse(other.projectStore === sharedProjects)
         XCTAssertFalse(other.container === dependencies.container)
         XCTAssertFalse((other.taskStore.repository as AnyObject) === (shared.repository as AnyObject))
         XCTAssertFalse((other.scheduleStore.repository as AnyObject) === (sharedSchedule.repository as AnyObject))
@@ -82,6 +86,8 @@ final class AppShellTests: XCTestCase {
                 XCTAssertEqual(AppShell.contentKind(for: destination), .today)
             } else if destination == .learning {
                 XCTAssertEqual(AppShell.contentKind(for: destination), .learning)
+            } else if destination == .projects {
+                XCTAssertEqual(AppShell.contentKind(for: destination), .projects)
             } else if destination == .focus {
                 XCTAssertEqual(AppShell.contentKind(for: destination), .focus)
             } else if destination == .tasks {
