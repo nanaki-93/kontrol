@@ -4,8 +4,8 @@
 
 **Build**
 
-- Show up to **three** eligible cards for the selected local project. Eligible means `ready`, every dependency completed, and no explicit blocker. `planned` work stays in the roadmap until its file is explicitly made ready; completed and active work do not appear as next-feature candidates.
-- Sort deterministically: current-focus area before others, then priority, effort (smaller first), and stable ID. Display a short reason: e.g. `Ready · dependency complete` or `Matches current focus`.
+- Show up to **three** eligible cards for the selected local project. Eligible means a supported V1 manifest, completed feature enumeration, a validated `ready` record, and every dependency present among validated features with `completed` status. V1's explicit blocker is `status: blocked`; there is no separate blocker YAML field, and neither Markdown nor unknown frontmatter keys imply blocking. `planned` work stays in the roadmap until its file is explicitly made ready; completed and active work do not appear as next-feature candidates.
+- Sort deterministically: any exact current-focus area match (regardless of focus-list position or match count) before others, then priority high→medium→low, effort small→medium→large, and case-sensitive stable ID. Display a short reason with precedence: focus match, otherwise completed dependencies when nonempty, otherwise ready. The selector returns typed reasons; presentation supplies the text.
 - Show the full feature description and acceptance notes on selection. If no feature is eligible, explain whether all are complete or dependencies/blockers prevent suggestions.
 - Keep the candidate algorithm local. AI and GitHub do not invent roadmap items in V1.
 

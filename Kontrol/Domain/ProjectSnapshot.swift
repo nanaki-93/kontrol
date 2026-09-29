@@ -130,7 +130,7 @@ enum ProjectFeatureCount: Equatable {
 struct ProjectInspection: Equatable {
     let manifest: ProjectManifest?
     let roadmap: ProjectOptionalContent<ProjectRoadmap>
-    let features: [ProjectFeature] // Only validated, eligible records.
+    let features: [ProjectFeature] // Validated records of every status; not necessarily next-feature candidates.
     let excludedFeaturePaths: [String]
     let featureEnumeration: ProjectFeatureEnumeration
     let context: ProjectOptionalDocument
