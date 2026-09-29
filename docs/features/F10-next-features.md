@@ -19,6 +19,12 @@
 | Read full feature details | [M30 · Learning history](../mockups/M30-feature-detail.png) | Show requirements, dependencies and acceptance text from the file. |
 | No eligible features or all complete | [M34 · Kontrol](../mockups/M34-project-empty-blocked.png) | Differentiate blocked/planned from complete; never invent extra cards. |
 
+## Supplemental F10 state references
+
+[Open the F10 state map](../../.mockups/flows/f10-next-features/index.html). Its peer pages cover [all complete](../../.mockups/flows/f10-next-features/01-all-complete.html), [successful zero-feature enumeration](../../.mockups/flows/f10-next-features/02-zero-features.html), [current partial-valid suggestions](../../.mockups/flows/f10-next-features/03-partial-valid.html), [unavailable enumeration](../../.mockups/flows/f10-next-features/04-unavailable.html), [failed refresh with retained stale detail](../../.mockups/flows/f10-next-features/05-retained-stale.html), [removed versus excluded selected feature](../../.mockups/flows/f10-next-features/06-selection-notices.html), and [full read-only detail and Back](../../.mockups/flows/f10-next-features/07-feature-detail.html), including its [retained last-known variant](../../.mockups/flows/f10-next-features/07-feature-detail.html#stale). These supplement M27/M30/M34, not replace them. Only current validated ready records are candidates; current partial results can offer valid peers, while stale suggestions are not actionable. View feature opens a read-only view; F11's Mark complete and Undo are not F10 controls. Folder navigation and project recovery remain available.
+
+The HTML uses illustrative fixtures and links between reference states, not real Refresh, Reconnect, Add, completion or project-file updates. Created unattended as static references, **not interactive sign-off**. Rendered comparisons, native keyboard/VoiceOver, enlarged-text and sandbox acceptance remain for F13.
+
 ## Implementation checklist
 
 - [ ] Filter status=ready, all dependencies completed, and schema-valid items.
