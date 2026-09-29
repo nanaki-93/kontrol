@@ -71,6 +71,18 @@ final class ProjectIntegrationTests: XCTestCase {
         return url
     }
 
+    private func writeFeature(_ folder: URL, _ file: String, id: String, status: String = "ready",
+                              priority: String = "medium", effort: String = "small",
+                              dependencies: [String] = [], areas: [String] = []) throws {
+        let yaml = "---\nid: \(id)\ntitle: \(id)\nstatus: \(status)\npriority: \(priority)\neffort: \(effort)\ndepends_on: [\(dependencies.joined(separator: ", "))]\nareas: [\(areas.joined(separator: ", "))]\n---\nFull body for \(id)\n"
+        try Data(yaml.utf8).write(to: folder.appendingPathComponent(".kontrol/features/\(file).md"))
+    }
+
+    private func candidates(_ subject: ProjectStore, _ id: UUID) -> [String] {
+        guard let inspection = subject.rows.first(where: { $0.reference.id == id })?.inspection else { return [] }
+        return FeatureSelector().select(from: inspection).candidates.map(\.id)
+    }
+
     /// Capture all .kontrol entries, including malformed peers, not just parsed sources.
     private func bytes(_ folders: [URL]) throws -> [String: Data] {
         var result: [String: Data] = [:]
@@ -121,6 +133,155 @@ final class ProjectIntegrationTests: XCTestCase {
         return ProjectStore(inspector: ProjectInspector(access: access),
             repository: SwiftDataProjectReferenceRepository(container: container, beforeSave: beforeSave),
             identifier: ScopedProjectFolderIdentifier(access: access))
+    }
+
+    func testRealEligibilityExternalEditsReorderingReopenAndReadOnlyNavigation() async throws {
+        let root = try workspace()
+        let folder = try project(root, folder: "roadmap", id: "roadmap")
+        let folders = [folder]
+        let grants = IntegrationGrants()
+        let database = root.appendingPathComponent("roadmap.store")
+        // Only fixture setup and the explicitly external edits below may change project bytes.
+        try writeFeature(folder, "downstream", id: "downstream", priority: "high",
+                         effort: "medium", dependencies: ["F1"], areas: ["Local"])
+        try writeFeature(folder, "beta", id: "beta", priority: "high")
+        try writeFeature(folder, "gamma", id: "gamma", priority: "low", effort: "large", areas: ["Remote"])
+        var id = UUID()
+        do {
+            let container = try ModelContainerFactory().makeContainer(mode: .persistent(database))
+            let subject = store(container, grants)
+            _ = try await unchanged(folders) { try await subject.previewFolder(folder) }
+            guard case let .added(saved) = try await unchanged(folders, {
+                try await subject.addPreviewedProject()
+            }) else { return XCTFail("Expected saved reference") }
+            id = saved
+            XCTAssertEqual(candidates(subject, id), ["beta", "gamma"])
+            XCTAssertEqual(subject.rows[0].inspection?.featureCount, .complete(completed: 0, total: 4))
+            try await unchanged(folders) { subject.selectFeature("downstream", in: id) }
+            XCTAssertEqual(subject.selectedFeature, ProjectFeatureIdentity(projectID: id, featureID: "downstream"))
+            try await unchanged(folders) { subject.closeFeature() }
+            try await unchanged(folders) { subject.selectFeature("F1", in: id) }
+            XCTAssertEqual(subject.selectedFeatureContent?.status, .planned)
+
+            // A user/editor, not the app, completes the prerequisite on disk.
+            try writeFeature(folder, "first", id: "F1", status: "completed", priority: "high")
+            let externalCompletion = try bytes(folders)
+            try await unchanged(folders) {
+                subject.refresh(id)
+                await wait { !subject.rows[0].isRefreshing &&
+                    subject.rows[0].inspection?.featureCount == .complete(completed: 1, total: 4) }
+            }
+            XCTAssertEqual(try bytes(folders), externalCompletion)
+            XCTAssertEqual(candidates(subject, id), ["downstream", "beta", "gamma"])
+            XCTAssertEqual(subject.selectedFeatureContent?.status, .completed)
+            try await unchanged(folders) { subject.selectFeature("downstream", in: id) }
+            XCTAssertEqual(subject.selectedFeatureContent?.dependsOn, ["F1"])
+
+            // A second external edit changes both the focus match and priority ordering.
+            try Data("schema_version: 1\nid: roadmap\nname: roadmap\ncurrent_focus: [Remote]\n".utf8)
+                .write(to: folder.appendingPathComponent(".kontrol/project.yaml"))
+            try writeFeature(folder, "beta", id: "beta", priority: "low")
+            try writeFeature(folder, "gamma", id: "gamma", priority: "high", areas: ["Remote"])
+            let reorderedBytes = try bytes(folders)
+            try await unchanged(folders) {
+                subject.refresh(id)
+                await wait { !subject.rows[0].isRefreshing &&
+                    subject.rows[0].inspection?.manifest?.currentFocus == ["Remote"] &&
+                    subject.rows[0].inspection?.features.first(where: { $0.id == "beta" })?.priority == .low }
+            }
+            XCTAssertEqual(try bytes(folders), reorderedBytes)
+            XCTAssertEqual(candidates(subject, id), ["gamma", "downstream", "beta"])
+            XCTAssertEqual(subject.selectedFeatureContent?.id, "downstream")
+            try await unchanged(folders) { subject.closeFeature() }
+            XCTAssertNil(subject.selectedFeature)
+        }
+        // A fresh store must reconstruct the same order from the project files, not cached slots.
+        let reopened = try ModelContainerFactory().makeContainer(mode: .persistent(database))
+        let subject = store(reopened, grants)
+        try await unchanged(folders) {
+            try subject.enterProjects()
+            await wait { subject.rows.count == 1 && subject.rows[0].inspection != nil && !subject.rows[0].isRefreshing }
+        }
+        XCTAssertEqual(subject.selectedID, id)
+        XCTAssertEqual(candidates(subject, id), ["gamma", "downstream", "beta"])
+        XCTAssertEqual(subject.rows[0].inspection?.featureCount, .complete(completed: 1, total: 4))
+        try await unchanged(folders) { subject.selectFeature("downstream", in: id) }
+        let oldGrant = subject.rows[0].reference.bookmarkData
+        grants.invalidate(oldGrant)
+        try await unchanged(folders) {
+            subject.refresh(id)
+            await wait { !subject.rows[0].isRefreshing &&
+                subject.rows[0].refreshFailure == .inspection(.access(.staleBookmark)) }
+        }
+        XCTAssertTrue(subject.rows[0].isRetainedInspection)
+        XCTAssertEqual(subject.selectedFeatureContent?.id, "downstream")
+        XCTAssertEqual(subject.rows[0].refreshFailure?.recovery, .reconnect)
+        try await unchanged(folders) { subject.closeFeature() }
+        XCTAssertNil(subject.selectedFeature)
+        XCTAssertTrue(grants.balanced)
+    }
+
+    func testRealInvalidGraphExcludesPeersButPreservesValidSuggestionsAndBytes() async throws {
+        let root = try workspace()
+        let folder = try project(root, folder: "graph", id: "graph")
+        let folders = [folder]
+        let grants = IntegrationGrants()
+        let container = try ModelContainerFactory().makeContainer(mode: .persistent(root.appendingPathComponent("graph.store")))
+        let subject = store(container, grants)
+        _ = try await unchanged(folders) { try await subject.previewFolder(folder) }
+        guard case let .added(id) = try await unchanged(folders, {
+            try await subject.addPreviewedProject()
+        }) else { return XCTFail("Expected saved reference") }
+
+        // This edit represents an external tool changing the saved folder after Add.
+        try writeFeature(folder, "done", id: "done", status: "completed")
+        try writeFeature(folder, "healthy", id: "healthy", priority: "high", areas: ["Local"])
+        try writeFeature(folder, "eligible", id: "eligible", dependencies: ["done"])
+        try writeFeature(folder, "awaiting", id: "awaiting", dependencies: ["F1"])
+        try Data("not frontmatter\n".utf8).write(to: folder.appendingPathComponent(".kontrol/features/malformed.md"))
+        try writeFeature(folder, "duplicate-a", id: "duplicate")
+        try writeFeature(folder, "duplicate-b", id: "duplicate")
+        try writeFeature(folder, "from-duplicate", id: "fromDuplicate", dependencies: ["duplicate"])
+        try writeFeature(folder, "missing", id: "missing", dependencies: ["absent"])
+        try writeFeature(folder, "self", id: "self", dependencies: ["self"])
+        try writeFeature(folder, "cycle-a", id: "cycleA", dependencies: ["cycleB"])
+        try writeFeature(folder, "cycle-b", id: "cycleB", dependencies: ["cycleA"])
+        try writeFeature(folder, "chain-a", id: "chainA", dependencies: ["missing"])
+        try writeFeature(folder, "chain-b", id: "chainB", dependencies: ["chainA"])
+        let externallyEdited = try bytes(folders)
+        try await unchanged(folders) {
+            subject.refresh(id)
+            await wait { !subject.rows[0].isRefreshing &&
+                subject.rows[0].inspection?.featureCount == .partial(completed: 1, total: 5, excludedFiles: 10) }
+        }
+        XCTAssertEqual(try bytes(folders), externallyEdited)
+        guard let inspection = subject.rows[0].inspection else { return XCTFail("Missing inspection") }
+        XCTAssertEqual(inspection.features.map(\.id), ["awaiting", "done", "eligible", "F1", "healthy"])
+        XCTAssertEqual(inspection.excludedFeaturePaths.count, 10)
+        XCTAssertEqual(Set(inspection.diagnostics.map(\.code)),
+                       Set([.invalidFrontmatter, .duplicateID, .invalidDependency, .missingDependency,
+                            .selfDependency, .cyclicDependency]))
+        let selection = FeatureSelector().select(from: inspection)
+        XCTAssertEqual(selection.state, .candidatesAvailable)
+        XCTAssertEqual(selection.progress, .partial(completed: 1, total: 5, excludedFiles: 10))
+        XCTAssertEqual(selection.candidates.map(\.id), ["healthy", "eligible"])
+        XCTAssertEqual(selection.unresolvedDependencies,
+                       [UnresolvedFeatureDependencies(featureID: "awaiting", dependencyIDs: ["F1"])])
+        try await unchanged(folders) { subject.selectFeature("chainB", in: id) }
+        XCTAssertNil(subject.selectedFeature)
+        try await unchanged(folders) { subject.selectFeature("awaiting", in: id) }
+        XCTAssertEqual(subject.selectedFeatureContent?.id, "awaiting")
+        try await unchanged(folders) { subject.selectFeature("healthy", in: id) }
+        try await unchanged(folders) { subject.closeFeature() }
+        // An unchanged reread must reproduce both validated peers and exclusions.
+        try await unchanged(folders) {
+            subject.refresh(id)
+            await wait { !subject.rows[0].isRefreshing &&
+                subject.rows[0].inspection?.featureCount == .partial(completed: 1, total: 5, excludedFiles: 10) }
+        }
+        XCTAssertEqual(candidates(subject, id), ["healthy", "eligible"])
+        XCTAssertEqual(try bytes(folders), externallyEdited)
+        XCTAssertTrue(grants.balanced)
     }
 
     func testTwoFolderAddReopenExternalEditsIndependentFailureAndReconnect() async throws {
