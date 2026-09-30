@@ -8,6 +8,28 @@ struct NewsManagementView: View {
     @State private var pendingFeedIDs = Set<UUID>()
     @State private var feedAction: FeedAction?
     @FocusState private var focusedTopic: String?
+    @FocusState private var managementFocus: ManagementFocus?
+    @AccessibilityFocusState private var accessibilityFocus: ManagementFocus?
+    @State private var focusOrigin: FeedAction?
+
+    enum ManagementFocus: Hashable {
+        case heading, add, edit(UUID), remove(UUID)
+    }
+
+    static func returnFocus(after action: FeedAction?, snapshot: NewsSnapshot?) -> ManagementFocus {
+        guard let snapshot else { return .heading }
+        switch action {
+        case .edit(let feed) where snapshot.feeds.contains(where: { $0.id == feed.id }): return .edit(feed.id)
+        case .remove(let feed) where snapshot.feeds.contains(where: { $0.id == feed.id }): return .remove(feed.id)
+        case .add where snapshot.feeds.count < 32: return .add
+        default: return .heading
+        }
+    }
+
+    private func present(_ action: FeedAction) {
+        focusOrigin = action
+        feedAction = action
+    }
 
     enum FeedAction: Equatable, Identifiable {
         case add
@@ -60,6 +82,17 @@ struct NewsManagementView: View {
             Text("Topics & feeds")
                 .appTypography(.section)
                 .accessibilityAddTraits(.isHeader)
+                .focusable()
+                .focused($managementFocus, equals: .heading)
+                .accessibilityFocused($accessibilityFocus, equals: .heading)
+                .overlay {
+                    if managementFocus == .heading {
+                        RoundedRectangle(cornerRadius: AppMetrics.smallRadius)
+                            .strokeBorder(AppColors.focusRing, lineWidth: 2)
+                            .padding(-3)
+                            .allowsHitTesting(false)
+                    }
+                }
             if let actionError {
                 Text(actionError)
                     .appTypography(.body)
@@ -86,22 +119,20 @@ struct NewsManagementView: View {
         .onAppear { store.loadIfNeeded() } // Local load only, never foreground refresh.
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("news-management")
-        .sheet(item: $feedAction) { action in
-            // Step 4.5 establishes the entry points only. Step 4.6 replaces this
-            // non-mutating destination with the editor and removal confirmation.
-            VStack(alignment: .leading, spacing: AppMetrics.space4) {
-                PageHeader(action.title)
-                if case .edit(let feed) = action { Text(feed.name).appTypography(.body) }
-                if case .remove(let feed) = action { Text(feed.name).appTypography(.body) }
-                Text("\(action.title) is not available yet. No feed has been changed.")
-                    .appTypography(.body)
-                    .fixedSize(horizontal: false, vertical: true)
-                ActionButton("Cancel") { feedAction = nil }
-                    .keyboardShortcut(.cancelAction)
+        .sheet(item: $feedAction, onDismiss: {
+            let target = Self.returnFocus(after: focusOrigin, snapshot: store.snapshot)
+            managementFocus = target
+            accessibilityFocus = target
+            focusOrigin = nil
+        }) { action in
+            switch action {
+            case .add:
+                NewsFeedEditorView(store: store) { feedAction = nil }
+            case .edit(let feed):
+                NewsFeedEditorView(store: store, feed: feed) { feedAction = nil }
+            case .remove(let feed):
+                NewsFeedRemovalView(store: store, feed: feed) { feedAction = nil }
             }
-            .padding(AppMetrics.space6)
-            .frame(width: 360)
-            .background(AppColors.background)
         }
     }
 
@@ -156,7 +187,9 @@ struct NewsManagementView: View {
             Text("\(snapshot.feeds.filter(\.isEnabled).count) enabled · \(snapshot.feeds.count) of 32 feeds")
                 .appTypography(.metadata)
                 .foregroundStyle(AppColors.textSecondary)
-            ActionButton("Add feed", symbol: "plus", isEnabled: snapshot.feeds.count < 32) { feedAction = .add }
+            ActionButton("Add feed", symbol: "plus", isEnabled: snapshot.feeds.count < 32) { present(.add) }
+                .focused($managementFocus, equals: .add)
+                .accessibilityFocused($accessibilityFocus, equals: .add)
                 .accessibilityIdentifier("news-add-feed")
             if snapshot.feeds.count >= 32 {
                 Text("Feed limit reached. Remove a feed before adding another.").appTypography(.body)
@@ -212,9 +245,13 @@ struct NewsManagementView: View {
             }
         }
         .accessibilityLabel("\(feed.isEnabled ? "Disable" : "Enable") \(feed.name) feed")
-        ActionButton("Edit", isEnabled: !pending) { feedAction = .edit(feed) }
+        ActionButton("Edit", isEnabled: !pending) { present(.edit(feed)) }
+            .focused($managementFocus, equals: .edit(feed.id))
+            .accessibilityFocused($accessibilityFocus, equals: .edit(feed.id))
             .accessibilityLabel("Edit \(feed.name) feed")
-        ActionButton("Remove", variant: .destructive, isEnabled: !pending) { feedAction = .remove(feed) }
+        ActionButton("Remove", variant: .destructive, isEnabled: !pending) { present(.remove(feed)) }
+            .focused($managementFocus, equals: .remove(feed.id))
+            .accessibilityFocused($accessibilityFocus, equals: .remove(feed.id))
             .accessibilityLabel("Remove \(feed.name) feed")
     }
 }

@@ -7,6 +7,40 @@ private actor PresentationService: NewsRefreshing {
     func validate(_ draft: FeedDraft) async throws -> ValidatedFeed { throw CancellationError() }
 }
 
+private actor EditorPresentationService: NewsRefreshing {
+    private(set) var requests: [FeedDraft] = []
+    private var continuation: CheckedContinuation<ValidatedFeed, Error>?
+    func refresh(_ feeds: [FeedSourceSnapshot]) async -> [FeedRefreshOutcome] { [] }
+    func validate(_ draft: FeedDraft) async throws -> ValidatedFeed {
+        requests.append(draft)
+        return try await withCheckedThrowingContinuation { continuation = $0 }
+    }
+    func resolve(success: Bool) {
+        guard let draft = requests.last else { return }
+        if success {
+            continuation?.resume(returning: ValidatedFeed(draftRevision: draft.draftRevision,
+                url: URL(string: draft.urlText)!, validatedAt: .now, etag: nil, lastModified: nil))
+        } else {
+            continuation?.resume(throwing: FeedServiceError(code: .malformedFeed, retryNotBefore: nil))
+        }
+        continuation = nil
+    }
+    func count() -> Int { requests.count }
+}
+
+@MainActor
+private final class EditorBrowserSpy: NewsBrowserOpening {
+    var urls: [URL] = []
+    func open(_ url: URL) -> Bool { urls.append(url); return true }
+}
+
+private final class EditorSaveSwitch {
+    enum Failure: Error { case injected }
+    var fail = false
+    var saves = 0
+    func beforeSave() throws { saves += 1; if fail { throw Failure.injected } }
+}
+
 /// Compiled presentation fixtures; hosted controls and keyboard/AX execution are F13 work.
 @MainActor
 final class NewsPresentationTests: XCTestCase {
@@ -163,6 +197,156 @@ final class NewsPresentationTests: XCTestCase {
         XCTAssertTrue(try XCTUnwrap(emptyStore.snapshot).feeds.isEmpty)
         try emptyStore.saveSelectedTopics(["go"])
         XCTAssertEqual(emptyStore.snapshot?.preferences.selectedTopicIDs, ["go"])
+    }
+
+    func testEditorLocalValidationAndFocusReturnFixtures() throws {
+        let snapshot = fixture()
+        let feed = snapshot.feeds[0]
+        var draft = NewsFeedEditorState.makeDraft(nil)
+        XCTAssertTrue(draft.isEnabled)
+        XCTAssertNil(draft.expectedRevision)
+        XCTAssertEqual(Set(NewsFeedEditorState.localErrors(draft, snapshot: snapshot).keys), ["name", "url", "topics"])
+        draft.name = " Offline draft "
+        draft.urlText = "https://new.test/rss"
+        draft.topicIDs = ["go"]
+        draft.isEnabled = false
+        XCTAssertTrue(NewsFeedEditorState.localErrors(draft, snapshot: snapshot).isEmpty)
+        XCTAssertFalse(NewsFeedEditorState.requiresValidation(draft, snapshot: snapshot))
+        draft.isEnabled = true
+        XCTAssertTrue(NewsFeedEditorState.requiresValidation(draft, snapshot: snapshot))
+        draft.urlText = feed.url.absoluteString
+        XCTAssertNotNil(NewsFeedEditorState.localErrors(draft, snapshot: snapshot)["url"])
+        draft.urlText = "http://unsafe.test/rss"
+        XCTAssertNotNil(NewsFeedEditorState.localErrors(draft, snapshot: snapshot)["url"])
+        draft.topicIDs = ["unknown"]
+        XCTAssertNotNil(NewsFeedEditorState.localErrors(draft, snapshot: snapshot)["topics"])
+        var edit = NewsFeedEditorState.makeDraft(feed)
+        edit.name = "Renamed"
+        XCTAssertFalse(NewsFeedEditorState.requiresValidation(edit, snapshot: snapshot))
+        XCTAssertEqual(edit.expectedRevision, feed.configurationRevision)
+        XCTAssertEqual(NewsManagementView.returnFocus(after: .add, snapshot: snapshot), .add)
+        XCTAssertEqual(NewsManagementView.returnFocus(after: .edit(feed), snapshot: snapshot), .edit(feed.id))
+        XCTAssertEqual(NewsManagementView.returnFocus(after: .remove(feed), snapshot: snapshot), .remove(feed.id))
+        let removed = NewsSnapshot(topics: snapshot.topics, feeds: [], articleStates: [], preferences: snapshot.preferences)
+        XCTAssertEqual(NewsManagementView.returnFocus(after: .remove(feed), snapshot: removed), .heading)
+        XCTAssertEqual(NewsManagementView.returnFocus(after: .edit(feed), snapshot: nil), .heading)
+        let full = NewsSnapshot(topics: snapshot.topics, feeds: Array(repeating: feed, count: 32),
+                                articleStates: [], preferences: snapshot.preferences)
+        XCTAssertEqual(NewsManagementView.returnFocus(after: .add, snapshot: full), .heading)
+        XCTAssertNotNil(NewsFeedEditorState.localErrors(draft, snapshot: full)["limit"])
+        let store = try compiledStoreFixture()
+        _ = NewsFeedEditorView(store: store) {}
+        _ = NewsFeedEditorView(store: store, feed: feed) {}
+        _ = NewsFeedRemovalView(store: store, feed: feed) {}
+    }
+
+    private func editorStore(service: NewsRefreshing, saves: EditorSaveSwitch = EditorSaveSwitch(),
+                             browser: NewsBrowserOpening? = nil) throws -> NewsStore {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let catalog = DefaultFeedCatalog(version: 1, topics: fixture().topics,
+            initialSelectedTopicIDs: ["go"], feeds: [
+                .init(id: goID, name: "Go Blog", url: URL(string: "https://feeds.test/go")!, topicIDs: ["go"])])
+        let store = NewsStore(repository: SwiftDataNewsRepository(container: container, beforeSave: { try saves.beforeSave() }),
+                              service: service, catalog: catalog, browserOpener: browser)
+        store.loadIfNeeded()
+        return store
+    }
+
+    private func waitForEditor(_ predicate: () async -> Bool) async {
+        for _ in 0..<1_000 {
+            if await predicate() { return }
+            await Task.yield()
+        }
+        XCTFail("Editor fixture did not reach expected state")
+    }
+
+    func testEditorPendingDuplicateFailureAndCancelRetainCommittedState() async throws {
+        let service = EditorPresentationService()
+        let saves = EditorSaveSwitch()
+        let browser = EditorBrowserSpy()
+        let store = try editorStore(service: service, saves: saves, browser: browser)
+        let saved = store.snapshot
+        let saveCount = saves.saves
+        let editor = NewsFeedEditorState()
+        editor.draft.name = "A new feed"
+        editor.draft.urlText = "https://new.test/rss"
+        editor.draft.topicIDs = ["go"]
+        let draft = editor.draft
+        var dismissed = false
+        editor.submit(store: store) { dismissed = true }
+        editor.submit(store: store) { dismissed = true }
+        XCTAssertTrue(editor.isSubmitting)
+        XCTAssertEqual(editor.pendingText, "Checking this feed…")
+        await waitForEditor { await service.count() == 1 }
+        await service.resolve(success: false)
+        await waitForEditor { !editor.isSubmitting }
+        XCTAssertFalse(dismissed)
+        XCTAssertEqual(editor.draft, draft)
+        XCTAssertTrue(editor.errorMessage?.contains("supported RSS or Atom") == true)
+        XCTAssertEqual(store.snapshot, saved)
+        editor.submit(store: store) { dismissed = true }
+        await waitForEditor { await service.count() == 2 }
+        editor.cancel(store: store)
+        await service.resolve(success: true) // Deliberately ignores transport cancellation.
+        await waitForEditor { !editor.isSubmitting }
+        XCTAssertFalse(dismissed)
+        XCTAssertEqual(store.snapshot, saved)
+        XCTAssertEqual(saves.saves, saveCount, "Validation failure and Cancel cannot persist")
+        XCTAssertTrue(browser.urls.isEmpty, "Cancel cannot open a browser")
+        let immediatelyCanceled = NewsFeedEditorState()
+        immediatelyCanceled.draft = draft
+        immediatelyCanceled.submit(store: store) { dismissed = true }
+        immediatelyCanceled.cancel(store: store) // Before its queued task starts.
+        await waitForEditor { !immediatelyCanceled.isSubmitting }
+        let requests = await service.count()
+        XCTAssertEqual(requests, 2)
+        XCTAssertEqual(saves.saves, saveCount)
+        XCTAssertTrue(browser.urls.isEmpty)
+        XCTAssertFalse(dismissed)
+    }
+
+    func testEditorSaveFailureStaleRecoveryAndConfirmedRemoval() async throws {
+        let saves = EditorSaveSwitch()
+        let store = try editorStore(service: PresentationService(), saves: saves)
+        let saved = try XCTUnwrap(store.snapshot)
+        let feed = try XCTUnwrap(saved.feeds.first)
+        let editor = NewsFeedEditorState(feed: feed)
+        editor.draft.name = "Retained rename"
+        let draft = editor.draft
+        var dismissed = false
+        saves.fail = true
+        editor.submit(store: store) { dismissed = true }
+        await waitForEditor { !editor.isSubmitting }
+        XCTAssertFalse(dismissed)
+        XCTAssertEqual(editor.draft, draft)
+        XCTAssertEqual(store.snapshot, saved)
+        XCTAssertTrue(editor.errorMessage?.contains("Nothing new was committed") == true)
+        XCTAssertThrowsError(try NewsFeedRemovalView.confirm(feed: feed, store: store))
+        XCTAssertEqual(store.snapshot, saved)
+        saves.fail = false
+        var concurrent = NewsFeedEditorState.makeDraft(feed)
+        concurrent.name = "Changed in Settings"
+        try await store.saveFeed(concurrent)
+        editor.submit(store: store) { dismissed = true }
+        await waitForEditor { !editor.isSubmitting }
+        XCTAssertTrue(editor.needsReload)
+        XCTAssertEqual(editor.draft, draft, "Stale rejection does not replace unsaved fields")
+        XCTAssertThrowsError(try NewsFeedRemovalView.confirm(feed: feed, store: store)) {
+            XCTAssertEqual($0 as? NewsRepositoryError, .staleRevision)
+        }
+        editor.reloadLatest(store: store)
+        XCTAssertFalse(editor.needsReload)
+        XCTAssertEqual(editor.draft.name, "Changed in Settings")
+        XCTAssertEqual(editor.draft.expectedRevision, store.snapshot?.feeds.first?.configurationRevision)
+        editor.draft.name = "Reviewed edit"
+        editor.submit(store: store) { dismissed = true }
+        await waitForEditor { !editor.isSubmitting }
+        XCTAssertTrue(dismissed)
+        XCTAssertEqual(store.snapshot?.feeds.first?.name, "Reviewed edit")
+        let current = try XCTUnwrap(store.snapshot?.feeds.first)
+        try NewsFeedRemovalView.confirm(feed: current, store: store)
+        XCTAssertTrue(try XCTUnwrap(store.snapshot).feeds.isEmpty)
+        XCTAssertEqual(NewsManagementView.returnFocus(after: .remove(current), snapshot: store.snapshot), .heading)
     }
 
     private func compiledStoreFixture() throws -> NewsStore {
