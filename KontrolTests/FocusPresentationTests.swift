@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import SwiftData
 import XCTest
 @testable import Kontrol
 
@@ -11,17 +12,16 @@ final class FocusPresentationTests: XCTestCase {
                                catalogRepository: SwiftDataCatalogRepository(container: container))
     }
 
-    // Non-hosted configuration coverage; this suite is selected by individual method,
-    // never as a whole until the reserved hosted GUI session.
+    // Configuration and application-hosted presentation coverage.
     func testConfigurationDefaultsPresetsAndInvalidCustom() throws {
         var draft = FocusReadyDraft()
         XCTAssertEqual(try draft.configuration(openTasks: [], tasksReadable: true).plannedSeconds(), 1500)
         for (choice, expected) in [(FocusDuration.fifteen, 900), (.twentyFive, 1500), (.fifty, 3000), (.custom("7"), 420)] {
-            draft.duration = choice
+            draft.selectDuration(choice)
             XCTAssertEqual(try draft.configuration(openTasks: [], tasksReadable: true).plannedSeconds(), expected)
         }
         for value in ["", "0", "-1", "1.5", "999999999999999999999999999999"] {
-            draft.duration = .custom(value)
+            draft.selectDuration(.custom(value))
             XCTAssertThrowsError(try draft.configuration(openTasks: [], tasksReadable: true))
         }
     }
@@ -45,7 +45,7 @@ final class FocusPresentationTests: XCTestCase {
     func testCancelDraftWritesNothingAndSharedWindowsCannotCompete() throws {
         let graph = try dependencies()
         var first = FocusReadyDraft()
-        first.duration = .fifty
+        first.selectDuration(.fifty)
         first = FocusReadyDraft() // Cancel/discard is local; no repository command.
         XCTAssertEqual(try first.configuration(openTasks: [], tasksReadable: true).plannedSeconds(), 1500)
         XCTAssertTrue(try SwiftDataFocusRepository(container: graph.container).fetchAll().isEmpty)
@@ -240,7 +240,7 @@ final class FocusPresentationTests: XCTestCase {
         XCTAssertEqual(try SwiftDataFocusRepository(container: graph.container).fetchAll(), [active])
     }
 
-    // Hosted presentation is compiled by build-for-testing, not executed in this step.
+    // Hosted presentation runs in the reserved GUI session.
     func testHostedHistoryAtBothReferenceSizes() throws {
         let graph = try dependencies()
         let host = NSHostingView(rootView: FocusHistoryView(service: graph.focusService,
@@ -252,10 +252,95 @@ final class FocusPresentationTests: XCTestCase {
         }
     }
 
+    func testHostedTwoWindowsFollowDefaultsPreserveOverridesAndResetAfterEnd() throws {
+        // Own-process AX inspection/actions do not require cross-process TCC authorization.
+        let graph = try dependencies()
+        try saveDefault(37, graph: graph)
+        let first = FocusPreferenceHost(graph: graph)
+        let second = FocusPreferenceHost(graph: graph)
+        defer { first.window.orderOut(nil); second.window.orderOut(nil) }
+        try first.expect("focus-ready-countdown", contains: "37 minutes")
+        try first.expect("focus-custom-minutes", contains: "37")
+        try second.press(title: "25")
+        try saveDefault(50, graph: graph)
+        try first.expect("focus-ready-countdown", contains: "50 minutes")
+        try second.expect("focus-ready-countdown", contains: "25 minutes")
+        try second.press(identifier: "focus-cancel-configuration")
+        try second.expect("focus-ready-countdown", contains: "50 minutes")
+        try first.press(identifier: "focus-start")
+        try first.expect("focus-timer-countdown", contains: "")
+        let running = try XCTUnwrap(graph.focusService.activeSession)
+        XCTAssertEqual(running.plannedSeconds, 3000)
+        try saveDefault(15, graph: graph)
+        XCTAssertEqual(graph.focusService.activeSession, running)
+        try graph.focusService.pause()
+        let paused = try XCTUnwrap(graph.focusService.activeSession)
+        try saveDefault(37, graph: graph)
+        XCTAssertEqual(graph.focusService.activeSession, paused)
+        try graph.focusService.end()
+        try first.expect("focus-ready-countdown", contains: "37 minutes")
+        try second.expect("focus-ready-countdown", contains: "37 minutes")
+        try first.expect("focus-custom-minutes", contains: "37")
+        XCTAssertEqual(graph.focusService.snapshots.first?.plannedSeconds, 3000)
+    }
+
+    func testHostedFailedStartIsFrozenAndUnreadablePreferencesAreIdentified() throws {
+        // The test fails if its real native controls cannot be inspected or operated.
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        var fail = true
+        let repository = SwiftDataFocusRepository(container: container, save: { context in
+            if fail { throw FocusError.persistenceFailure }
+            try context.save()
+        })
+        let graph = AppDependencies(container: container,
+            catalogRepository: SwiftDataCatalogRepository(container: container), focusRepository: repository)
+        try saveDefault(37, graph: graph)
+        let first = FocusPreferenceHost(graph: graph)
+        let second = FocusPreferenceHost(graph: graph)
+        defer { first.window.orderOut(nil); second.window.orderOut(nil) }
+        try first.press(identifier: "focus-start")
+        try first.expect("focus-start-error", contains: "")
+        try saveDefault(50, graph: graph)
+        try first.expect("focus-ready-countdown", contains: "37 minutes")
+        try second.expect("focus-ready-countdown", contains: "50 minutes")
+        fail = false
+        try first.press(identifier: "focus-start")
+        try first.expect("focus-timer-countdown", contains: "")
+        XCTAssertEqual(graph.focusService.activeSession?.plannedSeconds, 37 * 60)
+        try graph.focusService.end()
+        try first.expect("focus-ready-countdown", contains: "50 minutes")
+        let context = ModelContext(container)
+        context.autosaveEnabled = false
+        let record = try XCTUnwrap(context.fetch(FetchDescriptor<AppPreferencesRecord>()).first)
+        record.textSize = "unsupported"
+        try context.save()
+        graph.appPreferencesStore.retry()
+        for host in [first, second] {
+            try host.expect("focus-preferences-fallback", contains: "25-minute fallback")
+            try host.expect("focus-ready-countdown", contains: "25 minutes")
+        }
+        record.textSize = "system"
+        record.focusDefaultMinutes = 37
+        try context.save()
+        graph.appPreferencesStore.retry()
+        for host in [first, second] {
+            try host.expect("focus-ready-countdown", contains: "37 minutes")
+            try host.expect("focus-custom-minutes", contains: "37")
+            XCTAssertNil(host.element(identifier: "focus-preferences-fallback"))
+        }
+    }
+
+    private func saveDefault(_ minutes: Int, graph: AppDependencies) throws {
+        var input = AppPreferencesDraft()
+        input.focusDefaultMinutes = String(minutes)
+        try graph.appPreferencesStore.save(input, expectedRevision: graph.appPreferencesStore.committed?.revision)
+    }
+
     func testHostedReadySurface() throws {
         let graph = try dependencies()
         let host = NSHostingView(rootView: FocusView(service: graph.focusService, taskStore: graph.taskStore,
-                                                   learningStore: graph.learningCatalogStore))
+                                                   learningStore: graph.learningCatalogStore,
+                                                   preferencesStore: graph.appPreferencesStore))
         host.frame = CGRect(x: 0, y: 0, width: 1000, height: 700)
         host.layoutSubtreeIfNeeded()
         XCTAssertEqual(host.frame.width, 1000)
@@ -278,7 +363,8 @@ final class FocusPresentationTests: XCTestCase {
             focusWallClock: { start.addingTimeInterval(Double(elapsed)) },
             focusMonotonicClock: { base.advanced(by: .seconds(elapsed)) })
         let host = NSHostingView(rootView: FocusView(service: graph.focusService, taskStore: graph.taskStore,
-                                                   learningStore: graph.learningCatalogStore))
+                                                   learningStore: graph.learningCatalogStore,
+                                                   preferencesStore: graph.appPreferencesStore))
         host.frame = CGRect(x: 0, y: 0, width: 1000, height: 700)
         host.layoutSubtreeIfNeeded()
         XCTAssertEqual(graph.focusService.activeSession?.recoveryRequired, true)
@@ -295,12 +381,94 @@ final class FocusPresentationTests: XCTestCase {
         let graph = try dependencies()
         try graph.focusService.start(configuration: FocusConfiguration())
         let host = NSHostingView(rootView: FocusView(service: graph.focusService, taskStore: graph.taskStore,
-                                                   learningStore: graph.learningCatalogStore))
+                                                   learningStore: graph.learningCatalogStore,
+                                                   preferencesStore: graph.appPreferencesStore))
         host.frame = CGRect(x: 0, y: 0, width: 1000, height: 700)
         host.layoutSubtreeIfNeeded()
         XCTAssertNotNil(graph.focusService.countdownSeconds)
         try graph.focusService.pause()
         host.layoutSubtreeIfNeeded()
         XCTAssertEqual(graph.focusService.activeSession?.state, .paused)
+    }
+}
+
+/// Inspect and operate real native controls, rather than asserting host dimensions alone.
+@MainActor
+private final class FocusPreferenceHost {
+    let window: NSWindow
+    private let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+
+    init(graph: AppDependencies) {
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 940),
+                          styleMask: [.titled], backing: .buffered, defer: false)
+        window.title = "Focus preferences \(UUID())"
+        window.contentView = NSHostingView(rootView: ScrollView {
+            FocusView(service: graph.focusService, taskStore: graph.taskStore,
+                      learningStore: graph.learningCatalogStore, preferencesStore: graph.appPreferencesStore)
+        })
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        window.contentView?.layoutSubtreeIfNeeded()
+    }
+
+    private func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
+        var value: CFTypeRef?
+        return AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success ? value : nil
+    }
+
+    private func descendants(_ element: AXUIElement) -> [AXUIElement] {
+        let children = attribute(element, kAXChildrenAttribute) as? [AXUIElement] ?? []
+        return children.flatMap { [$0] + descendants($0) }
+    }
+
+    private var elements: [AXUIElement] {
+        let windows = attribute(app, kAXWindowsAttribute) as? [AXUIElement] ?? []
+        guard let match = windows.first(where: { attribute($0, kAXTitleAttribute) as? String == window.title })
+        else { return [] }
+        return descendants(match)
+    }
+
+    func element(identifier: String) -> AXUIElement? {
+        elements.first { attribute($0, kAXIdentifierAttribute) as? String == identifier }
+    }
+
+    private func text(_ element: AXUIElement) -> String {
+        [kAXTitleAttribute, kAXValueAttribute, kAXDescriptionAttribute]
+            .compactMap { attribute(element, $0) as? String }.joined(separator: " ")
+    }
+
+    private func wait(_ predicate: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(3)
+        repeat {
+            window.contentView?.layoutSubtreeIfNeeded()
+            if predicate() { return true }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        } while Date() < deadline
+        return predicate()
+    }
+
+    func expect(_ identifier: String, contains expected: String,
+                file: StaticString = #filePath, line: UInt = #line) throws {
+        XCTAssertTrue(wait {
+            guard let element = element(identifier: identifier) else { return false }
+            return expected.isEmpty || text(element).contains(expected)
+        }, "Missing \(identifier) with \(expected); AX text: \(elements.map(text))", file: file, line: line)
+    }
+
+    func press(identifier: String? = nil, title: String? = nil,
+               file: StaticString = #filePath, line: UInt = #line) throws {
+        var button: AXUIElement?
+        XCTAssertTrue(wait {
+            button = elements.first {
+                if let identifier { return attribute($0, kAXIdentifierAttribute) as? String == identifier }
+                return attribute($0, kAXRoleAttribute) as? String == kAXButtonRole &&
+                    (attribute($0, kAXTitleAttribute) as? String == title ||
+                     attribute($0, kAXDescriptionAttribute) as? String == title)
+            }
+            return button != nil
+        }, "Missing native button \(identifier ?? title ?? ""); AX text: \(elements.map(text))", file: file, line: line)
+        let target = try XCTUnwrap(button, file: file, line: line)
+        XCTAssertEqual(AXUIElementPerformAction(target, kAXPressAction as CFString), .success, file: file, line: line)
+        // Callers poll the expected observable state after each native action.
     }
 }

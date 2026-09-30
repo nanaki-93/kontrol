@@ -3,9 +3,37 @@ import SwiftUI
 /// Unsaved, window-local configuration. Disappearing links stay selected until explicitly
 /// changed; neither selecting a lesson nor validating the draft opens an attempt.
 struct FocusReadyDraft {
-    var duration: FocusDuration = .default
+    enum DurationSource: Equatable { case followingDefault, userOverride, submitted }
+
+    private(set) var duration: FocusDuration = .default
+    private(set) var durationSource: DurationSource = .followingDefault
+    private(set) var usesFallback = false
     private(set) var linkedTaskID: UUID?
     private(set) var linkedLessonID: String?
+
+    init(preferences: AppPreferencesSnapshot? = .defaults) {
+        followPreferences(preferences)
+    }
+
+    /// A failed read is not a loaded default, even if the store retains an older receipt.
+    mutating func followPreferences(_ snapshot: AppPreferencesSnapshot?) {
+        guard durationSource == .followingDefault else { return }
+        duration = snapshot?.preferences.focusDuration ?? .default
+        usesFallback = snapshot == nil
+    }
+
+    mutating func selectDuration(_ value: FocusDuration) {
+        duration = value
+        durationSource = .userOverride
+        usesFallback = false
+    }
+
+    /// Freeze before attempting Start, including validation/persistence failures in the service.
+    mutating func markSubmitted() { durationSource = .submitted }
+
+    var fallbackMessage: String? {
+        usesFallback ? "Using a 25-minute fallback because preferences could not be read. Retry preferences in Settings." : nil
+    }
 
     mutating func selectTask(_ id: UUID?) {
         linkedTaskID = id
@@ -84,8 +112,22 @@ struct FocusView: View {
     @ObservedObject var service: FocusService
     @ObservedObject var taskStore: TaskStore
     @ObservedObject var learningStore: LearningCatalogStore
-    @State private var draft = FocusReadyDraft()
-    @State private var customMinutes = ""
+    @ObservedObject var preferencesStore: AppPreferencesStore
+    @State private var draft: FocusReadyDraft
+
+    init(service: FocusService, taskStore: TaskStore, learningStore: LearningCatalogStore,
+         preferencesStore: AppPreferencesStore) {
+        self.service = service
+        self.taskStore = taskStore
+        self.learningStore = learningStore
+        self.preferencesStore = preferencesStore
+        _draft = State(initialValue: FocusReadyDraft(preferences: preferencesStore.editableSnapshot))
+    }
+
+    private var customMinutes: String {
+        if case .custom(let text) = draft.duration { return text }
+        return ""
+    }
     @State private var showingSessions = false
     @State private var historyFilter: FocusHistoryFilter = .recent
     @AccessibilityFocusState private var focusHistoryNavigation: Bool
@@ -185,7 +227,23 @@ struct FocusView: View {
         .onAppear {
             if taskStore.readState == .notLoaded { taskStore.refresh() }
             learningStore.loadIfNeeded()
+            refreshDefault()
         }
+        .onChange(of: preferencesStore.committed) { _, _ in refreshDefault() }
+        .onChange(of: preferencesStore.state) { _, _ in refreshDefault() }
+        .onChange(of: service.activeSession?.id) { old, new in
+            if old != nil && new == nil { resetDraft() }
+        }
+    }
+
+    private func refreshDefault() {
+        guard service.activeSession == nil else { return }
+        draft.followPreferences(preferencesStore.editableSnapshot)
+    }
+
+    private func resetDraft() {
+        draft = FocusReadyDraft(preferences: preferencesStore.editableSnapshot)
+        startError = nil
     }
 
     private func recoveryContent(_ session: FocusSessionSnapshot) -> some View {
@@ -406,16 +464,23 @@ struct FocusView: View {
                     VStack(alignment: .leading, spacing: AppMetrics.space2) { durationChoices }
                 }
                 if case .custom = draft.duration {
-                    TextField("Minutes", text: $customMinutes)
+                    TextField("Minutes", text: Binding(
+                        get: { customMinutes },
+                        set: { draft.selectDuration(.custom($0)); startError = nil }
+                    ))
                         .textFieldStyle(.roundedBorder)
                         .frame(maxWidth: 220)
                         .accessibilityLabel("Custom duration in whole minutes")
                         .accessibilityIdentifier("focus-custom-minutes")
-                        .onChange(of: customMinutes) { _, value in draft.duration = .custom(value) }
                 }
                 Text(durationLabel)
                     .appTypography(.metadata)
                     .foregroundStyle(AppColors.textSecondary)
+                if let message = draft.fallbackMessage {
+                    Label(message, systemImage: "exclamationmark.triangle")
+                        .appTypography(.metadata)
+                        .accessibilityIdentifier("focus-preferences-fallback")
+                }
             }
 
             VStack(alignment: .leading, spacing: AppMetrics.space3) {
@@ -498,9 +563,7 @@ struct FocusView: View {
             }
             .accessibilityIdentifier("focus-start")
             ActionButton("Cancel configuration") {
-                draft = FocusReadyDraft()
-                customMinutes = ""
-                startError = nil
+                resetDraft()
             }
             .accessibilityIdentifier("focus-cancel-configuration")
         }
@@ -521,7 +584,7 @@ struct FocusView: View {
         default: selected = false
         }
         return ActionButton(label, variant: selected ? .primary : .secondary) {
-            draft.duration = value
+            draft.selectDuration(value)
             startError = nil
         }
         .accessibilityValue(selected ? "Selected" : "Not selected")
@@ -529,6 +592,7 @@ struct FocusView: View {
 
     private func start() {
         guard service.readState.canStart, service.activeSession == nil, let configuration else { return }
+        draft.markSubmitted()
         do {
             try service.start(configuration: configuration)
             startError = nil

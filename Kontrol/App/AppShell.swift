@@ -117,7 +117,8 @@ struct AppShell: View {
                         ProjectsView(store: dependencies.projectStore)
                     case .focus:
                         FocusView(service: dependencies.focusService, taskStore: dependencies.taskStore,
-                                  learningStore: dependencies.learningCatalogStore)
+                                  learningStore: dependencies.learningCatalogStore,
+                                  preferencesStore: dependencies.appPreferencesStore)
                     case .tasks:
                         TasksView(store: dependencies.taskStore)
                     case .news:

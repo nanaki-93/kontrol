@@ -318,6 +318,36 @@ final class FocusLessonLinkTests: XCTestCase {
         XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).isEmpty)
     }
 
+    func testFailedStartRetainsSubmittedLessonAndDurationAcrossPreferenceChanges() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        try seed(container)
+        var fail = true
+        let writer = SwiftDataFocusRepository(container: container, save: { context in
+            if fail { throw Injected.failed }
+            try context.save()
+        })
+        let focus = FocusService(repository: writer, wallClock: { self.start },
+            scheduleTick: { _ in {} }, notificationCenter: NotificationCenter(),
+            workspaceNotificationCenter: NotificationCenter())
+        focus.loadIfNeeded()
+        var draft = FocusReadyDraft(preferences: AppPreferencesSnapshot(
+            preferences: try AppPreferences(focusDefaultMinutes: 37), revision: UUID()))
+        draft.selectLesson(lessonID)
+        let options = try SwiftDataCatalogRepository(container: container).loadSnapshot().definitions
+        let submitted = try draft.configuration(openTasks: [], tasksReadable: true, lessons: options)
+        draft.markSubmitted()
+        XCTAssertThrowsError(try focus.start(configuration: submitted))
+        draft.followPreferences(.defaults)
+        XCTAssertEqual(try draft.configuration(openTasks: [], tasksReadable: true, lessons: options), submitted)
+        XCTAssertEqual(draft.linkedLessonID, lessonID)
+        fail = false
+        try focus.start(configuration: draft.configuration(openTasks: [], tasksReadable: true, lessons: options))
+        XCTAssertEqual(focus.activeSession?.plannedSeconds, 37 * 60)
+        XCTAssertEqual(focus.activeSession?.linkedLessonID, lessonID)
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).isEmpty)
+        try focus.end()
+    }
+
     func testStartAndEndLinkedLessonNeverMutateLearning() throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         let catalog = SwiftDataCatalogRepository(container: container)
