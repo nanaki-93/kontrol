@@ -718,6 +718,281 @@ final class LocalDataExportTests: XCTestCase {
         XCTAssertFalse(inspect.hasChanges)
     }
 
+    @MainActor
+    private func configuration(general: [AppPreferencesRecord] = [], ai: [AISettingsRecord] = [],
+                               news: [NewsPreferencesRecord] = [], feeds: [NewsFeedRecord] = [],
+                               into envelope: Export? = nil) throws -> Export {
+        try DailyDataExportProjection.project(general: general, ai: ai, newsPreferences: news,
+            feeds: feeds, catalog: BundledFeedCatalog.load(),
+            into: envelope ?? Export(exportedAt: instant(), appVersion: "1.0"))
+    }
+
+    @MainActor
+    private func newsPreference(_ ids: [String] = ["go", "ai"]) throws -> NewsPreferencesRecord {
+        NewsPreferencesRecord(catalogVersion: 1, selectedTopicIDsPayload: try NewsRecordPayload.encodeTopics(ids))
+    }
+
+    @MainActor
+    private func configuredFeed(id: UUID? = nil) throws -> NewsFeedRecord {
+        NewsFeedRecord(id: id ?? secondID, name: "API_KEY=sk-not-a-credential 🔐 e\u{301}",
+            endpoint: "https://FEEDS.example.test:443/rss?token=keep%20me",
+            topicIDsPayload: try NewsRecordPayload.encodeTopics(["go", "ai"]), isEnabled: false,
+            etag: "excluded-validator", lastModified: "excluded-header", lastAttemptAt: try instant().date,
+            lastSuccessAt: try instant().date, lastErrorCode: "excluded-diagnostic", retryNotBefore: try instant().date)
+    }
+
+    @MainActor
+    func testConfigurationProjectionMissingRowsUsesBundledEffectiveDefaultsNotEmptyDTO() throws {
+        let catalog = try BundledFeedCatalog.load()
+        let value = try configuration()
+        XCTAssertEqual(value.generalPreferences, Export.GeneralPreferences(
+            focusDefaultMinutes: 25, textSize: "system", reduceMotion: "system",
+            ai: .init(enabled: false, providerID: "openai", modelID: nil)))
+        XCTAssertEqual(value.feedPreferences.selectedTopicIDs, catalog.initialSelectedTopicIDs.sorted())
+        XCTAssertFalse(value.feedPreferences.feeds.isEmpty)
+        XCTAssertEqual(value.feedPreferences.feeds, catalog.feeds.map {
+            Export.Feed(id: $0.id, name: $0.name, endpoint: $0.url.absoluteString,
+                topicIDs: $0.topicIDs.sorted(), isEnabled: true)
+        }.sorted { $0.id.uuidString < $1.id.uuidString })
+        XCTAssertEqual(try Export.decode(value.encoded()), value)
+    }
+
+    @MainActor
+    func testConfigurationProjectionAllPersistedDefaultCombinationsAndExplicitEmptyNews() throws {
+        let general = AppPreferencesRecord(focusDefaultMinutes: 51, textSize: "large", reduceMotion: "reduce")
+        let ai = AISettingsRecord(enabled: true, modelID: "gpt-test:1", credentialReference: firstID.uuidString)
+        let news = try newsPreference()
+        let feed = try configuredFeed()
+        for hasGeneral in [false, true] {
+            for hasAI in [false, true] {
+                for newsState in 0...2 { // absent, explicitly empty, populated
+                    let value = try configuration(general: hasGeneral ? [general] : [], ai: hasAI ? [ai] : [],
+                        news: newsState == 0 ? [] : [news], feeds: newsState == 2 ? [feed] : [])
+                    XCTAssertEqual(value.generalPreferences.focusDefaultMinutes, hasGeneral ? 51 : 25)
+                    XCTAssertEqual(value.generalPreferences.textSize, hasGeneral ? "large" : "system")
+                    XCTAssertEqual(value.generalPreferences.reduceMotion, hasGeneral ? "reduce" : "system")
+                    XCTAssertEqual(value.generalPreferences.ai, .init(enabled: hasAI, providerID: "openai",
+                        modelID: hasAI ? "gpt-test:1" : nil))
+                    if newsState != 0 {
+                        XCTAssertEqual(value.feedPreferences.selectedTopicIDs, ["ai", "go"])
+                        XCTAssertEqual(value.feedPreferences.feeds.count, newsState == 2 ? 1 : 0)
+                    } else { XCTAssertFalse(value.feedPreferences.feeds.isEmpty) }
+                    XCTAssertEqual(try Export.decode(value.encoded()), value)
+                }
+            }
+        }
+        let empty = try configuration(news: [newsPreference([])])
+        XCTAssertEqual(empty.feedPreferences, .init(selectedTopicIDs: [], feeds: []))
+        ai.enabled = false // Retain configured nonsecret model even when disabled.
+        ai.credentialReference = nil
+        XCTAssertEqual(try configuration(ai: [ai]).generalPreferences.ai,
+                       .init(enabled: false, providerID: "openai", modelID: "gpt-test:1"))
+        general.focusDefaultMinutes = Int.max / 60
+        XCTAssertEqual(try configuration(general: [general]).generalPreferences.focusDefaultMinutes, Int.max / 60)
+    }
+
+    @MainActor
+    func testConfigurationProjectionMapsAllowlistedFieldsExactlyAndNeverEmitsExcludedMetadata() throws {
+        let general = AppPreferencesRecord(focusDefaultMinutes: 15, textSize: "large", reduceMotion: "reduce")
+        let ai = AISettingsRecord(enabled: true, modelID: "gpt-test", credentialReference: firstID.uuidString)
+        let news = try newsPreference()
+        let feed = try configuredFeed()
+        let value = try configuration(general: [general], ai: [ai], news: [news], feeds: [feed])
+        XCTAssertEqual(value.generalPreferences, .init(focusDefaultMinutes: 15, textSize: "large",
+            reduceMotion: "reduce", ai: .init(enabled: true, providerID: "openai", modelID: "gpt-test")))
+        XCTAssertEqual(value.feedPreferences, .init(selectedTopicIDs: ["ai", "go"], feeds: [
+            .init(id: secondID, name: feed.name, endpoint: feed.endpoint, topicIDs: ["ai", "go"], isEnabled: false)]))
+        XCTAssertEqual(Array(value.feedPreferences.feeds[0].name.utf8), Array(feed.name.utf8))
+        let json = try object(value)
+        let preferences = try XCTUnwrap(json["generalPreferences"] as? [String: Any])
+        XCTAssertEqual(Set(preferences.keys), ["schemaVersion", "focusDefaultMinutes", "textSize", "reduceMotion", "ai"])
+        XCTAssertEqual(Set(try XCTUnwrap(preferences["ai"] as? [String: Any]).keys), ["enabled", "providerID", "modelID"])
+        let feedPreferences = try XCTUnwrap(json["feedPreferences"] as? [String: Any])
+        XCTAssertEqual(Set(feedPreferences.keys), ["selectedTopicIDs", "feeds"])
+        let projected = try XCTUnwrap((feedPreferences["feeds"] as? [[String: Any]])?.first)
+        XCTAssertEqual(Set(projected.keys), ["id", "name", "endpoint", "topicIDs", "isEnabled"])
+        let bytes = try value.encoded()
+        let text = try XCTUnwrap(String(data: bytes, encoding: .utf8))
+        for excluded in [firstID.uuidString, "excluded-validator", "excluded-header", "excluded-diagnostic"] {
+            XCTAssertFalse(text.contains(excluded))
+        }
+        // Damage in excluded transport fields is irrelevant to included configuration.
+        news.lastRefreshAt = Date(timeIntervalSince1970: .nan)
+        feed.lastAttemptAt = Date(timeIntervalSince1970: .nan)
+        feed.lastSuccessAt = Date(timeIntervalSince1970: .infinity)
+        feed.retryNotBefore = Date(timeIntervalSince1970: -.infinity)
+        feed.etag = String(repeating: "x", count: 5_000)
+        XCTAssertEqual(try configuration(general: [general], ai: [ai], news: [news], feeds: [feed]).encoded(), bytes)
+    }
+
+    @MainActor
+    func testConfigurationProjectionRejectsDamagedGeneralAndAIRowsWithoutFallback() throws {
+        let generalMutations: [(AppPreferencesRecord) -> Void] = [
+            { $0.payloadVersion = 2 }, { $0.focusDefaultMinutes = 0 }, { $0.focusDefaultMinutes = -1 },
+            { $0.focusDefaultMinutes = Int.max }, { $0.textSize = "unknown" }, { $0.reduceMotion = "unknown" }
+        ]
+        for (index, mutate) in generalMutations.enumerated() {
+            let row = AppPreferencesRecord(); mutate(row)
+            XCTAssertThrowsError(try configuration(general: [row])) {
+                XCTAssertEqual($0 as? LocalDataExportError, index == 0 ? .unsupportedVersion : .invalidValue)
+            }
+        }
+        let aiMutations: [(AISettingsRecord) -> Void] = [
+            { $0.payloadVersion = 2 }, { $0.providerID = "other" }, { $0.modelID = "" },
+            { $0.modelID = " contains whitespace " }, { $0.modelID = String(repeating: "a", count: 129) },
+            { $0.credentialReference = "not-a-uuid" }, { $0.enabled = true },
+            { $0.enabled = true; $0.modelID = "gpt-test" },
+            { $0.enabled = true; $0.credentialReference = self.firstID.uuidString }
+        ]
+        for (index, mutate) in aiMutations.enumerated() {
+            let row = AISettingsRecord(); mutate(row)
+            XCTAssertThrowsError(try configuration(ai: [row])) {
+                XCTAssertEqual($0 as? LocalDataExportError, index == 0 ? .unsupportedVersion : .invalidValue)
+            }
+        }
+    }
+
+    @MainActor
+    func testConfigurationProjectionRejectsDuplicateAndForeignSingletonsOrOrphanedFeeds() throws {
+        let general = AppPreferencesRecord()
+        let ai = AISettingsRecord()
+        let news = try newsPreference()
+        let feed = try configuredFeed()
+        for capture in [
+            { try self.configuration(general: [general, general]) },
+            { try self.configuration(ai: [ai, ai]) },
+            { try self.configuration(news: [news, news]) },
+            { try self.configuration(news: [news], feeds: [feed, feed]) }
+        ] {
+            XCTAssertThrowsError(try capture()) { XCTAssertEqual($0 as? LocalDataExportError, .duplicateIdentity) }
+        }
+        general.key = "foreign"; ai.key = "foreign"; news.key = "foreign"
+        for capture in [
+            { try self.configuration(general: [general]) }, { try self.configuration(ai: [ai]) },
+            { try self.configuration(news: [news]) }
+        ] {
+            XCTAssertThrowsError(try capture()) { XCTAssertEqual($0 as? LocalDataExportError, .invalidValue) }
+        }
+        XCTAssertThrowsError(try configuration(feeds: [feed])) {
+            XCTAssertEqual($0 as? LocalDataExportError, .invalidValue)
+        }
+    }
+
+    @MainActor
+    func testConfigurationProjectionRejectsCorruptUnsupportedOversizedAndDuplicateTopicPayloads() throws {
+        let payloads = [Data("not JSON".utf8), Data(#"{"version":2,"value":["go"]}"#.utf8),
+            Data(#"{"version":1,"value":["go","go"]}"#.utf8),
+            Data(#"{"version":1,"value":[""]}"#.utf8), Data(repeating: 32, count: 4_097)]
+        for (index, payload) in payloads.enumerated() {
+            let news = try newsPreference(); news.selectedTopicIDsPayload = payload
+            let feed = try configuredFeed(); feed.topicIDsPayload = payload
+            for capture in [
+                { try self.configuration(news: [news]) },
+                { try self.configuration(news: [self.newsPreference()], feeds: [feed]) }
+            ] {
+                XCTAssertThrowsError(try capture()) {
+                    XCTAssertEqual($0 as? LocalDataExportError, index == 1 ? .unsupportedVersion : .invalidValue)
+                }
+            }
+        }
+        let badVersion = try newsPreference(); badVersion.catalogVersion = 0
+        XCTAssertThrowsError(try configuration(news: [badVersion]))
+        XCTAssertThrowsError(try configuration(news: [newsPreference(["unknown"])]))
+    }
+
+    @MainActor
+    func testConfigurationProjectionRejectsInvalidFeedsEndpointsMappingsAndLimits() throws {
+        let mutations: [(NewsFeedRecord) -> Void] = [
+            { $0.name = "" }, { $0.name = " spaced " }, { $0.name = String(repeating: "a", count: 257) },
+            { $0.endpoint = "http://feeds.example.test/rss" },
+            { $0.endpoint = "https://user:secret@feeds.example.test/rss" },
+            { $0.endpoint = "https://feeds.example.test/rss#fragment" },
+            { $0.endpoint = "not a URL" },
+            { $0.topicIDsPayload = try! NewsRecordPayload.encodeTopics([]) },
+            { $0.topicIDsPayload = try! NewsRecordPayload.encodeTopics(["unknown"]) }
+        ]
+        for mutate in mutations {
+            let feed = try configuredFeed(); mutate(feed)
+            XCTAssertThrowsError(try configuration(news: [newsPreference()], feeds: [feed])) {
+                XCTAssertEqual($0 as? LocalDataExportError, .invalidValue)
+            }
+        }
+        let first = try configuredFeed(id: firstID)
+        let second = try configuredFeed()
+        second.endpoint = "https://feeds.example.test/rss?token=keep%20me" // Same normalized identity.
+        XCTAssertThrowsError(try configuration(news: [newsPreference()], feeds: [first, second])) {
+            XCTAssertEqual($0 as? LocalDataExportError, .duplicateIdentity)
+        }
+        let feeds = try (0..<33).map { index -> NewsFeedRecord in
+            let feed = try configuredFeed(id: UUID())
+            feed.endpoint = "https://feeds.example.test/\(index)"
+            return feed
+        }
+        XCTAssertThrowsError(try configuration(news: [newsPreference()], feeds: feeds))
+    }
+
+    @MainActor
+    func testConfigurationProjectionSortsDetachesAndPreservesOtherEnvelopeContent() throws {
+        let general = AppPreferencesRecord()
+        let ai = AISettingsRecord()
+        let news = try newsPreference()
+        let second = try configuredFeed()
+        let first = try configuredFeed(id: firstID); first.endpoint = "https://feeds.example.test/other"
+        let envelope = try rich()
+        let value = try configuration(general: [general], ai: [ai], news: [news], feeds: [second, first], into: envelope)
+        let reversed = try configuration(general: [general], ai: [ai], news: [news], feeds: [first, second], into: envelope)
+        XCTAssertEqual(try value.encoded(), try reversed.encoded())
+        XCTAssertEqual(value.feedPreferences.feeds.map(\.id), [firstID, secondID])
+        let canonical = envelope.canonicalized()
+        XCTAssertEqual(value.tasks, canonical.tasks); XCTAssertEqual(value.blocks, canonical.blocks)
+        XCTAssertEqual(value.sessions, canonical.sessions); XCTAssertEqual(value.learning, canonical.learning)
+        XCTAssertEqual(value.exportedAt, envelope.exportedAt); XCTAssertEqual(value.appVersion, envelope.appVersion)
+        let bytes = try value.encoded()
+        general.focusDefaultMinutes = 50; ai.modelID = "later-model"; first.name = "Later edit"
+        news.selectedTopicIDsPayload = try NewsRecordPayload.encodeTopics([])
+        XCTAssertEqual(try value.encoded(), bytes)
+    }
+
+    @MainActor
+    func testConfigurationProjectionNeverInsertsDefaultsSavesOrChangesOtherOwnersDrafts() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let capture = ModelContext(container); capture.autosaveEnabled = false
+        func projectRows() throws -> Export {
+            try configuration(general: capture.fetch(FetchDescriptor<AppPreferencesRecord>()),
+                ai: capture.fetch(FetchDescriptor<AISettingsRecord>()),
+                news: capture.fetch(FetchDescriptor<NewsPreferencesRecord>()),
+                feeds: capture.fetch(FetchDescriptor<NewsFeedRecord>()))
+        }
+        func counts(_ context: ModelContext) throws -> [Int] {
+            try [context.fetchCount(FetchDescriptor<AppPreferencesRecord>()),
+                 context.fetchCount(FetchDescriptor<AISettingsRecord>()),
+                 context.fetchCount(FetchDescriptor<NewsPreferencesRecord>()),
+                 context.fetchCount(FetchDescriptor<NewsFeedRecord>())]
+        }
+        _ = try projectRows()
+        XCTAssertFalse(capture.hasChanges)
+        XCTAssertEqual(try counts(ModelContext(container)), [0, 0, 0, 0])
+        let seed = ModelContext(container); seed.autosaveEnabled = false
+        seed.insert(AppPreferencesRecord()); seed.insert(AISettingsRecord())
+        seed.insert(try newsPreference()); seed.insert(try configuredFeed())
+        try seed.save()
+        let draftOwner = ModelContext(container); draftOwner.autosaveEnabled = false
+        let draft = try XCTUnwrap(draftOwner.fetch(FetchDescriptor<NewsFeedRecord>()).first)
+        draft.name = "Unsaved feed edit"
+        let value = try projectRows()
+        XCTAssertFalse(capture.hasChanges)
+        XCTAssertTrue(draftOwner.hasChanges)
+        XCTAssertEqual(draft.name, "Unsaved feed edit")
+        XCTAssertNotEqual(value.feedPreferences.feeds[0].name, draft.name)
+        let inspect = ModelContext(container); inspect.autosaveEnabled = false
+        XCTAssertEqual(try counts(inspect), [1, 1, 1, 1])
+        XCTAssertEqual(try configuration(general: inspect.fetch(FetchDescriptor<AppPreferencesRecord>()),
+            ai: inspect.fetch(FetchDescriptor<AISettingsRecord>()),
+            news: inspect.fetch(FetchDescriptor<NewsPreferencesRecord>()),
+            feeds: inspect.fetch(FetchDescriptor<NewsFeedRecord>())), value)
+        XCTAssertFalse(inspect.hasChanges)
+    }
+
     func testPrivacyFieldAllowlistsHaveNoOpaquePayloadsOrExcludedOwners() throws {
         let json = try object(rich())
         let forbidden: Set<String> = ["credentialReference", "credential", "apiKey", "password", "bookmarkData",

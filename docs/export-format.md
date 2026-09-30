@@ -2,8 +2,8 @@
 
 `LocalDataExport` in `Kontrol/Domain/LocalDataExport.swift` defines a detached,
 plain JSON serialization contract. `Kontrol/Data/Export/DailyDataExportProjection.swift`
-now maps supplied persisted tasks, blocks, and Focus sessions. Configuration and
-Learning projections, coherent capture, destination selection, and delivery remain
+now maps supplied persisted tasks, blocks, Focus sessions, and effective configuration.
+Learning projection, coherent capture, destination selection, and delivery remain
 separate implementation tasks. No import/restore is provided. This is **not an encrypted
 backup**; the JSON contains personal authored content and saved answers.
 
@@ -214,11 +214,50 @@ defaults are 1 / 25 / system / system, respectively, not inserted storage rows.
 (ID, default `openai`), **modelID** (nonblank string?; default null). It carries
 only nonsecret configuration, never a credential or credential reference.
 
-Projection requirements (not implemented in this contract checkpoint): damaged
-configuration is not absence. Missing general/AI rows use the above defaults
-without insertion. Effective bundled News defaults apply **only when both** News
-preferences and feed rows are absent. Orphaned feeds fail; corrupt/unsupported
-`NewsRecordPayload` values fail. No News initialization or network refresh occurs.
+### Persisted configuration projection
+
+`DailyDataExportProjection.project(general:ai:newsPreferences:feeds:catalog:into:)`
+is synchronous and main-actor isolated. The caller supplies already-fetched rows
+and the detached catalog from `BundledFeedCatalog.load()` (a local resource read,
+not News initialization). It replaces only the two configuration objects in the
+envelope, validates it, and returns canonicalized detached values. Fetching a
+coherent committed snapshot remains the repository's responsibility.
+
+- Missing general/AI rows use `AppPreferences.defaults` / `AISettingsSnapshot.disabled`
+  without inserting anything. Present general rows reuse `AppPreferences` validation,
+  including the entire supported custom-duration range. Present AI rows require
+  payload version 1 and reuse pure `AISettingsSnapshot.validate()`: provider `openai`,
+  optional model identifier of 1–128 ASCII letters/digits/`-.:_`, optional opaque
+  credential-reference UUID, and model/reference presence when enabled. Only
+  enabled/provider/model leave the mapper; there is no Keychain access or credential
+  verification. A disabled row's configured model is retained, not reset.
+- Multiple general, AI, or News singleton rows, foreign singleton keys, and duplicate
+  feed IDs fail rather than choosing a row. Unsupported general/AI payload versions
+  fail. Revisions are excluded, not synthesized.
+- Effective bundled News defaults apply **only when both** News preference and feed
+  rows are absent: initial selected topics and every stable bundled feed, enabled.
+  A present preference row with zero feeds stays empty; empty selection stays empty.
+  Feeds without a preference row fail. The supplied catalog must have positive
+  version, unique nonempty topics (≤32), valid selection/mappings, and ≤32 feeds with
+  unique UUIDs and normalized HTTPS endpoints. Persisted positive catalog versions
+  are retained as storage validity information, not exported or interpreted as
+  payload versions; no reconciliation to a newer catalog is performed.
+- Selections and feed mappings decode through `NewsRecordPayload.topics`, including
+  version 1, size/count/string limits and duplicate rejection. Corrupt, oversized,
+  or unsupported payloads fail. Topic IDs must belong to the supplied catalog;
+  each feed needs at least one topic. There may be at most 32 persisted feeds.
+- Feed names are nonempty, ≤256 UTF-8 bytes, and have no surrounding whitespace.
+  Names, endpoints, mappings, IDs, and enabled flags map exactly, without applying
+  editor normalization. `NewsURLPolicy` validates HTTPS endpoints (no user/password
+  authority or fragment) and normalized endpoint uniqueness, **without rewriting
+  the exported configured endpoint**. Secret-looking authored text is preserved.
+- Excluded transport timestamps, validators, diagnostics, and article-cache data
+  are neither read nor validated by this projection. Damage in an **included**
+  configuration field fails the whole export and is never treated as absence.
+  Errors expose only finite `LocalDataExportError` categories, not raw payloads.
+- No context save/insertion, News initialization/refresh, network, Keychain,
+  credential resolution, feature-store loading, or editor-draft access occurs.
+  Later row edits cannot change the detached result.
 
 ## Learning
 

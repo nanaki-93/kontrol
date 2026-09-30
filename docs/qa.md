@@ -1285,3 +1285,91 @@ paths. All roots/sidecars remain preserved; no cleanup was performed. Test host
 (`host-exit.log`). Existing multiple-destination and linkd/AppIntents diagnostics
 remain in logs, not new projection failures. No historical failed/skipped
 evidence was removed. **No remaining Step 2.2 blockers.**
+
+### F13 Step 2.3 — effective configuration projection (2026-09-30)
+
+Implemented read-only general/AI/News configuration mapping in
+`Kontrol/Data/Export/DailyDataExportProjection.swift`; added nine non-GUI methods
+in `KontrolTests/LocalDataExportTests.swift` and documented the storage boundary
+in `docs/export-format.md`. The cumulative task-5 checklist had no prior findings.
+No UI, schema, feature-owner, Keychain, or News initialization changes were made.
+
+Evidence root: **`/tmp/kontrol-f13-step2-3-20260930T223136/`**. Baseline HEAD:
+`8a693249752f7b6d1c1124a9bacbf8c657d82e91`; initial worktree/index were clean.
+`source.diff` captures the three implementation/format files tested; SHA-256:
+`884048110d7263952160262082454d435d53a0f5878c64219472438055bb2a44`.
+This ledger addition is the only later change. `environment.log` records macOS
+27.0 (26A428), arm64, Xcode 27.0 (27A266a), Swift compiler 6.4, and the selected
+Xcode path. Swift 5 project language mode and macOS 14 deployment remain unchanged.
+
+Exact commands (from repository root; `EVIDENCE` is the root above):
+
+```sh
+set -o pipefail
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
+  -resultBundlePath "$EVIDENCE/configuration.xcresult" \
+  -only-testing:KontrolTests/LocalDataExportTests \
+  -only-testing:KontrolTests/AppPreferencesRepositoryTests \
+  -only-testing:KontrolTests/NewsRepositoryTests \
+  -only-testing:KontrolTests/AISettingsStoreTests test
+make build DERIVED_DATA=/tmp/kontrol-f13-derived
+git diff --check
+xcrun xcresulttool get test-results summary \
+  --path "$EVIDENCE/configuration.xcresult" --format json > "$EVIDENCE/summary.json"
+xcrun xcresulttool get test-results tests \
+  --path "$EVIDENCE/configuration.xcresult" --format json > "$EVIDENCE/test-tree.json"
+python3 "$EVIDENCE/audit.py" > "$EVIDENCE/audit.log"
+python3 -m json.tool "$EVIDENCE/example-1.json" >/dev/null
+plutil -lint Kontrol.xcodeproj/project.pbxproj
+```
+
+All final commands exited **0**. Logs: `tests.log`, `build.log`, `diffcheck.log`,
+`plutil.log`, and `exit-codes.log`; fresh results: `configuration.xcresult`,
+`summary.json`, `test-tree.json`, and `audit.log`. **87/87 methods Passed**:
+36 LocalDataExportTests, 17 AppPreferencesRepositoryTests, 17 NewsRepositoryTests,
+17 AISettingsStoreTests. Zero failures, skips, expected failures, or xcresult
+runtime warnings. The source-identifier audit confirms every expected method
+executed exactly once. Its initial regex incorrectly included the test transport
+stub's `testConnection()` (exit 1); restricting discovery to each XCTestCase class
+corrected the audit, which then exited 0. No XCTest failed or was excluded.
+The format's JSON example parsed **1/1**. `test` compiled the hosted test target;
+no UI was introduced and no hosted/native selectors were required by Step 2.3.
+A13/S13/B13/D13 remain separate mandatory release gates, not inferred passes.
+
+New methods (all `KontrolTests/LocalDataExportTests/`, Passed):
+
+- `testConfigurationProjectionMissingRowsUsesBundledEffectiveDefaultsNotEmptyDTO`
+- `testConfigurationProjectionAllPersistedDefaultCombinationsAndExplicitEmptyNews`
+- `testConfigurationProjectionMapsAllowlistedFieldsExactlyAndNeverEmitsExcludedMetadata`
+- `testConfigurationProjectionRejectsDamagedGeneralAndAIRowsWithoutFallback`
+- `testConfigurationProjectionRejectsDuplicateAndForeignSingletonsOrOrphanedFeeds`
+- `testConfigurationProjectionRejectsCorruptUnsupportedOversizedAndDuplicateTopicPayloads`
+- `testConfigurationProjectionRejectsInvalidFeedsEndpointsMappingsAndLimits`
+- `testConfigurationProjectionSortsDetachesAndPreservesOtherEnvelopeContent`
+- `testConfigurationProjectionNeverInsertsDefaultsSavesOrChangesOtherOwnersDrafts`
+
+Coverage includes all 12 missing/persisted general/AI/News combinations, actual
+bundled defaults only for absent preference AND feeds, explicit empty selection/
+feeds, exact allowlisted values and secret-looking names/endpoints, disabled
+configured AI models, supported maximum Focus duration, detached deterministic
+ordering, unrelated envelope preservation, malformed included fields and payload
+versions, orphaned feeds, singleton/record duplication, foreign keys, endpoint
+policy/normalized uniqueness, topic mappings, and feed limits. In-memory fixtures
+confirm defaults insert no rows, projection leaves its context clean, persisted
+inventories/values remain unchanged, and another owner's unsaved feed draft is
+neither saved nor overwritten. Excluded feed diagnostics/validators/timestamps
+are not read or emitted, even when malformed. Production mapping has no context,
+feature-store, network, credential-resolution, or Keychain dependency.
+
+The unchanged disk-backed NewsRepositoryTests reproduced **45 SQLite unlink
+API-violation messages** across **15 store roots** (store/WAL/SHM), retained in
+`tests.log` and enumerated in `sqlite-diagnostic-paths.txt`. These originate from
+existing test cleanup while contexts remain alive; this task added only in-memory
+fixtures and did not alter those tests or perform store cleanup. The test host
+PID **57864** exited: `ps -p 57864 -o pid=,stat=,command=` returned **1** with no
+rows (`host-exit.log`). Existing multiple-destination/linkd diagnostics also remain
+in logs. No historical failed/skipped evidence was removed. **No remaining Step
+2.3 blockers.**
