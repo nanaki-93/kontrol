@@ -239,6 +239,196 @@ final class SettingsSceneTests: XCTestCase {
         XCTAssertNil(graph.focusService.activeSession)
     }
 
+    // These are hosted native keyboard/AX checks, not spoken VoiceOver acceptance.
+    private func keyboard(_ code: UInt16, _ text: String, in window: NSWindow,
+                          modifiers: NSEvent.ModifierFlags = []) throws {
+        window.makeKeyAndOrderFront(nil)
+        _ = try XCTUnwrap(window.isKeyWindow ? true : nil, "Keyboard events require the reserved key window")
+        let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero,
+            modifierFlags: modifiers, timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber, context: nil, characters: text,
+            charactersIgnoringModifiers: text, isARepeat: false, keyCode: code))
+        if !window.performKeyEquivalent(with: event) { window.sendEvent(event) }
+        settle()
+    }
+
+    private func focusedIdentifier() throws -> String {
+        let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+        let value = try XCTUnwrap(axAttribute(app, kAXFocusedUIElementAttribute))
+        return try XCTUnwrap(axAttribute(unsafeBitCast(value, to: AXUIElement.self), kAXIdentifierAttribute) as? String)
+    }
+
+    private func tab(to identifier: String, in window: NSWindow, backwards: Bool = false) throws {
+        if backwards { window.selectPreviousKeyView(nil) } else { window.selectNextKeyView(nil) }
+        settle()
+        XCTAssertEqual(try focusedIdentifier(), identifier)
+    }
+
+    private func keyboardSession() throws {
+        _ = try XCTUnwrap(AXIsProcessTrusted() ? true : nil,
+                          "Hosted keyboard validation requires Accessibility permission")
+        NSApp.activate(ignoringOtherApps: true)
+        settle()
+        _ = try XCTUnwrap(NSApp.isActive ? true : nil,
+                          "Keyboard validation requires the reserved active GUI session")
+    }
+
+    func testKeyboardHubOrderEditorHandoffNamesTargetsAndFocusReturn() throws {
+        try keyboardSession()
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let graph = AppDependencies(container: container, catalogRepository: SwiftDataCatalogRepository(container: container))
+        let window = show(ScrollView { FoundationSettingsView(dependencies: graph) }, size: CGSize(width: 520, height: 340))
+        defer { window.orderOut(nil) }
+        window.makeFirstResponder(nil)
+        try tab(to: "settings-general", in: window)
+        try capture("keyboard-hub-general-focused", window: window)
+        try tab(to: "settings-ai", in: window)
+        try tab(to: "settings-news", in: window)
+        try tab(to: "settings-general", in: window)
+        try keyboard(49, " ", in: window)
+        XCTAssertEqual(try focusedIdentifier(), "preferences-duration")
+        for (identifier, name, role) in [
+            ("preferences-duration", "Duration", kAXPopUpButtonRole),
+            ("preferences-text-size", "Text size", kAXPopUpButtonRole),
+            ("preferences-motion", "Motion", kAXPopUpButtonRole),
+            ("preferences-cancel", "Cancel", kAXButtonRole),
+            ("preferences-save", "Save", kAXButtonRole)
+        ] {
+            let element = try node(identifier, in: window)
+            XCTAssertEqual(axAttribute(element, kAXDescriptionAttribute) as? String, name)
+            XCTAssertEqual(axAttribute(element, kAXRoleAttribute) as? String, role)
+            XCTAssertGreaterThanOrEqual(try axFrame(element).height, AppMetrics.minimumTarget, identifier)
+            XCTAssertGreaterThanOrEqual(try axFrame(element).width, AppMetrics.minimumTarget, identifier)
+        }
+        try tab(to: "preferences-text-size", in: window)
+        try tab(to: "preferences-motion", in: window)
+        try tab(to: "preferences-cancel", in: window)
+        try tab(to: "preferences-save", in: window)
+        try tab(to: "preferences-cancel", in: window, backwards: true)
+        try keyboard(53, "\u{1b}", in: window)
+        XCTAssertEqual(try focusedIdentifier(), "settings-general")
+        for (identifier, next) in [("settings-ai", "settings-news"), ("settings-news", "settings-general")] {
+            try tab(to: identifier, in: window)
+            try keyboard(49, " ", in: window)
+            XCTAssertEqual(try focusedIdentifier(), "settings-back")
+            let back = try node("settings-back", in: window)
+            XCTAssertEqual(axAttribute(back, kAXDescriptionAttribute) as? String, "Back to Settings")
+            try keyboard(49, " ", in: window)
+            XCTAssertEqual(try focusedIdentifier(), identifier)
+            // Check return resumes the original hub order rather than a dead responder.
+            try tab(to: next, in: window)
+            window.selectPreviousKeyView(nil)
+            settle()
+        }
+    }
+
+    func testKeyboardValidationSaveFailureRecoveryAndEscapePreserveUnrelatedAnswers() throws {
+        try keyboardSession()
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        var failAnswerSaves = false
+        let catalog = SwiftDataCatalogRepository(container: container, beforeSave: {
+            if failAnswerSaves { throw LessonExperienceError.persistenceFailure }
+        })
+        // Import with a separate repository, then block answer autosaves to retain
+        // a genuinely unrelated dirty answer throughout Settings cancellation.
+        _ = try SwiftDataCatalogRepository(container: container).importIfNeeded(BundledCatalogLoader.load())
+        let repository = SettingsPreferencesSpy()
+        repository.value = AppPreferencesSnapshot(preferences: try AppPreferences(focusDefaultMinutes: 37), revision: UUID())
+        let graph = AppDependencies(container: container, catalogRepository: catalog, appPreferencesRepository: repository)
+        graph.learningCatalogStore.loadIfNeeded()
+        let lesson = try XCTUnwrap(graph.learningCatalogStore.state.snapshot?.slots.first?.lessonID)
+        let opened = try graph.learningCatalogStore.openLesson(lessonID: lesson)
+        let attempt = try XCTUnwrap(opened.detail.attempt)
+        graph.lessonDraftStore.observe(opened.detail)
+        failAnswerSaves = true
+        let answer = "  unrelated answer 🧪\n"
+        graph.lessonDraftStore.edit(answer, attemptID: attempt.id)
+        let window = show(ScrollView { FoundationSettingsView(dependencies: graph) }, size: CGSize(width: 520, height: 340))
+        defer { window.orderOut(nil) }
+        window.makeFirstResponder(nil)
+        try tab(to: "settings-general", in: window)
+        try keyboard(49, " ", in: window)
+        XCTAssertEqual(try focusedIdentifier(), "preferences-duration")
+        try tab(to: "preferences-custom-minutes", in: window)
+        try keyboard(0, "a", in: window, modifiers: .command)
+        try keyboard(18, "1.5", in: window)
+        try keyboard(1, "s", in: window, modifiers: .command)
+        XCTAssertEqual(try focusedIdentifier(), "preferences-custom-minutes")
+        XCTAssertEqual(try value("preferences-custom-minutes", in: window), "1.5")
+        XCTAssertEqual(repository.saves, 0)
+        XCTAssertTrue(try value("preferences-error", in: window).contains("not been saved"))
+        XCTAssertTrue((axAttribute(try node("preferences-custom-minutes", in: window), kAXHelpAttribute) as? String ?? "").contains("positive whole minutes"))
+        try keyboard(0, "a", in: window, modifiers: .command)
+        try keyboard(18, "0041", in: window)
+        repository.saveFailure = .persistenceFailure
+        try keyboard(1, "s", in: window, modifiers: .command)
+        XCTAssertEqual(try focusedIdentifier(), "preferences-save")
+        XCTAssertEqual(try value("preferences-custom-minutes", in: window), "0041")
+        try capture("keyboard-save-failure-focus", window: window)
+        repository.saveFailure = nil
+        try keyboard(49, " ", in: window)
+        XCTAssertEqual(repository.value.preferences.focusDefaultMinutes, 41)
+        XCTAssertEqual(try focusedIdentifier(), "settings-general")
+        try keyboard(49, " ", in: window)
+        try tab(to: "preferences-custom-minutes", in: window)
+        try keyboard(0, "a", in: window, modifiers: .command)
+        try keyboard(18, "99", in: window)
+        let saves = repository.saves
+        try keyboard(53, "\u{1b}", in: window)
+        XCTAssertEqual(repository.saves, saves)
+        XCTAssertEqual(repository.value.preferences.focusDefaultMinutes, 41)
+        XCTAssertEqual(try focusedIdentifier(), "settings-general")
+        XCTAssertEqual(graph.lessonDraftStore.buffers[attempt.id]?.text, answer)
+        XCTAssertEqual(graph.lessonDraftStore.buffers[attempt.id]?.isDirty, true)
+        XCTAssertEqual(try catalog.loadLesson(lessonID: lesson).attempt?.answerDraft, "")
+    }
+
+    func testKeyboardReadRetryAndStaleReviewReturnToSurvivingControlsWithoutDiscardingDraft() throws {
+        try keyboardSession()
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SettingsPreferencesSpy()
+        repository.readFailure = .invalidStoredData
+        let graph = AppDependencies(container: container, catalogRepository: SwiftDataCatalogRepository(container: container), appPreferencesRepository: repository)
+        let window = show(ScrollView { FoundationSettingsView(dependencies: graph) }, size: CGSize(width: 520, height: 340))
+        defer { window.orderOut(nil) }
+        window.makeFirstResponder(nil)
+        try tab(to: "settings-preferences-retry", in: window)
+        try keyboard(49, " ", in: window)
+        XCTAssertEqual(try focusedIdentifier(), "settings-preferences-retry")
+        repository.readFailure = nil
+        try keyboard(49, " ", in: window)
+        XCTAssertEqual(try focusedIdentifier(), "settings-general")
+        try keyboard(49, " ", in: window)
+        // An out-of-process revision change is discovered by the actual Save.
+        repository.value = AppPreferencesSnapshot(preferences: try AppPreferences(focusDefaultMinutes: 50), revision: UUID())
+        try tab(to: "preferences-text-size", in: window)
+        try tab(to: "preferences-motion", in: window)
+        try tab(to: "preferences-cancel", in: window)
+        try tab(to: "preferences-save", in: window)
+        try keyboard(49, " ", in: window)
+        XCTAssertEqual(try focusedIdentifier(), "preferences-review")
+        try capture("keyboard-stale-review-focus", window: window)
+        XCTAssertTrue(try value("preferences-error", in: window).contains("changed elsewhere"))
+        repository.readFailure = .persistenceFailure
+        try keyboard(49, " ", in: window)
+        XCTAssertEqual(try focusedIdentifier(), "preferences-review")
+        XCTAssertEqual((axAttribute(try node("preferences-save", in: window), kAXEnabledAttribute) as? NSNumber)?.boolValue, false)
+        try tab(to: "preferences-cancel", in: window)
+        try tab(to: "preferences-duration", in: window)
+        try tab(to: "preferences-text-size", in: window)
+        try tab(to: "preferences-motion", in: window)
+        try tab(to: "preferences-review", in: window)
+        repository.readFailure = nil
+        let saves = repository.saves
+        try keyboard(49, " ", in: window)
+        XCTAssertEqual(try focusedIdentifier(), "preferences-duration")
+        XCTAssertEqual(repository.saves, saves)
+        XCTAssertEqual(try value("preferences-latest-saved", in: window), "Latest saved: 50 minutes · System text · System motion")
+        try keyboard(1, "s", in: window, modifiers: .command)
+        XCTAssertEqual(repository.value.preferences.focusDefaultMinutes, 25, "Review retains the draft, not the latest saved value")
+        XCTAssertEqual(try focusedIdentifier(), "settings-general")
+    }
+
     private func axAttribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
         var value: CFTypeRef?
         return AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success ? value : nil

@@ -12,8 +12,10 @@ struct FoundationSettingsView: View {
     @ObservedObject private var news: NewsStore
     @State private var section: Section = .hub
     @State private var saved = false
+    @FocusState private var focusedAction: HubAction?
 
     private enum Section { case hub, general, ai, news }
+    private enum HubAction: Hashable { case general, ai, news, retry, back }
 
     init(dependencies: AppDependencies) {
         self.dependencies = dependencies
@@ -38,6 +40,7 @@ struct FoundationSettingsView: View {
                 GeneralPreferencesView(store: preferences) { didSave in
                     saved = didSave
                     section = .hub
+                    focusedAction = .general
                 }
             case .ai:
                 AISettingsView(store: ai)
@@ -85,10 +88,16 @@ struct FoundationSettingsView: View {
                         .appTypography(.body)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityIdentifier("settings-preferences-unavailable")
-                    ActionButton("Retry loading preferences") { preferences.retry() }
-                        .accessibilityIdentifier("settings-preferences-retry")
+                    ActionButton("Retry loading preferences") {
+                        preferences.retry()
+                        // Retry may disappear after a successful read.
+                        focusedAction = preferences.editableSnapshot == nil ? .retry : .general
+                    }
+                    .focused($focusedAction, equals: .retry)
+                    .accessibilityIdentifier("settings-preferences-retry")
                 }
                 ActionButton("Edit general & appearance") { saved = false; section = .general }
+                    .focused($focusedAction, equals: .general)
                     .accessibilityIdentifier("settings-general")
                 Text("Black / Red Terminal · fixed theme")
                     .appTypography(.metadata)
@@ -103,13 +112,15 @@ struct FoundationSettingsView: View {
                 .appTypography(.body)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier("settings-ai-summary")
-            ActionButton("Configure AI lessons") { section = .ai }
+            ActionButton("Configure AI lessons") { section = .ai; focusedAction = .back }
+                .focused($focusedAction, equals: .ai)
                 .accessibilityIdentifier("settings-ai")
             Text(newsSummary)
                 .appTypography(.body)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier("settings-news-summary")
-            ActionButton("Manage News topics & feeds") { section = .news }
+            ActionButton("Manage News topics & feeds") { section = .news; focusedAction = .back }
+                .focused($focusedAction, equals: .news)
                 .accessibilityIdentifier("settings-news")
         }
     }
@@ -123,7 +134,13 @@ struct FoundationSettingsView: View {
     }
 
     private var backAction: some View {
-        ActionButton("Back to Settings", symbol: "chevron.left") { section = .hub }
-            .accessibilityIdentifier("settings-back")
+        ActionButton("Back to Settings", symbol: "chevron.left") {
+            let origin = section
+            section = .hub
+            focusedAction = origin == .ai ? .ai : .news
+        }
+        .focused($focusedAction, equals: .back)
+        .accessibilityHint("Return to the Settings hub")
+        .accessibilityIdentifier("settings-back")
     }
 }
