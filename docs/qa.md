@@ -2926,3 +2926,115 @@ No production store, external project, native desktop, or temporary test store
 was accessed; no store cleanup occurred. Previously deferred A13 accessibility,
 S13 signed sandbox, B13 runtime matrix and D13 distribution acceptance are not
 satisfied by these checks. **No remaining Step 5.2 blockers.**
+
+## F13 Step 5.3 — Pinned dependency notices and bundle verification (2026-09-30, 18:16 UTC)
+
+First incomplete task matched runner **19/27, Step 5.3**. Read SPEC, ANALYSIS,
+PLAN and the complete task-19 cumulative checklist; no previous findings existed.
+Initial worktree/index were clean, ancestor/repository/target instruction searches
+found no applicable `AGENTS.md`, and no submodule was listed. Changed only
+`Kontrol/Resources/ThirdPartyNotices.txt`, `docs/third-party-notices.md`, notice
+membership in `Kontrol.xcodeproj/project.pbxproj`, and this required evidence
+ledger. No later release/documentation task was implemented.
+
+Base revision **`d467ba1b02cc31d4225b29f55207bd371cb4bd6b`**. Evidence directory:
+**`/tmp/kontrol-f13-step5-3.UUkjkG/`** (`EVIDENCE` below). `environment.log`
+records source/worktree/index/submodule checks and toolchain commands including
+`xcodebuild -list -project Kontrol.xcodeproj` (exit 0). Host: macOS **27.0
+(26A428)**, arm64, Xcode **27.0 (27A266a)**, Apple Swift **6.4**,
+`/Applications/Xcode.app/Contents/Developer`. Project mode remains Swift 5/macOS
+14; this is not macOS 14 execution evidence. Tested project patch
+`implementation.patch` SHA-256:
+`a64341bb18b9c7a63ce2769f3fab654085162d4cac5b4e4b5a9bac7b2557025f`.
+`implementation-sha256.txt` identifies the two new files, also copied into the
+evidence directory. This ledger is the only subsequent edit.
+
+### Source provenance and packaged acceptance
+
+- Both clean SwiftPM checkouts (Debug and Release) are at resolved Yams **5.4.0**,
+  revision **`3d6871d5b4a5cd519adf233fbb576e0a2af71c17`**. The audit compares
+  their tracked Sources, LICENSE, README and Package.swift bytes against pinned
+  Git objects, not merely HEAD labels. `Package.resolved` is byte-identical to
+  repository HEAD (SHA-256
+  `a27d1749f310edb30f4a129b64ce2043aa2fc9881a2739fd4534ff4d37149471`).
+- Complete Yams MIT license is copied unchanged from its pinned LICENSE
+  (SHA-256 `0354b0ea403d2e78059c5ae0510a2cfae9f8eb306fcef094ac9fff5b47e20bed`).
+  Inventory of all tracked shipped Sources finds **22** header copyrights,
+  **three** distinct lines (2016/2017/2024 Yams); all are included with only
+  comment syntax removed. Exact originating paths are in `packaging-audit.log`.
+- Pinned Package.swift confirms Yams depends on embedded **CYaml/libyaml**, with
+  no external package dependencies. Pinned README identifies both as MIT. Yams
+  has only the top-level LICENSE, not libyaml's separate License. Traced vendor
+  history in the pinned ancestry: Yams `409e565756cfdf50642a59c8f4290a6961fe7f1d`
+  identifies libyaml **`acd6f6f014c25e46363e718381e0b35205df2d83`**; latest CYaml
+  source update `c7a3398466895c46c875966fc9da6ad11619bce6` identifies upstream
+  **`51843fe48257c6b7b6e70cdec1db634f64a40818`**,
+  **`588eabff23ba2292f537872bbea5b64bce1e1a21`** and
+  **`840b65c40675e2d06bf40405ad3f12dec7f35923`**. Obtained upstream Git source
+  under `$EVIDENCE/libyaml` (clone exit 0); all four immutable License blobs
+  match exactly, SHA-256
+  **`c40112449f254b9753045925248313e9270efa36d226b22d82d4cc6c43c57f29`**.
+  Included complete Ingy döt Net/Kirill Simonov copyrights and permission/warranty
+  text; no licensing text was inferred from memory or a generic template.
+  Original license bytes are retained as `Yams-LICENSE.txt` and
+  `libyaml-License-<revision>.txt`; `source-inventory.log` and
+  `packaging-audit.log` preserve filename/header searches and vendor commit bodies.
+- New documentation gives immutable upstream links, absence/provenance explanation,
+  hashes, reproducible source audit and Debug/Release byte comparisons. Every local
+  Markdown link resolves. Project plist audit asserts the **entire configuration
+  delta** is only the notice file/build references and app Resources membership;
+  no dependency/signing/permission/build setting changed.
+- Both actual bundle resource directories now contain exactly the three existing
+  JSON resources and ThirdPartyNotices.txt. All four resources in each build
+  match source bytes. Notices are **2693 bytes**, SHA-256
+  **`52c4773d7710814fbf6b403fbb911b36daad3d0972a585d2664766c60e6b1d71`**.
+  Verified paths:
+  `/tmp/kontrol-f13-derived/Build/Products/Debug/Kontrol.app/Contents/Resources/ThirdPartyNotices.txt`
+  and
+  `/tmp/kontrol-f13-release-build/Build/Products/Release/Kontrol.app/Contents/Resources/ThirdPartyNotices.txt`.
+
+### Exact commands and fresh results
+
+Ran from repository root; final commands each exited **0**:
+
+```sh
+EVIDENCE=/tmp/kontrol-f13-step5-3.UUkjkG
+python3 -m json.tool Kontrol.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+python3 "$EVIDENCE/notice-audit.py" \
+  /tmp/kontrol-f13-derived/SourcePackages/checkouts/Yams "$EVIDENCE/libyaml"
+make build DERIVED_DATA=/tmp/kontrol-f13-derived
+make build CONFIGURATION=Release DERIVED_DATA=/tmp/kontrol-f13-release-build
+cmp Kontrol/Resources/ThirdPartyNotices.txt \
+  /tmp/kontrol-f13-derived/Build/Products/Debug/Kontrol.app/Contents/Resources/ThirdPartyNotices.txt
+cmp Kontrol/Resources/ThirdPartyNotices.txt \
+  /tmp/kontrol-f13-release-build/Build/Products/Release/Kontrol.app/Contents/Resources/ThirdPartyNotices.txt
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination platform=macOS \
+  -derivedDataPath /tmp/kontrol-f13-derived CODE_SIGNING_ALLOWED=NO build-for-testing
+plutil -lint Kontrol.xcodeproj/project.pbxproj
+python3 "$EVIDENCE/packaging-audit.py"
+git diff --check
+```
+
+`notice-audit.py` is extracted verbatim from the new documentation's Python
+block. Both builds **SUCCEEDED** and test compilation **SUCCEEDED**. Logs:
+`resolved-json.log`, `notice-source-audit.log`, `debug-build.log`,
+`release-build.log`, `debug-notice-cmp.log`, `release-notice-cmp.log`,
+`test-compilation.log`, `project-lint.log`, `packaging-audit.log`, `diff-check.log`;
+`commands.log`/`exit-codes.log` retain the exact calls/results. Whitespace check
+reran after this ledger addition. No XCTest selection was required or executed;
+no method count/result bundle is claimed. Existing AppIntents extraction warnings
+are retained in `diagnostics.log`; multiple matching macOS destinations remain
+in raw build logs.
+
+Initial source audit exited **1** (`notice-source-audit-initial.log`): exact-byte
+comparison detected a transcription typo, `this Software` instead of upstream
+`the Software` in the libyaml permission paragraph. Corrected only that word;
+reran the unchanged source audit (exit 0) before building and verified both final
+bundles. The failure is preserved, not converted to a pass or weakened assertion.
+
+No production data, native desktop or temporary test store was accessed; no
+store cleanup occurred. No dependency pin, checkout, entitlement, schema, fixture,
+external project, workflow state or plan checkbox changed. Changes remain
+uncommitted for review. A13/S13/B13/D13 remain separate mandatory gates, not
+satisfied by unsigned packaging verification. **No remaining Step 5.3 blockers.**
