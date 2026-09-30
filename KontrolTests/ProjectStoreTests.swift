@@ -201,6 +201,54 @@ private actor DeferredInspector: ProjectInspecting {
     }
 }
 
+private actor DeferredLocation: ProjectFolderIdentifying {
+    private var waiting: CheckedContinuation<String, Error>?
+    private var starts = 0
+    func selected(_ folder: URL) async throws -> ProjectFolderIdentity { throw CancellationError() }
+    func bookmarked(_ data: Data) async throws -> ProjectFolderIdentity { throw CancellationError() }
+    func location(bookmarked data: Data) async throws -> String {
+        starts += 1
+        return try await withCheckedThrowingContinuation { waiting = $0 }
+    }
+    func count() -> Int { starts }
+    func release() { waiting?.resume(returning: "Obsolete location"); waiting = nil }
+}
+
+private actor ReloadMutationWriter: FeatureFileWriting {
+    private var completeWaiter: CheckedContinuation<FeatureMutationReceipt, Error>?
+    private var undoWaiter: CheckedContinuation<FeatureMutationReceipt, Error>?
+    private var completion: FeatureCompletionRequest?
+    private var undoRequest: FeatureUndoRequest?
+    func complete(_ request: FeatureCompletionRequest) async throws -> FeatureMutationReceipt {
+        completion = request
+        return try await withCheckedThrowingContinuation { completeWaiter = $0 }
+    }
+    func undo(_ request: FeatureUndoRequest) async throws -> FeatureMutationReceipt {
+        undoRequest = request
+        return try await withCheckedThrowingContinuation { undoWaiter = $0 }
+    }
+    func isCompleting() -> Bool { completeWaiter != nil }
+    func isUndoing() -> Bool { undoWaiter != nil }
+    func succeed() {
+        let request = completion!
+        let saved = ProjectSourceDocument(relativePath: request.source.relativePath,
+            bytes: Data(String(decoding: request.source.bytes, as: UTF8.self)
+                .replacingOccurrences(of: "status: ready", with: "status: completed").utf8))
+        completeWaiter?.resume(returning: FeatureMutationReceipt(projectID: request.reference.id,
+            grantBookmarkData: request.reference.bookmarkData, featureID: request.featureID,
+            verifiedSource: saved, inverse: FeatureInversePatch(relativePath: saved.relativePath,
+                originalSHA256: request.source.sha256, completedSHA256: saved.sha256, edits: [])))
+        completeWaiter = nil
+    }
+    func succeedUndo() {
+        let request = undoRequest!
+        undoWaiter?.resume(returning: FeatureMutationReceipt(projectID: request.reference.id,
+            grantBookmarkData: request.reference.bookmarkData, featureID: request.receipt.featureID,
+            verifiedSource: completion!.source, inverse: request.receipt.inverse))
+        undoWaiter = nil
+    }
+}
+
 @MainActor
 final class ProjectStoreTests: XCTestCase {
     private let folder = URL(fileURLWithPath: "/tmp/picked-project", isDirectory: true)
@@ -453,6 +501,286 @@ final class ProjectStoreTests: XCTestCase {
         XCTAssertEqual(repo.inserts + repo.successfulReads, 0)
         XCTAssertEqual(identifier.bookmarks, [existing.bookmarkData])
         XCTAssertTrue(identifier.locations.isEmpty)
+    }
+
+    func testReloadBeforeEntryIsLocalOnlyAndFailedReloadRetainsRowsForExplicitRetry() async throws {
+        let io = StubInspector(), repo = StubRepository(), first = reference(1), second = reference(2)
+        let identifier = TrackingIdentity(selectedIdentity: identity), writer = TrackingWriter()
+        let subject = ProjectStore(inspector: io, repository: repo, identifier: identifier, writer: writer)
+        repo.failFetch = true
+        XCTAssertThrowsError(try subject.reloadReferences())
+        XCTAssertFalse(subject.isLoaded)
+        XCTAssertTrue(subject.loadFailed)
+        repo.failFetch = false
+        repo.saved = [first, second]
+        try subject.reloadReferences()
+        subject.select(second.id)
+        repo.failFetch = true
+        XCTAssertThrowsError(try subject.reloadReferences())
+        XCTAssertEqual(subject.rows.map(\.reference), [first, second])
+        XCTAssertEqual(subject.selectedID, second.id)
+        XCTAssertTrue(subject.isLoaded)
+        XCTAssertTrue(subject.loadFailed)
+        repo.failFetch = false
+        repo.saved = [second]
+        try subject.reloadReferences()
+        XCTAssertEqual(subject.rows.map(\.reference), [second])
+        XCTAssertFalse(subject.loadFailed)
+        subject.refreshOnMainWindowActivation()
+        try await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(io.inspectionCount + io.bookmarkedInspectionCount + io.bookmarkCount, 0)
+        XCTAssertEqual(identifier.selections, 0)
+        XCTAssertTrue(identifier.bookmarks.isEmpty && identifier.locations.isEmpty)
+        XCTAssertEqual(writer.completions + writer.undos, 0)
+        XCTAssertEqual(repo.inserts + repo.reconnects + repo.successfulReads, 0)
+        try subject.enterProjects()
+        await eventually { io.bookmarkedInspectionCount == 1 && !subject.rows[0].isRefreshing }
+    }
+
+    func testReloadPreservesHealthyStateSelectionAndFailedReviewDoesNotCancelRead() async throws {
+        let io = DeferredInspector(), repo = StubRepository(), first = reference(1), second = reference(2)
+        let identifier = TrackingIdentity(selectedIdentity: identity)
+        repo.saved = [first, second]
+        let subject = ProjectStore(inspector: io, repository: repo, identifier: identifier)
+        try subject.enterProjects()
+        await eventually { await io.counts().0 == 2 }
+        let original = inspectionWithFeatures([feature("F1")])
+        await io.release(first.bookmarkData, result: .success(original))
+        await io.release(second.bookmarkData, result: .success(original))
+        await eventually { repo.successfulReads == 2 }
+        subject.selectFeature("F1", in: second.id)
+        let before = subject.rows[1]
+        repo.saved.reverse()
+        try subject.reloadReferences()
+        XCTAssertEqual(subject.rows[0].reference, before.reference)
+        XCTAssertEqual(subject.rows[0].inspection, before.inspection)
+        XCTAssertEqual(subject.rows[0].lastReadAt, before.lastReadAt)
+        XCTAssertEqual(subject.rows[0].locationHint, before.locationHint)
+        XCTAssertFalse(subject.rows[0].isStale)
+        XCTAssertEqual(subject.selectedFeatureContent?.title, "Original")
+        XCTAssertEqual(subject.selectedID, second.id)
+        XCTAssertEqual(identifier.locations.count, 2)
+        subject.refresh(second.id)
+        await eventually { await io.counts().0 == 3 }
+        repo.failFetch = true
+        XCTAssertThrowsError(try subject.reloadReferences())
+        XCTAssertTrue(subject.rows[0].isRefreshing)
+        let fresh = inspectionWithFeatures([feature("F1", title: "Fresh")])
+        await io.release(second.bookmarkData, result: .success(fresh))
+        await eventually { repo.successfulReads == 3 }
+        XCTAssertEqual(subject.selectedFeatureContent?.title, "Fresh", "Failed review must not cancel usable ongoing work")
+        repo.failFetch = false
+        try subject.reloadReferences()
+        XCTAssertFalse(subject.loadFailed)
+        XCTAssertEqual(subject.selectedFeatureContent?.title, "Fresh")
+        let counts = await io.counts()
+        XCTAssertEqual(counts.0, 3)
+    }
+
+    func testReloadChangedAndRemovedRowsClearTransientStateAndChooseOrderedSurvivor() async throws {
+        let io = DeferredInspector(), repo = StubRepository()
+        let refs = (1...3).map { reference(UInt8($0)) }
+        repo.saved = refs
+        let subject = ProjectStore(inspector: io, repository: repo,
+            identifier: TrackingIdentity(selectedIdentity: identity))
+        try subject.enterProjects()
+        await eventually { await io.counts().0 == 3 }
+        for ref in refs { await io.release(ref.bookmarkData, result: .success(inspectionWithFeatures([feature("F1")]))) }
+        await eventually { repo.successfulReads == 3 }
+        subject.selectFeature("F1", in: refs[0].id)
+        subject.refresh(refs[0].id)
+        await eventually { await io.counts().0 == 4 }
+        await io.release(refs[0].bookmarkData, result: .success(inspectionWithFeatures([])))
+        await eventually { subject.selectionNotice != nil }
+        repo.saved.removeFirst()
+        try subject.reloadReferences()
+        XCTAssertNil(subject.selectionNotice)
+        XCTAssertEqual(subject.selectedID, refs[1].id)
+        subject.selectFeature("F1", in: refs[1].id)
+        let old = repo.saved[0]
+        repo.saved[0] = ProjectReferenceSnapshot(id: old.id, manifestID: old.manifestID,
+            bookmarkData: Data([99]), displayOrder: old.displayOrder, displayNameHint: "Reconnected",
+            lastSuccessfulReadAt: nil, revision: UUID())
+        try subject.reloadReferences()
+        XCTAssertEqual(subject.selectedID, old.id)
+        XCTAssertNil(subject.selectedFeature)
+        XCTAssertNil(subject.selectedFeatureContent)
+        let reset = subject.rows[0]
+        XCTAssertNil(reset.inspection)
+        XCTAssertNil(reset.lastReadAt)
+        XCTAssertNil(reset.locationHint)
+        XCTAssertNil(reset.completion)
+        XCTAssertNil(reset.reconnectFeaturePath)
+        XCTAssertNil(reset.refreshFailure)
+        XCTAssertFalse(reset.isStale || reset.isRetainedInspection || reset.isRefreshing)
+        XCTAssertNotNil(subject.rows[1].inspection, "Unchanged peer must stay usable")
+        repo.saved = []
+        try subject.reloadReferences()
+        XCTAssertTrue(subject.rows.isEmpty)
+        XCTAssertNil(subject.selectedID)
+        XCTAssertFalse(subject.loadFailed, "A successfully fetched empty list is distinct from failure")
+    }
+
+    func testReloadFencesNoncooperativeReadsAndRetainsCapacityUntilOwnersFinish() async throws {
+        let io = DeferredInspector(), repo = StubRepository()
+        let refs = (1...5).map { reference(UInt8($0)) }
+        repo.saved = refs
+        let identifier = TrackingIdentity(selectedIdentity: identity), writer = TrackingWriter()
+        let subject = ProjectStore(inspector: io, repository: repo, identifier: identifier, writer: writer)
+        try subject.enterProjects()
+        await eventually { await io.counts().0 == 3 }
+        subject.refresh(refs[0].id) // Obsolete follow-up must be dropped.
+        subject.refresh(refs[1].id)
+        let changed = ProjectReferenceSnapshot(id: refs[0].id, manifestID: "shared",
+            bookmarkData: Data([99]), displayOrder: 0, displayNameHint: "Replacement",
+            lastSuccessfulReadAt: nil, revision: UUID())
+        repo.saved = [changed, refs[2], refs[3]] // Remove running and queued rows.
+        try subject.reloadReferences()
+        try await Task.sleep(nanoseconds: 20_000_000)
+        let occupied = await io.counts()
+        XCTAssertEqual(occupied.0, 3)
+        XCTAssertEqual(occupied.1, 3, "Reload must not release a noncooperative reader's slot early")
+        XCTAssertFalse(subject.rows[0].isRefreshing)
+        await io.release(refs[0].bookmarkData, result: .success(inspection()))
+        await eventually { await io.counts().0 == 4 }
+        await io.release(refs[1].bookmarkData, result: .success(inspection()))
+        await eventually { await io.counts().1 == 2 }
+        XCTAssertNil(subject.rows[0].inspection)
+        XCTAssertNil(subject.rows[0].locationHint)
+        XCTAssertNil(subject.rows[0].reference.lastSuccessfulReadAt)
+        XCTAssertEqual(repo.successfulReads, 0)
+        XCTAssertTrue(identifier.locations.isEmpty)
+        await io.release(refs[2].bookmarkData, result: .success(inspection()))
+        await io.release(refs[3].bookmarkData, result: .success(inspection()))
+        await eventually { repo.successfulReads == 2 && subject.rows.allSatisfy { !$0.isRefreshing } }
+        let final = await io.counts()
+        XCTAssertEqual(final.0, 4)
+        XCTAssertEqual(final.2, 3)
+        let removedQueuedStarts = await io.starts(for: refs[4].bookmarkData)
+        XCTAssertEqual(removedQueuedStarts, 0)
+        subject.refresh(changed.id) // Explicit new-grant retry remains possible.
+        await eventually { await io.starts(for: changed.bookmarkData) == 1 }
+        await io.release(changed.bookmarkData, result: .success(inspection()))
+        await eventually { repo.successfulReads == 3 && subject.rows[0].inspection != nil }
+        XCTAssertEqual(writer.completions + writer.undos, 0)
+    }
+
+    func testReloadFencesDelayedLocationEvenWhenIdentityAndRevisionAreReintroduced() async throws {
+        let io = DeferredInspector(), repo = StubRepository(), ref = reference(1)
+        let identifier = DeferredLocation()
+        repo.saved = [ref]
+        let subject = ProjectStore(inspector: io, repository: repo, identifier: identifier)
+        try subject.enterProjects()
+        await eventually { await io.counts().0 == 1 }
+        await io.release(ref.bookmarkData, result: .success(inspection()))
+        await eventually { await identifier.count() == 1 }
+        repo.saved = []
+        try subject.reloadReferences()
+        repo.saved = [ref] // Same revision alone cannot give the old callback ownership.
+        try subject.reloadReferences()
+        await identifier.release()
+        await eventually { await io.counts().1 == 0 }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(subject.rows.map(\.reference), [ref])
+        XCTAssertNil(subject.rows[0].inspection)
+        XCTAssertNil(subject.rows[0].locationHint)
+        XCTAssertNil(subject.rows[0].refreshFailure)
+        XCTAssertFalse(subject.rows[0].isStale || subject.rows[0].isRefreshing)
+        XCTAssertEqual(repo.successfulReads, 0)
+    }
+
+    func testReloadRejectsReconnectAndAddWithoutCancelingOrQueuingWork() async throws {
+        let io = DeferredInspector(selectedInspection: inspection(), waitSelected: true), repo = StubRepository()
+        let ref = reference(1)
+        repo.saved = [ref]
+        let subject = ProjectStore(inspector: io, repository: repo,
+            identifier: StubIdentity(selectedIdentity: identity, saved: [Data([9]): identity]))
+        try subject.loadReferencesIfNeeded()
+        let reconnect = Task { try await subject.reconnect(ref.id, to: folder) }
+        await eventually { await io.hasSelectedWaiter() }
+        XCTAssertThrowsError(try subject.reloadReferences()) { XCTAssertEqual($0 as? ProjectStoreError, .busy) }
+        XCTAssertEqual(repo.fetches, 1)
+        await io.releaseSelected()
+        _ = try await reconnect.value
+        await eventually { await io.counts().0 == 1 }
+        await io.release(Data([9]), result: .success(inspection()))
+        await eventually { repo.successfulReads == 1 }
+        let preview = Task { try await subject.previewFolder(folder) }
+        await eventually { await io.hasSelectedWaiter() }
+        await io.releaseSelected()
+        _ = try await preview.value
+        let add = Task { try await subject.addPreviewedProject() }
+        await eventually { await io.hasSelectedWaiter() }
+        XCTAssertThrowsError(try subject.reloadReferences()) { XCTAssertEqual($0 as? ProjectStoreError, .busy) }
+        XCTAssertEqual(repo.fetches, 1)
+        await io.releaseSelected()
+        let result = try await add.value
+        XCTAssertEqual(result, .selectedExisting(ref.id))
+        XCTAssertEqual(repo.reconnects, 1)
+        XCTAssertEqual(repo.inserts, 0)
+        try subject.reloadReferences()
+        XCTAssertEqual(repo.fetches, 2, "Busy attempts must not queue an automatic review")
+    }
+
+    func testReloadRejectsCompletionUndoAndSavedWriteReconciliationAndPreservesUndoOnUnchangedReview() async throws {
+        let io = DeferredInspector(), repo = StubRepository(), ref = reference(1), writer = ReloadMutationWriter()
+        repo.saved = [ref]
+        let subject = ProjectStore(inspector: io, repository: repo, writer: writer)
+        func snapshot(_ status: String) throws -> ProjectInspection {
+            let source = ProjectSourceDocument(relativePath: ".kontrol/features/F1.md", bytes: Data(
+                "---\nid: F1\ntitle: F1\nstatus: \(status)\npriority: medium\neffort: small\n---\nBody".utf8))
+            guard case let .supported(parsed) = try ManifestParser().feature(source) else {
+                throw ProjectStoreError.invalidPreview
+            }
+            return inspectionWithFeatures([parsed], sources: [source])
+        }
+        let ready = try snapshot("ready"), completed = try snapshot("completed")
+        try subject.enterProjects()
+        await eventually { await io.counts().0 == 1 }
+        await io.release(ref.bookmarkData, result: .success(ready))
+        await eventually { repo.successfulReads == 1 }
+        let completion = Task { await subject.markComplete("F1", in: ref.id) }
+        await eventually { await writer.isCompleting() }
+        XCTAssertThrowsError(try subject.reloadReferences()) { XCTAssertEqual($0 as? ProjectStoreError, .busy) }
+        await writer.succeed()
+        await eventually { await io.counts().0 == 2 }
+        XCTAssertEqual(subject.rows[0].completion, .refreshing("F1"))
+        XCTAssertThrowsError(try subject.reloadReferences()) { XCTAssertEqual($0 as? ProjectStoreError, .busy) }
+        await io.release(ref.bookmarkData, result: .success(completed))
+        await completion.value
+        XCTAssertEqual(subject.rows[0].completion, .saved("F1"))
+        XCTAssertTrue(subject.canUndoCompletion(in: ref.id))
+        try subject.reloadReferences()
+        XCTAssertEqual(subject.rows[0].completion, .saved("F1"))
+        XCTAssertTrue(subject.canUndoCompletion(in: ref.id))
+        let undo = Task { await subject.undoCompletion(in: ref.id) }
+        await eventually { await writer.isUndoing() }
+        XCTAssertThrowsError(try subject.reloadReferences()) { XCTAssertEqual($0 as? ProjectStoreError, .busy) }
+        await writer.succeedUndo()
+        await eventually { await io.counts().0 == 3 }
+        XCTAssertThrowsError(try subject.reloadReferences()) { XCTAssertEqual($0 as? ProjectStoreError, .busy) }
+        await io.release(ref.bookmarkData, result: .success(ready))
+        await undo.value
+        XCTAssertEqual(subject.rows[0].completion, .undone("F1"))
+        XCTAssertEqual(repo.fetches, 2)
+        XCTAssertEqual(repo.successfulReads, 3)
+        // A grant change also removes an otherwise valid Undo token and completion notice.
+        let secondCompletion = Task { await subject.markComplete("F1", in: ref.id) }
+        await eventually { await writer.isCompleting() }
+        await writer.succeed()
+        await eventually { await io.counts().0 == 4 }
+        await io.release(ref.bookmarkData, result: .success(completed))
+        await secondCompletion.value
+        XCTAssertTrue(subject.canUndoCompletion(in: ref.id))
+        let old = repo.saved[0]
+        repo.saved[0] = ProjectReferenceSnapshot(id: old.id, manifestID: old.manifestID,
+            bookmarkData: Data([99]), displayOrder: old.displayOrder, displayNameHint: old.displayNameHint,
+            lastSuccessfulReadAt: nil, revision: UUID())
+        try subject.reloadReferences()
+        XCTAssertFalse(subject.canUndoCompletion(in: ref.id))
+        XCTAssertNil(subject.undoExpiration(in: ref.id))
+        XCTAssertNil(subject.rows[0].completion)
+        XCTAssertNil(subject.rows[0].inspection)
     }
 
     func testInitialRefreshIsBoundedIndependentAndCoalescesRequests() async throws {

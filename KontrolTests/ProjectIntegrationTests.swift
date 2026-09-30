@@ -281,6 +281,94 @@ final class ProjectIntegrationTests: XCTestCase {
         XCTAssertTrue(grants.balanced)
     }
 
+    func testExplicitReloadReviewsDurableReferencesWithoutGrantAccessAndRetainsStateOnCorruptFetch() async throws {
+        let root = try workspace()
+        let first = try mutationFixture(root, name: "reload-first")
+        let peer = try mutationFixture(root, name: "reload-peer")
+        let replacement = try project(root, folder: "reload-replacement", id: "reload-first")
+        let original = try tree(first), peerBytes = try tree(peer), replacementBytes = try tree(replacement)
+        let grants = IntegrationGrants()
+        let database = root.appendingPathComponent("reload.store")
+        let container = try ModelContainerFactory().makeContainer(mode: .persistent(database))
+        let repository = SwiftDataProjectReferenceRepository(container: container)
+        let a = try repository.insert(NewProjectReference(id: UUID(), manifestID: "reload-first",
+            bookmarkData: grants.createBookmark(for: first), displayOrder: 0, displayNameHint: "First"))
+        let b = try repository.insert(NewProjectReference(id: UUID(), manifestID: "reload-peer",
+            bookmarkData: grants.createBookmark(for: peer), displayOrder: 1, displayNameHint: "Peer"))
+        var saves = 0
+        let subject = store(container, grants, beforeSave: { saves += 1 })
+        try subject.enterProjects()
+        await wait { subject.rows.count == 2 && subject.rows.allSatisfy { !$0.isRefreshing && $0.inspection != nil } }
+        subject.selectFeature("F1", in: b.id)
+        let selected = subject.selectedFeatureContent, priorRows = subject.rows.map(\.reference)
+        let accessBeforeReview = grants.counts
+        try subject.reloadReferences()
+        XCTAssertEqual(subject.rows.map(\.reference), priorRows)
+        XCTAssertEqual(subject.selectedFeatureContent, selected)
+        XCTAssertEqual(grants.counts, accessBeforeReview)
+        XCTAssertEqual(saves, 2)
+
+        let context = ModelContext(container)
+        context.autosaveEnabled = false
+        let persisted = try XCTUnwrap(context.fetch(FetchDescriptor<ProjectReference>()).first { $0.id == a.id })
+        let name = persisted.displayNameHint
+        persisted.displayNameHint = ""
+        try context.save()
+        XCTAssertThrowsError(try subject.reloadReferences()) {
+            XCTAssertEqual($0 as? ProjectReferencePersistenceError, .invalidReference)
+        }
+        XCTAssertTrue(subject.loadFailed)
+        XCTAssertEqual(subject.rows.map(\.reference), priorRows)
+        XCTAssertEqual(subject.selectedFeatureContent, selected)
+        XCTAssertEqual(grants.counts, accessBeforeReview)
+        persisted.displayNameHint = name
+        try context.save()
+        try subject.reloadReferences()
+        XCTAssertFalse(subject.loadFailed)
+        XCTAssertEqual(subject.selectedFeatureContent, selected)
+
+        let newGrant = try grants.createBookmark(for: replacement)
+        let current = try XCTUnwrap(repository.fetchAll().first { $0.id == a.id })
+        let replaced = try repository.reconnect(id: a.id, expectedRevision: current.revision,
+            input: ReconnectedProjectReference(manifestID: a.manifestID,
+                bookmarkData: newGrant, displayNameHint: "Replacement"))
+        grants.invalidate(a.bookmarkData)
+        let authorizedCounts = grants.counts
+        try subject.reloadReferences()
+        XCTAssertEqual(subject.rows[0].reference, replaced)
+        XCTAssertNil(subject.rows[0].inspection)
+        XCTAssertNil(subject.rows[0].locationHint)
+        XCTAssertEqual(subject.selectedID, b.id)
+        XCTAssertEqual(subject.selectedFeatureContent, selected)
+        XCTAssertEqual(grants.counts, authorizedCounts)
+        let peerReference = try XCTUnwrap(repository.fetchAll().first { $0.id == b.id })
+        try repository.remove(id: b.id, expectedRevision: peerReference.revision)
+        try subject.reloadReferences()
+        XCTAssertEqual(subject.selectedID, a.id)
+        XCTAssertNil(subject.selectedFeature)
+        XCTAssertEqual(grants.counts, authorizedCounts)
+        XCTAssertEqual(saves, 2, "Review cannot write references or external files")
+        XCTAssertEqual(try tree(first), original)
+        XCTAssertEqual(try tree(peer), peerBytes)
+        XCTAssertEqual(try tree(replacement), replacementBytes)
+        XCTAssertTrue(grants.balanced)
+
+        let reopened = try ModelContainerFactory().makeContainer(mode: .persistent(database))
+        let newSubject = store(reopened, grants)
+        try newSubject.reloadReferences()
+        XCTAssertEqual(newSubject.rows.map(\.reference), [replaced])
+        XCTAssertEqual(grants.counts, authorizedCounts)
+        subject.refresh(a.id) // Only explicit inspection uses the new grant.
+        await wait { subject.rows[0].inspection != nil && !subject.rows[0].isRefreshing }
+        XCTAssertEqual(subject.rows[0].locationHint, replacement.path)
+        XCTAssertEqual(subject.rows[0].inspection?.manifest?.name, "reload-replacement")
+        XCTAssertEqual(saves, 3)
+        XCTAssertEqual(try tree(first), original)
+        XCTAssertEqual(try tree(peer), peerBytes)
+        XCTAssertEqual(try tree(replacement), replacementBytes)
+        XCTAssertTrue(grants.balanced)
+    }
+
     func testRealCompletionUndoAndReopenDeriveProgressFromDisk() async throws {
         let root = try workspace()
         let folder = try mutationFixture(root, name: "journey")

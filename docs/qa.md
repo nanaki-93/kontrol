@@ -576,3 +576,73 @@ Audits enumerate full method identifiers/results, compare against selected sourc
 Guarded post-host cleanup enumerated exactly the two printed integration roots `/var/folders/lz/20cqfx4x2k98r89q68w3q3ch0000gn/T/KontrolProjectIntegrationTests-2831` and `/var/folders/lz/20cqfx4x2k98r89q68w3q3ch0000gn/T/KontrolProjectIntegrationTests-3364`. Confirmed both PIDs exited, validated TMPDIR parent/process-owned name/no symlinks, enumerated **8 SQLite stores per root**, and checked all **16** read-only `PRAGMA integrity_check` results as `ok`. Connections closed and PID exit rechecked before removing only those exact roots; both no longer exist. Exact store paths/results are in `/tmp/kontrol-f13-step2.2-cleanup.log`. Original fixtures, production data, live stores, and historical unlogged roots remain untouched.
 
 **No Step 2.2 blocker remains.** No visible/hosted selectors changed. A13 Accessibility/full-suite/native observations, S13 signed-sandbox/OS-bookmark journeys, B13 baseline runtime, and D13 distribution remain required and pending—not passed, skipped, or waived. This checkpoint is not unconditional F13/release approval.
+
+## F13 explicit reference reload — Step 2.2b (2026-09-30, 10:15 UTC)
+
+**Implementation checkpoint passed; ready for review.** First incomplete task matches runner Step 2.2b. The complete cumulative task-2 review checklist has no previous findings. Initial worktree/index diffs were empty; no interrupted partial work needed recovery. Repository/target and direct-ancestor checks through `/` found no applicable `AGENTS.md`; no `.gitmodules` or configured submodules were found. Existing regression repairs remain intact. No later task, workflow state, or plan was changed; changes remain uncommitted for runner review.
+
+### Implementation and acceptance coverage
+
+- `ProjectStore.reloadReferences()` rejects active completion/Undo, saved-write reconciliation, reconnect, and Add before fetching. Busy attempts neither cancel their owner nor queue an automatic reload. Completion/Undo and reconnect finish successfully after rejected reload attempts.
+- Reload fetches through persistence only before replacing published state. Fetch failure throws and sets `loadFailed`, retaining rows, selection/detail, and running reads; a separately invoked reload clears the failure after success. Initial failed reload is distinguishable from a successfully fetched empty list.
+- Identical surviving snapshots retain inspection, timestamps, location, status, refresh bookkeeping, feature selection, and valid Undo. Changed/removed snapshots lose obsolete inspection/location/detail/notices/completion/Undo and queued follow-ups. Surviving project selection remains; missing selection falls back to display order then UUID.
+- Changed/removed reads are canceled and explicitly publication-fenced, including remove/reintroduce of the same identity/revision. Occupied task/generation bookkeeping stays until `finishRefresh` releases its slot. Late inspection/location results cannot publish or call `recordSuccessfulRead`. The three-slot saturated-queue regression verifies no early capacity release, no obsolete follow-up/removed queued read, survivor progress, and explicit new-grant refresh recovery. Passive reload never drains/adopts new inspection work or admits activation inspection.
+- Seven new store methods cover the above boundaries with inspector, identifier, and writer spies, deterministic noncooperative readers, delayed location, and successful completion/Undo/reconnect owners:
+  - `ProjectStoreTests/testReloadBeforeEntryIsLocalOnlyAndFailedReloadRetainsRowsForExplicitRetry`
+  - `ProjectStoreTests/testReloadPreservesHealthyStateSelectionAndFailedReviewDoesNotCancelRead`
+  - `ProjectStoreTests/testReloadChangedAndRemovedRowsClearTransientStateAndChooseOrderedSurvivor`
+  - `ProjectStoreTests/testReloadFencesNoncooperativeReadsAndRetainsCapacityUntilOwnersFinish`
+  - `ProjectStoreTests/testReloadFencesDelayedLocationEvenWhenIdentityAndRevisionAreReintroduced`
+  - `ProjectStoreTests/testReloadRejectsReconnectAndAddWithoutCancelingOrQueuingWork`
+  - `ProjectStoreTests/testReloadRejectsCompletionUndoAndSavedWriteReconciliationAndPreservesUndoOnUnchangedReview`
+- `ProjectIntegrationTests/testExplicitReloadReviewsDurableReferencesWithoutGrantAccessAndRetainsStateOnCorruptFetch` exercises real disk-backed fetch/reopen, corrupt persisted-row failure/explicit repair, out-of-band durable grant replacement/removal, unchanged survivor detail, invalidated changed detail, and explicit replacement-grant refresh. Counted grants show no resolution/creation/access during reload; store save counts remain unchanged. Whole-tree inventories preserve `.kontrol`, source, Git sentinels, and replacement-folder bytes. In-process opaque grants are not signed-sandbox/OS-bookmark acceptance.
+
+### Exact commands and results
+
+Discovery commands all exited **0**: `xcode-select -p`, `xcodebuild -version`, `xcrun swift --version`, `xcodebuild -list -project Kontrol.xcodeproj`, `sw_vers`, `uname -m`. Project listing: `/tmp/kontrol-f13-step2.2b-project-list.log`. Environment remains **Xcode 27.0 (27A266a), Apple Swift 6.4 (swiftlang-6.4.0.34.1; swift-driver 1.168.6), arm64 macOS 27.0 (26A428)**, developer directory `/Applications/Xcode.app/Contents/Developer`; Yams **5.4.0**. Swift 5/macOS 14 deployment remain unchanged; no macOS 14 runtime claim.
+
+From repository root:
+
+```sh
+set -o pipefail
+make build DERIVED_DATA=/tmp/kontrol-f13-derived
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
+  -only-testing:KontrolTests/ProjectStoreTests \
+  -only-testing:KontrolTests/ProjectIntegrationTests \
+  -only-testing:KontrolTests/ProjectCompletionStoreTests test
+# After fixing the test-helper compile error, reran the exact test command above.
+make build DERIVED_DATA=/tmp/kontrol-f13-derived
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  CODE_SIGNING_ALLOWED=NO build-for-testing
+git diff --check
+```
+
+Initial build exited **0** (`/tmp/kontrol-f13-step2.2b-build.log`). Initial test command exited **65**, before executing tests: the new mutation helper attempted `replacingOccurrences` on optional `ProjectSourceDocument.text`. Repaired the helper to decode its authored UTF-8 bytes explicitly; no behavior assertion was changed. Failed-build evidence remains `/tmp/kontrol-f13-step2.2b-tests.log` and `/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_18-12-48-+0800.xcresult`; this is not passing test evidence.
+
+Repaired exact test command exited **0**, log `/tmp/kontrol-f13-step2.2b-repair-tests.log`, fresh bundle **`/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_18-13-08-+0800.xcresult`**. **69 source methods executed exactly once and passed: ProjectStoreTests 41, ProjectIntegrationTests 9, ProjectCompletionStoreTests 19; 0 failures, 0 skips, 0 expected failures.** Final build and additional test compilation exited **0**, logs `/tmp/kontrol-f13-step2.2b-final-build.log` and `/tmp/kontrol-f13-step2.2b-bft.log`. `git diff --check` exited **0**. No new files require project registration. Hosted fixtures compiled but were not executed.
+
+Fresh audits (each exit **0**):
+
+```sh
+RESULT_BUNDLE=/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_18-13-08-+0800.xcresult
+xcrun xcresulttool get test-results summary --path "$RESULT_BUNDLE" --format json \
+  > /tmp/kontrol-f13-step2.2b-summary.json
+xcrun xcresulttool get test-results tests --path "$RESULT_BUNDLE" --format json \
+  > /tmp/kontrol-f13-step2.2b-test-tree.json
+python3 /tmp/kontrol-f13-step2.2-audit.py /tmp/kontrol-f13-step2.2b \
+  > /tmp/kontrol-f13-step2.2b-selector-audit.log
+python3 /tmp/kontrol-f13-step2.2b-cleanup.py \
+  | tee /tmp/kontrol-f13-step2.2b-cleanup.log
+git diff --check
+```
+
+The source/selector audit verifies nonempty exact-once execution and all results `Passed`, reconciling summary totals. Summary test-failure/runtime-warning arrays are empty. Raw logs retain existing malformed-bookmark/linkd diagnostics and destination/AppIntents warnings. Diagnostic audit `/tmp/kontrol-f13-step2.2b-diagnostics.log` confirms no SQLite `vnode unlinked while in use`, `InvalidTransition`, or AX prerequisite diagnostic.
+
+Guarded post-host cleanup enumerated the single exact printed root `/var/folders/lz/20cqfx4x2k98r89q68w3q3ch0000gn/T/KontrolProjectIntegrationTests-7354`. Confirmed PID **7354** exited, validated TMPDIR parent/process-owned name/no symlinks, enumerated **9 SQLite stores**, and checked all read-only `PRAGMA integrity_check` results as **ok**. Closed connections and rechecked host exit before removing only that root; it no longer exists. Exact store paths/results: `/tmp/kontrol-f13-step2.2b-cleanup.log`. Production data, original fixtures, and historical unlogged roots were untouched.
+
+**No Step 2.2b blocker remains.** Accessibility gate A13 and native/sandbox/baseline/distribution release gates remain required and pending—not passed, skipped, or waived. No visible surface or hosted method changed in this checkpoint.

@@ -178,6 +178,7 @@ final class ProjectStore: ObservableObject {
         var task: Task<Void, Never>?
         var followUp = false
         var queued = false
+        var publicationInvalidated = false
     }
     private var refreshOperations: [UUID: RefreshOperation] = [:]
     private var refreshQueue: [UUID] = []
@@ -432,6 +433,59 @@ final class ProjectStore: ObservableObject {
         }
     }
 
+    /// Explicit local review. Fetch before touching usable state, and never interfere
+    /// with an owner that may be committing a grant or reconciling a saved file write.
+    /// Changed references lose all session state; identical survivors keep theirs.
+    func reloadReferences() throws {
+        guard mutating.isEmpty, reconciliations.isEmpty, reconnecting.isEmpty, !adding else {
+            throw ProjectStoreError.busy
+        }
+        let references: [ProjectReferenceSnapshot]
+        do {
+            references = try repository.fetchAll()
+        } catch {
+            loadFailed = true
+            throw error
+        }
+        let unchanged = rows.filter { row in references.contains(row.reference) }
+        let invalidated = Set(rows.map(\.reference.id)).subtracting(unchanged.map(\.reference.id))
+        for id in invalidated {
+            // Keep occupied task/generation bookkeeping until finishRefresh releases
+            // its slot. Cancellation alone is not a publication fence for readers
+            // that ignore it (or a removed identity subsequently reintroduced).
+            if var operation = refreshOperations[id] {
+                operation.task?.cancel()
+                operation.publicationInvalidated = true
+                operation.followUp = false
+                operation.queued = false
+                if operation.task == nil {
+                    refreshOperations.removeValue(forKey: id)
+                } else {
+                    refreshOperations[id] = operation
+                }
+            }
+            undoTokens.removeValue(forKey: id)
+            refreshAfterMutation.remove(id)
+            reconnectGenerations.removeValue(forKey: id)
+        }
+        refreshQueue.removeAll { invalidated.contains($0) }
+        rows = references.map { reference in
+            unchanged.first(where: { $0.reference.id == reference.id }) ??
+                ProjectRowState(reference: reference, inspection: nil)
+        }
+        if let selectedFeature, invalidated.contains(selectedFeature.projectID) {
+            self.selectedFeature = nil
+        }
+        if let selectionNotice, invalidated.contains(selectionNotice.projectID) {
+            self.selectionNotice = nil
+        }
+        selectInitialProjectIfNeeded()
+        isLoaded = true
+        loadFailed = false
+        // No drain here: passive reload cannot initiate external-folder access.
+        // Occupied owners finish normally and drain surviving pre-existing work.
+    }
+
     /// Projects entry, not local-reference readiness, admits bounded initial inspection.
     func enterProjects() throws {
         try loadReferencesIfNeeded()
@@ -539,6 +593,7 @@ final class ProjectStore: ObservableObject {
                   var operation = refreshOperations[id], operation.queued else { continue }
             operation.queued = false
             operation.generation += 1
+            operation.publicationInvalidated = false
             let generation = operation.generation
             let reference = rows[index].reference
             activeRefreshes += 1
@@ -573,7 +628,8 @@ final class ProjectStore: ObservableObject {
         var reconciliationFailure: ProjectRefreshFailure?
         var didPublish = false
         // A replaced bookmark, canceled task, or removed row owns no publication rights.
-        if let index = rows.firstIndex(where: { $0.reference.id == id }),
+        if !operation.publicationInvalidated,
+           let index = rows.firstIndex(where: { $0.reference.id == id }),
            rows[index].reference.revision == revision,
            (!mutating.contains(id) || reconciliation != nil) {
             didPublish = true
