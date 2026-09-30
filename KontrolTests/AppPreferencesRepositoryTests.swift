@@ -8,12 +8,19 @@ import XCTest
 final class AppPreferencesRepositoryTests: XCTestCase {
     private let factory = ModelContainerFactory()
 
+    private func temporaryStoreDirectory() -> URL {
+        // SwiftData has no public synchronous close. Even after autoreleasepool
+        // drains, Core Data can still own SQLite handles on its worker queue.
+        // Keep isolated files until the test host exits; the QA command removes
+        // this exact process-owned root afterwards, never a live store/sidecar.
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "KontrolPreferencesTests-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
+        print("Preferences test store cleanup after host exit: \(root.path)")
+        return root.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    }
+
     private func withStore(_ operation: (ModelContainer, URL) throws -> Void) throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "KontrolPreferencesRepository-\(UUID().uuidString)", isDirectory: true)
-        // Release test-owned models, contexts, and containers before unlinking
-        // SQLite files. Cleanup must not invalidate a still-open coordinator.
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let directory = temporaryStoreDirectory()
         try autoreleasepool {
             try operation(reopen(directory), directory)
         }
@@ -80,9 +87,7 @@ final class AppPreferencesRepositoryTests: XCTestCase {
     }
 
     func testFirstSaveAndUpdateReturnDurableReceiptsAcrossClosedContainerReopen() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "KontrolPreferencesReceipts-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let directory = temporaryStoreDirectory()
         let first = try autoreleasepool {
             let container = try reopen(directory)
             let repository = SwiftDataAppPreferencesRepository(container: container)

@@ -130,6 +130,63 @@ final class FocusPreferencesTests: XCTestCase {
         XCTAssertNil(draft.linkedTaskID)
     }
 
+    func testFailedStartFreezesDefaultDurationAndLessonForRetryWithoutOpeningAttempt() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let catalog = SwiftDataCatalogRepository(container: container)
+        _ = try catalog.importIfNeeded(BundledCatalogLoader.load())
+        let lessons = try catalog.loadSnapshot().definitions
+        let lesson = try XCTUnwrap(lessons.first)
+        let before = try catalog.loadSnapshot()
+        var fail = true
+        let repository = SwiftDataFocusRepository(container: container, save: { context in
+            if fail { throw FocusError.persistenceFailure }
+            try context.save()
+        })
+        let service = FocusService(repository: repository, scheduleTick: { _ in {} },
+            notificationCenter: NotificationCenter(), workspaceNotificationCenter: NotificationCenter())
+        service.loadIfNeeded()
+        let preferences = AppPreferencesStore(repository: SwiftDataAppPreferencesRepository(container: container))
+        try save(37, to: preferences)
+        var draft = FocusReadyDraft(preferences: preferences.editableSnapshot)
+        draft.selectTask(UUID())
+        draft.selectLesson(lesson.id)
+        XCTAssertNil(draft.linkedTaskID, "Selecting a lesson replaces the task, not its duration")
+        let submitted = try draft.configuration(openTasks: [], tasksReadable: false, lessons: lessons)
+        draft.markSubmitted()
+        XCTAssertThrowsError(try service.start(configuration: submitted)) {
+            XCTAssertEqual($0 as? FocusError, .persistenceFailure)
+        }
+        XCTAssertTrue(try repository.fetchAll().isEmpty)
+        try save(50, to: preferences)
+        draft.followPreferences(preferences.editableSnapshot)
+        draft.followPreferences(nil)
+        XCTAssertEqual(draft.durationSource, .submitted)
+        XCTAssertEqual(draft.duration, .custom("37"))
+        XCTAssertEqual(draft.linkedLessonID, lesson.id)
+        XCTAssertNil(draft.linkedTaskID)
+        XCTAssertEqual(try draft.configuration(openTasks: [], tasksReadable: false, lessons: lessons), submitted)
+        XCTAssertThrowsError(try draft.configuration(openTasks: [], tasksReadable: false, lessons: [])) {
+            XCTAssertEqual($0 as? FocusError, .unavailableLesson)
+        }
+        XCTAssertEqual(draft.linkedLessonID, lesson.id, "Unavailable links must not silently become unlinked")
+        fail = false
+        try service.retryMutation()
+        let session = try XCTUnwrap(service.activeSession)
+        XCTAssertEqual(session.plannedSeconds, 37 * 60)
+        XCTAssertEqual(session.linkedLessonID, lesson.id)
+        XCTAssertEqual(session.linkedTitleSnapshot, lesson.title)
+        XCTAssertNil(session.linkedTaskID)
+        XCTAssertEqual(try repository.fetchAll().count, 1)
+        XCTAssertEqual(try catalog.loadSnapshot(), before, "Selection, Start, and retry must not change Learning")
+        XCTAssertNil(try catalog.loadLesson(lessonID: lesson.id).attempt)
+        try service.end()
+        draft = FocusReadyDraft(preferences: preferences.editableSnapshot)
+        XCTAssertEqual(draft.duration, .fifty)
+        XCTAssertEqual(draft.durationSource, .followingDefault)
+        XCTAssertNil(draft.linkedLessonID)
+        XCTAssertNil(draft.linkedTaskID)
+    }
+
     func testPreferencesRetainFullRangeAndStartTimeValidationRemainsAuthoritative() throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         let minutes = Int.max / 60

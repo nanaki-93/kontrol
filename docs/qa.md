@@ -25,6 +25,326 @@ This is a **scheduling change, not a waiver**. At F13, reserve an active, uncont
 | Settings | Export parses; no key/bookmark; canceled save; disconnected folder left intact | [M38](mockups/M38-settings.png)–[M41](mockups/M41-remove-project.png) |
 | Accessibility | Keyboard-only, VoiceOver, focus order, increased text, reduced motion | [M42](mockups/M42-design-accessibility.png) |
 
+## F13 foundation regression ledger — Step 1.1 (2026-09-30, incomplete)
+
+**Initial attempt: failed, not ready for approval; escalation update below.** This checkpoint verifies existing preferences, Focus, and accessibility behavior; it does not implement folder removal/export or certify hosted, native, sandbox, or distribution acceptance. The worktree was clean before inspection and after test execution. The cumulative task-1 review checklist contained no previous findings. No production sources, fixtures, test assertions, project membership, or plan checkboxes were changed.
+
+### Environment and prerequisites
+
+Commands run from the repository root (all completed successfully):
+
+```sh
+xcode-select -p
+xcodebuild -version
+xcrun swift --version
+xcodebuild -list -project Kontrol.xcodeproj
+sw_vers
+uname -m
+find . -name AGENTS.md -print
+git submodule status
+git status --short
+```
+
+Ancestor instruction checks covered `/`, `/Users`, `/Users/marcoandreose`, `/Users/marcoandreose/DEV`, and `/Users/marcoandreose/DEV/lab`; repository-wide enumeration found no `AGENTS.md`, and no submodule was listed. Toolchain: `/Applications/Xcode.app/Contents/Developer`, **Xcode 27.0 (27A266a)**, **Apple Swift 6.4 (swiftlang-6.4.0.34.1; swift-driver 1.168.6)**; **arm64 macOS 27.0 (26A428)**. Project listing resolved **Yams 5.4.0**, the `Kontrol` scheme, `Kontrol`/`KontrolTests` targets, and Debug/Release configurations. Swift 5 language mode/macOS 14 deployment remain existing project settings, not evidence of a macOS 14 runtime.
+
+Preflight at **08:00:55 UTC** found console user `marcoandreose`, one screen, a logged-in on-console session, and no competing xcodebuild/xctest/Kontrol process (only the system testmanagerd). The following shell probe reported `AXIsProcessTrusted=true`; it was repeated at 08:02:26 UTC. Frontmost app was `com.microsoft.rdc.macos`. These observations do **not** establish AX permission for the unsigned Kontrol test host or a human-reserved/uncontended desktop for consolidated GUI acceptance:
+
+```sh
+/usr/bin/stat -f '%Su' /dev/console
+pgrep -alf 'xcodebuild|xctest|Kontrol.app|testmanagerd'
+/usr/bin/swift -e 'import AppKit; import ApplicationServices; print("AXIsProcessTrusted=\(AXIsProcessTrusted())"); print("session=\(String(describing: CGSessionCopyCurrentDictionary()))"); print("frontmost=\(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "none")"); print("screens=\(NSScreen.screens.count)")'
+```
+
+Recorded toolchain/preflight output: `/tmp/kontrol-f13-step1.1-toolchain.log` (08:02:26 UTC repeat). No instruction installation or visual redesign was performed.
+
+### Required verification and result audit
+
+The plan's `f13_test` helper expanded to the following command, run with `set -o pipefail` and output piped through `tee /tmp/kontrol-f13-step1.1-tests.log`:
+
+```sh
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
+  -only-testing:KontrolTests/AppPreferencesRepositoryTests \
+  -only-testing:KontrolTests/AppPreferencesStoreTests \
+  -only-testing:KontrolTests/FocusPreferencesTests \
+  -only-testing:KontrolTests/FocusTimingTests \
+  -only-testing:KontrolTests/FocusServiceTests \
+  -only-testing:KontrolTests/DesignSystemComponentTests \
+  -only-testing:KontrolTests/DesignSystemTokenTests test
+```
+
+**Exit 65, `TEST FAILED`.** Fresh result: `/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_16-01-30-+0800.xcresult` (08:01:30 UTC). Tests ran 08:01:32–08:01:34 UTC. Result-bundle audit commands (exit 0):
+
+```sh
+xcrun xcresulttool get test-results summary --path '/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_16-01-30-+0800.xcresult' --format json > /tmp/kontrol-f13-step1.1-summary.json
+xcrun xcresulttool get test-results tests --path '/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_16-01-30-+0800.xcresult' --format json > /tmp/kontrol-f13-step1.1-test-tree.json
+```
+
+A Python audit walked every `Test Case` node, compared its method identifier against every `func test…` in each selected source, and checked the summary totals; **all seven selectors actually executed all their source methods**, with no extra/empty selection. Counts and all 22 failing identifiers/messages are preserved in `/tmp/kontrol-f13-step1.1-selector-audit.log`. Audit passed; the test gate did not.
+
+| Selected suite | Executed | Passed | Failed | Skipped |
+| --- | ---: | ---: | ---: | ---: |
+| AppPreferencesRepositoryTests | 17 | 17 | 0 | 0 |
+| AppPreferencesStoreTests | 13 | 13 | 0 | 0 |
+| FocusPreferencesTests | 7 | 7 | 0 | 0 |
+| FocusTimingTests | 16 | 16 | 0 | 0 |
+| FocusServiceTests | 29 | 29 | 0 | 0 |
+| DesignSystemComponentTests | 22 | 0 | 22 | 0 |
+| DesignSystemTokenTests | 7 | 7 | 0 | 0 |
+| **Total** | **111** | **89** | **22** | **0** |
+
+Expected failures: **0**. All component failures report `XCTUnwrap failed: expected non-nil value of type "AXUIElementRef"`: 20 at the common title-based window lookup (`DesignSystemComponentTests.swift:31`), keyboard focus at `:407`, and native confirmation at `:691`. They fail **before** the intended component/scene/sheet assertions, so none of those behaviors is validated by this run. Shell AX trust is not a diagnosis of these failures; host authorization, activation, and window registration/timing require investigation.
+
+### Inspected contracts and acceptance coverage
+
+- **Duration parsing:** `FocusDuration.seconds()` trims surrounding whitespace, accepts positive ASCII whole minutes, checks decimal parsing and multiplication overflow, and preserves presets 15/25/50. Repository/timing tests passed for custom values, leading zeros/whitespace, `Int.max / 60`, overflow, and rejected signs/decimals/exponents/non-ASCII digits. No smaller limit was introduced.
+- **Revision publication and drafts:** the repository uses a fresh non-autosaving context, validates the authoritative revision, saves before returning its receipt, and rolls back failure. Store publication uses that receipt without a post-save read. Independent editor baselines/inputs survive shared publications, stale saves, failed saves, and failed review. Explicit successful review retains input and authorizes only a separately revision-checked save. The corresponding repository/store regressions passed.
+- **Focus transitions/session isolation:** following drafts adopt readable defaults; even reselecting the current default is an override. Submission freezes duration and link for failed-Start retry; reset uses the latest readable default, and unavailable preferences use an identified 25-minute fallback. The selected Focus tests passed for task-linked submitted retry, full-range timing, and unchanged running/paused/recovered/completed/ended persisted rows after preference commits. Source inspection also found task/lesson selection mutually exclusive and neither cleared by `followPreferences`; a dedicated preference-change/failed-Start **lesson-link** regression remains to be added before declaring that branch covered.
+- **Accessibility resolver:** `AppAccessibilityPreferences.resolve` combines app/system reduction with OR and uses `max(systemTextSize, .xxLarge)` for Large. Store tests passed the motion truth table, all 12 system text sizes, idempotence, and unreadable/unsaved-value behavior. Token tests passed typography scaling, off-window glyph sizing, text contrast ≥4.5:1 and essential boundaries ≥3:1. These are not spoken VoiceOver or live visual acceptance.
+- **Both ready roots:** inspected `KontrolApp.swift:169,213`; main and native Settings install the resolver using the same graph-owned preferences store. Sheets inherit effective inputs. The real-root shared typography, native controls/metrics, and live sheet tests were selected but failed at AX lookup, leaving their intended assertions **unverified**.
+
+### Required narrow repair before continuing
+
+Stay on Step 1.1. Investigate the test-host AX/activation/window-readiness boundary, establish host-specific permission in an active uncontended GUI session, and make any necessary **narrow hosted harness repair** while preserving all behavior assertions (no skip/reclassification). Rerun the exact seven-suite selection and audit a fresh bundle. If those assertions expose a production behavior defect, introduce a separate behavior-plus-regression repair before later F13 implementation; do not infer 22 production defects from missing AX windows. Add the submitted lesson-link regression in `FocusPreferencesTests.swift` to complete link coverage.
+
+Also preserve and investigate the passing repository suite's runtime diagnostic at 08:01:32.198 UTC: `BUG IN CLIENT OF libsqlite3.dylib: database integrity compromised by API violation: vnode unlinked while in use` for a temporary `KontrolPreferencesRepository-…/Kontrol.store-shm` file. Test cleanup already uses autoreleasepool; coordinator lifetime/cleanup remains unresolved and is not proof of production or checked-in fixture corruption. The original test log is retained. Other diagnostics include linkd/AppIntents connection failures and the arm64/x86_64 destination warning.
+
+`git diff --check` passed (exit 0; `/tmp/kontrol-f13-step1.1-diffcheck.log`); `git status --short` lists only `docs/qa.md`. Changes remain uncommitted.
+
+No separate `make build`/`build-for-testing` was required or run: this attempt changed only this ledger, not production sources, test membership, or protocols; xcodebuild's required test action built/validated its existing host and test bundle before executing. Full `make test`, native captures/comparisons, VoiceOver, live reduced-motion/layout journeys, signed sandbox journeys, macOS 14 runtime, Developer ID signing and notarization remain **unverified**, not passes. Historical F02/F06 failures/skips and F11 fixture concerns below remain open. No release approval or human attestation is claimed.
+
+### Step 1.1 escalation repair (08:09–08:17 UTC; still incomplete)
+
+**Required gate remains FAILED; do not advance or approve Step 1.1.** Read the prior execution stdout, both execution sessions, latest failed-review feedback, and cumulative checklist. They contain one actual seven-suite run and repeated unresolved findings, not three independent passing/failing validations. Preserved the initial ledger/evidence above. At takeover only `docs/qa.md` was modified; the ancestor/repository rules rescan again found no applicable `AGENTS.md` or submodule. Repeated `xcode-select -p`, `xcodebuild -version`, `xcrun swift --version`, and `xcodebuild -list -project Kontrol.xcodeproj` all passed with the same toolchain/Yams versions above. No production source, schema, fixture, membership, workflow state, or plan checkbox changed.
+
+#### Diagnosis and narrow repairs
+
+- **AX root cause now measured inside the host:** the single action test with a two-second title-based wait returned `AXWindows status=0`, `trusted=false`, `active=false`, `running=true`, `visible=true`, `key=false`, AX titles `[]`, while AppKit listed both Kontrol and the inspection window. Explicit activation/order-front plus the same wait did not change that result. This disproves shell trust as sufficient evidence and a short readiness delay as the sole cause. Diagnostic commands used the exact xcodebuild flags above with only `-only-testing:KontrolTests/DesignSystemComponentTests/testActionVariantsAreNativeNamedButtonsWithTargetsAndSingleCallbacks`; both exited **65**, one failure each. Logs: `/tmp/kontrol-f13-escalation-ax-diagnostic.log`, `/tmp/kontrol-f13-escalation-ax-activation.log`; bundles: `Test-Kontrol-2026.09.30_16-09-15-+0800.xcresult` and `Test-Kontrol-2026.09.30_16-10-28-+0800.xcresult` under `/tmp/kontrol-f13-derived/Logs/Test/`.
+- **Hosted harness:** `KontrolTests/DesignSystemComponentTests.swift` now checks host-specific trust **before constructing hosting windows**, provides an actionable prerequisite failure, and uses bounded window-readiness/error diagnostics plus explicit activation for common, keyboard, real-root, and confirmation fixtures. All original component, sheet, scene, action-count, geometry, and focus assertions remain. No `XCTSkip`, expected failure, alternate AppKit-only assertion, or TCC modification was introduced. A guard after window construction exposed SwiftUI `InvalidTransition { phase: idle; targetPhase: failed(deinit) }` in the interim 16:13:24 run. A setup-level throwing guard then made XCTest additionally mark 22 bodies skipped in the interim 16:14:30 run. Both approaches were replaced by pre-construction, test-body checks; the final audited run has **22 prerequisite failures, no skips, and no InvalidTransition**. Neither interim run is credited as a pass.
+- **Submitted lesson-link coverage:** `KontrolTests/FocusPreferencesTests.swift` adds a real-repository failed-Start/retry regression using an isolated bundled catalog and durable preference commits. It verifies 37 minutes and the lesson ID survive a new 50-minute preference and unreadable preferences, unavailable inventory does not silently unlink, retry creates exactly one linked session/title snapshot, Learning remains unchanged with no opened attempt, and reset uses the latest default with cleared links. This new method passed in the required run and independent non-GUI rerun.
+- **SQLite cleanup:** the old helper unlinked temporary stores immediately after autoreleasepool, despite Core Data/SQLite worker-owned handles outliving the test-owned values. `KontrolTests/AppPreferencesRepositoryTests.swift` now retains UUID-isolated stores in an explicitly printed process-owned temporary root until the host exits. It preserves every reopen, byte-integrity, stale-save, and rollback assertion; no sleep/private SwiftData close API or production cleanup was added. Post-host cleanup below verified all **60 stores in four process roots** with SQLite `PRAGMA integrity_check=ok`, then removed only those logged roots after confirming their PIDs had exited. All four repaired repository runs passed; their logs contain **no `vnode unlinked while in use` warning**. This is a test-fixture lifecycle repair, not certification of historical fixtures or production storage.
+
+#### Final commands/results and evidence
+
+The required command is the same seven-selector expansion printed above, executed via the plan's unchanged `f13_test` helper:
+
+```sh
+f13_test AppPreferencesRepositoryTests AppPreferencesStoreTests FocusPreferencesTests FocusTimingTests FocusServiceTests DesignSystemComponentTests DesignSystemTokenTests
+# Supplemental non-GUI repeat, not a substitute for the required gate:
+f13_test AppPreferencesRepositoryTests AppPreferencesStoreTests FocusPreferencesTests FocusTimingTests FocusServiceTests DesignSystemTokenTests
+make build DERIVED_DATA=/tmp/kontrol-f13-derived
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived CODE_SIGNING_ALLOWED=NO build-for-testing
+git diff --check
+```
+
+| Suite | Required run passed / selected | Supplemental passed / selected |
+| --- | ---: | ---: |
+| AppPreferencesRepositoryTests | 17 / 17 | 17 / 17 |
+| AppPreferencesStoreTests | 13 / 13 | 13 / 13 |
+| FocusPreferencesTests | 8 / 8 | 8 / 8 |
+| FocusTimingTests | 16 / 16 | 16 / 16 |
+| FocusServiceTests | 29 / 29 | 29 / 29 |
+| DesignSystemComponentTests | 0 / 22 — host prerequisite failures | Not selected |
+| DesignSystemTokenTests | 7 / 7 | 7 / 7 |
+| **Total** | **90 / 112; 22 failed, 0 skipped** | **90 / 90; 0 failed, 0 skipped** |
+
+- **Required command exit 65:** `/tmp/kontrol-f13-escalation-gate.log`; result `/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_16-15-19-+0800.xcresult`. All 22 failures are `DesignSystemAXPrerequisite`, code `-25211`: host `trusted=false`, `active=false`. Their intended behavior assertions remain unverified.
+- **Supplemental command exit 0:** `/tmp/kontrol-f13-escalation-nongui.log`; result `/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_16-16-31-+0800.xcresult`.
+- Audited both bundles using `xcrun xcresulttool get test-results {summary,tests} --path <result above> --format json`, then a Python source-method/selector/count audit. Outputs: `/tmp/kontrol-f13-escalation-{summary,tests}.json`, `/tmp/kontrol-f13-escalation-selector-audit.log`, `/tmp/kontrol-f13-escalation-nongui-{summary,tests}.json`, `/tmp/kontrol-f13-escalation-nongui-audit.log`. Every selected source method is accounted for; both have zero expected failures. Audit success does not turn the required gate green.
+- **Build, final build-for-testing, whitespace checks exit 0:** `/tmp/kontrol-f13-escalation-build.log`, `/tmp/kontrol-f13-escalation-final-bft.log`, `/tmp/kontrol-f13-escalation-diffcheck.log`. The test action also compiled the final test changes. No added test membership/protocol or production changes required separate project edits.
+- Interim seven-selector evidence is retained at `Test-Kontrol-2026.09.30_16-13-24-+0800.xcresult` and `Test-Kontrol-2026.09.30_16-14-30-+0800.xcresult`; logs `/tmp/kontrol-f13-escalation-required.log` and `/tmp/kontrol-f13-escalation-final-required.log`.
+
+For future runs, retain the xcodebuild output as `TEST_LOG` and clean the **printed process-owned roots only after xcodebuild/test-host exit**. Direct Xcode execution intentionally retains these small isolated stores until the same post-host cleanup is performed. This command does not delete other historical fixtures or unlogged temporary directories:
+
+```sh
+# Set TEST_LOG to the completed run's output log; never to a live stream.
+TEST_LOG=/tmp/kontrol-f13-escalation-nongui.log python3 - <<'PY'
+import os, re, shutil
+from pathlib import Path
+lines = Path(os.environ['TEST_LOG']).read_text().splitlines()
+roots = {line.split(': ', 1)[1] for line in lines
+         if line.startswith('Preferences test store cleanup after host exit: ')}
+assert roots
+for path in sorted(roots):
+    root = Path(path)
+    assert re.fullmatch(r'KontrolPreferencesTests-\d+', root.name)
+    assert root.parent.resolve() == Path(os.environ['TMPDIR']).resolve()
+    assert not root.is_symlink()
+    pid = int(root.name.rsplit('-', 1)[1])
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        pass
+    else:
+        raise RuntimeError(f'Refusing cleanup for live/reused PID {pid}')
+    if root.exists():
+        shutil.rmtree(root)
+    print('Cleaned after host exit:', root)
+PY
+```
+
+Actual cleanup (including integrity checks before removal): `python3 /tmp/kontrol-f13-escalation-cleanup.py`, exit 0, `/tmp/kontrol-f13-escalation-cleanup.log`. Enumerated 15 isolated stores each under `$TMPDIR/KontrolPreferencesTests-{69265,69459,69721,70242}`; all four exact roots no longer exist. Original prior-attempt evidence remains untouched.
+
+**Outstanding external prerequisite:** a human must reserve an active uncontended desktop and authorize Accessibility for **`/private/tmp/kontrol-f13-derived/Build/Products/Debug/Kontrol.app`**, not just Terminal/the shell. Host activation must also succeed. Then rerun the exact seven-suite command and audit a fresh bundle; if component assertions fail, repair that same Step 1.1 contract before later tasks. No macOS privacy database manipulation, approval attestation, or spoken VoiceOver/native/release success is claimed. Required test failures mean this repair is **not ready for review**, even though lesson coverage, cleanup, compilation, and the non-GUI checks pass. Changes remain uncommitted and limited to the three test files above and this ledger; all initial partial work is preserved.
+
+### Step 1.1 second escalation revalidation (08:22 UTC; required gate still FAILED)
+
+Read both supplied execution stdout files, both failed-feedback files, and the cumulative checklist before editing. Confirmed Step 1.1 is the first incomplete task. Inspected the four existing modified files and preferences/Focus/resolver sources; no applicable ancestor or target-subdirectory `AGENTS.md` was found. **This attempt changes only this ledger**, preserving all three prior test repairs and unrelated work. No new production defect was demonstrated, and no safe code change can grant macOS host authorization or reserve the desktop. Do not advance to another task.
+
+Unlike the initial ledger-only attempt, this revalidation audits the repaired on-disk tests and actual host identity. The required seven-suite command below (same plan helper/flags as the expansion above) ran again, **exit 65**:
+
+```sh
+f13_test AppPreferencesRepositoryTests AppPreferencesStoreTests FocusPreferencesTests FocusTimingTests FocusServiceTests DesignSystemComponentTests DesignSystemTokenTests
+```
+
+Fresh result: **`/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_16-22-46-+0800.xcresult`**; output `/tmp/kontrol-f13-escalation2-gate.log`. **112 executed: 90 passed, 22 failed, 0 skipped, 0 expected failures.** Suite counts match the preceding required-run table. All 22 failures are `DesignSystemAXPrerequisite Code=-25211`, with **`host trusted=false, active=false`**, before the intended component assertions. The retained pre-guard activation diagnostic `/tmp/kontrol-f13-escalation-ax-activation.log` independently shows visible AppKit windows but no AX windows after activation/wait. Authorization and successful activation remain prerequisites; authorization alone is not a promise that all assertions will pass.
+
+Fresh environment checks (`xcode-select -p`, `xcodebuild -version`, `xcrun swift --version`, `xcodebuild -list -project Kontrol.xcodeproj`) passed with unchanged Xcode 27.0/Swift 6.4/Yams 5.4.0. Host inspection command `codesign -dv --verbose=4 /private/tmp/kontrol-f13-derived/Build/Products/Debug/Kontrol.app` reports a **linker ad-hoc signature, no TeamIdentifier/internal requirements** under the required unsigned build flags; no stable signed identity or host permission is inferred from shell trust. Shell probe still reports trust, one screen and an on-console session, with `com.microsoft.rdc.macos` frontmost. There is no human attestation of an uncontended desktop. Evidence: `/tmp/kontrol-f13-escalation2-environment.log`. No privacy database, entitlements, signing configuration, test assertions, or workflow state was changed.
+
+Previous outstanding findings checked individually:
+
+- **Submitted lesson-link/failed-Start coverage:** the added regression passed again (all eight `FocusPreferencesTests` passed); duration/links, retry, unchanged Learning, and reset assertions are retained.
+- **SQLite fixture lifetime:** all 17 repository tests passed, no `vnode unlinked while in use` or `InvalidTransition` diagnostic in the fresh log. After PID **72326** exited, enumerated all **15** stores under the exact logged `$TMPDIR/KontrolPreferencesTests-72326` root, checked each with read-only SQLite `PRAGMA integrity_check` (**all `ok`**), closed connections, then removed that root. Evidence: `/tmp/kontrol-f13-escalation2-cleanup.log`. No live, historical, or checked-in store was deleted.
+- **Hosted AX gate:** unresolved, not skipped/reclassified. No component/scene/sheet, spoken VoiceOver, native visual, or release approval is claimed.
+
+Automated audit commands (exit 0):
+
+```sh
+xcrun xcresulttool get test-results summary --path /tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_16-22-46-+0800.xcresult --format json
+xcrun xcresulttool get test-results tests --path /tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_16-22-46-+0800.xcresult --format json
+make build DERIVED_DATA=/tmp/kontrol-f13-derived
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug -destination 'platform=macOS' -derivedDataPath /tmp/kontrol-f13-derived CODE_SIGNING_ALLOWED=NO build-for-testing
+git diff --check
+```
+
+Summary/tree outputs: `/tmp/kontrol-f13-escalation2-{summary,tests}.json`. Python source-method/selector audit confirms every method in every selected suite ran exactly once and counts/failure identities agree with the summary: `/tmp/kontrol-f13-escalation2-selector-audit.log`. Builds passed; logs `/tmp/kontrol-f13-escalation2-{build,bft}.log`. Whitespace check passed. The prior supplemental six-suite pass remains historical; this attempt's 90 passes come from the fresh required run, not a substituted non-GUI command.
+
+**Required next action on this same task:** a human must reserve the active desktop and authorize the actual test host `/private/tmp/kontrol-f13-derived/Build/Products/Debug/Kontrol.app` in System Settings → Privacy & Security → Accessibility. Then rerun the unchanged seven-suite command and audit a fresh result; diagnose activation/behavior failures if any remain. This unattended attempt cannot safely supply that approval. Because the required command actually failed, its reported status remains **REPAIR / FAILED**, with an external prerequisite, rather than READY or a fabricated pass. All changes remain uncommitted.
+
+### Step 1.1 user-authorized Accessibility deferral (08:36 UTC)
+
+The user explicitly requested: **“i'll do the accessibility test later”**. Hosted `DesignSystemComponentTests` are therefore deferred for this follow-up, not converted to skips, passes, or expected failures. This is a scheduling decision, **not an attestation that any Accessibility check passed**. The prior seven-suite failures above remain historical evidence; the plan and completion checkbox are unchanged.
+
+Non-GUI repairs revalidated with the unchanged plan helper, omitting only the deferred hosted suite:
+
+```sh
+f13_test AppPreferencesRepositoryTests AppPreferencesStoreTests FocusPreferencesTests FocusTimingTests FocusServiceTests DesignSystemTokenTests
+git diff --check
+```
+
+Both commands exited **0**. Fresh result: `/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_16-36-05-+0800.xcresult`; log `/tmp/kontrol-f13-user-deferred-nongui.log`. **90 passed, 0 failed, 0 skipped, 0 expected failures** (17 repository, 13 store, 8 Focus preferences, 16 timing, 29 Focus service, 7 token tests). The submitted lesson-link regression and all duration/draft/session/resolver regressions pass. Result-summary/tree audit confirms every selected source method executed exactly once; outputs `/tmp/kontrol-f13-user-deferred-{summary,tests}.json`, audit `/tmp/kontrol-f13-user-deferred-audit.log`. No SQLite unlink or InvalidTransition diagnostic occurred. After PID 75788 exited, all 15 stores in the exact logged `$TMPDIR/KontrolPreferencesTests-75788` root passed read-only integrity checks and were removed; cleanup evidence is in that audit log.
+
+Only this ledger changed in the follow-up; the three existing test repairs are preserved. **Non-GUI repair validation passed; Step 1.1 acceptance remains incomplete** pending the unchanged seven-suite gate in an authorized, uncontended desktop session. Real-root typography, native controls, sheets, keyboard/confirmation and other hosted AX assertions are still unverified. No test assertions were weakened, no additional GUI run was attempted, and no hosted, native, spoken VoiceOver, or release approval is claimed. Changes remain uncommitted; reported status is **REPAIR / PASSED** for the checks actually run, not READY for the full task.
+
+## F13 continuation — Step 1.1a independent non-GUI checkpoint (2026-09-30, 09:09 UTC)
+
+### Scheduling amendment and acceptance boundary
+
+The continuation request explicitly splits the old Step 1.1 into **independently approvable Step 1.1a** and **deferred required release gate A13**. This amendment supersedes all historical “stay on Step 1.1,” “do not advance,” and seven-suite-before-later-implementation instructions above **for implementation scheduling only**. The original Step 1.1 remains historically incomplete; its failed runs and the historical 08:36 UTC 90-test pass remain unchanged. The fresh six-suite evidence below permits implementation to advance after approval of this checkpoint. It does not complete the remaining F13 implementation or grant release approval.
+
+**A13 remains required, pending—not passed, skipped, or waived.** Its owner is a human reserving an active, uncontended desktop and authorizing Accessibility for the actual rebuilt Kontrol test host (historically `/private/tmp/kontrol-f13-derived/Build/Products/Debug/Kontrol.app`), with successful activation/window registration checked again after build/signing changes. No new GUI authorization or human verification is claimed here.
+
+### Prerequisites and preserved work
+
+Confirmed the first top-level incomplete task in `.pi/PLAN.md` matches runner task **Step 1.1a**. Read `.pi/SPEC.md`, `.pi/ANALYSIS.md`, the plan, and the entire cumulative task-1 review checklist (no previous findings listed). Inspected `git status --short`, all existing diffs, and the index: at takeover only the three repaired test files and this ledger were modified, with nothing staged. Repository-wide `find . -name AGENTS.md -print`, target scans under `Kontrol/`, `KontrolTests/`, and `docs/`, and ancestor checks through `/` found no applicable instructions. `.gitmodules` is absent; `git submodule status` returned 0 with no entries. No commit-rule conflict was found. This attempt changes **only `docs/qa.md`**; all existing repairs, assertions, fixtures, sources, and workflow state remain untouched.
+
+Toolchain/project discovery commands, each exit **0** (output `/tmp/kontrol-f13-resume-toolchain.log`):
+
+```sh
+xcode-select -p
+xcodebuild -version
+xcrun swift --version
+xcodebuild -list -project Kontrol.xcodeproj
+sw_vers
+uname -m
+```
+
+Environment: `/Applications/Xcode.app/Contents/Developer`, **Xcode 27.0 (27A266a)**, **Apple Swift 6.4 (swiftlang-6.4.0.34.1; swift-driver 1.168.6)**, **arm64 macOS 27.0 (26A428)**. Project discovery resolved **Yams 5.4.0**, `Kontrol` scheme, `Kontrol`/`KontrolTests` targets, and Debug/Release configurations. This is not macOS 14 runtime evidence.
+
+### Fresh required verification and audit
+
+Executed with `set -o pipefail`, using the plan's `f13_test` helper and exactly these six suites:
+
+```sh
+f13_test AppPreferencesRepositoryTests AppPreferencesStoreTests \
+  FocusPreferencesTests FocusTimingTests FocusServiceTests \
+  DesignSystemTokenTests \
+  2>&1 | tee /tmp/kontrol-f13-resume-foundation.log
+```
+
+Exact helper expansion:
+
+```sh
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
+  -only-testing:KontrolTests/AppPreferencesRepositoryTests \
+  -only-testing:KontrolTests/AppPreferencesStoreTests \
+  -only-testing:KontrolTests/FocusPreferencesTests \
+  -only-testing:KontrolTests/FocusTimingTests \
+  -only-testing:KontrolTests/FocusServiceTests \
+  -only-testing:KontrolTests/DesignSystemTokenTests test
+```
+
+**Exit 0, TEST SUCCEEDED.** Fresh result: **`/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_17-09-51-+0800.xcresult`**. Bodies executed at 09:09:53 UTC. These results are separate from all historical runs above.
+
+| Selected suite | Current source methods | Executed / passed | Failed / skipped / expected failures |
+| --- | ---: | ---: | ---: |
+| AppPreferencesRepositoryTests | 17 | 17 / 17 | 0 / 0 / 0 |
+| AppPreferencesStoreTests | 13 | 13 / 13 | 0 / 0 / 0 |
+| FocusPreferencesTests | 8 | 8 / 8 | 0 / 0 / 0 |
+| FocusTimingTests | 16 | 16 / 16 | 0 / 0 / 0 |
+| FocusServiceTests | 29 | 29 / 29 | 0 / 0 / 0 |
+| DesignSystemTokenTests | 7 | 7 / 7 | 0 / 0 / 0 |
+| **Total** | **90** | **90 / 90** | **0 / 0 / 0** |
+
+Audit commands, each exit **0**:
+
+```sh
+RESULT_BUNDLE='/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_17-09-51-+0800.xcresult'
+xcrun xcresulttool get test-results summary \
+  --path "$RESULT_BUNDLE" --format json > /tmp/kontrol-f13-resume-summary.json
+xcrun xcresulttool get test-results tests \
+  --path "$RESULT_BUNDLE" --format json > /tmp/kontrol-f13-resume-tests.json
+python3 /tmp/kontrol-f13-resume-audit.py \
+  | tee /tmp/kontrol-f13-resume-selector-audit.log
+TEST_LOG=/tmp/kontrol-f13-resume-foundation.log \
+  python3 /tmp/kontrol-f13-resume-cleanup.py \
+  | tee /tmp/kontrol-f13-resume-cleanup.log
+git diff --check
+```
+
+The audit enumerated every `Test Case` node and compared full identifiers with every selected source `func test…`: all 90 methods executed exactly once, no missing/extra/empty selection, all `Passed`, matching summary counts. Exact identifiers/results are in `/tmp/kontrol-f13-resume-selector-audit.log`; audit scripts and JSON outputs are retained at the paths above. The fresh summary has no test failures/runtime warnings. The raw log retains AppIntents/linkd connection diagnostics and the multiple-architecture destination warning; it has **no `vnode unlinked while in use`, `InvalidTransition`, or AX prerequisite diagnostic**.
+
+Guarded cleanup used the existing post-host procedure plus read-only SQLite checks: confirmed PID **85745** had exited; enumerated all **15** stores under the sole exact logged root **`/var/folders/lz/20cqfx4x2k98r89q68w3q3ch0000gn/T/KontrolPreferencesTests-85745`**; validated its name, TMPDIR parent, absence of symlinks, and each `PRAGMA integrity_check=ok`; closed all connections, rechecked PID exit, and removed only that root. It no longer exists. All store paths and results are in `/tmp/kontrol-f13-resume-cleanup.log`. No live, unlogged historical, production, or checked-in stores were removed.
+
+### Contracts inspected and current coverage
+
+- **Duration/overflow:** inspected `Domain/AppPreferences.swift` and `Domain/FocusSessionSnapshot.swift`. Positive ASCII whole minutes retain whitespace/leading-zero rules, presets 15/25/50, checked decimal and seconds overflow, and the full `Int.max / 60` range. Repository/timing tests cover these boundaries; no smaller limit or recreation was introduced.
+- **Revision/publication/drafts:** inspected `SwiftDataAppPreferencesRepository.swift`, `AppPreferencesStore.swift`, and `AppPreferencesEditorDraft.swift`. Fresh non-autosaving contexts reject corrupt/duplicate rows and stale revisions; rollback protects failed commits; publication uses the durable receipt without a post-save read. Independent drafts/baselines survive other editors, stale saves, failure, and failed review. Review is explicit and the subsequent save rechecks revision. All repository/store methods passed.
+- **Focus/link/session isolation:** inspected `FocusReadyDraft`, ready-view follow/reset/Start handling in `FocusView.swift`, and service Start/retry publication. Following drafts alone adopt defaults; override/submitted drafts remain frozen; task/lesson selection is mutually exclusive; unreadable preferences use the identified fallback; reset uses the latest readable default. `FocusPreferencesTests/testFailedStartFreezesDefaultDurationAndLessonForRetryWithoutOpeningAttempt` passed with 37-minute submitted duration/lesson retained across changed/unreadable preferences, unavailable inventory rejection, one retry session/title snapshot, unchanged Learning/no attempt, and reset. Task retry and unchanged running/paused/recovered/completed/ended rows also passed. The existing lesson-link repair is preserved.
+- **Accessibility resolution:** inspected `AppAccessibilityPreferences.swift` and both ready roots in `KontrolApp.swift`. App/system motion combines with OR; Large uses `max(systemTextSize, .xxLarge)`, with a minimum 130% treatment and no shrinking of larger sizes. One resolver is installed at each ready root with inherited sheet inputs, and scaled metrics use a minimum rather than double multiplication. Store tests passed all 12 size mappings, idempotence, motion truth table, and readable-committed-only inputs; token tests passed off-window glyph scaling, contrast channels, and target constants. Root/sheet/native-control behavior is source-inspected, **not credited as hosted/native acceptance**.
+- **Preserved hosted repair:** inspected `DesignSystemComponentTests.swift` and its diff. Pre-construction host-specific permission checks, explicit activation, bounded window readiness diagnostics, and original AX/component/scene/sheet/keyboard/confirmation assertions remain unchanged. No assertion weakening, `XCTSkip`, expected failure, test disabling, TCC manipulation, or unauthorized hosted rerun occurred.
+
+### Deferred gate A13 and checkpoint decision
+
+Once the human-owned prerequisites exist, **rerun the original seven-suite selection** with the same helper/flags:
+
+```sh
+f13_test AppPreferencesRepositoryTests AppPreferencesStoreTests \
+  FocusPreferencesTests FocusTimingTests FocusServiceTests \
+  DesignSystemComponentTests DesignSystemTokenTests
+```
+
+All **22 current `KontrolTests/DesignSystemComponentTests` methods** remain required under A13, including `testBothRealReadyScenesUpdateSharedTypographyFromOneCommittedStore`, `testFocusAndCallerKeyboardShortcutWorkWithoutHover`, and `testNativeConfirmationCancelAndConfirmHaveDistinctEffects`. They must establish real-root typography updates, native control and inherited-sheet geometry, AX names/roles/actions, keyboard focus and single callbacks, and distinct confirmation/cancellation effects. Also retain the deferred presentation/full-suite and F00–F13 ledgers below, required native comparisons at 1000×700/1440×940 desktop and 520×340 Settings with standard/130%/larger text, keyboard/focus restoration, spoken VoiceOver, live motion combinations, contrast, and reachability. All remain **pending**, as do signed sandbox, macOS 14/current-runtime, and distribution acceptance; compilation/token evidence cannot substitute for them.
+
+**Step 1.1a acceptance is verified and ready for review**, with no checkpoint blocker. No later task was implemented, and no plan checkbox was changed. This ledger-only checkpoint required no separate `make build`/`build-for-testing`; the required test action built its existing host/bundle, and no new source, protocol, membership, or presentation change was made. Hosted/native and distribution release approval remain explicitly pending. The runner manages approved-task commits; this execution leaves the preserved worktree uncommitted for review.
+
 ## F12 implementation evidence (2026-09-30)
 
 The [F12 README ledger](../README.md#f12-topic-news-non-gui-implementation-gate-2026-09-30) records exact commands, per-suite counts, specification coverage, toolchain, diagnostics, historical failures and live endpoint observations. Xcode **27.0 (27A266a)** / Swift **6.4**, arm64 macOS **27.0 (26A428)**, Swift 5 language mode / macOS 14.0 minimum: `make build DERIVED_DATA=/tmp/kontrol-f12-derived` and the same unsigned macOS `xcodebuild ... build-for-testing` passed. The explicit **17 non-GUI suites plus two focused AppShell methods** ran **136 passed, 0 failed, 0 skipped, 0 expected failures**; every selector's execution was audited. Result **`/tmp/kontrol-f12-gate-selected.xcresult`**, summary `/tmp/kontrol-f12-gate-summary.json`, selector audit `/tmp/kontrol-f12-gate-selector-audit.log`, logs `/tmp/kontrol-f12-gate-{toolchain,build,bft,tests,plutil}.log`. `plutil -lint Kontrol.xcodeproj/project.pbxproj Kontrol/Kontrol.entitlements`, JSON validation and final `git diff --check` all returned 0.

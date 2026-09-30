@@ -17,20 +17,51 @@ final class DesignSystemComponentTests: XCTestCase {
         return children.flatMap { [$0] + descendants($0) }
     }
 
+    private func requireHostedAccessibility() throws {
+        // Shell trust is not host trust. Never silently skip or replace AX assertions
+        // with an AppKit-only tree when this external prerequisite is unavailable.
+        guard AXIsProcessTrusted() else {
+            throw NSError(domain: "DesignSystemAXPrerequisite", code: Int(AXError.apiDisabled.rawValue), userInfo: [
+                NSLocalizedDescriptionKey: "Hosted component validation requires Accessibility permission for the Kontrol test host (\(Bundle.main.bundleURL.path)); host trusted=false, active=\(NSApp.isActive). Reserve an uncontended GUI session and authorize the host before rerunning."
+            ])
+        }
+    }
+
+    private func inspectedWindow(_ window: NSWindow) throws -> AXUIElement {
+        try requireHostedAccessibility()
+        let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+        let deadline = Date().addingTimeInterval(2)
+        var status = AXError.success
+        var titles: [String] = []
+        repeat {
+            var windows: CFTypeRef?
+            status = AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &windows)
+            let roots = windows as? [AXUIElement] ?? []
+            titles = roots.compactMap { attribute($0, kAXTitleAttribute) as? String }
+            if let match = roots.first(where: { attribute($0, kAXTitleAttribute) as? String == window.title }) {
+                return match
+            }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        } while Date() < deadline
+        throw NSError(domain: "DesignSystemAX", code: Int(status.rawValue), userInfo: [
+            NSLocalizedDescriptionKey: "AX window missing: status=\(status.rawValue), trusted=\(AXIsProcessTrusted()), active=\(NSApp.isActive), running=\(NSApp.isRunning), visible=\(window.isVisible), key=\(window.isKeyWindow), AX titles=\(titles), AppKit titles=\(NSApp.windows.map(\.title))"
+        ])
+    }
+
     private func inspect<V: View>(_ view: V, width: CGFloat, _ check: (NSHostingView<V>, [AXUIElement]) throws -> Void) throws {
+        try requireHostedAccessibility()
         let host = NSHostingView(rootView: view)
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: 500),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.title = "Design system inspection \(UUID().uuidString)"
         window.contentView = host
+        NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
         defer { window.orderOut(nil) }
         host.layoutSubtreeIfNeeded()
         RunLoop.main.run(until: Date().addingTimeInterval(0.05))
-        let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
-        let inspected = try XCTUnwrap((attribute(app, kAXWindowsAttribute) as? [AXUIElement])?.first {
-            attribute($0, kAXTitleAttribute) as? String == window.title
-        })
+        let inspected = try inspectedWindow(window)
         try check(host, descendants(inspected))
     }
 
@@ -284,6 +315,7 @@ final class DesignSystemComponentTests: XCTestCase {
     }
 
     func testBothRealReadyScenesUpdateSharedTypographyFromOneCommittedStore() async throws {
+        try requireHostedAccessibility()
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         let launch = LaunchCoordinator(open: { container })
         await launch.start()
@@ -315,11 +347,7 @@ final class DesignSystemComponentTests: XCTestCase {
                 settingsHost.layoutSubtreeIfNeeded()
                 RunLoop.main.run(until: Date().addingTimeInterval(0.1))
                 @MainActor func currentNodes(_ window: NSWindow?) throws -> [AXUIElement] {
-                    let title = try XCTUnwrap(window).title
-                    let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
-                    let axWindow = try XCTUnwrap((attribute(app, kAXWindowsAttribute) as? [AXUIElement])?.first {
-                        attribute($0, kAXTitleAttribute) as? String == title
-                    })
+                    let axWindow = try inspectedWindow(XCTUnwrap(window))
                     return descendants(axWindow)
                 }
                 enlarged = [try headingWidth(currentNodes(mainHost.window)),
@@ -389,6 +417,7 @@ final class DesignSystemComponentTests: XCTestCase {
     }
 
     func testFocusAndCallerKeyboardShortcutWorkWithoutHover() throws {
+        try requireHostedAccessibility()
         var calls = 0
         let view = ActionButton("Run", symbol: "play.fill", variant: .primary) { calls += 1 }
             .accessibilityIdentifier("shortcut-action")
@@ -399,14 +428,14 @@ final class DesignSystemComponentTests: XCTestCase {
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.title = "Action focus inspection \(UUID().uuidString)"
         window.contentView = host
+        NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
         defer { window.orderOut(nil) }
         host.layoutSubtreeIfNeeded()
         RunLoop.main.run(until: Date().addingTimeInterval(0.1))
         let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
-        let axWindow = try XCTUnwrap((attribute(app, kAXWindowsAttribute) as? [AXUIElement])?.first {
-            attribute($0, kAXTitleAttribute) as? String == window.title
-        })
+        let axWindow = try inspectedWindow(window)
         let button = try XCTUnwrap(descendants(axWindow).first {
             attribute($0, kAXIdentifierAttribute) as? String == "shortcut-action"
         })
@@ -668,6 +697,7 @@ final class DesignSystemComponentTests: XCTestCase {
     }
 
     func testNativeConfirmationCancelAndConfirmHaveDistinctEffects() throws {
+        try requireHostedAccessibility()
         for destructive in [false, true] {
             var confirmations = 0
             let host = NSHostingView(rootView: ConfirmationFixture(destructive: destructive) { confirmations += 1 })
@@ -675,9 +705,12 @@ final class DesignSystemComponentTests: XCTestCase {
                                   styleMask: [.titled], backing: .buffered, defer: false)
             window.title = "Confirmation inspection \(UUID().uuidString)"
             window.contentView = host
+            NSApp.activate(ignoringOtherApps: true)
             window.makeKeyAndOrderFront(nil)
+            window.orderFrontRegardless()
             defer { window.orderOut(nil) }
             host.layoutSubtreeIfNeeded()
+            _ = try inspectedWindow(window)
             let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
             func named(_ name: String) -> AXUIElement? {
                 let windows = attribute(app, kAXWindowsAttribute) as? [AXUIElement] ?? []
