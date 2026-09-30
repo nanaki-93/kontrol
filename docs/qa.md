@@ -2409,3 +2409,122 @@ checkpoint. Local Data's dedicated compact/enlarged layout fixtures and export
 focus/accessibility transitions remain Steps 4.2/4.3, not implemented early.
 Existing A13/S13/B13/D13 obligations and historical findings remain pending.
 **No remaining Step 4.1 implementation blockers.**
+
+## F13 Step 4.2 — Local Data adaptive document (2026-10-01 local)
+
+First incomplete task matched runner task 15/27, Step 4.2. Read the complete
+cumulative checklist; no previous findings. Initial worktree/index were clean.
+Repository/target and direct ancestor checks found no applicable `AGENTS.md` or
+submodule. Reused M40 and supplemental export decision/preparing/canceled/failed/
+saved references (`.mockups/flows/f13-settings-release/07` through `11`, plus
+`index.html`); no new visible state or redesign was introduced.
+
+### Changes and fixture coverage
+
+- `Kontrol/Features/Settings/LocalDataSettingsView.swift`: headings/subtitle and
+  actions retain natural vertical height under constrained width. Status text is
+  explicitly proposed the remaining document width beside its symbol, allowing
+  long outcomes to wrap. Existing guidance/recovery wrapping, semantic typography
+  and ≥32-point `ActionButton` targets remain unchanged. All controls remain in the
+  enclosing scroll document; no scroll view, viewport-height form, fixed bar,
+  scaling multiplier, owner or export behavior was added. The existing adaptive
+  header and single-host contract in `FoundationSettingsView.swift` needed no edit.
+- `KontrolTests/SettingsSceneTests.swift`: six hosted selectors cover idle,
+  selecting, preparing, saved, canceled, and **every** failure category (selection,
+  answer-save, capture, preparation, delivery, cleanup). The matrix uses real
+  `SettingsSceneContent` / `MainWindowContent` roots and Local Data navigation,
+  not a fixed-height surrogate or a service-state override. Native Settings covers
+  520×340, 1000×700 and 1440×940; inline covers its supported desktop sizes
+  1000×700 and 1440×940. Each state uses standard system text, a committed Large
+  preference resolving to 130%, and larger system text resolving to 160% without
+  compounding or shrinking. This defines **165** state/root/size/text combinations.
+- Injected panel/preparation gates hold real selecting/preparing states. Real
+  answer-save failure retains an exact dirty buffer; repository/writer boundaries
+  produce the remaining failures. Cleanup failure removes only the owned private
+  fixture directory, forcing the real artifact boundary's cleanup confirmation to
+  fail without leaving personal-data bytes. Saved uses actual validated delivery.
+- Fixtures assert complete guidance/recovery text, visible compact wrapping,
+  nonoverlap, full viewport containment after native vertical scrolling, ≥32-point
+  Back/Cancel/export/retry targets, one scroll host and no horizontal scrolling,
+  exact content-point dimensions, single text scaling and retained pending answers.
+  They actually press Cancel or explicit retry, await lifecycle completion, parse
+  committed JSON and check owned-artifact cleanup. Capture attachments include
+  content points, pixel dimensions and backing scale when executed. Geometry,
+  keyboard/VoiceOver and rendered comparisons are **not credited by compilation**.
+
+### Exact validation and evidence
+
+Base revision: `4d0fc2bdfe4ec500637ab1ca83411c630acf7ae1`. Evidence:
+**`/tmp/kontrol-f13-step4-2.MAmRA4/`**. Tested implementation/test patch:
+`final-implementation.patch`, SHA-256
+`842b1f95df436b4d941ad3dcc6dd3a64f4a4cbe309d067e45b0336df528c6126`.
+`final-source-sha256.txt` identifies both tested files; this ledger is the only
+subsequent tree edit. `environment.log` records worktree/index/submodule, source
+identity, project listing and toolchain: macOS 27.0 (26A428), arm64 MacBook Pro,
+Xcode 27.0 (27A266a), Swift 6.4, `/Applications/Xcode.app/Contents/Developer`.
+Swift 5/macOS 14 project settings and Yams 5.4.0 resolution remain unchanged;
+this is not macOS 14 runtime acceptance.
+
+Commands from repository root (each final validation command exited **0**):
+
+```sh
+set -o pipefail
+EVIDENCE=/tmp/kontrol-f13-step4-2.MAmRA4
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
+  -resultBundlePath "$EVIDENCE/validation.xcresult" \
+  -only-testing:KontrolTests/ExportServiceTests \
+  -only-testing:KontrolTests/DesignSystemTokenTests \
+  -only-testing:KontrolTests/SettingsSceneTests/testLocalDataPresentationUsesActualStateAndSafeFailureCategories test
+make build DERIVED_DATA=/tmp/kontrol-f13-derived
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived CODE_SIGNING_ALLOWED=NO \
+  build-for-testing
+xcrun xcresulttool get test-results summary \
+  --path "$EVIDENCE/validation.xcresult" --format json \
+  > "$EVIDENCE/summary.json"
+xcrun xcresulttool get test-results tests \
+  --path "$EVIDENCE/validation.xcresult" --format json \
+  > "$EVIDENCE/test-tree.json"
+python3 "$EVIDENCE/audit.py"
+git diff --check
+```
+
+Fresh audited result: **51/51 Passed** — 43 ExportServiceTests, 7
+DesignSystemTokenTests and the exact non-GUI Settings presentation method. Zero
+failed/skipped/expected-failure tests or xcresult runtime-warning entries. Audit
+compares source methods against fresh test identifiers, checking each selected
+method ran exactly once (`executed-identifiers.txt`, `audit.log`). All hosted
+coverage compiled. Logs: `tests.log`, `build.log`, `final-compile.log`,
+`diffcheck.log`, `diagnostics.log`, `exit-codes.log`; the earlier compilation also
+passed (`compile.log`). No command or assertion failed. Existing folder-fixture
+optional-interpolation warning (now line 1605), AppIntents extraction warning,
+multiple-destination and linkd diagnostics remain recorded, not silently repaired.
+No new Local Data compiler warning or SQLite vnode-unlinked diagnostic occurred.
+Test host PID 17664 exited (`ps -p 17664 -o pid=,stat=,command=` returned **1**,
+no rows; `host-exit.log`). Executed export tests use in-memory persistence and
+owned non-store destinations; no agent store cleanup was performed. Original
+fixtures, frozen schemas, external projects, production data, dependency pins,
+permissions, workflow files and `.pi/PLAN.md` were not changed. Changes remain
+uncommitted for review; approved-task commits remain runner-owned.
+
+### Exact new hosted selectors deferred to A13
+
+Compiled, **not executed** (requires the reserved active desktop and actual rebuilt
+host Accessibility authorization):
+
+- `SettingsSceneTests/testLocalDataIdleGuidanceReflowsAtAllSettingsSizes`
+- `SettingsSceneTests/testLocalDataSelectingProgressAndCancelReflowAtAllSettingsSizes`
+- `SettingsSceneTests/testLocalDataPreparingProgressAndCancelReflowAtAllSettingsSizes`
+- `SettingsSceneTests/testLocalDataSavedResultAndActionsReflowAtAllSettingsSizes`
+- `SettingsSceneTests/testLocalDataCanceledResultAndActionsReflowAtAllSettingsSizes`
+- `SettingsSceneTests/testLocalDataEveryFailureRecoveryAndRetryReflowAtAllSettingsSizes`
+
+Existing deferred Local Data route, folder, General, full-suite and historical
+native selectors remain required. No rendered attachment/comparison, native
+geometry or spoken VoiceOver result is claimed here. Export focus/accessibility
+transition implementation remains Step 4.3; A13/S13/B13/D13 remain mandatory
+separate acceptance gates. **No remaining Step 4.2 implementation blockers.**

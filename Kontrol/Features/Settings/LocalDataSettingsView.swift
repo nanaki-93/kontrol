@@ -70,23 +70,36 @@ struct LocalDataSettingsView: View {
         let presentation = Self.presentation(service.state)
         VStack(alignment: .leading, spacing: AppMetrics.space4) {
             Text("Local data").appTypography(.section).accessibilityAddTraits(.isHeader)
+                .fixedSize(horizontal: false, vertical: true)
             Text("One point-in-time JSON file").appTypography(.body)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("settings-export-subtitle")
             guidance(Self.inclusions, identifier: "settings-export-inclusions")
             guidance(Self.exclusions, identifier: "settings-export-exclusions")
             guidance(Self.answerGuidance, identifier: "settings-export-answer-guidance")
             guidance(Self.privacyGuidance, identifier: "settings-export-privacy")
             Divider()
-            Label(presentation.status, systemImage: presentation.symbol)
+            // Give the status text the remaining document width rather than
+            // an ideal-width label. The symbol stays beside the wrapped text
+            // at compact/enlarged sizes.
+            Label {
+                Text(presentation.status)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } icon: {
+                Image(systemName: presentation.symbol)
+            }
                 .appTypography(.body)
-                .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier("settings-export-status")
             guidance(presentation.detail, identifier: "settings-export-detail")
             if presentation.canCancel {
                 ActionButton("Cancel export") { service.cancel() }
+                    .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("settings-export-cancel")
             } else {
                 ActionButton(presentation.actionTitle, symbol: "square.and.arrow.up", variant: .primary,
                              isEnabled: !service.isBusy) { service.startExport() }
+                    .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("settings-export-start")
             }
         }

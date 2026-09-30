@@ -86,9 +86,11 @@ private final class SettingsFolderRepository: ProjectReferenceRepository {
 @MainActor
 private final class SettingsExportPanel: ExportDestinationSelecting {
     private(set) var selections = 0
+    var failure: Error?
     var continuation: CheckedContinuation<ExportDestinationSelection, Never>?
     func selectDestination(suggestedAt date: Date) async throws -> ExportDestinationSelection {
         selections += 1
+        if let failure { throw failure }
         return await withCheckedContinuation { continuation = $0 }
     }
     func finish(_ selection: ExportDestinationSelection) {
@@ -128,14 +130,26 @@ private actor SettingsExportPreparationGate {
 private struct SettingsExportWriter: ExportFilePreparing, ExportFileDelivering {
     let writer: ExportFileWriter
     let gate: SettingsExportPreparationGate
+    var failure: ExportService.Failure? = nil
     func approveDestination(_ url: URL) throws -> ApprovedExportDestination { try writer.approveDestination(url) }
     func prepare(_ snapshot: LocalDataExport) async throws -> PreparedExportArtifact {
         await gate.wait()
         try Task.checkCancellation()
+        if failure == .preparation { throw ExportFileWriterError.preparationFailed }
         return try await writer.prepare(snapshot)
     }
     func deliver(_ artifact: PreparedExportArtifact, to destination: ApprovedExportDestination) async throws -> ExportDeliveryOutcome {
-        try await writer.deliver(artifact, to: destination)
+        if failure == .delivery { throw ExportFileWriterError.deliveryFailed }
+        if failure == .cleanup {
+            // Remove only this fixture's private artifact directory. The real
+            // ownership boundary will then fail its required cleanup confirmation
+            // (ENOENT), without leaving personal-data artifacts on disk.
+            return try artifact.consume { url in
+                try FileManager.default.removeItem(at: url.deletingLastPathComponent())
+                throw ExportFileWriterError.deliveryFailed
+            }
+        }
+        return try await writer.deliver(artifact, to: destination)
     }
 }
 
@@ -1177,6 +1191,202 @@ final class SettingsSceneTests: XCTestCase {
         attachment.lifetime = .keepAlways
         add(attachment)
         print("F13 native geometry \(name): content=\(content.bounds.size), pixels=\(bitmap.pixelsWide)x\(bitmap.pixelsHigh), backingScale=\(window.backingScaleFactor)")
+    }
+
+    func testLocalDataIdleGuidanceReflowsAtAllSettingsSizes() async throws {
+        try await assertLocalDataGeometry(.idle, name: "idle")
+    }
+
+    func testLocalDataSelectingProgressAndCancelReflowAtAllSettingsSizes() async throws {
+        try await assertLocalDataGeometry(.selecting, name: "selecting")
+    }
+
+    func testLocalDataPreparingProgressAndCancelReflowAtAllSettingsSizes() async throws {
+        try await assertLocalDataGeometry(.preparing, name: "preparing")
+    }
+
+    func testLocalDataSavedResultAndActionsReflowAtAllSettingsSizes() async throws {
+        try await assertLocalDataGeometry(.saved, name: "saved")
+    }
+
+    func testLocalDataCanceledResultAndActionsReflowAtAllSettingsSizes() async throws {
+        try await assertLocalDataGeometry(.canceled, name: "canceled")
+    }
+
+    func testLocalDataEveryFailureRecoveryAndRetryReflowAtAllSettingsSizes() async throws {
+        for (name, failure) in [("selection", ExportService.Failure.selection), ("answer-save", .answerSave),
+                                ("capture", .capture), ("preparation", .preparation),
+                                ("delivery", .delivery), ("cleanup", .cleanup)] {
+            try await assertLocalDataGeometry(.failed(failure), name: name)
+        }
+    }
+
+    /// Exercise production scene roots, navigation, shared preference resolution
+    /// and observable service, not an imposed-height surrogate or a mutable state
+    /// override. Injected boundaries hold progress and produce each real outcome.
+    /// Compilation is not native evidence; execute this matrix at A13.
+    private func assertLocalDataGeometry(_ state: ExportService.State, name: String) async throws {
+        try keyboardSession()
+        let sizes = [CGSize(width: 520, height: 340), CGSize(width: 1000, height: 700), CGSize(width: 1440, height: 940)]
+        let scales: [(String, DynamicTypeSize, AppTextSize, CGFloat)] = [
+            ("100", .large, .system, 1), ("130", .large, .large, 1.3), ("160", .accessibility1, .large, 1.6)
+        ]
+        for inline in [false, true] {
+            // The main-window minimum is 1000x700; compact is native Settings.
+            for size in sizes where !inline || size.width >= 1000 {
+                var standardSubtitleHeight: CGFloat?
+                for (percent, systemSize, preference, expectedScale) in scales {
+                    let root = FileManager.default.temporaryDirectory.appendingPathComponent("SettingsExportGeometry-\(UUID().uuidString)")
+                    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+                    let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+                    let preferences = SettingsPreferencesSpy()
+                    preferences.value = AppPreferencesSnapshot(preferences: try AppPreferences(focusDefaultMinutes: 25, textSize: preference), revision: UUID())
+                    let panel = SettingsExportPanel()
+                    let repository = SettingsExportRepository(container: container)
+                    let gate = SettingsExportPreparationGate()
+                    let failure: ExportService.Failure?
+                    if case .failed(let category) = state { failure = category } else { failure = nil }
+                    let writer = SettingsExportWriter(writer: ExportFileWriter(temporaryRoot: root), gate: gate, failure: failure)
+                    var failAnswerSaves = false
+                    let catalog = SwiftDataCatalogRepository(container: container, beforeSave: {
+                        if failAnswerSaves { throw LessonExperienceError.persistenceFailure }
+                    })
+                    let news = SettingsNewsSpy()
+                    let inspector = SettingsFolderInspectorSpy()
+                    let graph = AppDependencies(container: container, catalogRepository: catalog,
+                        projectInspector: inspector, draftScheduler: { _, _ in {} },
+                        appPreferencesRepository: preferences, newsService: news,
+                        exportRepository: repository, exportPanel: panel, exportWriter: writer)
+                    let launch = LaunchCoordinator(open: { container }, makeDependencies: { _, _ in graph })
+                    await launch.start()
+                    XCTAssertEqual(launch.state, .ready)
+                    var pendingAttempt: UUID?
+                    if failure == .answerSave {
+                        graph.learningCatalogStore.loadIfNeeded()
+                        let lesson = try XCTUnwrap(graph.learningCatalogStore.state.snapshot?.slots.first?.lessonID)
+                        let detail = try graph.learningCatalogStore.openLesson(lessonID: lesson).detail
+                        let attempt = try XCTUnwrap(detail.attempt)
+                        graph.lessonDraftStore.observe(detail)
+                        graph.lessonDraftStore.edit("  retained geometry answer 🧪\n", attemptID: attempt.id)
+                        pendingAttempt = attempt.id
+                        failAnswerSaves = true
+                    }
+                    if failure == .selection { panel.failure = ExportFileWriterError.unsafeDestination }
+                    if failure == .capture { repository.failure = ExportFileWriterError.invalidPreparation }
+                    if state != .preparing { await gate.release() }
+                    let navigation = NavigationStore()
+                    navigation.select(.settings)
+                    let scene = Group {
+                        if inline { MainWindowContent(launch: launch, navigation: navigation) }
+                        else { SettingsSceneContent(launch: launch) }
+                    }.environment(\.dynamicTypeSize, systemSize)
+                    let window = show(scene, size: size)
+                    defer { window.orderOut(nil) } // Match existing native hosting lifetime policy.
+                    let label = "export-\(name)-\(inline ? "inline" : "native")-\(Int(size.width))x\(Int(size.height))-\(percent)"
+                    try press("settings-local-data", in: window)
+                    if state != .idle {
+                        try press("settings-export-start", in: window)
+                        if failure != .selection {
+                            var panelOpened = false
+                            for _ in 0..<200 {
+                                if panel.continuation != nil { panelOpened = true; break }
+                                try await Task.sleep(for: .milliseconds(10))
+                            }
+                            XCTAssertTrue(panelOpened, "Injected panel must hold selection: \(label)")
+                            if !panelOpened { throw ExportFileWriterError.unsafeDestination }
+                            if state == .canceled { panel.finish(.canceled) }
+                            else if state != .selecting {
+                                panel.finish(.approved(try writer.approveDestination(root.appendingPathComponent("export.json"))))
+                            }
+                        }
+                        if state == .preparing {
+                            for _ in 0..<200 {
+                                if graph.exportService.state == .preparing { break }
+                                try await Task.sleep(for: .milliseconds(10))
+                            }
+                        } else if state != .selecting { await graph.exportService.waitForCompletion() }
+                    }
+                    XCTAssertEqual(graph.exportService.state, state, label)
+                    settle()
+                    let presentation = LocalDataSettingsView.presentation(state)
+                    let action = presentation.canCancel ? "settings-export-cancel" : "settings-export-start"
+                    let texts = ["settings-export-subtitle", "settings-export-inclusions", "settings-export-exclusions",
+                                 "settings-export-answer-guidance", "settings-export-privacy", "settings-export-status", "settings-export-detail"]
+                    try assertReachable(texts, in: window)
+                    try assertFolderTargets(["settings-back", action], in: window)
+                    try assertNonoverlapping(texts + ["settings-back", action], in: window)
+                    XCTAssertEqual(try value("settings-export-detail", in: window), presentation.detail)
+                    for (identifier, copy) in [("settings-export-inclusions", LocalDataSettingsView.inclusions),
+                                               ("settings-export-exclusions", LocalDataSettingsView.exclusions),
+                                               ("settings-export-answer-guidance", LocalDataSettingsView.answerGuidance),
+                                               ("settings-export-privacy", LocalDataSettingsView.privacyGuidance)] {
+                        XCTAssertEqual(try value(identifier, in: window), copy, "Full guidance must survive wrapping")
+                        if size.width == 520 {
+                            let font = NSFont.monospacedSystemFont(ofSize: AppTypography.Role.body.baseSize * expectedScale, weight: .regular)
+                            XCTAssertGreaterThan(try axFrame(node(identifier, in: window)).height,
+                                                 font.ascender - font.descender + 2, "Compact guidance must visibly wrap: \(label) / \(identifier)")
+                        }
+                        try reveal(identifier, in: window)
+                        try capture("\(label)-\(identifier)", window: window)
+                    }
+                    if size.width == 520 {
+                        let font = NSFont.monospacedSystemFont(ofSize: AppTypography.Role.body.baseSize * expectedScale, weight: .regular)
+                        XCTAssertGreaterThan(try axFrame(node("settings-export-detail", in: window)).height,
+                                             font.ascender - font.descender + 2, "Progress/recovery/result copy must wrap")
+                    }
+                    let subtitleHeight = try axFrame(node("settings-export-subtitle", in: window)).height
+                    if expectedScale == 1 { standardSubtitleHeight = subtitleHeight }
+                    else {
+                        XCTAssertEqual(subtitleHeight / (try XCTUnwrap(standardSubtitleHeight)), expectedScale, accuracy: 0.15,
+                                       "Large must scale once; larger system text must neither shrink nor multiply")
+                    }
+                    try reveal("settings-export-status", in: window)
+                    try capture("\(label)-status", window: window)
+                    try reveal(action, in: window)
+                    try capture("\(label)-result-actions", window: window)
+                    _ = try assertSingleDocument(in: window)
+                    XCTAssertEqual(window.contentView?.bounds.size, size, "Document must not enlarge the requested viewport")
+                    // Actually press the reachable in-document action. Pending
+                    // states cancel and retain ownership until the gate releases;
+                    // terminal states explicitly retry through the same picker.
+                    if presentation.canCancel {
+                        try press(action, in: window)
+                        panel.finish(.canceled)
+                        await gate.release()
+                        await graph.exportService.waitForCompletion()
+                        XCTAssertEqual(graph.exportService.state, .canceled)
+                    } else {
+                        panel.failure = nil
+                        try press(action, in: window)
+                        for _ in 0..<200 {
+                            if panel.continuation != nil { break }
+                            try await Task.sleep(for: .milliseconds(10))
+                        }
+                        XCTAssertNotNil(panel.continuation, "Explicit export/retry must remain usable")
+                        panel.finish(.canceled)
+                        await graph.exportService.waitForCompletion()
+                        XCTAssertEqual(graph.exportService.state, .canceled)
+                    }
+                    if let pendingAttempt {
+                        XCTAssertEqual(graph.lessonDraftStore.buffers[pendingAttempt]?.text, "  retained geometry answer 🧪\n")
+                        XCTAssertEqual(graph.lessonDraftStore.buffers[pendingAttempt]?.isDirty, true)
+                    }
+                    let files = try FileManager.default.contentsOfDirectory(atPath: root.path)
+                    XCTAssertEqual(files, state == .saved ? ["export.json"] : [], "No private or sibling staging survives")
+                    if state == .saved {
+                        XCTAssertNoThrow(try LocalDataExport.decode(Data(contentsOf: root.appendingPathComponent("export.json"))))
+                    }
+                    XCTAssertEqual(preferences.saves, 0)
+                    let requests = await news.requests
+                    let inspections = await inspector.calls
+                    XCTAssertEqual(requests, 0)
+                    XCTAssertEqual(inspections, 0)
+                    // Only non-store, owned export files after lifecycle completion.
+                    try FileManager.default.removeItem(at: root)
+                    print("F13 Local Data geometry PASS \(label): wrapped guidance/recovery, reachable >=32pt targets, one document, single scale")
+                }
+            }
+        }
     }
 
     private enum FolderGeometryState: String {
