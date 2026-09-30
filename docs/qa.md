@@ -1489,3 +1489,88 @@ messages remain in logs. Test host PID **65404** exited: `ps -p 65404 -o
 pid=,stat=,command=` returned **1** with no rows (`host-exit.log`). No agent store
 cleanup was performed; new persistence fixtures are in-memory. Historical
 failed/skipped evidence remains intact. **No remaining Step 2.4 blockers.**
+
+### F13 Step 2.5 — historical personal Learning export (2026-09-30)
+
+First incomplete task confirmed as Step 2.5, matching runner task 7/27. The
+cumulative review checklist has no prior findings. Starting worktree/index were
+clean; no applicable ancestor or repository `AGENTS.md` was found. Base revision:
+`042069dfe30d4b1350363f4a6f43c55a684270c8`. Implementation/format patch preserved at
+`/tmp/kontrol-f13-step2-5/implementation.patch`, SHA-256
+`51ff22d41f7b0844fcd3bdb4432404c318d439ad7d8570e5a86cb2d0da666eb8`
+(excludes this QA ledger). No schema, project membership, fixture, or dependency
+changes were required.
+
+Environment: macOS **27.0 (26A428)**, arm64 MacBook Pro, Xcode **27.0 (27A266a)**,
+`/Applications/Xcode.app/Contents/Developer`; Apple Swift **6.4**, project Swift 5
+language mode. Evidence directory: `/tmp/kontrol-f13-step2-5`.
+
+Exact validation commands (repository root; all exit **0**):
+
+```sh
+set -o pipefail
+EVIDENCE=/tmp/kontrol-f13-step2-5
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
+  -only-testing:KontrolTests/LocalDataExportTests \
+  -only-testing:KontrolTests/LearningHistoryTests \
+  -only-testing:KontrolTests/LessonExperienceRepositoryTests \
+  -only-testing:KontrolTests/GeneratedLessonRepositoryTests test \
+  > "$EVIDENCE/tests-final.log" 2>&1
+make build DERIVED_DATA=/tmp/kontrol-f13-derived > "$EVIDENCE/build.log" 2>&1
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived CODE_SIGNING_ALLOWED=NO \
+  build-for-testing > "$EVIDENCE/compile.log" 2>&1
+RESULT_BUNDLE=/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_23-08-10-+0800.xcresult
+xcrun xcresulttool get test-results summary --path "$RESULT_BUNDLE" \
+  --format json > "$EVIDENCE/summary.json"
+xcrun xcresulttool get test-results tests --path "$RESULT_BUNDLE" \
+  --format json > "$EVIDENCE/test-tree.json"
+python3 "$EVIDENCE/audit.py" > "$EVIDENCE/audit.log"
+python3 -m json.tool "$EVIDENCE/example-1.json" >/dev/null
+git diff --check
+```
+
+The initial identical test selection also passed **107/107** (log `tests.log`,
+bundle `/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_23-05-40-+0800.xcresult`).
+After adding explicit inner terminal/catalog byte-identity validation and its
+regressions, the final fresh selection passed **107/107**: **54** LocalDataExportTests,
+**11** LearningHistoryTests, **31** LessonExperienceRepositoryTests, **11**
+GeneratedLessonRepositoryTests. Zero failures, skips, expected failures, or
+xcresult runtime warnings. Source-to-result audit confirms every expected method
+executed exactly once; full selectors are in `executed-identifiers.txt` and the
+result tree. Debug build, explicit compilation of all hosted tests, JSON example
+parsing (**1/1**), and whitespace validation passed. No native selector is required
+for this data-only task; compilation is not A13/S13/B13/D13 acceptance.
+
+Seven new methods (all `KontrolTests/LocalDataExportTests/`, Passed):
+
+- `testPersonalLearningProjectionMapsEveryFieldAndPreservesHistoricalContentAgainstChangedDefinition`
+- `testPersonalLearningProjectionLegacyNilAndEmptySentinelNeverUseCurrentDefinition`
+- `testPersonalLearningProjectionMapsEveryTerminalProvenanceAndGeneratedPins`
+- `testPersonalLearningProjectionRejectsPresentCorruptPinsEvenWithValidPartialSnapshot`
+- `testPersonalLearningProjectionRejectsCorruptUnsupportedAndMismatchedEvidencePayloads`
+- `testPersonalLearningProjectionRejectsDuplicatesInvalidScalarsDatesSlotsAndPartialContent`
+- `testPersonalLearningProjectionSortsAllEvidenceCollectionsWithoutMutationOrReconciliation`
+
+The mapper covers all stored progress/attempt milestones, byte-exact saved answers,
+ordered studied content, pins, partial completed snapshots, slots, terminal records,
+and retired catalog membership. It reuses `PinnedLessonContent.decode`, `metadata()`,
+and `membership()`, sharing definition/provenance validation for embedded historical
+content. Nil and released empty-pin sentinels map to null; missing historical content
+never uses today's changed definition. Present corruption, unsupported evidence
+versions, duplicates, invalid dates/content, key mismatches, and outer/inner or
+embedded metadata mismatches abort with safe categories. The format documents
+legacy gaps and storage decoder rules; no opaque payload is exported.
+
+In-memory fixtures prove detached results survive later row edits; capture mapping
+leaves contexts unchanged, preserves a separate owner's unsaved answer, retains
+inventories, and synthesizes no definitions/import state. There is no save, answer
+mutation, slot rotation, catalog reconciliation, resource load, or external access.
+The final log contains no SQLite API-violation/unlink diagnostics; existing multiple
+matching destinations, AppIntents metadata, and linkd connection diagnostics remain
+in the logs. Test host PID **71025** exited; no original stores were edited and no
+agent cleanup was performed. Historical evidence is retained. **No Step 2.5 blockers.**

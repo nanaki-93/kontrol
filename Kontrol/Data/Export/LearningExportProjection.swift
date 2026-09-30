@@ -28,6 +28,80 @@ enum LearningExportProjection {
         return value.canonicalized()
     }
 
+    /// Personal evidence is projected independently of mutable installed content.
+    static func project(progress: [LessonProgress], attempts: [LessonAttempt], slots: [LessonSlot],
+                        terminalRecords: [LessonTerminalRecord], catalogMembership: [CatalogMembership],
+                        into envelope: LocalDataExport) throws -> LocalDataExport {
+        var value = envelope
+        value.learning.progress = try progress.map { row in
+            try identity(row.lessonID)
+            return try .init(lessonID: row.lessonID, status: row.status.rawValue,
+                firstShownAt: row.firstShownAt.map(ExportTimestamp.init), startedAt: row.startedAt.map(ExportTimestamp.init),
+                completedAt: row.completedAt.map(ExportTimestamp.init), dismissedAt: row.dismissedAt.map(ExportTimestamp.init),
+                lastOpenedAt: row.lastOpenedAt.map(ExportTimestamp.init))
+        }
+        value.learning.attempts = try attempts.map { row in
+            try identity(row.lessonID)
+            let pin: LocalDataExport.Pin?
+            // Empty is the released upgrade sentinel for unrecoverable legacy
+            // content. Any other present bytes must decode, even with a snapshot.
+            if let data = row.pinnedContentData, !data.isEmpty {
+                let decoded: PinnedLessonContent
+                do { decoded = try PinnedLessonContent.decode(data, lessonID: row.lessonID, contentVersion: row.contentVersion) }
+                catch { throw LocalDataExportError.invalidValue }
+                pin = try .init(definition: definition(decoded.definition))
+            } else { pin = nil }
+            let completed = try row.completedContentSnapshot.map { content in
+                try content.conceptIDs.forEach(identity)
+                return LocalDataExport.CompletedContent(title: content.title, objectiveKey: content.objectiveKey,
+                    conceptIDs: content.conceptIDs, difficulty: content.difficulty, format: content.format,
+                    explanation: content.explanation, workedExample: content.workedExample, exercise: content.exercise,
+                    referenceAnswer: content.referenceAnswer, selfCheckCriteria: content.selfCheckCriteria)
+            }
+            return try .init(id: row.id, lessonID: row.lessonID, contentVersion: row.contentVersion,
+                answerDraft: row.answerDraft, revision: row.revision,
+                solutionRevealedAt: row.solutionRevealedAt.map(ExportTimestamp.init),
+                selfCheckAcknowledgedAt: row.selfCheckAcknowledgedAt.map(ExportTimestamp.init),
+                completedAt: row.completedAt.map(ExportTimestamp.init), pinnedContent: pin, completedContentSnapshot: completed)
+        }
+        value.learning.slots = try slots.map { row in
+            try [row.key, row.topicID, row.lessonID].forEach(identity)
+            return try .init(key: row.key, topicID: row.topicID, slotIndex: row.slotIndex,
+                lessonID: row.lessonID, assignedAt: ExportTimestamp(row.assignedAt))
+        }
+        value.learning.terminalRecords = try terminalRecords.map { row in
+            let metadata = try evidence { try row.metadata() }
+            try identity(row.lessonID)
+            try identity(metadata.lessonID)
+            try [metadata.topicID, metadata.subtopicID].compactMap { $0 }.forEach(identity)
+            try metadata.conceptIDs?.forEach(identity)
+            return try .init(lessonID: metadata.lessonID, provenance: metadata.provenance.rawValue,
+                title: metadata.title, topicID: metadata.topicID, subtopicID: metadata.subtopicID,
+                contentVersion: metadata.contentVersion, objectiveKey: metadata.objectiveKey,
+                conceptIDs: metadata.conceptIDs, normalizedContentHash: metadata.normalizedContentHash,
+                format: metadata.format, dismissalTimeDefinition: metadata.dismissalTimeDefinition.map(definition))
+        }
+        value.learning.catalogMembership = try catalogMembership.map { row in
+            let membership = try evidence { try row.membership() }
+            try identity(row.catalogID)
+            try identity(membership.catalogID)
+            try [membership.topicIDs, membership.subtopicIDs, membership.conceptIDs, membership.seededLessonIDs]
+                .forEach { try $0.forEach(identity) }
+            return .init(catalogID: membership.catalogID, catalogVersion: membership.catalogVersion,
+                topicIDs: membership.topicIDs, subtopicIDs: membership.subtopicIDs,
+                conceptIDs: membership.conceptIDs, seededLessonIDs: membership.seededLessonIDs)
+        }
+        try value.validate()
+        return value.canonicalized()
+    }
+
+    private static func evidence<T>(_ decode: () throws -> T) throws -> T {
+        do { return try decode() }
+        catch LearningEvidenceError.unsupportedVersion { throw LocalDataExportError.unsupportedVersion }
+        catch LearningEvidenceError.identityMismatch { throw LocalDataExportError.identityMismatch }
+        catch { throw LocalDataExportError.invalidValue }
+    }
+
     private static func identity(_ text: String) throws {
         let canonical = text.trimmingCharacters(in: .whitespacesAndNewlines).precomposedStringWithCanonicalMapping
         guard !canonical.isEmpty, text.utf8.elementsEqual(canonical.utf8) else {
@@ -36,6 +110,16 @@ enum LearningExportProjection {
     }
 
     private static func definition(_ row: LessonDefinition) throws -> LocalDataExport.Definition {
+        try definition(LessonDefinitionSnapshot(id: row.id, objectiveKey: row.objectiveKey, objective: row.objective,
+            title: row.title, topicID: row.topicID, subtopicID: row.subtopicID, conceptIDs: row.conceptIDs,
+            difficulty: row.difficulty, format: row.format, estimatedMinutes: row.estimatedMinutes,
+            prerequisiteConceptIDs: row.prerequisiteConceptIDs, explanation: row.explanation,
+            workedExample: row.workedExample, exercise: row.exercise, referenceAnswer: row.referenceAnswer,
+            selfCheckCriteria: row.selfCheckCriteria, contentVersion: row.contentVersion,
+            normalizedContentHash: row.normalizedContentHash, source: row.source, provenance: row.provenance))
+    }
+
+    private static func definition(_ row: LessonDefinitionSnapshot) throws -> LocalDataExport.Definition {
         try [row.id, row.topicID, row.subtopicID].forEach(identity)
         try row.conceptIDs.forEach(identity)
         try row.prerequisiteConceptIDs.forEach(identity)

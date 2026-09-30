@@ -1348,6 +1348,316 @@ final class LocalDataExportTests: XCTestCase {
         XCTAssertEqual(try inventory(ModelContext(container)), [1, 1, 1, 2, 0, 0, 0, 0, 0, 0])
     }
 
+    @MainActor
+    private func personal(progress: [LessonProgress] = [], attempts: [LessonAttempt] = [], slots: [LessonSlot] = [],
+                          terminal: [LessonTerminalRecord] = [], membership: [CatalogMembership] = [],
+                          into envelope: Export? = nil) throws -> Export {
+        try LearningExportProjection.project(progress: progress, attempts: attempts, slots: slots,
+            terminalRecords: terminal, catalogMembership: membership,
+            into: envelope ?? Export(exportedAt: instant(), appVersion: "1.0"))
+    }
+
+    private func historicalPin(_ value: Export.Definition? = nil, provenance: String? = nil) -> PinnedLessonContent {
+        let value = value ?? definition()
+        return .init(definition: .init(id: value.id, objectiveKey: value.objectiveKey, objective: value.objective,
+            title: value.title, topicID: value.topicID, subtopicID: value.subtopicID, conceptIDs: value.conceptIDs,
+            difficulty: value.difficulty, format: value.format, estimatedMinutes: value.estimatedMinutes,
+            prerequisiteConceptIDs: value.prerequisiteConceptIDs, explanation: value.explanation,
+            workedExample: value.workedExample, exercise: value.exercise, referenceAnswer: value.referenceAnswer,
+            selfCheckCriteria: value.selfCheckCriteria, contentVersion: value.contentVersion,
+            normalizedContentHash: value.normalizedContentHash, source: value.source, provenance: provenance ?? authored))
+    }
+
+    private func terminalMetadata(_ provenance: TerminalMetadataProvenance = .dismissalReference) -> LessonTerminalMetadata {
+        let pin = historicalPin()
+        return .init(lessonID: "lesson", provenance: provenance, title: authored, topicID: "topic",
+            subtopicID: "subtopic", contentVersion: 2, objectiveKey: "objective.key",
+            conceptIDs: ["concept", "z.concept"], normalizedContentHash: pin.definition.normalizedContentHash,
+            format: "code", dismissalTimeDefinition: provenance == .dismissalReference ? pin.definition : nil)
+    }
+
+    private func storedMembership() -> CurrentCatalogMembership {
+        .init(catalogID: "retired.catalog", catalogVersion: 7, topicIDs: ["a.topic", "z.topic"],
+            subtopicIDs: ["subtopic"], conceptIDs: ["concept", "z.concept"], seededLessonIDs: ["absent", "lesson"])
+    }
+
+    @MainActor
+    func testPersonalLearningProjectionMapsEveryFieldAndPreservesHistoricalContentAgainstChangedDefinition() throws {
+        let now = try instant(), later = try instant("2026-09-30T13:00:00.456Z")
+        let pin = historicalPin()
+        let progress = LessonProgress(lessonID: "lesson", status: .completed, firstShownAt: now.date,
+            startedAt: now.date, completedAt: later.date, dismissedAt: now.date, lastOpenedAt: later.date)
+        let attempt = LessonAttempt(id: secondID, lessonID: "lesson", contentVersion: 2, answerDraft: authored,
+            solutionRevealedAt: now.date, selfCheckAcknowledgedAt: later.date, completedAt: later.date,
+            completedContentSnapshot: pin.completedSnapshot, pinnedContentData: try pin.encoded(), revision: 8)
+        let slot = LessonSlot(topicID: "t:é", slotIndex: 12, lessonID: "absent", assignedAt: now.date)
+        let terminal = try LessonTerminalRecord(metadata: terminalMetadata())
+        let membership = try CatalogMembership(membership: storedMembership())
+        let current = storedDefinition(); current.contentVersion = 99; current.title = "Changed current title"
+        current.explanation = "Changed current explanation"
+        current.normalizedContentHash = CatalogValidator.fingerprint(explanation: current.explanation,
+            workedExample: current.workedExample, exercise: current.exercise, referenceAnswer: current.referenceAnswer,
+            selfCheckCriteria: current.selfCheckCriteria)
+        let envelope = try learning(definitions: [current], into: rich())
+        let value = try personal(progress: [progress], attempts: [attempt], slots: [slot],
+            terminal: [terminal], membership: [membership], into: envelope)
+        XCTAssertEqual(value.learning.progress, [.init(lessonID: "lesson", status: "completed", firstShownAt: now,
+            startedAt: now, completedAt: later, dismissedAt: now, lastOpenedAt: later)])
+        var expected = Export(exportedAt: now, appVersion: "1.0")
+        expected.learning.attempts = [.init(id: secondID, lessonID: "lesson", contentVersion: 2, answerDraft: authored,
+            revision: 8, solutionRevealedAt: now, selfCheckAcknowledgedAt: later, completedAt: later,
+            pinnedContent: .init(definition: definition()), completedContentSnapshot: .init(title: authored,
+                objectiveKey: "objective.key", conceptIDs: definition().conceptIDs, difficulty: "basic", format: "code",
+                explanation: authored, workedExample: " example\n", exercise: " exercise\t", referenceAnswer: authored,
+                selfCheckCriteria: [" Z check\n", " A check\t"]))]
+        XCTAssertEqual(value.learning.attempts, expected.canonicalized().learning.attempts)
+        XCTAssertEqual(value.learning.slots, [.init(key: "4:t:é:12", topicID: "t:é", slotIndex: 12,
+            lessonID: "absent", assignedAt: now)])
+        XCTAssertEqual(value.learning.terminalRecords, [.init(lessonID: "lesson", provenance: "dismissalReference",
+            title: authored, topicID: "topic", subtopicID: "subtopic", contentVersion: 2, objectiveKey: "objective.key",
+            conceptIDs: ["concept", "z.concept"], normalizedContentHash: definition().normalizedContentHash,
+            format: "code", dismissalTimeDefinition: expected.canonicalized().learning.attempts[0].pinnedContent!.definition)])
+        XCTAssertEqual(value.learning.catalogMembership, [.init(catalogID: "retired.catalog", catalogVersion: 7,
+            topicIDs: ["a.topic", "z.topic"], subtopicIDs: ["subtopic"], conceptIDs: ["concept", "z.concept"],
+            seededLessonIDs: ["absent", "lesson"])])
+        XCTAssertEqual(value.learning.definitions, envelope.learning.definitions)
+        XCTAssertEqual(value.tasks, envelope.tasks); XCTAssertEqual(value.blocks, envelope.blocks)
+        XCTAssertEqual(value.sessions, envelope.sessions); XCTAssertEqual(value.feedPreferences, envelope.feedPreferences)
+        XCTAssertEqual(value.generalPreferences, envelope.generalPreferences)
+        XCTAssertEqual(value.exportedAt, envelope.exportedAt); XCTAssertEqual(value.appVersion, envelope.appVersion)
+        XCTAssertEqual(try Export.decode(value.encoded()), value)
+        XCTAssertEqual(Array(value.learning.attempts[0].answerDraft.utf8), Array(authored.utf8))
+        XCTAssertEqual(value.learning.attempts[0].pinnedContent?.definition.selfCheckCriteria, [" Z check\n", " A check\t"])
+        let bytes = try value.encoded()
+        attempt.answerDraft = "Later edit"; attempt.pinnedContentData = Data("bad".utf8)
+        progress.status = .dismissed; slot.assignedAt = later.date; terminal.payload = Data(); membership.payload = Data()
+        XCTAssertEqual(try value.encoded(), bytes)
+    }
+
+    @MainActor
+    func testPersonalLearningProjectionLegacyNilAndEmptySentinelNeverUseCurrentDefinition() throws {
+        let now = try instant()
+        for data in [nil, Data()] as [Data?] {
+            var partial = historicalPin().completedSnapshot
+            partial.conceptIDs = [] // Released partial content has no invented full metadata.
+            let attempt = LessonAttempt(id: firstID, lessonID: "lesson", contentVersion: 1, answerDraft: authored,
+                completedAt: now.date, completedContentSnapshot: partial, pinnedContentData: data)
+            let terminal = try LessonTerminalRecord(metadata: .init(lessonID: "lesson", provenance: .legacyCompletedPartial,
+                title: authored, topicID: nil, subtopicID: nil, contentVersion: nil, objectiveKey: nil, conceptIDs: nil,
+                normalizedContentHash: nil, format: nil, dismissalTimeDefinition: nil))
+            let value = try personal(attempts: [attempt], terminal: [terminal], into: learning(definitions: [storedDefinition()]))
+            XCTAssertNil(value.learning.attempts[0].pinnedContent)
+            XCTAssertEqual(value.learning.attempts[0].completedContentSnapshot?.conceptIDs, [])
+            XCTAssertEqual(value.learning.attempts[0].completedContentSnapshot?.workedExample, " example\n")
+            XCTAssertEqual(value.learning.attempts[0].answerDraft, authored)
+            XCTAssertNil(value.learning.terminalRecords[0].topicID)
+            XCTAssertNil(value.learning.terminalRecords[0].contentVersion)
+            XCTAssertNil(value.learning.terminalRecords[0].dismissalTimeDefinition)
+            let json = try object(value), learning = try XCTUnwrap(json["learning"] as? [String: Any])
+            let rows = try XCTUnwrap(learning["attempts"] as? [[String: Any]])
+            XCTAssertTrue(rows[0]["pinnedContent"] is NSNull)
+            attempt.completedContentSnapshot = nil; attempt.completedAt = nil; attempt.answerDraft = ""
+            let unavailable = try personal(attempts: [attempt], into: value)
+            XCTAssertNil(unavailable.learning.attempts[0].pinnedContent)
+            XCTAssertNil(unavailable.learning.attempts[0].completedContentSnapshot)
+            XCTAssertEqual(unavailable.learning.attempts[0].answerDraft, "")
+        }
+        for status in [KontrolSchemaV1.ProgressStatus.available, .started, .completed, .dismissed] {
+            let value = try personal(progress: [LessonProgress(lessonID: "absent", status: status)])
+            XCTAssertEqual(value.learning.progress[0].status, status.rawValue)
+            XCTAssertNil(value.learning.progress[0].firstShownAt); XCTAssertNil(value.learning.progress[0].lastOpenedAt)
+        }
+        XCTAssertEqual(try personal(), try Export(exportedAt: instant(), appVersion: "1.0"))
+    }
+
+    @MainActor
+    func testPersonalLearningProjectionMapsEveryTerminalProvenanceAndGeneratedPins() throws {
+        for provenance in [TerminalMetadataProvenance.studiedPin, .dismissalPin, .dismissalReference,
+                           .legacyCompletedPartial, .legacyRecoveredReference] {
+            let row = try LessonTerminalRecord(metadata: terminalMetadata(provenance))
+            XCTAssertEqual(try personal(terminal: [row]).learning.terminalRecords[0].provenance, provenance.rawValue)
+        }
+        let generated = try acceptedGenerated()
+        let dto = try learning(definitions: [generated]).learning.definitions[0]
+        let attempt = LessonAttempt(id: firstID, lessonID: generated.id, contentVersion: generated.contentVersion,
+            pinnedContentData: try historicalPin(dto, provenance: generated.provenance).encoded())
+        XCTAssertEqual(try personal(attempts: [attempt]).learning.attempts[0].pinnedContent?.definition, dto)
+    }
+
+    @MainActor
+    func testPersonalLearningProjectionRejectsPresentCorruptPinsEvenWithValidPartialSnapshot() throws {
+        let baseline = try historicalPin().encoded()
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: baseline) as? [String: Any])
+        var payloads = [Data("not JSON".utf8), Data("null".utf8), Data("{}".utf8)]
+        object["envelopeVersion"] = 2; payloads.append(try JSONSerialization.data(withJSONObject: object))
+        object["envelopeVersion"] = 1; object["extra"] = "excluded"; payloads.append(try JSONSerialization.data(withJSONObject: object))
+        for payload in payloads {
+            let attempt = LessonAttempt(id: firstID, lessonID: "lesson", contentVersion: 2,
+                completedContentSnapshot: historicalPin().completedSnapshot, pinnedContentData: payload)
+            XCTAssertThrowsError(try personal(attempts: [attempt])) { XCTAssertEqual($0 as? LocalDataExportError, .invalidValue) }
+            XCTAssertEqual(attempt.pinnedContentData, payload)
+        }
+        for (lessonID, version) in [("other", 2), ("lesson", 3)] {
+            let attempt = LessonAttempt(id: firstID, lessonID: lessonID, contentVersion: version, pinnedContentData: baseline)
+            XCTAssertThrowsError(try personal(attempts: [attempt]))
+        }
+        var corrupt = definition(); corrupt.normalizedContentHash = "sha256:" + String(repeating: "0", count: 64)
+        let attempt = LessonAttempt(id: firstID, lessonID: "lesson", contentVersion: 2,
+            pinnedContentData: try historicalPin(corrupt).encoded())
+        XCTAssertThrowsError(try personal(attempts: [attempt])) { XCTAssertEqual($0 as? LocalDataExportError, .invalidValue) }
+        corrupt = definition(); corrupt.conceptIDs = ["e\u{301}"]
+        attempt.pinnedContentData = try historicalPin(corrupt).encoded()
+        XCTAssertThrowsError(try personal(attempts: [attempt]))
+    }
+
+    @MainActor
+    func testPersonalLearningProjectionRejectsCorruptUnsupportedAndMismatchedEvidencePayloads() throws {
+        let terminal = try LessonTerminalRecord(metadata: terminalMetadata())
+        let membership = try CatalogMembership(membership: storedMembership())
+        let terminalBytes = terminal.payload, membershipBytes = membership.payload
+        for baseline in [terminalBytes, membershipBytes] {
+            var json = try XCTUnwrap(JSONSerialization.jsonObject(with: baseline) as? [String: Any])
+            json["version"] = 2
+            let unsupported = try JSONSerialization.data(withJSONObject: json)
+            let isTerminal = baseline == terminalBytes
+            for (payload, error) in [(Data(), LocalDataExportError.invalidValue), (Data("bad".utf8), .invalidValue),
+                                     (unsupported, .unsupportedVersion)] {
+                if isTerminal { terminal.payload = payload }
+                else { membership.payload = payload }
+                XCTAssertThrowsError(try isTerminal ? personal(terminal: [terminal]) : personal(membership: [membership])) {
+                    XCTAssertEqual($0 as? LocalDataExportError, error)
+                }
+            }
+        }
+        terminal.payload = terminalBytes; membership.payload = membershipBytes
+        terminal.lessonID = "other"; membership.catalogID = "other"
+        XCTAssertThrowsError(try personal(terminal: [terminal])) { XCTAssertEqual($0 as? LocalDataExportError, .identityMismatch) }
+        XCTAssertThrowsError(try personal(membership: [membership])) { XCTAssertEqual($0 as? LocalDataExportError, .identityMismatch) }
+        terminal.lessonID = "lesson"; membership.catalogID = "retired.catalog"
+        // Valid outer decoding must still reject embedded definition/metadata disagreement.
+        for (key, bad): (String, Any) in [("contentVersion", 3), ("topicID", "other"), ("subtopicID", "other"),
+            ("objectiveKey", "other"), ("conceptIDs", ["other"]), ("format", "learn"),
+            ("normalizedContentHash", "sha256:" + String(repeating: "0", count: 64))] {
+            var json = try XCTUnwrap(JSONSerialization.jsonObject(with: terminalBytes) as? [String: Any])
+            var value = try XCTUnwrap(json["value"] as? [String: Any]); value[key] = bad; json["value"] = value
+            terminal.payload = try JSONSerialization.data(withJSONObject: json)
+            XCTAssertThrowsError(try personal(terminal: [terminal])) { XCTAssertEqual($0 as? LocalDataExportError, .identityMismatch) }
+        }
+        // Swift equality can equate canonically equivalent IDs; export requires
+        // canonical bytes in both the outer row and the decoded inner payload.
+        for baseline in [terminalBytes, membershipBytes] {
+            let isTerminal = baseline == terminalBytes
+            var json = try XCTUnwrap(JSONSerialization.jsonObject(with: baseline) as? [String: Any])
+            var value = try XCTUnwrap(json["value"] as? [String: Any])
+            value[isTerminal ? "lessonID" : "catalogID"] = "e\u{301}"
+            if isTerminal { value["provenance"] = "legacyCompletedPartial"; value.removeValue(forKey: "dismissalTimeDefinition") }
+            json["value"] = value
+            if isTerminal { terminal.lessonID = "é"; terminal.payload = try JSONSerialization.data(withJSONObject: json) }
+            else { membership.catalogID = "é"; membership.payload = try JSONSerialization.data(withJSONObject: json) }
+            XCTAssertThrowsError(try isTerminal ? personal(terminal: [terminal]) : personal(membership: [membership])) {
+                XCTAssertEqual($0 as? LocalDataExportError, .invalidValue)
+            }
+        }
+        terminal.lessonID = "lesson"; membership.catalogID = "retired.catalog"
+        for (key, bad): (String, Any) in [("conceptIDs", ["concept", "concept"]), ("catalogVersion", 0),
+                                         ("topicIDs", ["z", "a"]), ("seededLessonIDs", ["e\u{301}"])] {
+            var json = try XCTUnwrap(JSONSerialization.jsonObject(with: membershipBytes) as? [String: Any])
+            var value = try XCTUnwrap(json["value"] as? [String: Any]); value[key] = bad; json["value"] = value
+            membership.payload = try JSONSerialization.data(withJSONObject: json)
+            XCTAssertThrowsError(try personal(membership: [membership])) { XCTAssertEqual($0 as? LocalDataExportError, .invalidValue) }
+        }
+    }
+
+    @MainActor
+    func testPersonalLearningProjectionRejectsDuplicatesInvalidScalarsDatesSlotsAndPartialContent() throws {
+        let now = try instant().date
+        let progress = LessonProgress(lessonID: "lesson")
+        let attempt = LessonAttempt(id: firstID, lessonID: "lesson", contentVersion: 2)
+        let slot = LessonSlot(topicID: "topic", slotIndex: 0, lessonID: "lesson", assignedAt: now)
+        let terminal = try LessonTerminalRecord(metadata: terminalMetadata())
+        let membership = try CatalogMembership(membership: storedMembership())
+        for capture in [{ try self.personal(progress: [progress, progress]) }, { try self.personal(attempts: [attempt, attempt]) },
+                        { try self.personal(slots: [slot, slot]) }, { try self.personal(terminal: [terminal, terminal]) },
+                        { try self.personal(membership: [membership, membership]) }] {
+            XCTAssertThrowsError(try capture()) { XCTAssertEqual($0 as? LocalDataExportError, .duplicateIdentity) }
+        }
+        let otherSlot = LessonSlot(topicID: "topic", slotIndex: 1, lessonID: "lesson", assignedAt: now)
+        XCTAssertThrowsError(try personal(slots: [slot, otherSlot])) { XCTAssertEqual($0 as? LocalDataExportError, .duplicateIdentity) }
+        for key in ["wrong", "5:topic:1"] {
+            slot.key = key
+            XCTAssertThrowsError(try personal(slots: [slot])) { XCTAssertEqual($0 as? LocalDataExportError, .identityMismatch) }
+        }
+        for mutation: (LessonAttempt) -> Void in [{ $0.revision = -1 }, { $0.contentVersion = 0 }, { $0.lessonID = "e\u{301}" }] {
+            let row = LessonAttempt(id: firstID, lessonID: "lesson", contentVersion: 2); mutation(row)
+            XCTAssertThrowsError(try personal(attempts: [row])) { XCTAssertEqual($0 as? LocalDataExportError, .invalidValue) }
+        }
+        for mutation: (LessonAttempt) -> Void in [
+            { $0.solutionRevealedAt = Date(timeIntervalSince1970: .nan) },
+            { $0.selfCheckAcknowledgedAt = Date(timeIntervalSince1970: .infinity) },
+            { $0.completedAt = Date(timeIntervalSince1970: 253_402_300_800) }] {
+            let row = LessonAttempt(id: firstID, lessonID: "lesson", contentVersion: 2); mutation(row)
+            XCTAssertThrowsError(try personal(attempts: [row])) { XCTAssertEqual($0 as? LocalDataExportError, .invalidDate) }
+        }
+        for mutation: (LessonProgress) -> Void in [
+            { $0.firstShownAt = Date(timeIntervalSince1970: .nan) }, { $0.startedAt = Date(timeIntervalSince1970: .nan) },
+            { $0.completedAt = Date(timeIntervalSince1970: .nan) }, { $0.dismissedAt = Date(timeIntervalSince1970: .nan) },
+            { $0.lastOpenedAt = Date(timeIntervalSince1970: .nan) }] {
+            let row = LessonProgress(lessonID: "lesson"); mutation(row)
+            XCTAssertThrowsError(try personal(progress: [row])) { XCTAssertEqual($0 as? LocalDataExportError, .invalidDate) }
+        }
+        slot.key = "5:topic:0"; slot.assignedAt = Date(timeIntervalSince1970: .nan)
+        XCTAssertThrowsError(try personal(slots: [slot])) { XCTAssertEqual($0 as? LocalDataExportError, .invalidDate) }
+        var partial = historicalPin().completedSnapshot; partial.exercise = " "
+        attempt.completedContentSnapshot = partial
+        XCTAssertThrowsError(try personal(attempts: [attempt])) { XCTAssertEqual($0 as? LocalDataExportError, .invalidValue) }
+        partial = historicalPin().completedSnapshot; partial.conceptIDs = ["e\u{301}"]; attempt.completedContentSnapshot = partial
+        XCTAssertThrowsError(try personal(attempts: [attempt]))
+    }
+
+    @MainActor
+    func testPersonalLearningProjectionSortsAllEvidenceCollectionsWithoutMutationOrReconciliation() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let seed = ModelContext(container); seed.autosaveEnabled = false
+        let now = try instant().date
+        for (index, id) in ["z.lesson", "a.lesson"].enumerated() {
+            seed.insert(LessonProgress(lessonID: id, status: .started, startedAt: now))
+            seed.insert(LessonAttempt(id: index == 0 ? secondID : firstID, lessonID: id, contentVersion: 1, answerDraft: authored))
+            seed.insert(LessonSlot(topicID: "topic", slotIndex: index, lessonID: id, assignedAt: now))
+            seed.insert(try LessonTerminalRecord(metadata: .init(lessonID: id, provenance: .legacyCompletedPartial,
+                title: nil, topicID: nil, subtopicID: nil, contentVersion: nil, objectiveKey: nil, conceptIDs: nil,
+                normalizedContentHash: nil, format: nil, dismissalTimeDefinition: nil)))
+            seed.insert(try CatalogMembership(membership: .init(catalogID: id, catalogVersion: 1,
+                topicIDs: [], subtopicIDs: [], conceptIDs: [], seededLessonIDs: [])))
+        }
+        try seed.save()
+        let draftOwner = ModelContext(container); draftOwner.autosaveEnabled = false
+        let draft = try XCTUnwrap(draftOwner.fetch(FetchDescriptor<LessonAttempt>()).first)
+        draft.answerDraft = "Unsaved answer"
+        let read = ModelContext(container); read.autosaveEnabled = false
+        let progress = try read.fetch(FetchDescriptor<LessonProgress>()), attempts = try read.fetch(FetchDescriptor<LessonAttempt>())
+        let slots = try read.fetch(FetchDescriptor<LessonSlot>()), terminal = try read.fetch(FetchDescriptor<LessonTerminalRecord>())
+        let membership = try read.fetch(FetchDescriptor<CatalogMembership>())
+        let value = try personal(progress: progress, attempts: attempts, slots: slots, terminal: terminal, membership: membership)
+        let reversed = try personal(progress: progress.reversed(), attempts: attempts.reversed(), slots: slots.reversed(),
+            terminal: terminal.reversed(), membership: membership.reversed())
+        XCTAssertEqual(try value.encoded(), try reversed.encoded())
+        XCTAssertEqual(value.learning.progress.map(\.lessonID), ["a.lesson", "z.lesson"])
+        XCTAssertEqual(value.learning.attempts.map(\.id), [firstID, secondID])
+        XCTAssertEqual(value.learning.slots.map(\.key), ["5:topic:0", "5:topic:1"])
+        XCTAssertEqual(value.learning.terminalRecords.map(\.lessonID), ["a.lesson", "z.lesson"])
+        XCTAssertEqual(value.learning.catalogMembership.map(\.catalogID), ["a.lesson", "z.lesson"])
+        XCTAssertTrue(value.learning.attempts.allSatisfy { $0.answerDraft == authored && $0.pinnedContent == nil })
+        XCTAssertFalse(read.hasChanges); XCTAssertTrue(draftOwner.hasChanges); XCTAssertEqual(draft.answerDraft, "Unsaved answer")
+        let inspect = ModelContext(container); inspect.autosaveEnabled = false
+        XCTAssertEqual(try personal(progress: inspect.fetch(FetchDescriptor<LessonProgress>()),
+            attempts: inspect.fetch(FetchDescriptor<LessonAttempt>()), slots: inspect.fetch(FetchDescriptor<LessonSlot>()),
+            terminal: inspect.fetch(FetchDescriptor<LessonTerminalRecord>()), membership: inspect.fetch(FetchDescriptor<CatalogMembership>())), value)
+        XCTAssertEqual(try inspect.fetchCount(FetchDescriptor<LessonDefinition>()), 0)
+        XCTAssertEqual(try inspect.fetchCount(FetchDescriptor<CatalogImportState>()), 0)
+        XCTAssertEqual([progress.count, attempts.count, slots.count, terminal.count, membership.count], [2, 2, 2, 2, 2])
+        XCTAssertFalse(inspect.hasChanges)
+    }
+
     func testPrivacyFieldAllowlistsHaveNoOpaquePayloadsOrExcludedOwners() throws {
         let json = try object(rich())
         let forbidden: Set<String> = ["credentialReference", "credential", "apiKey", "password", "bookmarkData",

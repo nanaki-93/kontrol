@@ -4,8 +4,8 @@
 plain JSON serialization contract. `Kontrol/Data/Export/DailyDataExportProjection.swift`
 now maps supplied persisted tasks, blocks, Focus sessions, and effective configuration.
 `Kontrol/Data/Export/LearningExportProjection.swift` maps stored Learning taxonomy
-and accepted definitions. Personal Learning evidence, coherent capture, destination
-selection, and delivery remain separate implementation tasks. No import/restore is provided. This is **not an encrypted
+and accepted definitions plus stored personal Learning evidence. Coherent capture,
+destination selection, and delivery remain separate implementation tasks. No import/restore is provided. This is **not an encrypted
 backup**; the JSON contains personal authored content and saved answers.
 
 ## Common rules
@@ -399,7 +399,7 @@ lessonID/contentVersion, even if the currently stored definition has changed.
 there are **no invented identity, version, topic, objective, estimate, source, or
 provenance fields**. Its author content order and exact text remain intact.
 
-The future projection must use `PinnedLessonContent.decode` for present pins.
+The personal evidence projection uses `PinnedLessonContent.decode` for present pins.
 Nil/known unavailable legacy pins become null; present corrupt payloads fail.
 Partial completed content is exported as partial, never replaced by today's
 Definition. An empty pin sentinel that explicitly records unavailable legacy
@@ -432,7 +432,7 @@ slot index. Export performs no rotation or assignment.
 Nonlegacy provenance requires all metadata fields except dismissalTimeDefinition
 to be nonnull. Legacy provenance permits documented gaps. Embedded dismissal
 content must match lessonID and every available contentVersion/topicID/subtopicID/
-objectiveKey/conceptIDs/hash/format field. Future projection uses `metadata()` to
+objectiveKey/conceptIDs/hash/format field. The projection uses `metadata()` to
 validate the stored outer identity and version before mapping. Stored terminal
 metadata is distinct from current progress and never determines replacement
 studied content.
@@ -442,9 +442,60 @@ studied content.
 **schemaVersion** (integer exactly 1), **catalogID** (ID, unique),
 **catalogVersion** (integer >0), **topicIDs**, **subtopicIDs**, **conceptIDs**,
 **seededLessonIDs** (each ID[], unique sets, empty allowed).
-Future projection uses `membership()` to validate the stored outer identity and
+The projection uses `membership()` to validate the stored outer identity and
 version. This is explicit stored membership, not a freshly reconciled catalog.
 Absent rows remain an empty collection, not synthesized current membership.
+
+### Persisted personal evidence projection
+
+`LearningExportProjection.project(progress:attempts:slots:terminalRecords:catalogMembership:into:)`
+is synchronous and main-actor isolated. It accepts already-fetched rows, replaces
+only these five Learning arrays, validates the whole envelope, and returns
+canonicalized detached values. Taxonomy/definitions and other envelope fields
+remain unchanged except for contract sorting. Fetching coherent committed rows
+belongs to the caller; the mapper does not read another owner's unsaved answers.
+
+- Progress maps its stored status and all five optional milestones directly.
+  Attempts map UUID, lesson ID, studied content version, exact saved answer,
+  revision, and all three optional milestones. Dates use the common Instant
+  rules; absent milestones remain null, not inferred from related records.
+  Legacy evidence need not contain today's completion/reveal requirements.
+- Nil pins and the released empty-Data upgrade sentinel become `pinnedContent: null`.
+  Nonempty pins decode through `PinnedLessonContent.decode`, including exact
+  version-1 envelope/definition key shapes and enclosing attempt identity/version.
+  Corrupt present pins fail even when a valid reduced completed snapshot exists.
+  Embedded definitions use the same stored-content fingerprint, canonical-ID,
+  source-specific provenance allowlist, and content validation as definition rows.
+  Generated historical pins retain their original generation metadata.
+- Available completed snapshots map their released reduced fields directly,
+  independently of pin availability. Empty concept sets are valid partial legacy
+  evidence; corrupt present content fails. No identity/version/taxonomy/provenance
+  is invented, and no missing pin or snapshot is replaced with today's definition.
+  Named teaching sections and ordered/repeated self-checks remain exact.
+- Slots map the stored key, topic, index, lesson, and assignment date without
+  recreating the key, rotating slots, or checking current eligibility. The shared
+  contract rejects mismatched keys, negative indices, duplicate keys/lesson IDs,
+  or invalid dates. Scalar lesson links need not exist in current definitions.
+- Terminal rows decode through `metadata()`; catalog rows decode through
+  `membership()`. These boundaries validate version-1 payloads, outer/inner
+  identities, and metadata/membership shape. Stored metadata concept sets and
+  all membership sets must already be sorted and unique under the existing
+  decoder rules; invalid storage is not silently sorted into validity. The mapper
+  additionally requires canonical NFC identity **bytes**, including both outer
+  and inner IDs, parent links, and set elements. The shared contract validates
+  terminal codes, available fields, and embedded reference identity/metadata
+  matches; embedded definitions use the same content mapper as pins.
+- Terminal legacy gaps remain explicit nulls. Studied/dismissal-pin metadata never
+  supplies a replacement studied definition. Only stored dismissal-reference or
+  legacy-recovered-reference content may populate `dismissalTimeDefinition`.
+  Catalog membership maps every stored catalog row/version/set, including retired
+  catalogs, without comparing to installed versions, filtering, or reconciliation.
+  Missing rows remain empty arrays; no catalog resources are read or seeded.
+- Every included row is mapped; corruption aborts the entire export with finite
+  `LocalDataExportError` categories. Decoder errors and raw payloads never escape
+  into exported fields or diagnostics. No save/insertion, answer mutation, slot
+  rotation, catalog initialization/reconciliation, generation, external access,
+  or payload dumping occurs. Subsequent row edits cannot change returned values.
 
 ## Privacy and limitations
 
@@ -459,6 +510,6 @@ before sharing it; it is not guaranteed to be free of sensitive authored content
 No SwiftData object, `Data` blob, arbitrary dictionary, filesystem URL/grant,
 network operation, store reset, generation, restore, or external-project mutation
 belongs to this contract. Daily/configuration and Learning taxonomy/definition
-mapping are implemented; personal evidence projection, coherent capture, and safe
-atomic delivery will be implemented and verified in later checkpoints before
+and personal evidence mapping are implemented; coherent capture and safe atomic
+delivery will be implemented and verified in later checkpoints before
 exposing export UI.
