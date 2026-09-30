@@ -121,11 +121,9 @@ struct QuickCaptureView: View {
                             .accessibilityIdentifier("quick-capture-title")
                     }
                     VStack(alignment: .leading, spacing: AppMetrics.space2) {
-                        Picker("Plan for", selection: $draft.planChoice) {
-                            Text("Today").tag(QuickCaptureDraft.PlanChoice.today)
-                            Text("Choose date").tag(QuickCaptureDraft.PlanChoice.date)
-                            Text("Unplanned").tag(QuickCaptureDraft.PlanChoice.unplanned)
-                        }
+                        AppMenuPicker("Plan for", selection: $draft.planChoice, options: [
+                            ("Today", .today), ("Choose date", .date), ("Unplanned", .unplanned)
+                        ])
                         .accessibilityIdentifier("quick-capture-plan")
                         if draft.planChoice == .date {
                             DatePicker("Plan date", selection: Binding(

@@ -6,8 +6,15 @@ struct LoadingState: View {
     let label: String
     @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
     @Environment(\.loadingReduceMotionOverride) private var previewReduceMotion
+    @Environment(\.appReduceMotion) private var appReduceMotion
 
-    private var reduceMotion: Bool { previewReduceMotion ?? systemReduceMotion }
+    // The production root has already OR-combined app and system reduction.
+    // An explicit preview can still demonstrate either rendering without saving.
+    private var reduceMotion: Bool { Self.resolvedReduceMotion(system: systemReduceMotion || appReduceMotion, preview: previewReduceMotion) }
+
+    static func resolvedReduceMotion(system: Bool, preview: Bool? = nil) -> Bool {
+        preview ?? system
+    }
 
     init(_ label: String) {
         self.label = label

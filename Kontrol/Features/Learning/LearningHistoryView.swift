@@ -264,7 +264,7 @@ struct LearningHistoryView: View {
     }
 
     @ViewBuilder private func pickers(topicIDs: [String], names: [String: String], hasUnknown: Bool) -> some View {
-        Picker("Topic", selection: Binding(get: {
+        AppMenuPicker("Topic", selection: Binding(get: {
             switch filters.topic {
             case .all: return 0
             case .unknown: return 1
@@ -274,23 +274,15 @@ struct LearningHistoryView: View {
             if index == 0 { filters.topic = .all }
             else if index == 1 { filters.topic = .unknown }
             else if topicIDs.indices.contains(index - 2) { filters.topic = .topic(topicIDs[index - 2]) }
-        })) {
-            Text("All topics").tag(0)
-            if hasUnknown { Text("Unknown topic").tag(1) }
-            ForEach(topicIDs.indices, id: \.self) { index in
-                Text(names[topicIDs[index]] ?? topicIDs[index]).tag(index + 2)
-            }
-        }
+        }), options: [("All topics", 0)] + (hasUnknown ? [("Unknown topic", 1)] : []) +
+            topicIDs.enumerated().map { (names[$0.element] ?? $0.element, $0.offset + 2) })
         .accessibilityIdentifier("learning-history-topic-filter")
-        Picker("Status", selection: Binding(get: {
+        AppMenuPicker("Status", selection: Binding(get: {
             switch filters.status { case .all: return 0; case .completed: return 1; case .dismissed: return 2 }
-        }, set: { filters.status = $0 == 1 ? .completed : $0 == 2 ? .dismissed : .all })) {
-            Text("All statuses").tag(0)
-            Text("Completed").tag(1)
-            Text("Dismissed").tag(2)
-        }
+        }, set: { filters.status = $0 == 1 ? .completed : $0 == 2 ? .dismissed : .all }),
+                      options: [("All statuses", 0), ("Completed", 1), ("Dismissed", 2)])
         .accessibilityIdentifier("learning-history-status-filter")
-        Picker("Date", selection: Binding(get: {
+        AppMenuPicker("Date", selection: Binding(get: {
             switch filters.date {
             case .allTime: return 0
             case .today: return 1
@@ -311,12 +303,7 @@ struct LearningHistoryView: View {
                 filters.date = .custom(start: customStart, end: customEnd)
             default: filters.date = .allTime
             }
-        })) {
-            Text("All time").tag(0)
-            Text("Today").tag(1)
-            Text("Last 7 days").tag(2)
-            Text("Custom range").tag(3)
-        }
+        }), options: [("All time", 0), ("Today", 1), ("Last 7 days", 2), ("Custom range", 3)])
         .accessibilityIdentifier("learning-history-date-filter")
     }
 

@@ -40,12 +40,9 @@ struct AISettingsView: View {
                 VStack(alignment: .leading, spacing: AppMetrics.space3) {
                     Text("Provider: OpenAI (only supported provider)")
                         .appTypography(.metadata)
-                    Picker("Model", selection: $model) {
-                        if !models.contains(model) {
-                            Text("Unsupported saved model — choose another").tag(model)
-                        }
-                        ForEach(models, id: \.self) { Text($0).tag($0) }
-                    }
+                    AppMenuPicker("Model", selection: $model, options:
+                        (models.contains(model) ? [] : [("Unsupported saved model — choose another", model)]) +
+                        models.map { ($0, $0) })
                     .accessibilityLabel("OpenAI model")
                     .focused($focusedField, equals: .model)
                     SecureField("New API key", text: $key)

@@ -134,7 +134,7 @@ struct FocusView: View {
     @AccessibilityFocusState private var focusTimerNavigation: Bool
     @FocusState private var focusSessionsButton: Bool
     @FocusState private var focusBackButton: Bool
-    @ScaledMetric(relativeTo: .largeTitle) private var countdownFontSize: CGFloat = 64
+    @AppScaledMetric(relativeTo: .largeTitle) private var countdownFontSize: CGFloat = 64
     @State private var startError: FocusError?
     @State private var actionError: (sessionID: UUID, state: FocusSessionState, message: String)?
 
@@ -490,16 +490,13 @@ struct FocusView: View {
                     Text("Task choices are unavailable. You can still start without a task.")
                         .appTypography(.metadata)
                 }
-                Picker("Link to task", selection: Binding(
+                AppMenuPicker("Link to task", selection: Binding(
                     get: { draft.linkedTaskID },
                     set: { draft.selectTask($0); startError = nil }
-                )) {
-                    Text("No task").tag(nil as UUID?)
-                    ForEach(openTasks) { task in Text(task.title).tag(task.id as UUID?) }
-                    if let id = draft.linkedTaskID, !openTasks.contains(where: { $0.id == id }) {
-                        Text("Unavailable task — choose again").tag(id as UUID?)
-                    }
-                }
+                ), options: [("No task", nil as UUID?)] + openTasks.map { ($0.title, Optional($0.id)) } +
+                    (draft.linkedTaskID.map { id in
+                        openTasks.contains(where: { $0.id == id }) ? [] : [("Unavailable task — choose again", Optional(id))]
+                    } ?? []))
                 .frame(maxWidth: 380)
                 .accessibilityIdentifier("focus-task-picker")
                 if openTasks.isEmpty && taskStore.readState == .loaded {
@@ -518,16 +515,13 @@ struct FocusView: View {
                     Text("Lesson choices are unavailable. You can still start without a lesson.")
                         .appTypography(.metadata)
                 }
-                Picker("Link to lesson", selection: Binding(
+                AppMenuPicker("Link to lesson", selection: Binding(
                     get: { draft.linkedLessonID },
                     set: { draft.selectLesson($0); startError = nil }
-                )) {
-                    Text("No lesson").tag(nil as String?)
-                    ForEach(lessons ?? []) { lesson in Text(lesson.title).tag(lesson.id as String?) }
-                    if let id = draft.linkedLessonID, lessons?.contains(where: { $0.id == id }) != true {
-                        Text("Unavailable lesson — choose again").tag(id as String?)
-                    }
-                }
+                ), options: [("No lesson", nil as String?)] + (lessons ?? []).map { ($0.title, Optional($0.id)) } +
+                    (draft.linkedLessonID.map { id in
+                        lessons?.contains(where: { $0.id == id }) == true ? [] : [("Unavailable lesson — choose again", Optional(id))]
+                    } ?? []))
                 .frame(maxWidth: 380)
                 .accessibilityIdentifier("focus-lesson-picker")
                 if lessons?.isEmpty == true {

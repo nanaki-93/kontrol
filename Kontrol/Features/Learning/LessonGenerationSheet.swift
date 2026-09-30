@@ -142,19 +142,16 @@ struct LessonGenerationSheet: View {
                         Text("Concepts: \(selected.conceptIDs.map { id in catalog.concepts.first { $0.id == id }?.name ?? id }.joined(separator: ", "))")
                         Text("Objective: \(selected.text)")
                             .fixedSize(horizontal: false, vertical: true)
-                        Picker("Format", selection: $format) {
-                            ForEach(selected.formats, id: \.self) { Text($0.capitalized).tag($0) }
-                        }
+                        AppMenuPicker("Format", selection: $format,
+                                      options: selected.formats.map { ($0.capitalized, $0) })
                         .disabled(running)
-                        Picker("Difficulty", selection: $difficulty) {
-                            ForEach(selected.difficulties, id: \.self) { Text($0.capitalized).tag($0) }
-                        }
+                        AppMenuPicker("Difficulty", selection: $difficulty,
+                                      options: selected.difficulties.map { ($0.capitalized, $0) })
                         .disabled(running)
                     }
                     if objectives.count > 1 {
-                        Picker("Objective", selection: $objectiveKey) {
-                            ForEach(objectives, id: \.key) { item in Text(item.text).tag(Optional(item.key)) }
-                        }
+                        AppMenuPicker("Objective", selection: $objectiveKey,
+                                      options: objectives.map { ($0.text, Optional($0.key)) })
                         .disabled(running)
                     }
                 }

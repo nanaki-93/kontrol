@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import SwiftUI
+import SwiftData
 import XCTest
 @testable import Kontrol
 
@@ -33,6 +34,10 @@ final class DesignSystemComponentTests: XCTestCase {
         try check(host, descendants(inspected))
     }
 
+    private func popups(_ view: NSView) -> [NSPopUpButton] {
+        (view as? NSPopUpButton).map { [$0] } ?? view.subviews.flatMap(popups)
+    }
+
     private func frame(_ element: AXUIElement) throws -> CGRect {
         let position = try XCTUnwrap(attribute(element, kAXPositionAttribute))
         let size = try XCTUnwrap(attribute(element, kAXSizeAttribute))
@@ -41,6 +46,291 @@ final class DesignSystemComponentTests: XCTestCase {
         XCTAssertTrue(AXValueGetValue(unsafeBitCast(position, to: AXValue.self), .cgPoint, &origin))
         XCTAssertTrue(AXValueGetValue(unsafeBitCast(size, to: AXValue.self), .cgSize, &dimensions))
         return CGRect(origin: origin, size: dimensions)
+    }
+
+    private struct AccessibilityProbeValue: Equatable {
+        let size: DynamicTypeSize
+        let reduced: Bool
+        let metric: CGFloat
+        let previewScale: CGFloat?
+        let previewMotion: Bool?
+        let font: Font?
+    }
+
+    private struct AccessibilityProbe: View {
+        @Environment(\.dynamicTypeSize) private var systemSize
+        @Environment(\.appAccessibilityPreferences) private var effective
+        @Environment(\.accessibilityReduceMotion) private var systemReduced
+        @Environment(\.appReduceMotion) private var appReduced
+        @Environment(\.appTextScaleOverride) private var previewScale
+        @Environment(\.loadingReduceMotionOverride) private var previewMotion
+        @Environment(\.font) private var font
+        @AppScaledMetric(relativeTo: .largeTitle) private var metric: CGFloat = 64
+        let report: (AccessibilityProbeValue) -> Void
+
+        var body: some View {
+            ProbeView(value: AccessibilityProbeValue(size: effective?.textSize ?? systemSize, reduced: systemReduced || appReduced, metric: metric,
+                                                     previewScale: previewScale, previewMotion: previewMotion,
+                                                     font: font), report: report)
+                .frame(width: 1, height: 1)
+        }
+
+        private struct ProbeView: NSViewRepresentable {
+            let value: AccessibilityProbeValue
+            let report: (AccessibilityProbeValue) -> Void
+            func makeNSView(context: Context) -> NSView { NSView() }
+            func updateNSView(_ view: NSView, context: Context) { report(value) }
+        }
+    }
+
+    private struct AccessibilitySheetFixture: View {
+        @State private var presented = false
+        let report: (AccessibilityProbeValue) -> Void
+        var body: some View {
+            Button("Open accessibility sheet") { presented = true }
+                .sheet(isPresented: $presented) {
+                    VStack {
+                        AccessibilityProbe(report: report)
+                        Text("Inherited typography").appTypography(.body)
+                            .accessibilityIdentifier("sheet-typography")
+                        TextField("Native input", text: .constant("Inherited native input"))
+                        AppMenuPicker("Inherited picker", selection: .constant(1), options: [("Choice", 1)])
+                        Button("Close accessibility sheet") { presented = false }
+                    }.padding().frame(width: 400, height: 220)
+                }
+        }
+    }
+
+    func testProductionModifierFeedsTypographyNativeControlsAndScaledMetricsOnce() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let store = AppPreferencesStore(repository: SwiftDataAppPreferencesRepository(container: container))
+        var probe: AccessibilityProbeValue?
+        var calls = 0
+        func fixture() -> some View {
+            VStack {
+                AccessibilityProbe { probe = $0 }
+                Text("MMMMMMMM").appTypography(.body).accessibilityIdentifier("shared-font")
+                Button("MMMMMMMM") { calls += 1 }.accessibilityIdentifier("native-font")
+                    .keyboardShortcut("r", modifiers: .command)
+                AppMenuPicker("Native picker", selection: .constant("MMMMMMMMMMMMMMMMMMMMMMMM"),
+                              options: [("MMMMMMMMMMMMMMMMMMMMMMMM", "MMMMMMMMMMMMMMMMMMMMMMMM")], showsLabel: false)
+                    .fixedSize().accessibilityIdentifier("native-picker")
+                TextField("Native input", text: .constant("MMMMMMMM"))
+                    .fixedSize().accessibilityIdentifier("native-input")
+            }.fixedSize().padding().appAccessibilityPreferences(store)
+                .environment(\.dynamicTypeSize, .large)
+        }
+        var standard: [String: CGRect] = [:]
+        try inspect(fixture(), width: 500) { _, nodes in
+            XCTAssertEqual(probe?.size, .large)
+            XCTAssertEqual(probe?.reduced, NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+            XCTAssertNil(probe?.previewScale)
+            XCTAssertNil(probe?.previewMotion)
+            for id in ["shared-font", "native-font", "native-input", "native-picker"] {
+                standard[id] = try frame(XCTUnwrap(nodes.first { attribute($0, kAXIdentifierAttribute) as? String == id }))
+            }
+        }
+        var draft = AppPreferencesDraft()
+        draft.textSize = .large
+        draft.reduceMotion = .reduce
+        try store.save(draft, expectedRevision: nil)
+        try inspect(fixture(), width: 500) { host, nodes in
+            let effective = try XCTUnwrap(probe)
+            XCTAssertEqual(effective.size, .xxLarge)
+            XCTAssertTrue(effective.reduced)
+            XCTAssertEqual(effective.font, AppTypography.nativeControlFont(for: .xxLarge))
+            XCTAssertNil(effective.previewScale, "Production must not commandeer preview seams")
+            XCTAssertNil(effective.previewMotion)
+            for id in ["shared-font", "native-font", "native-input", "native-picker"] {
+                let enlarged = try frame(XCTUnwrap(nodes.first { attribute($0, kAXIdentifierAttribute) as? String == id }))
+                XCTAssertGreaterThan(enlarged.width, try XCTUnwrap(standard[id]).width * 1.15, id)
+                XCTAssertLessThan(enlarged.width, try XCTUnwrap(standard[id]).width * 1.5, "No double scaling: \(id)")
+            }
+            let popup = try XCTUnwrap(popups(host).first)
+            XCTAssertEqual(try XCTUnwrap(popup.font).pointSize, NSFont.systemFontSize * 1.3, accuracy: 0.001)
+            XCTAssertEqual(try XCTUnwrap(popup.menu?.font).pointSize, NSFont.systemFontSize * 1.3, accuracy: 0.001)
+            let button = try XCTUnwrap(nodes.first { attribute($0, kAXIdentifierAttribute) as? String == "native-font" })
+            XCTAssertEqual(attribute(button, kAXRoleAttribute) as? String, kAXButtonRole)
+            XCTAssertEqual(attribute(button, kAXDescriptionAttribute) as? String, "MMMMMMMM")
+            XCTAssertEqual(AXUIElementPerformAction(button, kAXPressAction as CFString), .success)
+            XCTAssertEqual(calls, 1)
+            let window = try XCTUnwrap(host.window)
+            let key = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command,
+                                                   timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                                                   characters: "r", charactersIgnoringModifiers: "r", isARepeat: false, keyCode: 15))
+            XCTAssertTrue(window.performKeyEquivalent(with: key))
+            XCTAssertEqual(calls, 2, "Hosted native labels must retain shortcut/press behavior exactly once")
+        }
+        XCTAssertEqual(try XCTUnwrap(probe).metric, 64 * 1.3, accuracy: 0.001,
+                       "macOS metric must grow to 130% once, including in sheets")
+    }
+
+    func testPresentedSheetInheritsEffectiveInputsAndLiveCommittedUpdatesWithoutOverrides() throws {
+        for size in [DynamicTypeSize.large, .accessibility2] {
+            let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+            let store = AppPreferencesStore(repository: SwiftDataAppPreferencesRepository(container: container))
+            var probe: AccessibilityProbeValue?
+            try inspect(AccessibilitySheetFixture { probe = $0 }.appAccessibilityPreferences(store)
+                .environment(\.dynamicTypeSize, size)
+                .environment(\.appReduceMotion, size == .accessibility2), width: 500) { host, nodes in
+                    let trigger = try XCTUnwrap(nodes.first { attribute($0, kAXDescriptionAttribute) as? String == "Open accessibility sheet" })
+                    XCTAssertEqual(AXUIElementPerformAction(trigger, kAXPressAction as CFString), .success)
+                    RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+                    XCTAssertEqual(probe?.size, size)
+                    XCTAssertEqual(probe?.font, AppTypography.nativeControlFont(for: size))
+                    @MainActor func sheetNodes() -> [AXUIElement] {
+                        let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+                        return (attribute(app, kAXWindowsAttribute) as? [AXUIElement] ?? []).flatMap { descendants($0) }
+                    }
+                    @MainActor func textWidth() throws -> CGFloat {
+                        try frame(XCTUnwrap(sheetNodes().first {
+                            attribute($0, kAXIdentifierAttribute) as? String == "sheet-typography"
+                        })).width
+                    }
+                    let baselineWidth = try textWidth()
+                    let sheetContent = try XCTUnwrap(host.window?.attachedSheet?.contentView)
+                    let popup = try XCTUnwrap(popups(sheetContent).first {
+                        $0.accessibilityLabel() == "Inherited picker"
+                    })
+                    @MainActor func assertPickerFont(_ size: DynamicTypeSize) throws {
+                        let points = NSFont.systemFontSize * AppTypography.systemScale(for: size)
+                        let font = try XCTUnwrap(popup.font)
+                        XCTAssertEqual(font.pointSize, points, accuracy: 0.001)
+                        XCTAssertEqual(try XCTUnwrap(popup.menu?.font).pointSize, points, accuracy: 0.001)
+                        XCTAssertGreaterThanOrEqual(popup.bounds.height, font.ascender - font.descender,
+                                                    "Native control must have room for enlarged glyphs")
+                    }
+                    try assertPickerFont(size)
+                    var draft = AppPreferencesDraft()
+                    draft.textSize = .large
+                    draft.reduceMotion = .reduce
+                    let receipt = try store.save(draft, expectedRevision: nil)
+                    RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+                    let effectiveSize = max(size, .xxLarge)
+                    XCTAssertEqual(probe?.size, effectiveSize, "A live sheet must update without being recreated")
+                    try assertPickerFont(effectiveSize)
+                    XCTAssertEqual(probe?.reduced, true)
+                    XCTAssertEqual(probe?.font, AppTypography.nativeControlFont(for: effectiveSize))
+                    XCTAssertEqual(try XCTUnwrap(probe).metric, 64 * AppTypography.systemScale(for: effectiveSize), accuracy: 0.001)
+                    XCTAssertEqual(try textWidth() / baselineWidth, size == .large ? 1.3 : 1, accuracy: 0.03)
+                    XCTAssertNil(probe?.previewScale)
+                    XCTAssertNil(probe?.previewMotion)
+                    try store.save(AppPreferencesDraft(), expectedRevision: receipt.revision)
+                    RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+                    XCTAssertEqual(probe?.size, size)
+                    try assertPickerFont(size)
+                    XCTAssertEqual(probe?.reduced, size == .accessibility2 || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+                                   "Inherited/system reduction remains enabled when app reduction is turned off")
+                    XCTAssertEqual(try textWidth(), baselineWidth, accuracy: 1)
+                    let close = try XCTUnwrap(sheetNodes().first {
+                        attribute($0, kAXDescriptionAttribute) as? String == "Close accessibility sheet"
+                    })
+                    _ = AXUIElementPerformAction(close, kAXPressAction as CFString)
+                    RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+                }
+        }
+    }
+
+    func testNativePickerKeepsValueIdentityFocusDisabledStateAndDoesNotWriteDuringUpdates() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let store = AppPreferencesStore(repository: SwiftDataAppPreferencesRepository(container: container))
+        var selected: Int? = 1
+        var writes = 0
+        let selection = Binding<Int?>(get: { selected }, set: { selected = $0; writes += 1 })
+        func fixture(disabled: Bool = false) -> some View {
+            AppMenuPicker("Native choices", selection: selection, options: [
+                ("No choice", nil), ("Same title", 1), ("Same title", 2)
+            ]).disabled(disabled).padding().appAccessibilityPreferences(store)
+                .environment(\.dynamicTypeSize, .large)
+        }
+        try inspect(fixture(), width: 500) { host, nodes in
+            let popup = try XCTUnwrap(popups(host).first)
+            XCTAssertEqual(writes, 0)
+            XCTAssertEqual(popup.numberOfItems, 3, "Duplicate titles must not collapse distinct values")
+            XCTAssertEqual(popup.indexOfSelectedItem, 1)
+            let axPopup = try XCTUnwrap(nodes.first { attribute($0, kAXRoleAttribute) as? String == kAXPopUpButtonRole })
+            XCTAssertEqual(attribute(axPopup, kAXDescriptionAttribute) as? String, "Native choices")
+            XCTAssertTrue(try XCTUnwrap(host.window).makeFirstResponder(popup))
+            var draft = AppPreferencesDraft()
+            draft.textSize = .large
+            let receipt = try store.save(draft, expectedRevision: nil)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+            XCTAssertTrue(host.window?.firstResponder === popup, "Live font updates preserve native keyboard focus")
+            XCTAssertEqual(popup.indexOfSelectedItem, 1)
+            XCTAssertEqual(writes, 0, "Font/menu updates must not call the user binding")
+            // Exercise the native target/action path, including duplicate titles
+            // and the nil option, rather than invoking a SwiftUI test closure.
+            for (index, value) in [(2, Optional(2)), (0, nil)] {
+                popup.menu?.performActionForItem(at: index)
+                XCTAssertEqual(selected, value)
+            }
+            XCTAssertEqual(writes, 2)
+            try store.save(AppPreferencesDraft(), expectedRevision: receipt.revision)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+            XCTAssertEqual(popup.font?.pointSize, NSFont.systemFontSize)
+            XCTAssertEqual(writes, 2, "Returning to System must not edit the choice")
+            XCTAssertTrue(host.window?.firstResponder === popup)
+        }
+        try inspect(fixture(disabled: true), width: 500) { host, nodes in
+            let popup = try XCTUnwrap(popups(host).first)
+            XCTAssertFalse(popup.isEnabled)
+            let axPopup = try XCTUnwrap(nodes.first { attribute($0, kAXRoleAttribute) as? String == kAXPopUpButtonRole })
+            XCTAssertEqual((attribute(axPopup, kAXEnabledAttribute) as? NSNumber)?.boolValue, false)
+            popup.selectItem(at: 1)
+            _ = popup.sendAction(popup.action, to: popup.target)
+            XCTAssertNil(selected)
+            XCTAssertEqual(writes, 2)
+        }
+    }
+
+    func testBothRealReadyScenesUpdateSharedTypographyFromOneCommittedStore() async throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let launch = LaunchCoordinator(open: { container })
+        await launch.start()
+        XCTAssertEqual(launch.state, .ready)
+        let store = try XCTUnwrap(launch.dependencies).appPreferencesStore
+        let suite = "AccessibilityScenes.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let navigation = NavigationStore(preferences: UserDefaultsDestinationPreferences(defaults: defaults))
+        navigation.select(.settings)
+        let main = MainWindowContent(launch: launch, navigation: navigation).environment(\.dynamicTypeSize, .large)
+        let settings = SettingsSceneContent(launch: launch).environment(\.dynamicTypeSize, .large)
+        var baseline: [CGFloat] = []
+        func headingWidth(_ nodes: [AXUIElement]) throws -> CGFloat {
+            let heading = try XCTUnwrap(nodes.first { attribute($0, kAXRoleAttribute) as? String == kAXHeadingRole &&
+                (attribute($0, kAXValueAttribute) as? String == "AI lessons" ||
+                 attribute($0, kAXDescriptionAttribute) as? String == "AI lessons") })
+            return try frame(heading).width
+        }
+        var enlarged: [CGFloat] = []
+        try inspect(main, width: 1440) { mainHost, mainNodes in
+            try inspect(settings, width: 1440) { settingsHost, settingsNodes in
+                baseline = [try headingWidth(mainNodes), try headingWidth(settingsNodes)]
+                var draft = AppPreferencesDraft()
+                draft.textSize = .large
+                draft.reduceMotion = .reduce
+                try store.save(draft, expectedRevision: nil)
+                mainHost.layoutSubtreeIfNeeded()
+                settingsHost.layoutSubtreeIfNeeded()
+                RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+                @MainActor func currentNodes(_ window: NSWindow?) throws -> [AXUIElement] {
+                    let title = try XCTUnwrap(window).title
+                    let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+                    let axWindow = try XCTUnwrap((attribute(app, kAXWindowsAttribute) as? [AXUIElement])?.first {
+                        attribute($0, kAXTitleAttribute) as? String == title
+                    })
+                    return descendants(axWindow)
+                }
+                enlarged = [try headingWidth(currentNodes(mainHost.window)),
+                            try headingWidth(currentNodes(settingsHost.window))]
+            }
+        }
+        XCTAssertEqual(baseline[0], baseline[1], accuracy: 1)
+        XCTAssertEqual(enlarged[0], enlarged[1], accuracy: 1)
+        for index in 0..<2 {
+            XCTAssertEqual(enlarged[index] / baseline[index], 1.3, accuracy: 0.05)
+        }
     }
 
     func testActionVariantsAreNativeNamedButtonsWithTargetsAndSingleCallbacks() throws {

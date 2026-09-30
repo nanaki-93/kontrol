@@ -166,6 +166,7 @@ struct MainWindowContent: View {
         Group {
             if let dependencies = launch.dependencies, launch.state == .ready {
                 AppShell(navigation: navigation, dependencies: dependencies)
+                    .appAccessibilityPreferences(dependencies.appPreferencesStore)
                     .modelContainer(dependencies.container)
                     .onAppear {
                         navigation.attachDrafts(dependencies.lessonDraftStore)
@@ -207,6 +208,7 @@ struct SettingsSceneContent: View {
                         .frame(maxWidth: .infinity, minHeight: 340, alignment: .topLeading)
                 }
                 .background(AppColors.background)
+                .appAccessibilityPreferences(dependencies.appPreferencesStore)
             } else if case .failed(let failure) = launch.state {
                 RecoveryView(failure: failure, launch: launch, onRetry: {
                     recoveryFailure = failure

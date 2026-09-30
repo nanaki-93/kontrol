@@ -1,5 +1,6 @@
 import Combine
 import SwiftData
+import SwiftUI
 import XCTest
 @testable import Kontrol
 
@@ -30,6 +31,77 @@ private final class PreferencesRepositorySpy: AppPreferencesRepository {
 
 @MainActor
 final class AppPreferencesStoreTests: XCTestCase {
+    func testAccessibilityResolverPreservesSystemMappingsAndLargeTextIsAMinimumNotAMultiplier() throws {
+        let system = AppPreferences.defaults
+        let large = try AppPreferences(focusDefaultMinutes: 25, textSize: .large)
+        let sizes: [DynamicTypeSize] = [.xSmall, .small, .medium, .large, .xLarge, .xxLarge, .xxxLarge,
+                                      .accessibility1, .accessibility2, .accessibility3, .accessibility4, .accessibility5]
+        for size in sizes {
+            for preferences in [nil, system] {
+                let effective = AppAccessibilityPreferences.resolve(preferences, systemTextSize: size,
+                                                                     systemReduceMotion: false)
+                XCTAssertEqual(effective.textSize, size)
+                XCTAssertEqual(AppTypography.scale(for: effective.textSize), AppTypography.systemScale(for: size))
+            }
+            let effective = AppAccessibilityPreferences.resolve(large, systemTextSize: size, systemReduceMotion: false)
+            XCTAssertEqual(effective.textSize, max(size, .xxLarge))
+            for role in AppTypography.Role.allCases {
+                XCTAssertEqual(AppTypography.pointSize(role, for: effective.textSize),
+                               role.baseSize * max(1.3, AppTypography.systemScale(for: size)), accuracy: 0.001)
+            }
+            // Resolution is idempotent, including inherited sheet inputs.
+            XCTAssertEqual(AppAccessibilityPreferences.resolve(large, systemTextSize: effective.textSize,
+                                                               systemReduceMotion: effective.reduceMotion), effective)
+        }
+    }
+
+    func testAccessibilityMotionORTruthTableAndPreviewSeamsAreNotPreferences() throws {
+        for motion in AppReduceMotion.allCases {
+            let preferences = try AppPreferences(focusDefaultMinutes: 25, reduceMotion: motion)
+            for system in [false, true] {
+                let effective = AppAccessibilityPreferences.resolve(preferences, systemTextSize: .large,
+                                                                     systemReduceMotion: system)
+                XCTAssertEqual(effective.reduceMotion, system || motion == .reduce)
+                XCTAssertEqual(LoadingState.resolvedReduceMotion(system: effective.reduceMotion), effective.reduceMotion)
+                // Explicit previews remain replacement seams, outside production resolution.
+                XCTAssertFalse(LoadingState.resolvedReduceMotion(system: effective.reduceMotion, preview: false))
+                XCTAssertTrue(LoadingState.resolvedReduceMotion(system: effective.reduceMotion, preview: true))
+                XCTAssertEqual(AppTypography.scale(for: effective.textSize, override: 1), 1)
+            }
+        }
+        XCTAssertTrue(AppAccessibilityPreferences.resolve(nil, systemTextSize: .large,
+                                                          systemReduceMotion: true).reduceMotion)
+    }
+
+    func testAccessibilityUsesOnlyReadableCommittedReceiptsAndFallsBackToSystemOnReadFailure() throws {
+        let repository = PreferencesRepositorySpy()
+        let store = AppPreferencesStore(repository: repository)
+        let editor = AppPreferencesEditorDraft(snapshot: store.editableSnapshot)
+        func effective() -> AppAccessibilityPreferences {
+            AppAccessibilityPreferences.resolve(store.editableSnapshot?.preferences,
+                                                systemTextSize: .large, systemReduceMotion: false)
+        }
+        let baseline = effective()
+        editor.draft.textSize = .large
+        editor.draft.reduceMotion = .reduce
+        XCTAssertEqual(effective(), baseline, "Local edits must not affect any scene")
+        repository.saveFailure = PreferencesRepositorySpy.Injected.failed
+        XCTAssertThrowsError(try editor.save(using: store))
+        XCTAssertEqual(effective(), baseline)
+        repository.saveFailure = nil
+        try editor.save(using: store)
+        XCTAssertEqual(effective(), AppAccessibilityPreferences(textSize: .xxLarge, reduceMotion: true, largeTextRequested: true))
+        let saved = store.committed
+        repository.readFailure = PreferencesRepositorySpy.Injected.failed
+        store.retry()
+        XCTAssertEqual(store.committed, saved, "Keep saved values without treating them as currently readable")
+        XCTAssertEqual(effective(), baseline, "A read failure uses safe system behavior")
+        repository.readFailure = nil
+        store.retry()
+        XCTAssertEqual(effective(), AppAccessibilityPreferences(textSize: .xxLarge, reduceMotion: true, largeTextRequested: true))
+        XCTAssertEqual(repository.saves, 2, "Rendering and retries never persist accessibility inputs")
+    }
+
     func testMissingPreferencesLoadDefaultsWithoutSavingAndRetryIsExplicit() {
         let repository = PreferencesRepositorySpy()
         let store = AppPreferencesStore(repository: repository)

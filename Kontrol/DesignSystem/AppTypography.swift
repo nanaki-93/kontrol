@@ -1,7 +1,9 @@
+import AppKit
 import SwiftUI
 
 /// The selected local monospaced scale in .mockups/design-system/typography.html.
-/// Font resolution is presentation-only: neither the system input nor a preview override is persisted.
+/// Font resolution is presentation-only. The production modifier supplies the
+/// effective system/app size; preview overrides never become stored preferences.
 enum AppTypography {
     enum Role: CaseIterable {
         case page, dialog, section, body, metadata, navigation, action
@@ -56,14 +58,24 @@ enum AppTypography {
         role.baseSize * scale(for: size, override: override)
     }
 
+    /// Native controls keep their system face and baseline size. Use absolute
+    /// points, just like shared typography, so the effective input scales once.
+    static func nativeControlFont(for size: DynamicTypeSize) -> Font {
+        .system(size: nativeNSControlFont(for: size).pointSize)
+    }
+
+    static func nativeNSControlFont(for size: DynamicTypeSize) -> NSFont {
+        .systemFont(ofSize: NSFont.systemFontSize * systemScale(for: size))
+    }
+
     static func font(_ role: Role, for size: DynamicTypeSize, override: CGFloat? = nil) -> Font {
         .system(size: pointSize(role, for: size, override: override),
                 weight: role.weight, design: .monospaced)
     }
 }
 
-/// Preview/test injection only. Use `dynamicTypeSize` for the system value; do not
-/// install an app-wide preference or store this override in UserDefaults.
+/// Preview/test injection only. Production uses the effective `dynamicTypeSize`
+/// from appAccessibilityPreferences; never store this override in UserDefaults.
 private struct AppTextScaleOverrideKey: EnvironmentKey {
     static let defaultValue: CGFloat? = nil
 }
@@ -79,9 +91,10 @@ private struct AppTypographyModifier: ViewModifier {
     let role: AppTypography.Role
     @Environment(\.dynamicTypeSize) private var systemSize
     @Environment(\.appTextScaleOverride) private var previewScale
+    @Environment(\.appAccessibilityPreferences) private var effective
 
     func body(content: Content) -> some View {
-        content.font(AppTypography.font(role, for: systemSize, override: previewScale))
+        content.font(AppTypography.font(role, for: effective?.textSize ?? systemSize, override: previewScale))
     }
 }
 
