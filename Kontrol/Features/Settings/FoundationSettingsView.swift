@@ -10,23 +10,28 @@ struct FoundationSettingsView: View {
     @ObservedObject private var preferences: AppPreferencesStore
     @ObservedObject private var ai: AISettingsStore
     @ObservedObject private var news: NewsStore
+    @ObservedObject private var projects: ProjectStore
+    // Keep a stale-review gate across Back/section changes in this Settings client.
+    @StateObject private var foldersManagement: ProjectFoldersSettingsState
     @State private var section: Section = .hub
     @State private var saved = false
     @FocusState private var focusedAction: HubAction?
 
-    private enum Section { case hub, general, ai, news }
-    private enum HubAction: Hashable { case general, ai, news, retry, back }
+    private enum Section { case hub, general, ai, news, folders }
+    private enum HubAction: Hashable { case general, ai, news, folders, retry, back }
 
     init(dependencies: AppDependencies) {
         self.dependencies = dependencies
         _preferences = ObservedObject(wrappedValue: dependencies.appPreferencesStore)
         _ai = ObservedObject(wrappedValue: dependencies.aiSettingsStore)
         _news = ObservedObject(wrappedValue: dependencies.newsStore)
+        _projects = ObservedObject(wrappedValue: dependencies.projectStore)
+        _foldersManagement = StateObject(wrappedValue: ProjectFoldersSettingsState(store: dependencies.projectStore))
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppMetrics.space4) {
-            if section == .ai || section == .news {
+            if section == .ai || section == .news || section == .folders {
                 // Shared header moves Back below the title when its ideal width
                 // does not fit. Native Settings needs no global destination bar.
                 PageHeader("Settings") { backAction }
@@ -48,6 +53,8 @@ struct FoundationSettingsView: View {
                 NewsManagementView(store: news)
                     .padding(AppMetrics.space4)
                     .background(AppColors.surface, in: RoundedRectangle(cornerRadius: AppMetrics.mediumRadius))
+            case .folders:
+                ProjectFoldersSettingsView(store: projects, management: foldersManagement)
             }
         }
         // The scroll host proposes an unconstrained height. Keep that natural
@@ -60,7 +67,10 @@ struct FoundationSettingsView: View {
         .foregroundStyle(AppColors.textPrimary)
         .preferredColorScheme(.dark)
         .modelContainer(dependencies.container)
-        .onAppear { news.loadIfNeeded() } // Saved local summaries only; never refresh feeds.
+        .onAppear {
+            news.loadIfNeeded() // Saved local summaries only; never refresh feeds.
+            try? projects.loadReferencesIfNeeded() // No grant resolution or inspection admission.
+        }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("settings-content")
     }
@@ -122,6 +132,13 @@ struct FoundationSettingsView: View {
             ActionButton("Manage News topics & feeds") { section = .news; focusedAction = .back }
                 .focused($focusedAction, equals: .news)
                 .accessibilityIdentifier("settings-news")
+            Text(ProjectFoldersSettingsView.summary(projects))
+                .appTypography(.body)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("settings-folders-summary")
+            ActionButton("Manage project folders") { section = .folders; focusedAction = .back }
+                .focused($focusedAction, equals: .folders)
+                .accessibilityIdentifier("settings-folders")
         }
     }
 
@@ -137,7 +154,11 @@ struct FoundationSettingsView: View {
         ActionButton("Back to Settings", symbol: "chevron.left") {
             let origin = section
             section = .hub
-            focusedAction = origin == .ai ? .ai : .news
+            switch origin {
+            case .ai: focusedAction = .ai
+            case .folders: focusedAction = .folders
+            default: focusedAction = .news
+            }
         }
         .focused($focusedAction, equals: .back)
         .accessibilityHint("Return to the Settings hub")

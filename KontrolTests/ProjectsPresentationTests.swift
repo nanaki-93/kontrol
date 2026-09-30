@@ -27,11 +27,15 @@ private actor CardInspector: ProjectInspecting {
 
 @MainActor
 private final class ListRepository: ProjectReferenceRepository {
-    let references: [ProjectReferenceSnapshot]
+    var references: [ProjectReferenceSnapshot]
     init(_ references: [ProjectReferenceSnapshot]) { self.references = references }
     func fetchAll() throws -> [ProjectReferenceSnapshot] { references }
     func insert(_ input: NewProjectReference) throws -> ProjectReferenceSnapshot { throw CancellationError() }
-    func remove(id: UUID, expectedRevision: UUID) throws { throw CancellationError() }
+    func remove(id: UUID, expectedRevision: UUID) throws {
+        guard let reference = references.first(where: { $0.id == id }) else { throw ProjectReferencePersistenceError.notFound }
+        guard reference.revision == expectedRevision else { throw ProjectReferencePersistenceError.staleRevision }
+        references.removeAll { $0.id == id }
+    }
     func reconnect(id: UUID, expectedRevision: UUID,
                    input: ReconnectedProjectReference) throws -> ProjectReferenceSnapshot { throw CancellationError() }
     func recordSuccessfulRead(id: UUID, expectedRevision: UUID,
@@ -107,6 +111,47 @@ final class ProjectsPresentationTests: XCTestCase {
         ProjectReferenceSnapshot(id: id, manifestID: "same-id", bookmarkData: Data([UInt8(order + 1)]),
                                  displayOrder: order, displayNameHint: "Same project",
                                  lastSuccessfulReadAt: nil, revision: UUID())
+    }
+
+    func testSettingsRemovalUpdatesSharedProjectsSelectionDetailAndPickerOwnership() async throws {
+        let id = UUID(), survivor = UUID()
+        let inspector = CardInspector([1: cardInspection([card("next")]), 2: cardInspection([])])
+        let store = ProjectStore(inspector: inspector, repository: ListRepository([
+            reference(id, order: 0), reference(survivor, order: 1)]))
+        try store.enterProjects()
+        for _ in 0..<100 where store.rows.contains(where: { $0.isRefreshing }) {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        store.selectFeature("next", in: id)
+        XCTAssertNotNil(store.selectedFeatureContent)
+        let projects = NSHostingView(rootView: ProjectsView(store: store))
+        let folders = NSHostingView(rootView: ProjectFoldersSettingsView(store: store))
+        let management = ProjectFoldersSettingsState(store: store)
+        management.requestRemoval(id)
+        management.cancel()
+        XCTAssertEqual(store.selectedFeature?.projectID, id)
+        XCTAssertNotNil(store.selectedFeatureContent, "Cancel does not disturb open Projects detail")
+        management.requestRemoval(id)
+        management.confirm()
+        XCTAssertEqual(management.outcome, .removed("Same project"))
+        XCTAssertTrue(projects.rootView.store === folders.rootView.store)
+        XCTAssertEqual(projects.rootView.store.selectedID, survivor)
+        XCTAssertNil(projects.rootView.store.selectedFeature)
+        XCTAssertNil(projects.rootView.store.selectedFeatureContent)
+        let add = NSHostingView(rootView: ProjectAddView(store: folders.rootView.store, close: {}))
+        XCTAssertTrue(add.rootView.store === store, "Re-add uses the existing preview/picker owner")
+        XCTAssertNil(store.preview)
+        var unavailable = try XCTUnwrap(store.rows.first)
+        unavailable.refreshFailure = .inspection(.access(.staleBookmark))
+        XCTAssertEqual(ProjectFoldersSettingsView.status(unavailable), "Folder access unavailable · saved local reference still exists")
+        unavailable.inspection = nil
+        unavailable.refreshFailure = nil
+        XCTAssertEqual(ProjectFoldersSettingsView.status(unavailable), "Saved local reference · folder not inspected here")
+        let panel = ProjectAddView.configuredPicker()
+        XCTAssertTrue(panel.canChooseDirectories)
+        XCTAssertFalse(panel.canChooseFiles)
+        XCTAssertFalse(panel.allowsMultipleSelection)
+        XCTAssertFalse(panel.canCreateDirectories)
     }
 
     func testEmptyAndMultipleProjectHostsCompileWithSharedStore() throws {

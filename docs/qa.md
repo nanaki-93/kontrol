@@ -806,3 +806,99 @@ Guarded cleanup enumerated exactly six printed process-owned roots under `/var/f
 External fixture evidence was captured before cleanup: each of four existing external trees contains **14 entries**. Final fixture workspace was `/var/folders/lz/20cqfx4x2k98r89q68w3q3ch0000gn/T/KontrolProjectIntegrationTests-14423/B84B5452-78AC-4E09-920A-8B6D95F3D118/`, with `disconnect-{original,copy,malformed,revoked}` and absent `disconnect-missing`. The XCTest performs the before/after full-byte comparisons; additionally, post-run original/copy full-entry SHA-256 inventories matched in **both** runs. After-run entry kinds/sizes/hashes and exact paths are retained at `/tmp/kontrol-f13-step2.4-external-inventories.json`; this file is after-run evidence, not a separate before-capture. Original checked-in fixtures, production data, live stores, and historical unlogged roots were untouched.
 
 **No Step 2.4 blocker remains.** No hosted identifiers or visible surfaces changed. A13 Accessibility/full-suite/native observations, S13 signed sandbox and real OS-bookmark journeys, B13 runtime matrix, and D13 distribution acceptance remain mandatory and pending—not passed, skipped, or waived. This checkpoint verifies non-GUI disconnect safety, not unconditional F13/release acceptance.
+
+## F13 shared folder Settings and named confirmation — Step 2.5 (2026-09-30, 11:07 UTC)
+
+**Implementation checkpoint passed; ready for review.** The first incomplete task matches runner Step 2.5. Read the complete cumulative task-5 checklist; it has no previous findings. Initial worktree/index were clean; no interrupted source changes existed. Target/repository searches and ancestor checks through `/` found no applicable `AGENTS.md`; no submodules were configured. Existing regression repairs, external fixtures, schemas, and workflow state are preserved. The workflow runner retains responsibility for approved-task commits; this execution leaves changes uncommitted.
+
+### Implementation and acceptance coverage
+
+- `Kontrol/Features/Settings/ProjectFoldersSettingsView.swift` introduces the folder section and its per-client presentation state. Both Settings entry points receive the existing graph-owned `ProjectStore`; no new reference/IO owner is created. Hub summaries and folder loading use `loadReferencesIfNeeded()`, and explicit review uses `reloadReferences()` only. No listing/review operation admits external inspection.
+- The native semantic `ConfirmationAffordance` captures display name, UUID, and revision independently of subsequent store publications. Copy names the target, states project/.kontrol/Git files remain on disk, and explains picker-authorized re-add. Cancel never calls disconnect; confirmation submits only the captured revision. Stale/missing results require successful explicit reload, review, and a separate new confirmation. That review gate survives Back/re-entry within the Settings client. Failed reload preserves usable rows and the gate.
+- Empty, load-unavailable, canceled, stale/missing, busy, failed, and successful outcomes use explicit text (with status icons). Failed/busy results never queue or automatically retry removal. A successful later initial load retires old unavailable copy. A failed reload does not present an empty-list success.
+- Add reuses `ProjectAddView`; Reconnect reuses its folder-only native picker configuration and the existing `ProjectStore.reconnect` authorization/validation owner. Construction/listing never requests a picker. Re-add does not recover an old grant or bypass preview/authorization.
+- `FoundationSettingsView.swift` observes that same store, adds the folder route/count summary and Back routing, and retains per-client review state across section changes. General preference draft behavior and scene scroll ownership remain unchanged. No Local Data/export or later adaptive/folder-focus task is implemented here.
+- Explicit target membership is registered in `Kontrol.xcodeproj/project.pbxproj`. `ProjectsPresentationTests.swift` adds a compiled shared-store fixture: Cancel preserves selected detail; successful Settings removal clears detail and selects a survivor; normal Add/picker owners remain shared. Its repository double now performs identity/revision-checked removal, rather than claiming success.
+
+Fresh non-GUI presentation-state coverage (all executed):
+
+- `SettingsSceneTests/testFolderConfirmationCapturesNameIdentityRevisionCancelAndDurableSuccessAcrossClients`: frozen name/ID/revision, no-effect Cancel, durable publication, shared clients, missing second confirmation, separate review/reconfirmation, selection/empty counts, and zero inspection/bookmark calls.
+- `SettingsSceneTests/testFolderStaleConfirmationRequiresSuccessfulExplicitReloadAndSeparateReconfirmation`: newer store publication cannot rebase confirmation; stale removal is blocked; failed review retains rows/gate; successful review never deletes; separate confirmation captures the new name/revision.
+- `SettingsSceneTests/testFolderUnavailableMissingBusyAndFailedOutcomesNeverAutomaticallyDelete`: failed initial load and later successful entry, explicit review, busy/failed outcomes, no automatic retry, authoritative missing reference, and local review to an empty list.
+
+### Exact commands, environment, and results
+
+Discovery commands exited **0**: `xcode-select -p`, `xcodebuild -version`, `xcrun swift --version`, `xcodebuild -list -project Kontrol.xcodeproj`, `sw_vers`, `uname -m`. Project-list output: `/tmp/kontrol-f13-step2.5-project-list.log`. Toolchain: **Xcode 27.0 (27A266a), Apple Swift 6.4 (swiftlang-6.4.0.34.1; swift-driver 1.168.6), arm64 macOS 27.0 (26A428)**, developer directory `/Applications/Xcode.app/Contents/Developer`. Resolved Yams remains **5.4.0**; macOS 14 deployment/Swift 5 language mode are unchanged. No baseline-runtime acceptance is claimed.
+
+The plan's unchanged `f13_test` helper ran the required selection, followed by three explicit non-GUI state methods. Standard build and test compilation ran initially, after retaining the review gate across Back, and on final source after repairing stale initial-unavailability copy; **every command exited 0**:
+
+```sh
+set -o pipefail
+make build DERIVED_DATA=/tmp/kontrol-f13-derived
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  CODE_SIGNING_ALLOWED=NO build-for-testing
+f13_test ProjectDisconnectTests ProjectStoreTests ProjectIntegrationTests
+f13_test \
+  'SettingsSceneTests/testFolderConfirmationCapturesNameIdentityRevisionCancelAndDurableSuccessAcrossClients' \
+  'SettingsSceneTests/testFolderStaleConfirmationRequiresSuccessfulExplicitReloadAndSeparateReconfirmation' \
+  'SettingsSceneTests/testFolderUnavailableMissingBusyAndFailedOutcomesNeverAutomaticallyDelete'
+git diff --check
+plutil -lint Kontrol.xcodeproj/project.pbxproj
+```
+
+The combined 66-method selection ran twice, including the final verified source. Its exact expanded command is:
+
+```sh
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
+  -only-testing:KontrolTests/ProjectDisconnectTests \
+  -only-testing:KontrolTests/ProjectStoreTests \
+  -only-testing:KontrolTests/ProjectIntegrationTests \
+  -only-testing:KontrolTests/SettingsSceneTests/testFolderConfirmationCapturesNameIdentityRevisionCancelAndDurableSuccessAcrossClients \
+  -only-testing:KontrolTests/SettingsSceneTests/testFolderStaleConfirmationRequiresSuccessfulExplicitReloadAndSeparateReconfirmation \
+  -only-testing:KontrolTests/SettingsSceneTests/testFolderUnavailableMissingBusyAndFailedOutcomesNeverAutomaticallyDelete test
+```
+
+| Selection | Fresh result bundle | Executed / passed | Failures / skips / expected failures |
+| --- | --- | --- | --- |
+| Required suites | `/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_19-00-01-+0800.xcresult` | 63 / 63 | 0 / 0 / 0 |
+| Non-GUI Settings state | `/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_19-00-18-+0800.xcresult` | 3 / 3 | 0 / 0 / 0 |
+| Combined intermediate | `/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_19-03-01-+0800.xcresult` | 66 / 66 | 0 / 0 / 0 |
+| Combined final verified source | `/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_19-07-27-+0800.xcresult` | **66 / 66** | **0 / 0 / 0** |
+
+Final counts: **9 disconnect, 44 store, 10 integration, 3 Settings state**. Logs are `/tmp/kontrol-f13-builder2.5-{build,bft,required-tests,state-tests,final-build,final-bft,final-tests,verified-build,verified-bft,verified-tests}.log`. Hosted fixtures compile in the final `verified-bft.log`; none of the hosted fixtures were executed in this checkpoint.
+
+Bundle audit commands (all exit **0**): for each table bundle set `RESULT_BUNDLE` to its exact path and `PREFIX` to `/tmp/kontrol-f13-builder2.5-{required,state,final,verified}` respectively, then run:
+
+```sh
+xcrun xcresulttool get test-results summary --path "$RESULT_BUNDLE" --format json > "${PREFIX}-summary.json"
+xcrun xcresulttool get test-results tests --path "$RESULT_BUNDLE" --format json > "${PREFIX}-test-tree.json"
+python3 /tmp/kontrol-f13-builder2.5-audit.py > /tmp/kontrol-f13-builder2.5-selector-audit.log
+python3 /tmp/kontrol-f13-builder2.5-cleanup.py > /tmp/kontrol-f13-builder2.5-cleanup.log
+python3 /tmp/kontrol-f13-builder2.5-verified-cleanup.py > /tmp/kontrol-f13-builder2.5-verified-cleanup.log
+git diff --check
+```
+
+The selector audit enumerates every executed full identifier/result, compares exact-once/nonempty selection against current source methods, and reconciles summary counts. All four summaries have empty failure/runtime-warning arrays. Raw-log diagnostic assertions pass: no `vnode unlinked while in use`, `InvalidTransition`, or hosted AX-window failure. Existing malformed-bookmark/linkd diagnostics and multiple-destination/AppIntents warnings are retained; no assertion was weakened and no skip/expected failure was added.
+
+Guarded post-host cleanup enumerated exactly six printed roots under `/var/folders/lz/20cqfx4x2k98r89q68w3q3ch0000gn/T/`: `KontrolProjectDisconnectTests-{17276,17656,18267}` (**2 stores each**) and `KontrolProjectIntegrationTests-{17276,17656,18267}` (**10 each**). Each PID had exited, each root's TMPDIR parent/process-owned name and absence of symlinks were validated, and all **36** read-only SQLite integrity checks returned **ok**. Connections closed and PID exit rechecked before removing only those exact roots; all six no longer exist. Exact paths/results remain in the cleanup logs. After-run original/copy full-entry SHA-256 inventories matched in each run (14 entries per external tree); evidence is `/tmp/kontrol-f13-builder2.5-external-inventories.json` and `/tmp/kontrol-f13-builder2.5-verified-external-inventories.json`. These are after-run inventories, not native screenshots or independent before-captures. The existing integration tests perform before/after external-byte comparisons. No original, production, live, or unlogged historical store was removed.
+
+### A13 — exact changed hosted identifiers and required observations
+
+**Compiled, execution/native acceptance pending; not passed or waived.** Run these changed/additional identifiers with the authorized actual rebuilt host in the reserved desktop, alongside the previously deferred ledger/full-suite requirements:
+
+- `SettingsSceneTests/testNativeFolderRouteNamedCancelStaleReviewFailureAndSuccessUseSharedStore`
+- `SettingsSceneTests/testNativeFolderUnavailableRetryAndBusyOutcomeRetainReferences`
+- `SettingsSceneTests/testKeyboardHubOrderEditorHandoffNamesTargetsAndFocusReturn`
+- `SettingsSceneTests/testNativeAndInlineSettingsGeometryAtCompactDesktopAndAccessibilitySizes`
+- `SettingsSceneTests/testSettingsReadFailureRetryAndRetainedEditorGuidanceReflowAtAllNativeSizes`
+- `SettingsSceneTests/testSettingsOpenedDuringInitializationAndWindowReopenUseOneGraph`
+- `ProjectsPresentationTests/testSettingsRemovalUpdatesSharedProjectsSelectionDetailAndPickerOwnership`
+
+Reference paths: `.mockups/flows/f13-settings-release/{01-settings-hub,12-project-unavailable,13-project-empty,14-removal-confirmation,15-removal-busy,16-removal-failed,17-removal-stale,18-removal-canceled,19-removal-success,22-project-read-failed}.html`, `docs/mockups/M41-remove-project.png`, and existing M28/M33 Add/access-recovery references linked from those HTML pages. Required native observations remain: both real Settings entry points, actual named native Cancel/confirm and unchanged files, stale review after Back/re-entry, busy/failure recovery, surviving Projects selection/detail, normal folder picker Add/Reconnect/re-add, compact/enlarged reachability, keyboard/Escape/focus, independent spoken VoiceOver, and capture/reference comparisons at specified sizes/scales. No capture, GUI authorization, human observation, or VoiceOver attestation was supplied or claimed here. Steps 2.6/2.7 retain their dedicated folder layout/focus fixtures and implementation scope.
+
+**No Step 2.5 implementation blocker remains.** A13 Accessibility/full-suite/native, S13 signed sandbox/picker lifecycles, B13 runtime matrix, and D13 distribution acceptance remain mandatory and pending. This checkpoint is not unconditional F13/release approval.

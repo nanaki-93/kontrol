@@ -48,8 +48,277 @@ private final class SettingsPreferencesSpy: AppPreferencesRepository {
     }
 }
 
+private actor SettingsFolderInspectorSpy: ProjectInspecting {
+    private(set) var calls = 0
+    func inspect(selectedFolder: URL) async throws -> ProjectInspection { calls += 1; throw CancellationError() }
+    func inspect(bookmarkData: Data) async throws -> ProjectInspection { calls += 1; throw CancellationError() }
+    func makeBookmark(selectedFolder: URL) async throws -> Data { calls += 1; throw CancellationError() }
+}
+
+@MainActor
+private final class SettingsFolderRepository: ProjectReferenceRepository {
+    var references: [ProjectReferenceSnapshot]
+    var loadFailure: Error?
+    var removeFailure: Error?
+    private(set) var removals: [(UUID, UUID)] = []
+    private(set) var loads = 0
+
+    init(_ references: [ProjectReferenceSnapshot] = []) { self.references = references }
+    func fetchAll() throws -> [ProjectReferenceSnapshot] {
+        loads += 1
+        if let loadFailure { throw loadFailure }
+        return references
+    }
+    func remove(id: UUID, expectedRevision: UUID) throws {
+        removals.append((id, expectedRevision))
+        if let removeFailure { throw removeFailure }
+        guard let reference = references.first(where: { $0.id == id }) else {
+            throw ProjectReferencePersistenceError.notFound
+        }
+        guard reference.revision == expectedRevision else { throw ProjectReferencePersistenceError.staleRevision }
+        references.removeAll { $0.id == id }
+    }
+    func insert(_ input: NewProjectReference) throws -> ProjectReferenceSnapshot { throw CancellationError() }
+    func reconnect(id: UUID, expectedRevision: UUID, input: ReconnectedProjectReference) throws -> ProjectReferenceSnapshot { throw CancellationError() }
+    func recordSuccessfulRead(id: UUID, expectedRevision: UUID, nameHint: String, readAt: Date) throws -> ProjectReferenceSnapshot { throw CancellationError() }
+}
+
 @MainActor
 final class SettingsSceneTests: XCTestCase {
+    private func folderReference(_ id: UUID = UUID(), revision: UUID = UUID(), name: String = "Harbor", order: Int = 0) -> ProjectReferenceSnapshot {
+        ProjectReferenceSnapshot(id: id, manifestID: "harbor", bookmarkData: Data([1]), displayOrder: order,
+                                 displayNameHint: name, lastSuccessfulReadAt: nil, revision: revision)
+    }
+
+    // Explicit non-GUI selections: no NSWindow, AX, panels, or external-folder IO.
+    func testFolderConfirmationCapturesNameIdentityRevisionCancelAndDurableSuccessAcrossClients() async throws {
+        let reference = folderReference()
+        let survivor = folderReference(name: "Peer", order: 1)
+        let repository = SettingsFolderRepository([reference, survivor])
+        let inspector = SettingsFolderInspectorSpy()
+        let store = ProjectStore(inspector: inspector, repository: repository)
+        let first = ProjectFoldersSettingsState(store: store)
+        let second = ProjectFoldersSettingsState(store: store)
+        first.load(); second.load()
+        XCTAssertEqual(repository.loads, 1)
+        XCTAssertTrue(first.store === second.store)
+        XCTAssertEqual(ProjectFoldersSettingsView.summary(store), "Project folders: 2 saved references")
+        first.requestRemoval(reference.id)
+        let target = try XCTUnwrap(first.confirmation)
+        XCTAssertEqual(target.id, reference.id)
+        XCTAssertEqual(target.revision, reference.revision)
+        XCTAssertEqual(target.name, "Harbor")
+        XCTAssertEqual(target.title, "Remove Harbor?")
+        XCTAssertTrue(target.message.contains("files remain on disk"))
+        XCTAssertTrue(target.message.contains(".kontrol and Git"))
+        first.cancel(); first.confirm()
+        XCTAssertEqual(first.outcome, .canceled("Harbor"))
+        XCTAssertTrue(repository.removals.isEmpty)
+        XCTAssertEqual(store.rows.count, 2)
+        first.requestRemoval(reference.id)
+        second.requestRemoval(reference.id)
+        first.confirm()
+        XCTAssertEqual(first.outcome, .removed("Harbor"))
+        XCTAssertEqual(repository.removals.count, 1)
+        XCTAssertEqual(repository.removals.first?.1, reference.revision)
+        XCTAssertEqual(store.selectedID, survivor.id)
+        XCTAssertEqual(second.store.rows.map(\.reference.id), [survivor.id])
+        second.confirm()
+        XCTAssertEqual(second.outcome, .stale("Harbor"))
+        XCTAssertTrue(second.requiresReview)
+        XCTAssertEqual(repository.removals.count, 1, "Missing store identity must not submit another deletion")
+        second.review()
+        XCTAssertFalse(second.requiresReview)
+        second.requestRemoval(survivor.id)
+        second.confirm()
+        XCTAssertTrue(store.rows.isEmpty)
+        XCTAssertEqual(ProjectFoldersSettingsView.summary(store), "Project folders: 0 saved references")
+        store.refreshOnMainWindowActivation()
+        let calls = await inspector.calls
+        XCTAssertEqual(calls, 0, "Listing, reviewing and removing do not admit external inspection")
+    }
+
+    func testFolderStaleConfirmationRequiresSuccessfulExplicitReloadAndSeparateReconfirmation() async throws {
+        let original = folderReference()
+        let repository = SettingsFolderRepository([original])
+        let inspector = SettingsFolderInspectorSpy()
+        let store = ProjectStore(inspector: inspector, repository: repository)
+        let management = ProjectFoldersSettingsState(store: store)
+        management.load()
+        management.requestRemoval(original.id)
+        let revised = folderReference(original.id, name: "Renamed elsewhere")
+        repository.references = [revised]
+        // Another client may reload or a read receipt may advance the row while the alert is open.
+        try store.reloadReferences()
+        XCTAssertEqual(management.confirmation?.revision, original.revision)
+        XCTAssertEqual(management.confirmation?.name, original.displayNameHint)
+        management.confirm()
+        XCTAssertEqual(management.outcome, .stale("Harbor"))
+        XCTAssertTrue(repository.removals.isEmpty)
+        management.requestRemoval(original.id)
+        XCTAssertNil(management.confirmation, "Cannot silently rebase a stale confirmation")
+        repository.loadFailure = ProjectReferencePersistenceError.invalidReference
+        management.review()
+        XCTAssertTrue(management.requiresReview)
+        XCTAssertEqual(management.outcome, .unavailable)
+        XCTAssertEqual(store.rows.first?.reference, revised)
+        management.requestRemoval(original.id)
+        XCTAssertNil(management.confirmation)
+        repository.loadFailure = nil
+        management.review()
+        XCTAssertEqual(management.outcome, .reviewed)
+        XCTAssertTrue(repository.removals.isEmpty, "Review never retries deletion")
+        management.requestRemoval(original.id)
+        XCTAssertEqual(management.confirmation?.name, "Renamed elsewhere")
+        XCTAssertEqual(management.confirmation?.revision, revised.revision)
+        management.confirm()
+        XCTAssertEqual(management.outcome, .removed("Renamed elsewhere"))
+        XCTAssertEqual(repository.removals.first?.1, revised.revision)
+        let calls = await inspector.calls
+        XCTAssertEqual(calls, 0)
+    }
+
+    func testFolderUnavailableMissingBusyAndFailedOutcomesNeverAutomaticallyDelete() throws {
+        let reference = folderReference()
+        let repository = SettingsFolderRepository([reference])
+        repository.loadFailure = ProjectReferencePersistenceError.invalidReference
+        let store = ProjectStore(inspector: SettingsFolderInspectorSpy(), repository: repository)
+        let management = ProjectFoldersSettingsState(store: store)
+        management.load()
+        XCTAssertEqual(management.outcome, .unavailable)
+        XCTAssertFalse(store.isLoaded)
+        XCTAssertEqual(ProjectFoldersSettingsView.summary(store), "Project folders: saved references unavailable")
+        repository.loadFailure = nil
+        management.load()
+        XCTAssertNil(management.outcome, "A successful later entry must retire initial unavailability")
+        management.review()
+        for (failure, expected) in [(ProjectStoreError.busy as Error, ProjectFoldersSettingsState.Outcome.busy),
+                                    (ProjectReferencePersistenceError.invalidReference, .failed("Harbor"))] {
+            repository.removeFailure = failure
+            management.requestRemoval(reference.id)
+            management.confirm()
+            XCTAssertEqual(management.outcome, expected)
+            XCTAssertEqual(store.rows.first?.reference, reference)
+            XCTAssertNil(management.confirmation)
+            management.confirm()
+        }
+        XCTAssertEqual(repository.removals.count, 2, "No implicit retry after busy or failed removal")
+        repository.removeFailure = nil
+        management.requestRemoval(reference.id)
+        repository.references = [] // Authoritative missing identity, without a prior store reload.
+        management.confirm()
+        XCTAssertEqual(management.outcome, .stale("Harbor"))
+        XCTAssertTrue(management.requiresReview)
+        XCTAssertEqual(store.rows.first?.reference, reference)
+        management.review()
+        XCTAssertTrue(store.rows.isEmpty)
+        XCTAssertFalse(management.requiresReview)
+    }
+
+    private func folderOutcome(in window: NSWindow) throws -> String {
+        let element = try node("settings-folders-result", in: window)
+        // Native Label may expose its combined text as a description rather than value.
+        return try XCTUnwrap((axAttribute(element, kAXValueAttribute) as? String) ??
+                             (axAttribute(element, kAXDescriptionAttribute) as? String))
+    }
+
+    func testNativeFolderRouteNamedCancelStaleReviewFailureAndSuccessUseSharedStore() async throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let reference = folderReference()
+        let repository = SettingsFolderRepository([reference])
+        let inspector = SettingsFolderInspectorSpy()
+        let graph = AppDependencies(container: container, catalogRepository: SwiftDataCatalogRepository(container: container),
+                                    projectInspector: inspector, projectRepository: repository)
+        let first = show(ScrollView { FoundationSettingsView(dependencies: graph) })
+        let second = show(ScrollView { FoundationSettingsView(dependencies: graph) })
+        defer { first.orderOut(nil); second.orderOut(nil) }
+        for window in [first, second] {
+            try press("settings-folders", in: window)
+            _ = try node("settings-folders-content", in: window)
+        }
+        let removeID = "settings-folder-remove-\(reference.id.uuidString)"
+        func dialogButton(_ name: String, window: NSWindow) throws -> AXUIElement {
+            let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+            let deadline = Date().addingTimeInterval(2)
+            repeat {
+                if let button = axDescendants(app).first(where: {
+                    axAttribute($0, kAXRoleAttribute) as? String == kAXButtonRole &&
+                    axAttribute($0, kAXDescriptionAttribute) as? String == name
+                }) { return button }
+                settle()
+            } while Date() < deadline
+            throw NSError(domain: "SettingsSceneTests", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing folder alert button \(name)"])
+        }
+        func dismiss(_ name: String) throws {
+            XCTAssertEqual(AXUIElementPerformAction(try dialogButton(name, window: first), kAXPressAction as CFString), .success)
+            settle()
+        }
+        try press(removeID, in: first)
+        let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+        for text in ["Remove Harbor?", "files remain on disk"] {
+            XCTAssertTrue(axDescendants(app).contains {
+                ((axAttribute($0, kAXValueAttribute) as? String) ?? (axAttribute($0, kAXDescriptionAttribute) as? String) ?? "").contains(text)
+            }, "Confirmation must name its captured target and explain local-only removal: \(text)")
+        }
+        try dismiss("Cancel")
+        XCTAssertTrue(repository.removals.isEmpty)
+        XCTAssertTrue(try folderOutcome(in: first).contains("canceled"))
+        try press(removeID, in: first)
+        repository.references = [folderReference(reference.id, name: "Current Harbor")]
+        try dismiss("Remove from Kontrol")
+        XCTAssertTrue(try folderOutcome(in: first).contains("Reload & review"))
+        XCTAssertEqual((axAttribute(try node(removeID, in: first), kAXEnabledAttribute) as? NSNumber)?.boolValue, false)
+        try press("settings-back", in: first)
+        try press("settings-folders", in: first)
+        XCTAssertEqual((axAttribute(try node(removeID, in: first), kAXEnabledAttribute) as? NSNumber)?.boolValue, false,
+                       "Back/re-entry must not bypass explicit stale review")
+        try press("settings-folders-reload", in: first)
+        XCTAssertEqual(repository.removals.count, 1, "Reload is not an automatic deletion retry")
+        repository.removeFailure = ProjectReferencePersistenceError.invalidReference
+        try press(removeID, in: first)
+        try dismiss("Remove from Kontrol")
+        XCTAssertTrue(try folderOutcome(in: first).contains("was not removed"))
+        repository.removeFailure = nil
+        try press(removeID, in: first)
+        try dismiss("Remove from Kontrol")
+        for window in [first, second] { _ = try node("settings-folders-empty", in: window) }
+        XCTAssertTrue(try folderOutcome(in: first).contains("Current Harbor removed"))
+        try press("settings-back", in: first)
+        XCTAssertEqual(try value("settings-folders-summary", in: first), "Project folders: 0 saved references")
+        let calls = await inspector.calls
+        XCTAssertEqual(calls, 0)
+    }
+
+    func testNativeFolderUnavailableRetryAndBusyOutcomeRetainReferences() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let reference = folderReference()
+        let repository = SettingsFolderRepository([reference])
+        repository.loadFailure = ProjectReferencePersistenceError.invalidReference
+        let graph = AppDependencies(container: container, catalogRepository: SwiftDataCatalogRepository(container: container),
+                                    projectInspector: SettingsFolderInspectorSpy(), projectRepository: repository)
+        let window = show(ScrollView { FoundationSettingsView(dependencies: graph) })
+        defer { window.orderOut(nil) }
+        try press("settings-folders", in: window)
+        _ = try node("settings-folders-unavailable", in: window)
+        XCTAssertTrue(try folderOutcome(in: window).contains("could not be loaded"))
+        repository.loadFailure = nil
+        try press("settings-folders-reload", in: window)
+        repository.removeFailure = ProjectStoreError.busy
+        try press("settings-folder-remove-\(reference.id.uuidString)", in: window)
+        let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+        let button = try XCTUnwrap(axDescendants(app).first {
+            axAttribute($0, kAXRoleAttribute) as? String == kAXButtonRole &&
+            axAttribute($0, kAXDescriptionAttribute) as? String == "Remove from Kontrol"
+        })
+        XCTAssertEqual(AXUIElementPerformAction(button, kAXPressAction as CFString), .success)
+        settle()
+        XCTAssertTrue(try folderOutcome(in: window).contains("Nothing was removed or queued"))
+        XCTAssertEqual(graph.projectStore.rows.first?.reference, reference)
+        XCTAssertEqual(repository.removals.count, 1)
+        try press("settings-back", in: window)
+        XCTAssertEqual(try value("settings-folders-summary", in: window), "Project folders: 1 saved reference")
+    }
+
     private func show<V: View>(_ view: V, size: CGSize = CGSize(width: 1000, height: 1000)) -> NSWindow {
         let window = NSWindow(contentRect: NSRect(origin: .zero, size: size),
                               styleMask: [.titled], backing: .buffered, defer: false)
@@ -284,6 +553,7 @@ final class SettingsSceneTests: XCTestCase {
         try capture("keyboard-hub-general-focused", window: window)
         try tab(to: "settings-ai", in: window)
         try tab(to: "settings-news", in: window)
+        try tab(to: "settings-folders", in: window)
         try tab(to: "settings-general", in: window)
         try keyboard(49, " ", in: window)
         XCTAssertEqual(try focusedIdentifier(), "preferences-duration")
@@ -307,7 +577,7 @@ final class SettingsSceneTests: XCTestCase {
         try tab(to: "preferences-cancel", in: window, backwards: true)
         try keyboard(53, "\u{1b}", in: window)
         XCTAssertEqual(try focusedIdentifier(), "settings-general")
-        for (identifier, next) in [("settings-ai", "settings-news"), ("settings-news", "settings-general")] {
+        for (identifier, next) in [("settings-ai", "settings-news"), ("settings-news", "settings-folders"), ("settings-folders", "settings-general")] {
             try tab(to: identifier, in: window)
             try keyboard(49, " ", in: window)
             XCTAssertEqual(try focusedIdentifier(), "settings-back")
@@ -581,7 +851,7 @@ final class SettingsSceneTests: XCTestCase {
                     defer { window.orderOut(nil) }
                     let label = "\(inline ? "inline" : "native")-\(Int(size.width))x\(Int(size.height))-\(percent)"
                     XCTAssertEqual(window.contentView?.bounds.size, size, "Layout must not enlarge the requested content viewport")
-                    try assertReachable(["settings-general", "settings-ai", "settings-news"], in: window)
+                    try assertReachable(["settings-general", "settings-ai", "settings-news", "settings-folders"], in: window)
                     try capture("\(label)-hub-bottom", window: window)
                     try press("settings-general", in: window)
                     try assertReachable(["preferences-duration", "preferences-text-size", "preferences-motion"], in: window)
@@ -652,7 +922,7 @@ final class SettingsSceneTests: XCTestCase {
                 let window = show(SettingsSceneContent(launch: launch).environment(\.dynamicTypeSize, textSize), size: size)
                 defer { window.orderOut(nil) }
                 let label = "native-\(Int(size.width))x\(Int(size.height))-\(percent)-read-failed"
-                try assertReachable(["settings-preferences-unavailable", "settings-preferences-retry", "settings-general", "settings-ai", "settings-news"], in: window)
+                try assertReachable(["settings-preferences-unavailable", "settings-preferences-retry", "settings-general", "settings-ai", "settings-news", "settings-folders"], in: window)
                 try press("settings-preferences-retry", in: window)
                 try press("settings-general", in: window)
                 try assertReachable(["preferences-error", "preferences-review", "preferences-cancel", "preferences-save"], in: window)
@@ -833,8 +1103,8 @@ final class SettingsSceneTests: XCTestCase {
                 (attribute($0, kAXValueAttribute) as? String == "Settings" ||
                  attribute($0, kAXDescriptionAttribute) as? String == "Settings")
             }.count, 1)
-            for identifier in ["settings-general", "settings-ai", "settings-news", "settings-focus-summary",
-                               "settings-appearance-summary", "settings-ai-summary", "settings-news-summary"] {
+            for identifier in ["settings-general", "settings-ai", "settings-news", "settings-folders", "settings-focus-summary",
+                               "settings-appearance-summary", "settings-ai-summary", "settings-news-summary", "settings-folders-summary"] {
                 XCTAssertTrue(nodes.contains { attribute($0, kAXIdentifierAttribute) as? String == identifier },
                               "Both entries must expose implemented hub capability or saved summary: \(identifier)")
             }
@@ -909,6 +1179,13 @@ final class SettingsSceneTests: XCTestCase {
             try press("settings-news", in: window)
             _ = try node("news-management", in: window)
             try press("settings-back", in: window)
+        }
+        for window in [settingsWindow, mainWindow] {
+            try press("settings-folders", in: window)
+            _ = try node("settings-folders-content", in: window)
+            _ = try node("settings-folders-empty", in: window)
+            try press("settings-back", in: window)
+            XCTAssertEqual(try value("settings-folders-summary", in: window), "Project folders: 0 saved references")
         }
         XCTAssertEqual(graph.appPreferencesStore.committed, .defaults, "Opening/canceling sections does not save preferences")
 
