@@ -29,12 +29,16 @@ private final class LaunchAISettingsRepository: AISettingsRepository {
 
 private final class LaunchCredentials: CredentialStore {
     var keys: [String: Data] = [:]
+    private(set) var reads = 0
+    private(set) var saves = 0
+    private(set) var removals = 0
     func read(reference: String) throws -> Data {
+        reads += 1
         guard let key = keys[reference] else { throw CredentialStoreError.missing }
         return key
     }
-    func save(_ credential: Data, reference: String) throws { keys[reference] = credential }
-    func remove(reference: String) throws { keys.removeValue(forKey: reference) }
+    func save(_ credential: Data, reference: String) throws { saves += 1; keys[reference] = credential }
+    func remove(reference: String) throws { removals += 1; keys.removeValue(forKey: reference) }
 }
 
 private actor LaunchProvider: LessonGenerator, OpenAIConnectionTesting {
@@ -57,6 +61,42 @@ private actor LaunchNewsService: NewsRefreshing {
     func validate(_ draft: FeedDraft) async throws -> ValidatedFeed {
         validations += 1
         throw FeedServiceError(code: .offline, retryNotBefore: nil)
+    }
+}
+
+@MainActor
+private final class LaunchExportRepository: ExportRepository {
+    private(set) var captures = 0
+    func snapshot(exportedAt: Date, appVersion: String) throws -> LocalDataExport {
+        captures += 1
+        throw ExportFileWriterError.invalidPreparation
+    }
+}
+
+@MainActor
+private final class LaunchExportPanel: ExportDestinationSelecting {
+    private(set) var selections = 0
+    func selectDestination(suggestedAt date: Date) async throws -> ExportDestinationSelection {
+        selections += 1
+        return .canceled
+    }
+}
+
+private actor LaunchExportWriter: ExportFilePreparing, ExportFileDelivering {
+    private(set) var preparations = 0
+    private(set) var deliveries = 0
+    nonisolated func approveDestination(_ url: URL) throws -> ApprovedExportDestination {
+        XCTFail("Launch must not approve a destination")
+        throw ExportFileWriterError.unsafeDestination
+    }
+    func prepare(_ snapshot: LocalDataExport) async throws -> PreparedExportArtifact {
+        preparations += 1
+        throw ExportFileWriterError.invalidPreparation
+    }
+    func deliver(_ artifact: PreparedExportArtifact,
+                 to destination: ApprovedExportDestination) async throws -> ExportDeliveryOutcome {
+        deliveries += 1
+        throw ExportFileWriterError.deliveryFailed
     }
 }
 
@@ -158,6 +198,8 @@ final class LaunchCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.state, .ready)
         let graph = try XCTUnwrap(coordinator.dependencies)
         XCTAssertTrue(graph.container === container)
+        XCTAssertEqual(graph.exportService.state, .idle)
+        XCTAssertFalse(graph.exportService.isBusy)
         XCTAssertEqual(graph.learningCatalogStore.state, .notLoaded)
         let firstConsumer = graph.learningCatalogStore
         let secondConsumer = graph.learningCatalogStore
@@ -187,9 +229,20 @@ final class LaunchCoordinatorTests: XCTestCase {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         let inspector = LaunchProjectInspector()
         let projectRepository = LaunchProjectRepository()
+        let credentials = LaunchCredentials()
+        let provider = LaunchProvider()
+        let news = LaunchNewsService()
+        let exportRepository = LaunchExportRepository()
+        let exportPanel = LaunchExportPanel()
+        let exportWriter = LaunchExportWriter()
+        var exportClockReads = 0
         let coordinator = LaunchCoordinator(open: { container }, makeDependencies: { container, catalog in
             AppDependencies(container: container, catalogRepository: catalog,
-                projectInspector: inspector, projectRepository: projectRepository)
+                projectInspector: inspector, projectRepository: projectRepository,
+                aiSettingsRepository: LaunchAISettingsRepository(), credentialStore: credentials,
+                aiGenerator: { _, _, _ in provider }, aiConnectionTester: { _, _, _ in provider },
+                newsService: news, exportRepository: exportRepository, exportPanel: exportPanel,
+                exportWriter: exportWriter, exportClock: { exportClockReads += 1; return Date() })
         })
         await coordinator.start()
         XCTAssertEqual(coordinator.state, .ready)
@@ -205,6 +258,31 @@ final class LaunchCoordinatorTests: XCTestCase {
         XCTAssertTrue(coordinator.dependencies === graph)
         XCTAssertTrue(coordinator.dependencies?.projectStore === firstWindowStore)
         XCTAssertEqual(projectRepository.fetches, 0)
+        let mainExport = graph.exportService
+        let nativeExport = try XCTUnwrap(coordinator.dependencies).exportService
+        XCTAssertTrue(mainExport === nativeExport)
+        XCTAssertEqual(mainExport.state, .idle)
+        XCTAssertFalse(mainExport.isBusy)
+        XCTAssertTrue(graph.lessonDraftStore.buffers.isEmpty)
+        XCTAssertNil(graph.newsStore.snapshot)
+        XCTAssertEqual(exportClockReads, 0)
+        XCTAssertEqual(exportRepository.captures, 0)
+        XCTAssertEqual(exportPanel.selections, 0)
+        let preparations = await exportWriter.preparations
+        let deliveries = await exportWriter.deliveries
+        let generations = await provider.generations
+        let connections = await provider.connections
+        let refreshes = await news.refreshes
+        let validations = await news.validations
+        XCTAssertEqual(preparations, 0)
+        XCTAssertEqual(deliveries, 0)
+        XCTAssertEqual(generations, 0)
+        XCTAssertEqual(connections, 0)
+        XCTAssertEqual(refreshes, 0)
+        XCTAssertEqual(validations, 0)
+        XCTAssertEqual(credentials.reads, 0)
+        XCTAssertEqual(credentials.saves, 0)
+        XCTAssertEqual(credentials.removals, 0)
     }
 
     func testSharedAIConfigurationIsOptInAndOrdinaryLearningNeverContactsProvider() async throws {

@@ -18,6 +18,7 @@ final class AppDependencies {
     let focusService: FocusService
     let projectStore: ProjectStore
     let newsStore: NewsStore
+    let exportService: ExportService
 
     init(container: ModelContainer, catalogRepository: any CatalogRepository,
          taskRepository: (any TaskRepository)? = nil,
@@ -40,7 +41,12 @@ final class AppDependencies {
          newsRepository: (any NewsRepository)? = nil,
          newsService: any NewsRefreshing = FeedService(),
          newsCatalog: DefaultFeedCatalog? = nil,
-         newsCatalogLoader: () throws -> DefaultFeedCatalog = { try BundledFeedCatalog.load() }) {
+         newsCatalogLoader: () throws -> DefaultFeedCatalog = { try BundledFeedCatalog.load() },
+         exportRepository: (any ExportRepository)? = nil,
+         exportPanel: (any ExportDestinationSelecting)? = nil,
+         exportWriter: any ExportFilePreparing & ExportFileDelivering = ExportFileWriter(),
+         exportClock: @escaping () -> Date = Date.init,
+         exportBundle: Bundle = .main) {
         self.container = container
         self.catalogRepository = catalogRepository
         // General preferences are independently retryable. An unreadable record
@@ -84,6 +90,16 @@ final class AppDependencies {
         } else {
             lessonDraftStore = LessonDraftStore(learning: learningCatalogStore, clock: draftClock)
         }
+        // Both Settings clients use this one transient owner. Assembly does not
+        // select a destination, flush answers, capture data, or create artifacts.
+        exportService = ExportService(
+            repository: exportRepository ?? SwiftDataExportRepository(container: container),
+            panel: exportPanel ?? ExportSavePanel(approve: exportWriter.approveDestination),
+            writer: exportWriter, clock: exportClock,
+            appVersion: { exportBundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "" },
+            flushAnswers: lessonDraftStore.flushAll)
+        // Missing bundle metadata fails export validation rather than inventing a
+        // version. The existing draft owner is retained; there is no second buffer.
         taskStore = TaskStore(repository: taskRepository ?? SwiftDataTaskRepository(container: container))
         scheduleStore = ScheduleStore(repository: scheduleRepository ?? SwiftDataScheduleRepository(container: container))
         focusService = FocusService(repository: focusRepository ?? SwiftDataFocusRepository(container: container),

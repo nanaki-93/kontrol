@@ -2153,3 +2153,129 @@ No agent store cleanup occurred. New draft integration uses an in-memory contain
 writer/service tests clean only owned non-store destinations/artifacts. No original
 fixture, frozen schema, dependency pin, external project, production store, workflow
 file, or plan checkbox changed. **No remaining Step 3.4 blockers.**
+
+## F13 Step 3.5 — one graph-owned export service (2026-09-30, 16:38 UTC)
+
+First incomplete task matched runner task 13/27. The cumulative checklist had no
+previous findings. Initial worktree/index were clean; repository/target and direct
+ancestor checks found no applicable `AGENTS.md`; no submodule was listed. Changed
+only `Kontrol/App/AppDependencies.swift`, ownership/integration coverage in
+`KontrolTests/{ExportServiceTests,LaunchCoordinatorTests,AppShellTests}.swift`, and
+this required ledger. No Local Data route/UI or later task was implemented.
+
+Base revision: `1bbe589461e6608d9c92d2cfb99d73da4a6ca58a`. Evidence directory:
+**`/tmp/kontrol-f13-step3-5.ctokSG/`**. Tested implementation/test patch:
+`implementation.patch`, SHA-256
+`63a6a7968926880b32f1d7ecc7fef445507aaa3848cb1fd8ffb75f3d1733e2b9`.
+This QA addition is the only subsequent tree edit. `environment.log` records
+macOS 27.0 (26A428), arm64 MacBook Pro, Xcode 27.0 (27A266a), Apple Swift 6.4,
+`/Applications/Xcode.app/Contents/Developer`, source identity and worktree state.
+`xcodebuild -list -project Kontrol.xcodeproj` passed with the existing two targets,
+one scheme, and Yams 5.4.0. Swift 5/macOS 14 settings remain unchanged; this does
+not establish macOS 14 runtime acceptance.
+
+### Implemented ownership and coverage
+
+- `AppDependencies.exportService` is constructed once from the graph's existing
+  container, existing `LessonDraftStore.flushAll`, lazy native panel adapter, and
+  private/atomic writer. The panel's default approval uses the same injected writer
+  boundary. Narrow optional repository/panel and writer/clock/bundle seams retain
+  production defaults without requiring another container, answer owner, or service.
+- Export marketing version is read from `CFBundleShortVersionString`, not the build
+  number or a hardcoded version. Missing metadata supplies an invalid empty version
+  to the existing validator rather than inventing one; release metadata configuration
+  remains Step 5.2. Injected real bundle fixtures prove `9.8.7` and `2.3.4` survive
+  exported JSON, distinct from their `456` build number.
+- New graph integration method
+  `ExportServiceTests/testGraphSettingsClientsShareExportOwnerAndRejectOverlapDuringSelectionAndPreparation`
+  constructs two Settings clients, asserts identical service/draft/container owners,
+  and verifies zero initial panel/capture/writer/clock calls or artifacts. Actions
+  from either client cannot overlap selection or deliberately suspended preparation;
+  there is exactly one panel, capture, preparation, and delivery, with shared saved
+  publication and complete owned staging cleanup.
+- The existing real answer-flush regression now uses `graph.exportService` and its
+  default export repository. Cancel leaves three pending buffers dirty, a second
+  answer-save failure retains failed/unvisited text and the first durable save,
+  and explicit retry exports exact answers from that same container/draft owner.
+- Launch tests now cover the default service remaining idle and injected boundaries
+  receiving zero export calls across repeated starts. They also assert zero
+  credential reads/saves/removals, project inspections/reference fetches, AI
+  generations/connection tests, News refreshes/validations, and no draft buffers.
+  The AppShell ownership selector checks main/native Settings and two window clients
+  share the export/draft owners, while a separate graph has independent owners.
+- Inspected production routes: `KontrolApp.SettingsSceneContent` and
+  `AppShell` both pass the same launch-owned dependencies to
+  `FoundationSettingsView`. No export action is wired into presentation in this
+  task; that remains Step 4.1.
+
+### Exact validation and audited results
+
+Commands ran from the repository root; final commands each exited **0**:
+
+```sh
+set -o pipefail
+EVIDENCE=/tmp/kontrol-f13-step3-5.ctokSG
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
+  -resultBundlePath "$EVIDENCE/ownership.xcresult" \
+  -only-testing:KontrolTests/ExportServiceTests \
+  -only-testing:KontrolTests/LaunchCoordinatorTests \
+  -only-testing:KontrolTests/LessonExperienceStoreTests \
+  -only-testing:KontrolTests/NewsStoreTests \
+  -only-testing:KontrolTests/AISettingsStoreTests test
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
+  -resultBundlePath "$EVIDENCE/shell.xcresult" \
+  -only-testing:KontrolTests/AppShellTests/testOneStorePerDependencyGraphAcrossRoutesAndWindows test
+make build DERIVED_DATA=/tmp/kontrol-f13-derived
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived CODE_SIGNING_ALLOWED=NO \
+  build-for-testing
+for bundle in ownership shell; do
+  xcrun xcresulttool get test-results summary \
+    --path "$EVIDENCE/$bundle.xcresult" --format json \
+    > "$EVIDENCE/$bundle-summary.json"
+  xcrun xcresulttool get test-results tests \
+    --path "$EVIDENCE/$bundle.xcresult" --format json \
+    > "$EVIDENCE/$bundle-tests.json"
+done
+python3 "$EVIDENCE/audit.py"
+git diff --check
+```
+
+Fresh results: **119/119 Passed** (43 ExportServiceTests, 7 LaunchCoordinatorTests,
+30 LessonExperienceStoreTests, 22 NewsStoreTests, 17 AISettingsStoreTests), plus
+**1/1 Passed** for the exact AppShell ownership selector. Zero failed/skipped/
+expected-failure methods. The source-to-result audit proves each required method
+executed exactly once; full identifiers are in `executed-identifiers.txt`.
+Logs: `tests.log`, `shell.log`, `build.log`, `compile.log`, `audit.log`,
+`diffcheck.log`, `exit-codes.log`; both fresh summaries/test trees are retained.
+The initial audit script exited **1** because its regex also counted non-XCTest
+`testConnection` protocol doubles. Restricting enumeration to each XCTest class
+fixed the audit; the final audit passes without changing any tests/selections.
+No build or test command failed.
+
+Both xcresult summaries report no runtime-warning entries, but console diagnostics
+are preserved in `diagnostics.log`: five continuation-leak events from existing
+News tests (`testEligibilityManualOverrideRetryDeadlineAndNextScheduledCheck`,
+`testScheduledCheckRunsWhenForegroundAndBecomesEligible`, printed twice each),
+existing `SettingsSceneTests.swift:1200` optional-interpolation compiler warning,
+AppIntents metadata extraction warnings, multiple-destination and linkd messages.
+These are not new export findings or evidence of native release acceptance; no
+assertion was weakened and no out-of-scope diagnostic was silently repaired.
+No SQLite vnode-unlinked diagnostic occurred in this selection.
+
+Test hosts **7012** and **7282** exited (`ps -p 7012,7282 -o pid=,stat=,command=`
+returned **1**, no rows; `host-exit.log`). New graph tests use in-memory SwiftData
+and isolated non-store bundle/destination fixtures, cleaning only their owned
+non-store artifacts. No agent store cleanup, production-data access, historical
+fixture/schema edits, external project changes, dependency changes, workflow state
+changes, staging, or commits occurred. All hosted tests compiled; this graph-only
+step adds no native UI selector or manual observation. Previously deferred native
+panel, rendering/keyboard/VoiceOver and A13/S13/B13/D13 remain mandatory separate
+gates. **No remaining Step 3.5 blockers.**

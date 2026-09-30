@@ -264,6 +264,85 @@ final class ExportServiceTests: XCTestCase {
         }
     }
 
+    private func versionBundle(in root: URL, version: String) throws -> Bundle {
+        let url = root.appendingPathComponent("ExportMetadata.bundle")
+        let contents = url.appendingPathComponent("Contents")
+        try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
+        let info = ["CFBundleIdentifier": "test.kontrol.export.\(UUID().uuidString)",
+                    "CFBundleShortVersionString": version, "CFBundleVersion": "456"]
+        try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
+            .write(to: contents.appendingPathComponent("Info.plist"))
+        return try XCTUnwrap(Bundle(url: url))
+    }
+
+    @MainActor
+    func testGraphSettingsClientsShareExportOwnerAndRejectOverlapDuringSelectionAndPreparation() async throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let bundleRoot = try self.root()
+        defer { try? FileManager.default.removeItem(at: bundleRoot) }
+        let bundle = try versionBundle(in: bundleRoot, version: "9.8.7")
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = LifecycleRepository()
+        let writer = LifecycleWriter(root: root)
+        let spy = PanelSpy()
+        let selected = expectation(description: "Shared panel started")
+        spy.onBegin = { selected.fulfill() }
+        let prepared = expectation(description: "Shared writer preparing")
+        await writer.suspendAfterPreparation(prepared)
+        let date = Date(timeIntervalSince1970: 1_750_000_000)
+        var clockReads = 0
+        let graph = AppDependencies(container: container,
+            catalogRepository: SwiftDataCatalogRepository(container: container),
+            exportRepository: repository, exportPanel: ExportSavePanel(makePanel: { spy }),
+            exportWriter: writer, exportClock: { clockReads += 1; return date }, exportBundle: bundle)
+        let mainSettings = FoundationSettingsView(dependencies: graph)
+        let nativeSettings = FoundationSettingsView(dependencies: graph)
+        let mainService = mainSettings.dependencies.exportService
+        let nativeService = nativeSettings.dependencies.exportService
+        XCTAssertTrue(mainService === nativeService)
+        XCTAssertTrue(mainSettings.dependencies.lessonDraftStore === nativeSettings.dependencies.lessonDraftStore)
+        XCTAssertTrue(mainSettings.dependencies.container === container)
+        XCTAssertTrue(nativeSettings.dependencies.container === container)
+        XCTAssertEqual(mainService.state, .idle)
+        XCTAssertFalse(mainService.isBusy)
+        XCTAssertEqual(clockReads, 0)
+        XCTAssertEqual(spy.begins, 0)
+        XCTAssertTrue(repository.calls.isEmpty)
+        let constructionCounts = await writer.counts()
+        XCTAssertEqual(constructionCounts, [0, 0])
+        try assertEmpty(root)
+        XCTAssertTrue(mainService.startExport())
+        XCTAssertFalse(nativeService.startExport())
+        await fulfillment(of: [selected], timeout: 5)
+        XCTAssertEqual(spy.begins, 1)
+        XCTAssertEqual(nativeService.state, .selecting)
+        XCTAssertFalse(nativeService.startExport())
+        spy.completion?(true, root.appendingPathComponent("destination.json"))
+        await fulfillment(of: [prepared], timeout: 5)
+        XCTAssertEqual(nativeService.state, .preparing)
+        XCTAssertFalse(mainService.startExport())
+        XCTAssertFalse(nativeService.startExport())
+        XCTAssertEqual(repository.calls.count, 1)
+        XCTAssertEqual(repository.calls.first?.0, date)
+        XCTAssertEqual(repository.calls.first?.1, "9.8.7", "Use marketing version, not build number or a constant")
+        let preparingCounts = await writer.counts()
+        XCTAssertEqual(preparingCounts, [1, 0])
+        await writer.resumePreparation()
+        await nativeService.waitForCompletion()
+        XCTAssertEqual(mainService.state, .saved)
+        XCTAssertEqual(nativeService.state, .saved)
+        XCTAssertFalse(mainService.isBusy)
+        XCTAssertEqual(clockReads, 2)
+        XCTAssertEqual(spy.begins, 1)
+        let savedCounts = await writer.counts()
+        XCTAssertEqual(savedCounts, [1, 1])
+        let exported = try LocalDataExport.decode(Data(contentsOf: root.appendingPathComponent("destination.json")))
+        XCTAssertEqual(exported.appVersion, "9.8.7")
+        XCTAssertEqual(exported.exportedAt, try ExportTimestamp(date))
+        try assertDeliveryClean(root)
+    }
+
     @MainActor
     func testServicePanelCancelAndSelectionFailureNeverFlushCapturePrepareOrWrite() async throws {
         let root = try root()
@@ -394,8 +473,15 @@ final class ExportServiceTests: XCTestCase {
             }
         })
         _ = try repository.importIfNeeded(BundledCatalogLoader.load())
+        let bundleRoot = try self.root()
+        defer { try? FileManager.default.removeItem(at: bundleRoot) }
+        let bundle = try versionBundle(in: bundleRoot, version: "2.3.4")
+        let writer = LifecycleWriter(root: root)
+        let spy = PanelSpy()
         let graph = AppDependencies(container: container, catalogRepository: repository,
-            draftScheduler: { _, _ in {} })
+            draftScheduler: { _, _ in {} }, exportPanel: ExportSavePanel(makePanel: { spy }),
+            exportWriter: writer, exportBundle: bundle)
+        let service = graph.exportService
         graph.learningCatalogStore.loadIfNeeded()
         let slots = try XCTUnwrap(graph.learningCatalogStore.state.snapshot?.slots)
         for slot in slots.prefix(3) {
@@ -406,14 +492,10 @@ final class ExportServiceTests: XCTestCase {
         }
         let buffers = graph.lessonDraftStore.buffers.values.sorted { $0.attemptID.uuidString < $1.attemptID.uuidString }
         XCTAssertEqual(buffers.count, 3)
-        let capture = SwiftDataExportRepository(container: container)
-        let writer = LifecycleWriter(root: root)
-        let spy = PanelSpy()
         let target = root.appendingPathComponent("destination.json")
-        // Cancel must leave even real pending buffers untouched.
+        // Cancel must leave even real pending buffers untouched. The graph's
+        // default repository reads this container after its own draft owner saves.
         spy.onBegin = { [weak spy] in spy?.completion?(false, nil) }
-        let service = ExportService(repository: capture, panel: ExportSavePanel(makePanel: { spy }),
-            writer: writer, appVersion: { "1.0" }, flushAnswers: graph.lessonDraftStore.flushAll)
         XCTAssertTrue(service.startExport())
         await service.waitForCompletion()
         XCTAssertEqual(service.state, .canceled)
@@ -439,6 +521,7 @@ final class ExportServiceTests: XCTestCase {
         await service.waitForCompletion()
         XCTAssertEqual(service.state, .saved)
         let exported = try LocalDataExport.decode(Data(contentsOf: target))
+        XCTAssertEqual(exported.appVersion, "2.3.4")
         for buffer in buffers {
             XCTAssertEqual(exported.learning.attempts.first { $0.id == buffer.attemptID }?.answerDraft, buffer.text)
             XCTAssertFalse(try XCTUnwrap(graph.lessonDraftStore.buffers[buffer.attemptID]).isDirty)

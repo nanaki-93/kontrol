@@ -34,6 +34,10 @@ final class AppShellTests: XCTestCase {
         let sharedSchedule = dependencies.scheduleStore
         let sharedProjects = dependencies.projectStore
         let sharedNews = dependencies.newsStore
+        let sharedExport = dependencies.exportService
+        let sharedDrafts = dependencies.lessonDraftStore
+        XCTAssertEqual(sharedExport.state, .idle)
+        XCTAssertFalse(sharedExport.isBusy)
         XCTAssertNil(sharedNews.snapshot, "Dependency construction must not load news or start network IO")
         let first = AppShell(navigation: NavigationStore(), dependencies: dependencies)
         let second = AppShell(navigation: NavigationStore(), dependencies: dependencies)
@@ -47,7 +51,14 @@ final class AppShellTests: XCTestCase {
         XCTAssertTrue(second.dependencies.newsStore === sharedNews)
         XCTAssertTrue(first.dependencies.appPreferencesStore === dependencies.appPreferencesStore)
         XCTAssertTrue(second.dependencies.appPreferencesStore === dependencies.appPreferencesStore)
-        XCTAssertTrue(FoundationSettingsView(dependencies: dependencies).dependencies === first.dependencies)
+        let mainSettings = FoundationSettingsView(dependencies: first.dependencies)
+        let nativeSettings = FoundationSettingsView(dependencies: dependencies)
+        XCTAssertTrue(nativeSettings.dependencies === first.dependencies)
+        XCTAssertTrue(mainSettings.dependencies.exportService === sharedExport)
+        XCTAssertTrue(nativeSettings.dependencies.exportService === sharedExport)
+        XCTAssertTrue(second.dependencies.exportService === sharedExport)
+        XCTAssertTrue(mainSettings.dependencies.lessonDraftStore === sharedDrafts)
+        XCTAssertTrue(nativeSettings.dependencies.lessonDraftStore === sharedDrafts)
         XCTAssertTrue(first.dependencies.container === second.dependencies.container)
         let requestsBeforeEntry = await service.requests
         XCTAssertEqual(requestsBeforeEntry, 0, "Building two window routes must not fetch feeds")
@@ -70,6 +81,8 @@ final class AppShellTests: XCTestCase {
         XCTAssertFalse(other.scheduleStore === sharedSchedule)
         XCTAssertFalse(other.projectStore === sharedProjects)
         XCTAssertFalse(other.newsStore === sharedNews)
+        XCTAssertFalse(other.exportService === sharedExport)
+        XCTAssertFalse(other.lessonDraftStore === sharedDrafts)
         XCTAssertFalse(other.container === dependencies.container)
         XCTAssertFalse((other.taskStore.repository as AnyObject) === (shared.repository as AnyObject))
         XCTAssertFalse((other.scheduleStore.repository as AnyObject) === (sharedSchedule.repository as AnyObject))
