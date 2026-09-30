@@ -203,9 +203,11 @@ struct SettingsSceneContent: View {
     var body: some View {
         Group {
             if let dependencies = launch.dependencies, launch.state == .ready {
+                // Match AppShell: one vertical document owns hub, local sections,
+                // failure guidance and actions. No inner form scroll regions.
                 ScrollView {
                     FoundationSettingsView(dependencies: dependencies)
-                        .frame(maxWidth: .infinity, minHeight: 340, alignment: .topLeading)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
                 .background(AppColors.background)
                 .appAccessibilityPreferences(dependencies.appPreferencesStore)

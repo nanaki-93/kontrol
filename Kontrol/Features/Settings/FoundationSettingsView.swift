@@ -3,6 +3,8 @@ import SwiftUI
 
 /// One Settings hub for both the destination and native scene. Local navigation
 /// changes presentation only; every section receives the same app-owned graph.
+/// The scene/shell owns the single scroll document. Sections never add a nested
+/// scroll view or a pinned action bar that could hide controls in compact windows.
 struct FoundationSettingsView: View {
     let dependencies: AppDependencies
     @ObservedObject private var preferences: AppPreferencesStore
@@ -22,7 +24,13 @@ struct FoundationSettingsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppMetrics.space4) {
-            PageHeader("Settings")
+            if section == .ai || section == .news {
+                // Shared header moves Back below the title when its ideal width
+                // does not fit. Native Settings needs no global destination bar.
+                PageHeader("Settings") { backAction }
+            } else {
+                PageHeader("Settings")
+            }
             switch section {
             case .hub:
                 hub
@@ -32,19 +40,18 @@ struct FoundationSettingsView: View {
                     section = .hub
                 }
             case .ai:
-                backAction
                 AISettingsView(store: ai)
             case .news:
-                backAction
                 NewsManagementView(store: news)
                     .padding(AppMetrics.space4)
                     .background(AppColors.surface, in: RoundedRectangle(cornerRadius: AppMetrics.mediumRadius))
             }
-            Spacer(minLength: 0)
         }
+        // The scroll host proposes an unconstrained height. Keep that natural
+        // document size, including lazy News rows, without a viewport-height form.
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, AppMetrics.horizontalInset)
-        .padding(.top, AppMetrics.space8)
+        .padding(.top, AppMetrics.space4)
         .padding(.bottom, AppMetrics.space4)
         .background(AppColors.background)
         .foregroundStyle(AppColors.textPrimary)
@@ -66,6 +73,7 @@ struct FoundationSettingsView: View {
                 if let snapshot = preferences.editableSnapshot {
                     Text("Focus default: \(snapshot.preferences.focusDefaultMinutes) minutes")
                         .appTypography(.body)
+                        .fixedSize(horizontal: false, vertical: true)
                         .accessibilityIdentifier("settings-focus-summary")
                     Text(GeneralPreferencesView.summary(snapshot.preferences))
                         .appTypography(.metadata)
@@ -85,6 +93,7 @@ struct FoundationSettingsView: View {
                 Text("Black / Red Terminal · fixed theme")
                     .appTypography(.metadata)
                     .foregroundStyle(AppColors.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Divider()
             Text("Connections").appTypography(.section).accessibilityAddTraits(.isHeader)

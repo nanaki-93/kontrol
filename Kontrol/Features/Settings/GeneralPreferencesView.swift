@@ -58,7 +58,7 @@ struct GeneralPreferencesView: View {
                 .foregroundStyle(AppColors.textSecondary)
 
             Text("Focus default").appTypography(.section).accessibilityAddTraits(.isHeader)
-            AppMenuPicker("Duration", selection: Binding(
+            responsivePicker("Duration", selection: Binding(
                 get: { durationChoice },
                 set: {
                     durationChoice = $0
@@ -79,19 +79,23 @@ struct GeneralPreferencesView: View {
                 .appTypography(.metadata)
                 .foregroundStyle(AppColors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("preferences-focus-guidance")
 
             Text("Appearance").appTypography(.section).accessibilityAddTraits(.isHeader)
-            Text("Black / Red Terminal · fixed theme").appTypography(.body)
-            AppMenuPicker("Text size", selection: $editor.draft.textSize,
+            Text("Black / Red Terminal · fixed theme")
+                .appTypography(.body)
+                .fixedSize(horizontal: false, vertical: true)
+            responsivePicker("Text size", selection: $editor.draft.textSize,
                           options: [("System", .system), ("Large · at least 130%", .large)])
                 .accessibilityIdentifier("preferences-text-size")
-            AppMenuPicker("Motion", selection: $editor.draft.reduceMotion,
+            responsivePicker("Motion", selection: $editor.draft.reduceMotion,
                           options: [("System", .system), ("Reduce", .reduce)])
                 .accessibilityIdentifier("preferences-motion")
             Text("Large never shrinks a larger system size. System reduced motion always remains respected.")
                 .appTypography(.metadata)
                 .foregroundStyle(AppColors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("preferences-appearance-guidance")
 
             if case .failed(let error) = store.state {
                 failure(Self.errorMessage(.preferences(error)))
@@ -112,24 +116,44 @@ struct GeneralPreferencesView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("preferences-latest-saved")
             }
-            HStack(spacing: AppMetrics.space2) {
-                ActionButton("Cancel") {
-                    editor.cancel()
-                    onClose(false)
-                }
-                .accessibilityIdentifier("preferences-cancel")
-                ActionButton("Save", variant: .primary, isEnabled: store.state == .loaded && !needsReview) {
-                    do {
-                        try editor.save(using: store)
-                        onClose(true)
-                    } catch { /* The editor retains the draft and publishes the actionable error. */ }
-                }
-                .accessibilityIdentifier("preferences-save")
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: AppMetrics.space2) { editorActions }
+                VStack(alignment: .leading, spacing: AppMetrics.space2) { editorActions }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("general-preferences-editor")
+    }
+
+    /// Measure ideal label/control widths before choosing a row. Enlarged native
+    /// popup titles must not be squeezed beside their labels into ellipses.
+    private func responsivePicker<Value: Hashable>(_ title: String, selection: Binding<Value>,
+                                                   options: [(String, Value)]) -> some View {
+        ViewThatFits(in: .horizontal) {
+            AppMenuPicker(title, selection: selection, options: options)
+                .fixedSize(horizontal: true, vertical: false)
+            VStack(alignment: .leading, spacing: AppMetrics.space2) {
+                Text(title)
+                AppMenuPicker(title, selection: selection, options: options, showsLabel: false)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var editorActions: some View {
+        ActionButton("Cancel") {
+            editor.cancel()
+            onClose(false)
+        }
+        .accessibilityIdentifier("preferences-cancel")
+        ActionButton("Save", variant: .primary, isEnabled: store.state == .loaded && !needsReview) {
+            do {
+                try editor.save(using: store)
+                onClose(true)
+            } catch { /* The editor retains the draft and publishes the actionable error. */ }
+        }
+        .accessibilityIdentifier("preferences-save")
     }
 
     private func failure(_ message: String) -> some View {
