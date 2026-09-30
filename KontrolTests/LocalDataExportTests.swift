@@ -993,6 +993,361 @@ final class LocalDataExportTests: XCTestCase {
         XCTAssertFalse(inspect.hasChanges)
     }
 
+    @MainActor
+    private func learning(topics: [Topic] = [], subtopics: [Subtopic] = [], concepts: [Concept] = [],
+                          definitions: [LessonDefinition] = [], into envelope: Export? = nil) throws -> Export {
+        try LearningExportProjection.project(topics: topics, subtopics: subtopics, concepts: concepts,
+            definitions: definitions, into: envelope ?? Export(exportedAt: instant(), appVersion: "1.0"))
+    }
+
+    @MainActor
+    private func storedDefinition(_ value: Export.Definition? = nil, provenance: String? = nil) -> LessonDefinition {
+        let value = value ?? definition()
+        return LessonDefinition(id: value.id, objectiveKey: value.objectiveKey, title: value.title,
+            topicID: value.topicID, subtopicID: value.subtopicID, conceptIDs: value.conceptIDs,
+            difficulty: value.difficulty, format: value.format, estimatedMinutes: value.estimatedMinutes,
+            prerequisiteConceptIDs: value.prerequisiteConceptIDs, explanation: value.explanation,
+            workedExample: value.workedExample, exercise: value.exercise, referenceAnswer: value.referenceAnswer,
+            selfCheckCriteria: value.selfCheckCriteria, contentVersion: value.contentVersion,
+            normalizedContentHash: value.normalizedContentHash, source: value.source,
+            provenance: provenance ?? authored, objective: value.objective)
+    }
+
+    @MainActor
+    private func acceptedGenerated(returnedModel: String? = nil) throws -> LessonDefinition {
+        let catalog = try BundledCatalogLoader.load()
+        let value = catalog.value
+        let membership = CurrentCatalogMembership(catalogID: value.catalogID, catalogVersion: value.version,
+            topicIDs: value.topics.map(\.id).sorted(), subtopicIDs: value.subtopics.map(\.id).sorted(),
+            conceptIDs: value.concepts.map(\.id).sorted(), seededLessonIDs: value.lessons.map(\.id).sorted())
+        let registry = try GenerationObjectivesLoader.load(catalog: catalog, membership: membership)
+        let context = LessonGenerationContext(catalog: catalog, membership: membership,
+            completedConceptIDs: ["go.concurrency.cancel-work"], terminal: [], definitions: [], startedPins: [])
+        let request = try LessonGenerationRequestBuilder.make(selection: .init(topicID: "go",
+            objectiveKey: "expansion.go.concurrency.cancellation-race", format: "code", difficulty: "intermediate"),
+            operationID: secondID, context: context, registry: registry)
+        let candidate = CandidateLesson(title: authored, objectiveKey: request.objectiveKey, objective: authored,
+            topicID: request.topicID, subtopicID: request.subtopicID, conceptIDs: request.conceptIDs,
+            difficulty: request.difficulty, format: request.format, estimatedMinutes: 20,
+            prerequisiteConceptIDs: request.prerequisiteConceptIDs, explanation: authored,
+            workedExample: " example\n", exercise: " exercise\t", referenceAnswer: authored,
+            selfCheckCriteria: [" Z check\n", " A check\t", " A check\t"])
+        let accepted = try GeneratedLessonValidator.validate(candidate, request: request, context: context,
+            registry: registry, requestedModel: "gpt-test", returnedModel: returnedModel, now: instant().date).definition
+        let row = storedDefinition()
+        row.id = accepted.id; row.objectiveKey = accepted.objectiveKey; row.objective = accepted.objective
+        row.topicID = accepted.topicID; row.subtopicID = accepted.subtopicID; row.conceptIDs = accepted.conceptIDs
+        row.difficulty = accepted.difficulty; row.estimatedMinutes = accepted.estimatedMinutes
+        row.prerequisiteConceptIDs = accepted.prerequisiteConceptIDs; row.contentVersion = accepted.contentVersion
+        row.selfCheckCriteria = accepted.selfCheckCriteria; row.normalizedContentHash = accepted.normalizedContentHash
+        row.source = accepted.source; row.provenance = accepted.provenance
+        return row
+    }
+
+    @MainActor
+    func testLearningDefinitionsProjectionMapsEveryTaxonomyAndSeedFieldExactly() throws {
+        let row = storedDefinition()
+        let value = try learning(topics: [Topic(id: "topic", name: authored)],
+            subtopics: [Subtopic(id: "subtopic", topicID: "topic", name: authored)],
+            concepts: [Concept(id: "concept", subtopicID: "subtopic", name: authored,
+                prerequisiteConceptIDs: ["z.prerequisite", "a.prerequisite"])], definitions: [row])
+        XCTAssertEqual(value.learning.topics, [.init(id: "topic", name: authored)])
+        XCTAssertEqual(value.learning.subtopics, [.init(id: "subtopic", topicID: "topic", name: authored)])
+        XCTAssertEqual(value.learning.concepts, [.init(id: "concept", subtopicID: "subtopic", name: authored,
+            prerequisiteConceptIDs: ["a.prerequisite", "z.prerequisite"])])
+        var expected = Export(exportedAt: try instant(), appVersion: "1.0")
+        expected.learning.definitions = [definition()]
+        XCTAssertEqual(value.learning.definitions, expected.canonicalized().learning.definitions)
+        XCTAssertEqual(try Export.decode(value.encoded()), value)
+        let projected = try XCTUnwrap(value.learning.definitions.first)
+        for text in [value.learning.topics[0].name, value.learning.subtopics[0].name,
+                     value.learning.concepts[0].name, projected.title, projected.objective,
+                     projected.explanation, projected.referenceAnswer, projected.provenance!.attribution!] {
+            XCTAssertEqual(Array(text.utf8), Array(authored.utf8))
+        }
+        XCTAssertEqual(projected.workedExample, " example\n")
+        XCTAssertEqual(projected.exercise, " exercise\t")
+        XCTAssertEqual(projected.selfCheckCriteria, [" Z check\n", " A check\t"])
+    }
+
+    @MainActor
+    func testLearningDefinitionsProjectionMapsAcceptedGeneratedAllowlistAndNilReturnedModel() throws {
+        for returned in [nil, "gpt-returned"] as [String?] {
+            let row = try acceptedGenerated(returnedModel: returned)
+            let value = try learning(definitions: [row])
+            XCTAssertEqual(value.learning.definitions, [.init(id: "generated.\(secondID.uuidString.lowercased())",
+                objectiveKey: row.objectiveKey, objective: row.objective, title: authored, topicID: "go",
+                subtopicID: row.subtopicID, conceptIDs: row.conceptIDs.sorted(), difficulty: "intermediate",
+                format: "code", estimatedMinutes: 20, prerequisiteConceptIDs: row.prerequisiteConceptIDs.sorted(),
+                explanation: authored, workedExample: " example\n", exercise: " exercise\t", referenceAnswer: authored,
+                selfCheckCriteria: [" Z check\n", " A check\t", " A check\t"], contentVersion: 1,
+                normalizedContentHash: row.normalizedContentHash, source: "generated",
+                provenance: .init(attribution: nil, generation: .init(provider: "openai", requestedModel: "gpt-test",
+                    returnedModel: returned, generatedAt: try instant(), operationID: secondID,
+                    requestSchemaVersion: 1, objectiveRegistryVersion: 1)))])
+            XCTAssertEqual(try Export.decode(value.encoded()), value)
+            let json = try object(value)
+            let definitions = try XCTUnwrap((json["learning"] as? [String: Any])?["definitions"] as? [[String: Any]])
+            let provenance = try XCTUnwrap(definitions[0]["provenance"] as? [String: Any])
+            XCTAssertEqual(Set(provenance.keys), ["schemaVersion", "attribution", "generation"])
+            let generation = try XCTUnwrap(provenance["generation"] as? [String: Any])
+            XCTAssertEqual(Set(generation.keys), ["provider", "requestedModel", "returnedModel", "generatedAt",
+                "operationID", "requestSchemaVersion", "objectiveRegistryVersion"])
+            XCTAssertFalse(String(decoding: try value.encoded(), as: UTF8.self).contains("\"version\""))
+        }
+    }
+
+    @MainActor
+    func testLearningDefinitionsProjectionIncludesRetiredSeedTaxonomyWithoutCurrentMembershipFiltering() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataCatalogRepository(container: container)
+        let catalog = try BundledCatalogLoader.load()
+        _ = try repository.importIfNeeded(catalog)
+        let captureBefore = ModelContext(container); captureBefore.autosaveEnabled = false
+        let before = try learning(topics: captureBefore.fetch(FetchDescriptor<Topic>()),
+            subtopics: captureBefore.fetch(FetchDescriptor<Subtopic>()), concepts: captureBefore.fetch(FetchDescriptor<Concept>()),
+            definitions: captureBefore.fetch(FetchDescriptor<LessonDefinition>()))
+        var upgrade = catalog.value
+        upgrade.version += 1
+        let retired = Set(upgrade.subtopics.filter { $0.topicID == "go" }.map(\.id))
+        upgrade.topics.removeAll { $0.id == "go" }; upgrade.subtopics.removeAll { retired.contains($0.id) }
+        upgrade.concepts.removeAll { retired.contains($0.subtopicID) }; upgrade.lessons.removeAll { $0.topicID == "go" }
+        _ = try repository.importIfNeeded(CatalogValidator.validate(upgrade))
+        let capture = ModelContext(container); capture.autosaveEnabled = false
+        let value = try learning(topics: capture.fetch(FetchDescriptor<Topic>()),
+            subtopics: capture.fetch(FetchDescriptor<Subtopic>()), concepts: capture.fetch(FetchDescriptor<Concept>()),
+            definitions: capture.fetch(FetchDescriptor<LessonDefinition>()))
+        XCTAssertEqual(value, before)
+        XCTAssertTrue(value.learning.definitions.contains { $0.topicID == "go" })
+        XCTAssertTrue(value.learning.topics.contains { $0.id == "go" })
+        XCTAssertFalse(capture.hasChanges)
+        let membership = try XCTUnwrap(capture.fetch(FetchDescriptor<CatalogMembership>()).first).membership()
+        XCTAssertFalse(membership.topicIDs.contains("go"))
+        XCTAssertTrue(value.learning.progress.isEmpty); XCTAssertTrue(value.learning.slots.isEmpty)
+    }
+
+    @MainActor
+    func testLearningDefinitionsProjectionPreservesLegacyEmptyObjectiveAttributionAndMissingScalarLinks() throws {
+        let row = storedDefinition(provenance: "")
+        row.objective = ""; row.contentVersion = 7
+        row.topicID = "retired.topic"; row.subtopicID = "retired.subtopic"
+        let value = try learning(definitions: [row])
+        XCTAssertEqual(value.learning.definitions[0].objective, "")
+        XCTAssertEqual(value.learning.definitions[0].contentVersion, 7)
+        XCTAssertEqual(value.learning.definitions[0].normalizedContentHash, row.normalizedContentHash)
+        XCTAssertNil(value.learning.definitions[0].provenance)
+        XCTAssertEqual(value.learning.definitions[0].topicID, "retired.topic")
+        XCTAssertTrue(value.learning.topics.isEmpty)
+        XCTAssertEqual(try Export.decode(value.encoded()), value)
+        row.provenance = " \n"
+        XCTAssertThrowsError(try learning(definitions: [row])) {
+            XCTAssertEqual($0 as? LocalDataExportError, .invalidValue)
+        }
+    }
+
+    @MainActor
+    func testLearningDefinitionsProjectionSortsDetachesAndPreservesOtherEnvelopeFields() throws {
+        let topic = Topic(id: "topic", name: authored), other = Topic(id: "z.topic", name: "Other")
+        let subtopic = Subtopic(id: "subtopic", topicID: "topic", name: authored)
+        let otherSubtopic = Subtopic(id: "z.subtopic", topicID: "z.topic", name: "Other")
+        let concept = Concept(id: "concept", subtopicID: "subtopic", name: authored,
+            prerequisiteConceptIDs: ["z.prerequisite", "a.prerequisite"])
+        let otherConcept = Concept(id: "z.concept", subtopicID: "z.subtopic", name: "Other")
+        let seed = storedDefinition(), generated = try acceptedGenerated()
+        let envelope = try rich()
+        let value = try learning(topics: [other, topic], subtopics: [otherSubtopic, subtopic],
+            concepts: [otherConcept, concept], definitions: [seed, generated], into: envelope)
+        concept.prerequisiteConceptIDs.reverse(); seed.conceptIDs.reverse(); seed.prerequisiteConceptIDs.reverse()
+        let reversed = try learning(topics: [topic, other], subtopics: [subtopic, otherSubtopic],
+            concepts: [concept, otherConcept], definitions: [generated, seed], into: envelope)
+        XCTAssertEqual(try value.encoded(), try reversed.encoded())
+        let canonical = envelope.canonicalized()
+        XCTAssertEqual(value.exportedAt, canonical.exportedAt); XCTAssertEqual(value.appVersion, canonical.appVersion)
+        XCTAssertEqual(value.tasks, canonical.tasks); XCTAssertEqual(value.blocks, canonical.blocks)
+        XCTAssertEqual(value.sessions, canonical.sessions); XCTAssertEqual(value.generalPreferences, canonical.generalPreferences)
+        XCTAssertEqual(value.feedPreferences, canonical.feedPreferences)
+        XCTAssertEqual(value.learning.progress, canonical.learning.progress)
+        XCTAssertEqual(value.learning.attempts, canonical.learning.attempts)
+        XCTAssertEqual(value.learning.slots, canonical.learning.slots)
+        XCTAssertEqual(value.learning.terminalRecords, canonical.learning.terminalRecords)
+        XCTAssertEqual(value.learning.catalogMembership, canonical.learning.catalogMembership)
+        let bytes = try value.encoded()
+        topic.name = "Later edit"; subtopic.topicID = "Later edit"; concept.prerequisiteConceptIDs = []
+        seed.explanation = "Later edit"; generated.provenance = "damaged"
+        XCTAssertEqual(try value.encoded(), bytes)
+        XCTAssertEqual(try learning(), try Export(exportedAt: instant(), appVersion: "1.0"))
+    }
+
+    @MainActor
+    func testLearningDefinitionsProjectionRejectsDuplicateCollectionsAndReferenceSetsWithoutDeduplication() throws {
+        let topic = Topic(id: "topic", name: "Topic")
+        let subtopic = Subtopic(id: "subtopic", topicID: "topic", name: "Subtopic")
+        let concept = Concept(id: "concept", subtopicID: "subtopic", name: "Concept")
+        let row = storedDefinition()
+        for capture in [
+            { try self.learning(topics: [topic, topic]) }, { try self.learning(subtopics: [subtopic, subtopic]) },
+            { try self.learning(concepts: [concept, concept]) }, { try self.learning(definitions: [row, row]) },
+            { concept.prerequisiteConceptIDs = ["same", "same"]; return try self.learning(concepts: [concept]) },
+            { row.conceptIDs = ["same", "same"]; return try self.learning(definitions: [row]) },
+            { row.conceptIDs = ["concept"]; row.prerequisiteConceptIDs = ["same", "same"]
+              return try self.learning(definitions: [row]) }
+        ] {
+            XCTAssertThrowsError(try capture()) { XCTAssertEqual($0 as? LocalDataExportError, .duplicateIdentity) }
+        }
+    }
+
+    @MainActor
+    func testLearningDefinitionsProjectionRejectsDamagedTaxonomyIdentitiesAndNames() throws {
+        let topic = Topic(id: "topic", name: "Topic")
+        let subtopic = Subtopic(id: "subtopic", topicID: "topic", name: "Subtopic")
+        let concept = Concept(id: "concept", subtopicID: "subtopic", name: "Concept")
+        for badID in ["", " ", " spaced", "e\u{301}"] {
+            topic.id = badID; subtopic.id = badID; concept.id = badID
+            for capture in [{ try self.learning(topics: [topic]) }, { try self.learning(subtopics: [subtopic]) },
+                            { try self.learning(concepts: [concept]) }] {
+                XCTAssertThrowsError(try capture()) { XCTAssertEqual($0 as? LocalDataExportError, .invalidValue) }
+            }
+        }
+        topic.id = "topic"; subtopic.id = "subtopic"; concept.id = "concept"
+        topic.name = "\n"; subtopic.topicID = " bad"; concept.subtopicID = ""
+        XCTAssertThrowsError(try learning(topics: [topic]))
+        XCTAssertThrowsError(try learning(subtopics: [subtopic]))
+        XCTAssertThrowsError(try learning(concepts: [concept]))
+        subtopic.topicID = "topic"; subtopic.name = "\t"
+        concept.subtopicID = "subtopic"; concept.name = " "
+        XCTAssertThrowsError(try learning(subtopics: [subtopic]))
+        XCTAssertThrowsError(try learning(concepts: [concept]))
+        concept.name = "Concept"; concept.prerequisiteConceptIDs = [" spaced"]
+        XCTAssertThrowsError(try learning(concepts: [concept]))
+    }
+
+    @MainActor
+    func testLearningDefinitionsProjectionRejectsCorruptIncludedDefinitionContentWithoutRepair() throws {
+        let mutations: [(LessonDefinition) -> Void] = [
+            { $0.id = " lesson" }, { $0.id = "e\u{301}" }, { $0.topicID = "e\u{301}" },
+            { $0.subtopicID = "e\u{301}" }, { $0.conceptIDs = ["e\u{301}"] },
+            { $0.prerequisiteConceptIDs = ["e\u{301}"] },
+            { $0.topicID = "" }, { $0.subtopicID = " " }, { $0.title = "\n" },
+            { $0.objectiveKey = " " }, { $0.objective = "\t" }, { $0.conceptIDs = [] },
+            { $0.conceptIDs = [" noncanonical"] }, { $0.prerequisiteConceptIDs = [""] },
+            { $0.difficulty = "unknown" }, { $0.format = "video" }, { $0.source = "bundle" },
+            { $0.estimatedMinutes = 0 }, { $0.contentVersion = 0 }, { $0.contentVersion = -1 },
+            { $0.normalizedContentHash = "digest" }, { $0.normalizedContentHash = "sha256:" + String(repeating: "0", count: 64) },
+            { $0.explanation = " " }, { $0.workedExample = " " }, { $0.exercise = " " }, { $0.referenceAnswer = " " },
+            { $0.selfCheckCriteria = [] }, { $0.selfCheckCriteria = [" "] },
+            { $0.explanation += "corrupt change" }, { $0.selfCheckCriteria.reverse() }
+        ]
+        for mutate in mutations {
+            let row = storedDefinition(); mutate(row)
+            let originalHash = row.normalizedContentHash, originalBody = row.explanation
+            XCTAssertThrowsError(try learning(definitions: [row])) {
+                XCTAssertEqual($0 as? LocalDataExportError, .invalidValue)
+            }
+            XCTAssertEqual(row.normalizedContentHash, originalHash); XCTAssertEqual(row.explanation, originalBody)
+        }
+    }
+
+    @MainActor
+    func testLearningDefinitionsProjectionRejectsMalformedUnsupportedAndUnknownGeneratedProvenance() throws {
+        let row = try acceptedGenerated()
+        let baseline = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(row.provenance.utf8)) as? [String: Any])
+        func reject(_ object: [String: Any], _ error: LocalDataExportError = .invalidValue) throws {
+            row.provenance = String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
+            XCTAssertThrowsError(try learning(definitions: [row])) { XCTAssertEqual($0 as? LocalDataExportError, error) }
+        }
+        for key in baseline.keys {
+            var missing = baseline; missing.removeValue(forKey: key); try reject(missing)
+        }
+        for (key, bad): (String, Any) in [("version", 2), ("requestSchemaVersion", 2)] {
+            var object = baseline; object[key] = bad; try reject(object, .unsupportedVersion)
+        }
+        for (key, bad): (String, Any) in [
+            ("version", true), ("provider", "other"), ("requestedModel", "bad model"),
+            ("returnedModel", "bad model"), ("returnedModel", 42), ("generatedAt", "2026-02-30T00:00:00.000Z"),
+            ("objectiveRegistryVersion", 0), ("operationID", "not-a-uuid"), ("requestSchemaVersion", "1"),
+            ("credentialReference", "excluded-secret"), ("payload", ["password": "excluded-secret"])
+        ] {
+            var object = baseline; object[key] = bad
+            try reject(object, key == "generatedAt" ? .invalidDate : .invalidValue)
+        }
+        var mismatch = baseline; mismatch["operationID"] = firstID.uuidString
+        try reject(mismatch, .identityMismatch)
+        for malformed in ["", " ", "not JSON", "[]", "null", "{}"] {
+            row.provenance = malformed
+            XCTAssertThrowsError(try learning(definitions: [row])) {
+                XCTAssertEqual($0 as? LocalDataExportError, .invalidValue)
+            }
+        }
+        var explicitNull = baseline; explicitNull["returnedModel"] = NSNull()
+        row.provenance = String(decoding: try JSONSerialization.data(withJSONObject: explicitNull), as: UTF8.self)
+        XCTAssertNil(try learning(definitions: [row]).learning.definitions[0].provenance?.generation?.returnedModel)
+    }
+
+    @MainActor
+    func testLearningDefinitionsProjectionEnforcesGeneratedAcceptanceContentBounds() throws {
+        let mutations: [(LessonDefinition) -> Void] = [
+            { $0.title = String(repeating: "x", count: 201) }, { $0.objective = String(repeating: "x", count: 1_001) },
+            { $0.objective = "" }, { $0.explanation = String(repeating: "x", count: 12_001) },
+            { $0.workedExample = String(repeating: "x", count: 12_001) },
+            { $0.exercise = String(repeating: "x", count: 12_001) },
+            { $0.referenceAnswer = String(repeating: "x", count: 12_001) },
+            { $0.selfCheckCriteria = Array(repeating: "Check", count: 11) },
+            { $0.selfCheckCriteria = [String(repeating: "x", count: 1_001)] },
+            { $0.conceptIDs = (0..<21).map { "concept.\($0)" } },
+            { $0.prerequisiteConceptIDs = (0..<21).map { "prerequisite.\($0)" } }, { $0.estimatedMinutes = 121 }
+        ]
+        for mutate in mutations {
+            let row = try acceptedGenerated(); mutate(row)
+            row.normalizedContentHash = CatalogValidator.fingerprint(explanation: row.explanation,
+                workedExample: row.workedExample, exercise: row.exercise, referenceAnswer: row.referenceAnswer,
+                selfCheckCriteria: row.selfCheckCriteria)
+            XCTAssertThrowsError(try learning(definitions: [row])) {
+                XCTAssertEqual($0 as? LocalDataExportError, .invalidValue)
+            }
+        }
+    }
+
+    @MainActor
+    func testLearningDefinitionsProjectionNeverSeedsReconcilesSavesOrChangesAnotherOwnersDraft() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        func capture(_ context: ModelContext) throws -> Export {
+            try learning(topics: context.fetch(FetchDescriptor<Topic>()), subtopics: context.fetch(FetchDescriptor<Subtopic>()),
+                concepts: context.fetch(FetchDescriptor<Concept>()), definitions: context.fetch(FetchDescriptor<LessonDefinition>()))
+        }
+        func inventory(_ context: ModelContext) throws -> [Int] {
+            try [context.fetchCount(FetchDescriptor<Topic>()), context.fetchCount(FetchDescriptor<Subtopic>()),
+                context.fetchCount(FetchDescriptor<Concept>()), context.fetchCount(FetchDescriptor<LessonDefinition>()),
+                context.fetchCount(FetchDescriptor<LessonProgress>()), context.fetchCount(FetchDescriptor<LessonAttempt>()),
+                context.fetchCount(FetchDescriptor<LessonSlot>()), context.fetchCount(FetchDescriptor<CatalogMembership>()),
+                context.fetchCount(FetchDescriptor<LessonTerminalRecord>()), context.fetchCount(FetchDescriptor<CatalogImportState>())]
+        }
+        let empty = ModelContext(container); empty.autosaveEnabled = false
+        XCTAssertEqual(try capture(empty), try learning())
+        XCTAssertFalse(empty.hasChanges); XCTAssertEqual(try inventory(ModelContext(container)), Array(repeating: 0, count: 10))
+        let seed = ModelContext(container); seed.autosaveEnabled = false
+        seed.insert(Topic(id: "topic", name: authored)); seed.insert(Subtopic(id: "subtopic", topicID: "topic", name: authored))
+        seed.insert(Concept(id: "concept", subtopicID: "subtopic", name: authored)); seed.insert(storedDefinition())
+        seed.insert(try acceptedGenerated()); try seed.save()
+        let draftOwner = ModelContext(container); draftOwner.autosaveEnabled = false
+        let draft = try XCTUnwrap(draftOwner.fetch(FetchDescriptor<LessonDefinition>()).first { $0.id == "lesson" })
+        draft.title = "Unsaved definition edit"
+        let read = ModelContext(container); read.autosaveEnabled = false
+        let value = try capture(read)
+        XCTAssertFalse(read.hasChanges); XCTAssertTrue(draftOwner.hasChanges)
+        XCTAssertEqual(draft.title, "Unsaved definition edit")
+        XCTAssertEqual(value.learning.definitions.first { $0.id == "lesson" }?.title, authored)
+        let inspect = ModelContext(container); inspect.autosaveEnabled = false
+        XCTAssertEqual(try capture(inspect), value)
+        XCTAssertEqual(try inventory(inspect), [1, 1, 1, 2, 0, 0, 0, 0, 0, 0])
+        XCTAssertFalse(inspect.hasChanges)
+        let damaged = try XCTUnwrap(read.fetch(FetchDescriptor<LessonDefinition>()).first)
+        damaged.provenance = "\n"; try read.save()
+        let failedCapture = ModelContext(container); failedCapture.autosaveEnabled = false
+        XCTAssertThrowsError(try capture(failedCapture))
+        XCTAssertFalse(failedCapture.hasChanges)
+        XCTAssertEqual(try inventory(ModelContext(container)), [1, 1, 1, 2, 0, 0, 0, 0, 0, 0])
+    }
+
     func testPrivacyFieldAllowlistsHaveNoOpaquePayloadsOrExcludedOwners() throws {
         let json = try object(rich())
         let forbidden: Set<String> = ["credentialReference", "credential", "apiKey", "password", "bookmarkData",

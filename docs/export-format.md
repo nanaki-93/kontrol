@@ -3,8 +3,9 @@
 `LocalDataExport` in `Kontrol/Domain/LocalDataExport.swift` defines a detached,
 plain JSON serialization contract. `Kontrol/Data/Export/DailyDataExportProjection.swift`
 now maps supplied persisted tasks, blocks, Focus sessions, and effective configuration.
-Learning projection, coherent capture, destination selection, and delivery remain
-separate implementation tasks. No import/restore is provided. This is **not an encrypted
+`Kontrol/Data/Export/LearningExportProjection.swift` maps stored Learning taxonomy
+and accepted definitions. Personal Learning evidence, coherent capture, destination
+selection, and delivery remain separate implementation tasks. No import/restore is provided. This is **not an encrypted
 backup**; the JSON contains personal authored content and saved answers.
 
 ## Common rules
@@ -49,7 +50,7 @@ backup**; the JSON contains personal authored content and saved answers.
 - Scalar historical links may point to records no longer present. The contract
   does not require current definitions/tasks/taxonomy to exist for historical
   evidence and does not perform foreign-key reconstruction. Internal embedded
-  identity/version matches **are** required. Persisted projection tasks will add
+  identity/version matches **are** required. Persisted projections add
   storage-specific validation using the existing payload boundaries.
 
 ## Required envelope
@@ -306,9 +307,65 @@ Accepted seed/generated definitions, including retained historical rows, have:
 (UUID), **requestSchemaVersion** (integer exactly 1), **objectiveRegistryVersion**
 (integer >0). A present generation object requires definition source `generated`.
 No arbitrary provider payload or transport request/response is included.
-Provenance projection must interpret only recognized stored shapes and reject
-present corruption, rather than dumping unknown serialized fields or treating
-corruption as legacy absence.
+Provenance projection interprets only the source-specific stored shapes below,
+rejecting present corruption rather than dumping unknown serialized fields or
+treating corruption as legacy absence.
+
+### Persisted taxonomy/definition projection
+
+`LearningExportProjection.project(topics:subtopics:concepts:definitions:into:)`
+is synchronous and main-actor isolated. It accepts already-fetched stored rows,
+replaces only these four Learning arrays, validates the resulting envelope, and
+returns canonicalized detached values. The other five Learning arrays and all
+other envelope fields remain unchanged except for contract sorting. No catalog
+resource or current membership is an input. Coherent committed fetching belongs
+to the caller, not this mapper.
+
+- All stored taxonomy and definitions are included, including retired taxonomy
+  and retained seed/generated rows not in current catalog membership or slots.
+  There is no active-catalog filtering, prerequisite eligibility calculation, or
+  substitution from a current catalog. Scalar links may outlive their target;
+  this is not whole-current-catalog validation or foreign-key reconstruction.
+- Every field maps directly, preserving exact authored strings, empty legacy
+  objectives, positive author content versions, source, and recorded fingerprints.
+  A nonempty objective must be nonblank. IDs, parent/link IDs, and reference-set
+  IDs must have canonical NFC **bytes** and no surrounding whitespace; they are
+  rejected, not normalized. Duplicate records/reference IDs fail. Named content
+  sections and ordered/repeated self-check text remain exact. Sets sort by ID.
+- Fingerprints must equal `CatalogValidator.fingerprint` of the **stored** teaching
+  sections/self-check sequence (trim + NFC of sections, U+001F separators, SHA-256).
+  This computation validates only: it never replaces the stored digest or authored
+  content. A malformed or inconsistent legacy digest fails explicitly; export
+  does not repair old rows. The detached DTO itself validates digest syntax only.
+- For source `seed`, the stored provenance string is explicitly allowlisted as
+  authored attribution text, retained byte-for-byte. An empty string is unavailable
+  legacy attribution and exports as `provenance: null`; whitespace-only text is
+  corrupt. No attribution is invented from the objective, catalog, or resource.
+- For source `generated`, provenance must be the JSON metadata written by
+  `GeneratedLessonValidator`: required keys `version`, `provider`, `requestedModel`,
+  `generatedAt`, `operationID`, `requestSchemaVersion`, `objectiveRegistryVersion`,
+  and optional `returnedModel`. Unknown keys or missing/wrongly typed required
+  fields fail. `version` and `requestSchemaVersion` must be 1; the independent
+  positive objective-registry version is not compared to today's registry.
+  Provider must be `openai`; requested/returned model IDs use the existing 1–128
+  ASCII letters/digits/`-.:_` validator. Missing or explicit-null returned model
+  exports as required null. `generatedAt` must be a valid common Instant.
+  Operation ID must be a UUID and match the stored lesson ID exactly as
+  `generated.<lowercase canonical UUID>`. Only the documented Generation fields
+  leave this boundary; no raw JSON, transport payload, credentials, or extra
+  provider fields can escape under provenance.
+- Generated content retains the local acceptance bounds: nonempty objective,
+  title ≤200 Unicode scalars, objective ≤1,000, each teaching section ≤12,000,
+  1–10 self-check strings each ≤1,000, ≤20 concept/prerequisite IDs, and estimate
+  1–120 minutes. Shared contract checks nonblank content/metadata, nonempty concept
+  set, positive content version, and supported difficulty/format/source. Seed and
+  retained seed content use the shared bounds, not today's generation limits.
+- Corrupt included values fail the whole projection with finite
+  `LocalDataExportError` categories. No row is omitted, repaired, deduplicated, or
+  treated as absent. No initialization/import, reconciliation, generation,
+  progress mutation, slot rotation, context save, network, credential/folder
+  access, or editor-draft access occurs. Later stored-row edits cannot alter
+  returned values. Empty storage remains empty; nothing is seeded.
 
 ### Progress
 
@@ -401,6 +458,7 @@ before sharing it; it is not guaranteed to be free of sensitive authored content
 
 No SwiftData object, `Data` blob, arbitrary dictionary, filesystem URL/grant,
 network operation, store reset, generation, restore, or external-project mutation
-belongs to this contract. Daily row mapping is implemented; the remaining
-projections, coherent capture, and safe atomic delivery will be implemented and
-verified in later checkpoints before exposing export UI.
+belongs to this contract. Daily/configuration and Learning taxonomy/definition
+mapping are implemented; personal evidence projection, coherent capture, and safe
+atomic delivery will be implemented and verified in later checkpoints before
+exposing export UI.

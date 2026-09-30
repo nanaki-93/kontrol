@@ -1373,3 +1373,119 @@ PID **57864** exited: `ps -p 57864 -o pid=,stat=,command=` returned **1** with n
 rows (`host-exit.log`). Existing multiple-destination/linkd diagnostics also remain
 in logs. No historical failed/skipped evidence was removed. **No remaining Step
 2.3 blockers.**
+
+### F13 Step 2.4 — stored Learning taxonomy and definitions (2026-09-30)
+
+Implemented `Kontrol/Data/Export/LearningExportProjection.swift`, explicitly
+registered in `Kontrol.xcodeproj/project.pbxproj`. Added eleven non-GUI methods
+to `KontrolTests/LocalDataExportTests.swift`; documented the storage-specific
+validation/provenance allowlist in `docs/export-format.md`. The cumulative task-6
+checklist had no previous findings. No schema, UI, feature-owner, or generation
+behavior changed; personal evidence/capture/delivery remain separate tasks.
+
+Evidence root: **`/tmp/kontrol-f13-step2-4-20260930T224814/`**. Baseline HEAD:
+`436e437da42bf082f8498fda12f6287f2b3f3673`; initial worktree/index were clean.
+Ancestor checks through `/` and target-directory instruction searches found no
+applicable `AGENTS.md`; no submodule was listed. `source.diff` includes the new
+untracked projection plus the three changed implementation/format files tested;
+SHA-256 **`615dfa84b6c13dfff92253620329349ebd839fa44117d508a9d0a62672bc1857`**.
+`source-hashes.json` records per-file identities. This QA addition is the only
+later edit. `environment.log` and `diagnostic-audit.log` record macOS 27.0
+(26A428), arm64, Xcode 27.0 (27A266a), Swift compiler 6.4, and selected Xcode path.
+Swift 5 language mode, macOS 14 deployment, and the Yams pin remain unchanged.
+
+Exact verification commands (repository root; `EVIDENCE` is the root above):
+
+```sh
+set -o pipefail
+f13_test() {
+  local flags=()
+  local suite
+  for suite in "$@"; do
+    flags+=("-only-testing:KontrolTests/$suite")
+  done
+  xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+    -configuration Debug -destination 'platform=macOS' \
+    -derivedDataPath /tmp/kontrol-f13-derived \
+    -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
+    -resultBundlePath "$RESULT_BUNDLE" "${flags[@]}" test
+}
+# Initial selection before the NFC-byte repair:
+RESULT_BUNDLE="$EVIDENCE/learning.xcresult"
+f13_test LocalDataExportTests GeneratedLessonRepositoryTests
+# Fresh selection after repair (same methods, no exclusions):
+RESULT_BUNDLE="$EVIDENCE/learning-repaired.xcresult"
+f13_test LocalDataExportTests GeneratedLessonRepositoryTests
+make build DERIVED_DATA=/tmp/kontrol-f13-derived
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  CODE_SIGNING_ALLOWED=NO build-for-testing
+# Both initial and repaired bundles were audited:
+for name in learning learning-repaired; do
+  RESULT_BUNDLE="$EVIDENCE/$name.xcresult"
+  xcrun xcresulttool get test-results summary \
+    --path "$RESULT_BUNDLE" --format json > "$EVIDENCE/$name-summary.json"
+  xcrun xcresulttool get test-results tests \
+    --path "$RESULT_BUNDLE" --format json > "$EVIDENCE/$name-test-tree.json"
+done
+python3 "$EVIDENCE/audit.py" > "$EVIDENCE/audit.log"
+python3 -m json.tool "$EVIDENCE/example-1.json" >/dev/null
+plutil -lint Kontrol.xcodeproj/project.pbxproj
+git diff --check
+```
+
+Initial test command exited **65**: 57 passed/1 failed method out of 58, with
+three failed `XCTAssertThrowsError` assertions in
+`LocalDataExportTests/testLearningDefinitionsProjectionRejectsDamagedTaxonomyIdentitiesAndNames`.
+Swift String equality accepts canonically equivalent decomposed/NFC strings,
+so the shared DTO check could not enforce its documented NFC storage boundary.
+The new projection now compares ID UTF-8 bytes against trimmed/NFC bytes and
+rejects rather than normalizing. The original failing assertions remain, with
+additional decomposed definition/link/reference cases. Initial failure evidence
+is preserved in `tests.log`, `learning.xcresult`, and `learning-summary.json`.
+
+**Final verification passed:** fresh repaired selection exited **0**, **58/58**
+methods Passed: 47 LocalDataExportTests and 11 GeneratedLessonRepositoryTests.
+Zero failures, skips, expected failures, or xcresult runtime warnings. The
+source-to-xcresult identifier audit confirms every expected method ran exactly
+once (`audit.log`, `learning-repaired-test-tree.json`). Build, final explicit
+test compilation, plist lint, JSON example parsing (**1/1**), and whitespace
+validation all exited **0**. Logs: `tests-repaired.log`, `build.log`,
+`compile-repaired.log`, `plutil.log`, `diffcheck.log`, `exit-codes.log`. Initial
+explicit test compilation also passed (`compile.log`). No native selectors are
+required by this content-only task; A13/S13/B13/D13 remain separate release gates.
+
+New methods (all `KontrolTests/LocalDataExportTests/`, Passed):
+
+- `testLearningDefinitionsProjectionMapsEveryTaxonomyAndSeedFieldExactly`
+- `testLearningDefinitionsProjectionMapsAcceptedGeneratedAllowlistAndNilReturnedModel`
+- `testLearningDefinitionsProjectionIncludesRetiredSeedTaxonomyWithoutCurrentMembershipFiltering`
+- `testLearningDefinitionsProjectionPreservesLegacyEmptyObjectiveAttributionAndMissingScalarLinks`
+- `testLearningDefinitionsProjectionSortsDetachesAndPreservesOtherEnvelopeFields`
+- `testLearningDefinitionsProjectionRejectsDuplicateCollectionsAndReferenceSetsWithoutDeduplication`
+- `testLearningDefinitionsProjectionRejectsDamagedTaxonomyIdentitiesAndNames`
+- `testLearningDefinitionsProjectionRejectsCorruptIncludedDefinitionContentWithoutRepair`
+- `testLearningDefinitionsProjectionRejectsMalformedUnsupportedAndUnknownGeneratedProvenance`
+- `testLearningDefinitionsProjectionEnforcesGeneratedAcceptanceContentBounds`
+- `testLearningDefinitionsProjectionNeverSeedsReconcilesSavesOrChangesAnotherOwnersDraft`
+
+Fixtures cover exact complete-field seed mapping, real locally validated generated
+metadata (nil/present returned model), all bundled seed rows and retired Go
+content retained after catalog upgrade, ordered/repeated self-checks, authored
+whitespace/decomposed Unicode/secret-looking text, legacy empty objectives and
+attribution, positive content versions, fingerprint mismatch without repair,
+stable sorting, detachment, duplicates, corrupt/unsupported metadata, operation-ID
+mismatch, generated content limits, and excluded provider fields. In-memory
+contexts prove empty capture inserts nothing, successful/failed mapping does not
+save or mutate inventories, no membership/slots/progress/attempts/terminal/import
+state is synthesized, and another owner's unsaved definition draft stays unsaved
+and unchanged. The mapper has no context, catalog resource, generation service,
+network, Keychain, or external-folder dependency. No original fixtures were edited.
+
+The repaired selected-run log has **0 SQLite API-violation/unlink diagnostics**
+(`diagnostic-audit.log`). Existing linkd/AppIntents and multiple-destination
+messages remain in logs. Test host PID **65404** exited: `ps -p 65404 -o
+pid=,stat=,command=` returned **1** with no rows (`host-exit.log`). No agent store
+cleanup was performed; new persistence fixtures are in-memory. Historical
+failed/skipped evidence remains intact. **No remaining Step 2.4 blockers.**
