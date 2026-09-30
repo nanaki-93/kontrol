@@ -1574,3 +1574,129 @@ The final log contains no SQLite API-violation/unlink diagnostics; existing mult
 matching destinations, AppIntents metadata, and linkd connection diagnostics remain
 in the logs. Test host PID **71025** exited; no original stores were edited and no
 agent cleanup was performed. Historical evidence is retained. **No Step 2.5 blockers.**
+
+## F13 Step 2.6 — coherent read-only persisted capture (2026-09-30)
+
+Task 8 matches the first unchecked implementation item. The cumulative review
+checklist has no previous findings. Initial worktree/index were clean; repository,
+target directories, and direct ancestors have no applicable `AGENTS.md`; no
+submodule is configured. No later export lifecycle or UI task was implemented.
+
+Source base: `50960a23856f24308f134687380cc08d7455177b`, with uncommitted changes to
+`SwiftDataExportRepository.swift`, `LocalDataExportTests.swift`, project membership,
+and this ledger. Tested source SHA-256 values (also `source-sha256.txt` below):
+
+- Repository: `e9f9c3c5549dae58c101bcfaff8b4d76ccdae293c976478766d0dd68df0d7b78`
+- Tests: `f98f43e65afe91e9194ab39e4cd315b0acf94511c9b91219022e95daa089e0f8`
+- Project: `df3e2c03fd8a0fa54fb772bc26f420bdf2486e5854feff55213c06467f4a1e9d`
+
+Environment: arm64 MacBook Pro, macOS 27.0 (`26A428`), Xcode 27.0 (`27A266a`),
+Apple Swift 6.4 (`swiftlang-6.4.0.34.1`); project remains Swift 5/macOS 14. Developer
+path `/Applications/Xcode.app/Contents/Developer`. Fresh `xcodebuild -list` resolved
+only Yams 5.4.0 and listed Kontrol/KontrolTests targets and Kontrol scheme. Initial
+`git status --short`, `git diff --stat`, `git diff --cached --stat`,
+`git submodule status`, `xcode-select -p`, `xcodebuild -version`,
+`xcrun swift --version`, `xcodebuild -list -project Kontrol.xcodeproj`, `sw_vers`,
+and `uname -m` all completed successfully.
+
+Commands from repository root (all final commands exit **0**):
+
+```sh
+set -o pipefail
+EVIDENCE=/tmp/kontrol-f13-step2-6
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
+  -only-testing:KontrolTests/LocalDataExportTests \
+  -only-testing:KontrolTests/NewsRepositoryTests \
+  -only-testing:KontrolTests/FocusRepositoryTests \
+  -only-testing:KontrolTests/LessonExperienceRepositoryTests test \
+  > "$EVIDENCE/tests-final.log" 2>&1
+make build DERIVED_DATA=/tmp/kontrol-f13-derived > "$EVIDENCE/build.log" 2>&1
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived CODE_SIGNING_ALLOWED=NO \
+  build-for-testing > "$EVIDENCE/compile.log" 2>&1
+RESULT_BUNDLE=/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_23-23-50-+0800.xcresult
+xcrun xcresulttool get test-results summary --path "$RESULT_BUNDLE" \
+  --format json > "$EVIDENCE/summary.json"
+xcrun xcresulttool get test-results tests --path "$RESULT_BUNDLE" \
+  --format json > "$EVIDENCE/test-tree.json"
+python3 "$EVIDENCE/audit.py" > "$EVIDENCE/audit.log"
+shasum -a 256 Kontrol/Data/Persistence/SwiftDataExportRepository.swift \
+  KontrolTests/LocalDataExportTests.swift Kontrol.xcodeproj/project.pbxproj \
+  > "$EVIDENCE/source-sha256.txt"
+plutil -lint Kontrol.xcodeproj/project.pbxproj
+git diff --check
+```
+
+Fresh result: **133/133 passed** — **59** LocalDataExportTests, **17**
+NewsRepositoryTests, **26** FocusRepositoryTests, **31** LessonExperienceRepositoryTests.
+Zero failures/skips/expected failures; xcresult reports no runtime warnings. The
+source-to-result audit confirms every selected method executed exactly once;
+`executed-identifiers.txt` and `test-tree.json` retain complete identifiers. Debug
+build, explicit compilation of all hosted tests, project plist lint, and whitespace
+validation passed. No native selector is required by this data-only task;
+compilation does not close A13/S13/B13/D13 or their deferred observations.
+
+Five added methods, all `KontrolTests/LocalDataExportTests/` and Passed:
+
+- `testRepositoryEmptyPersistentStoreUsesDefaultsWithoutSeedingAcrossReopen`
+- `testRepositoryRichCompleteCapturePreservesInventoriesExcludedRowsAndReopen`
+- `testRepositoryIgnoresUnsavedOwnersAndReturnsValuesIndependentOfLaterCommittedEdits`
+- `testRepositoryRejectsCorruptionInEveryIncludedCollectionWithoutRepairOrOmission`
+- `testRepositoryRejectsInvalidEnvelopeAndOrphanedFeedsWithoutSeeding`
+
+The main-actor `ExportRepository.snapshot(exportedAt:appVersion:)` uses the existing
+container and a single fresh non-autosaving context. It synchronously fetches only
+the 16 included model kinds, composing validated detached projections with no
+suspension, save, seeding, timer recovery/advancement, catalog reconciliation,
+feature-store initialization, network, credentials, or external folder access.
+Bundled News defaults are loaded as pure resource configuration. Coherence relies
+on the existing single-process main-actor persistence ownership, not a claimed
+cross-process transaction. Construction only retains the supplied container.
+
+Empty and rich persistent fixtures capture twice, close their local owners, and
+reopen without inventory changes. The rich fixture represents every V10 model,
+including intentionally invalid excluded article/bookmark data, stored generated
+content, retired membership, pinned/completed content, exact answers, legacy nulls,
+and an expired-but-still-running Focus session. Entire DTO equality covers every
+included field; auxiliary checks preserve revisions, raw pins/provenance,
+terminal/catalog/topic payload bytes, News transport metadata, excluded rows, and
+import state across capture/reopen. Tests retain separate owners' unsaved task,
+answer, and preference edits; later committed edits/deletions affect fresh captures
+but cannot alter previously returned values. Corruption in each of the 16 included
+model kinds aborts twice without repair/omission; invalid envelope inputs and
+orphaned feeds cannot seed missing preference rows.
+
+Earlier local failures are preserved, not counted as passes:
+
+- `tests.log`, identical four-suite command, exit **65**, bundle
+  `/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_23-21-15-+0800.xcresult`:
+  133 executed, three fixture failures (`invalidValue`). The fixture incorrectly
+  set both task and lesson links on one Focus session. Clearing its lesson link
+  makes it valid without weakening the production validator.
+- `tests-repair.log`, same xcodebuild options but only LocalDataExportTests,
+  exit **65**, bundle
+  `/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_23-22-15-+0800.xcresult`:
+  59 executed, two rich-fixture assertions failed comparing separately encoded
+  unordered pin JSON. The fix compares decoded pin content and separately captures
+  the actual stored raw bytes before export, checking those same bytes unchanged
+  afterward and after reopen. The final 133-method run validates both repairs.
+
+Final fixture roots (under `/var/folders/lz/20cqfx4x2k98r89q68w3q3ch0000gn/T/`):
+
+- Empty: `kontrol-export-capture-E37B19BC-4CBF-4E9D-A9D5-B2641BD9B88E/`
+- Rich: `kontrol-export-capture-C8C6FDF2-F0FF-4327-AC95-916DE78A4562/`
+
+After host PID **77722** exited, the audit enumerated each root's `Kontrol.store`,
+`Kontrol.store-wal`, and `Kontrol.store-shm` and ran read-only SQLite
+`PRAGMA integrity_check`: **ok** for both. No agent cleanup was performed; earlier
+attempt roots remain logged and preserved. Existing News regression tests emitted
+**45** SQLite vnode-unlinked diagnostics in the final log; none reference these new
+capture fixtures. This does not close the separately tracked historical
+store-lifetime/migration investigation. Existing multiple-matching-destination,
+AppIntents extraction, and linkd diagnostics remain in the logs. No original
+fixtures, production stores, dependency pins, frozen schemas, or external project
+files were edited. **No Step 2.6 blockers.**

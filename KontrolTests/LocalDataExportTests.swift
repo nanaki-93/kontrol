@@ -1658,6 +1658,288 @@ final class LocalDataExportTests: XCTestCase {
         XCTAssertFalse(inspect.hasChanges)
     }
 
+    @MainActor
+    private func exportInventory(_ container: ModelContainer) throws -> [Int] {
+        let context = ModelContext(container); context.autosaveEnabled = false
+        func count<T: PersistentModel>(_ type: T.Type) throws -> Int {
+            try context.fetchCount(FetchDescriptor<T>())
+        }
+        return try KontrolSchemaV10.models.map { try count($0) }
+    }
+
+    @MainActor
+    private func exportStoreURL() -> URL {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kontrol-export-capture-\(UUID().uuidString)")
+        // Keep stores and sidecars until the owning test host exits.
+        print("F13 capture fixture root: \(root.path)")
+        return root.appendingPathComponent("Kontrol.store")
+    }
+
+    @MainActor
+    private func seedExportStore(_ container: ModelContainer) throws -> Export {
+        let context = ModelContext(container); context.autosaveEnabled = false
+        let now = try instant(), later = try instant("2026-09-30T13:00:00.456Z")
+        let task = try TaskItem(id: firstID, title: "Persisted task", createdAt: now.date, notes: authored,
+            dueAt: later.date, plannedDay: .init(calendarIdentifier: "gregorian", year: 2026, month: 9, day: 30),
+            plannedTimeZoneID: "Europe/Rome")
+        let block = ScheduleBlock(id: firstID, title: authored, startAt: now.date, endAt: later.date,
+            note: authored, lessonID: "lesson", linkedTitleSnapshot: authored)
+        let session = try storedSession() // Expired running deadline must not be recovered/advanced.
+        session.linkedLessonID = nil; session.linkedTaskID = firstID
+        let general = AppPreferencesRecord(focusDefaultMinutes: 51, textSize: "large", reduceMotion: "reduce",
+            revision: firstID)
+        let ai = AISettingsRecord(enabled: true, modelID: "gpt-test", credentialReference: firstID.uuidString,
+            revision: firstID)
+        let news = try newsPreference(), feed = try configuredFeed()
+        let topic = Topic(id: "topic", name: authored)
+        let subtopic = Subtopic(id: "subtopic", topicID: "topic", name: authored)
+        let concept = Concept(id: "concept", subtopicID: "subtopic", name: authored,
+            prerequisiteConceptIDs: ["z.prerequisite", "a.prerequisite"])
+        let definition = storedDefinition(), generated = try acceptedGenerated()
+        let progress = LessonProgress(lessonID: "lesson", status: .completed, firstShownAt: now.date,
+            startedAt: now.date, completedAt: later.date, dismissedAt: now.date, lastOpenedAt: later.date)
+        let pin = historicalPin()
+        let attempt = LessonAttempt(id: secondID, lessonID: "lesson", contentVersion: 2, answerDraft: authored,
+            solutionRevealedAt: now.date, selfCheckAcknowledgedAt: later.date, completedAt: later.date,
+            completedContentSnapshot: pin.completedSnapshot, pinnedContentData: try pin.encoded(), revision: 8)
+        let legacy = LessonAttempt(id: firstID, lessonID: "absent.legacy", contentVersion: 1,
+            answerDraft: authored, pinnedContentData: Data())
+        let slot = LessonSlot(topicID: "topic", slotIndex: 0, lessonID: "absent.legacy", assignedAt: now.date)
+        let terminal = try LessonTerminalRecord(metadata: terminalMetadata())
+        let membership = try CatalogMembership(membership: storedMembership())
+        context.insert(task); context.insert(block); context.insert(session)
+        context.insert(general); context.insert(ai); context.insert(news); context.insert(feed)
+        context.insert(topic); context.insert(subtopic); context.insert(concept)
+        context.insert(definition); context.insert(generated); context.insert(progress)
+        context.insert(attempt); context.insert(legacy); context.insert(slot)
+        context.insert(terminal); context.insert(membership)
+        // Excluded data is intentionally unreadable by feature repositories. Export
+        // must neither validate it nor resolve this invalid bookmark or cache payload.
+        context.insert(ProjectReference(id: firstID, manifestID: "excluded-project", bookmarkData: Data("bad".utf8),
+            displayOrder: 4, displayNameHint: "excluded-project", lastSuccessfulReadAt: now.date, revision: secondID))
+        context.insert(NewsArticleRecord(id: firstID, url: "excluded-invalid-url", canonicalURL: "excluded-path",
+            title: "excluded-article", firstFetchedAt: now.date, provenancePayload: Data("bad".utf8)))
+        context.insert(CatalogImportState(catalogID: "excluded-import", lastImportedVersion: 7))
+        try context.save()
+        // Compose the expected complete value from fixture rows, independently of
+        // repository fetching. Projection field-level assertions live above.
+        var expected = try daily(tasks: [task], blocks: [block], sessions: [session])
+        expected = try configuration(general: [general], ai: [ai], news: [news], feeds: [feed], into: expected)
+        expected = try learning(topics: [topic], subtopics: [subtopic], concepts: [concept],
+            definitions: [definition, generated], into: expected)
+        return try personal(progress: [progress], attempts: [attempt, legacy], slots: [slot],
+            terminal: [terminal], membership: [membership], into: expected)
+    }
+
+    @MainActor
+    private func assertExportAuxiliaryRowsUnchanged(_ container: ModelContainer,
+                                                   file: StaticString = #filePath, line: UInt = #line) throws {
+        let context = ModelContext(container); context.autosaveEnabled = false
+        let project = try XCTUnwrap(context.fetch(FetchDescriptor<ProjectReference>()).first)
+        XCTAssertEqual(project.id, firstID, file: file, line: line)
+        XCTAssertEqual(project.manifestID, "excluded-project", file: file, line: line)
+        XCTAssertEqual(project.bookmarkData, Data("bad".utf8), file: file, line: line)
+        XCTAssertEqual(project.displayOrder, 4, file: file, line: line)
+        XCTAssertEqual(project.displayNameHint, "excluded-project", file: file, line: line)
+        XCTAssertEqual(project.lastSuccessfulReadAt, try instant().date, file: file, line: line)
+        XCTAssertEqual(project.revision, secondID, file: file, line: line)
+        let article = try XCTUnwrap(context.fetch(FetchDescriptor<NewsArticleRecord>()).first)
+        XCTAssertEqual(article.id, firstID, file: file, line: line)
+        XCTAssertEqual(article.url, "excluded-invalid-url", file: file, line: line)
+        XCTAssertEqual(article.canonicalURL, "excluded-path", file: file, line: line)
+        XCTAssertEqual(article.title, "excluded-article", file: file, line: line)
+        XCTAssertEqual(article.firstFetchedAt, try instant().date, file: file, line: line)
+        XCTAssertNil(article.publishedAt, file: file, line: line); XCTAssertNil(article.summary, file: file, line: line)
+        XCTAssertEqual(article.provenancePayload, Data("bad".utf8), file: file, line: line)
+        let imported = try XCTUnwrap(context.fetch(FetchDescriptor<CatalogImportState>()).first)
+        XCTAssertEqual(imported.catalogID, "excluded-import", file: file, line: line)
+        XCTAssertEqual(imported.lastImportedVersion, 7, file: file, line: line)
+        XCTAssertEqual(try XCTUnwrap(context.fetch(FetchDescriptor<AppPreferencesRecord>()).first).revision,
+            firstID, file: file, line: line)
+        let ai = try XCTUnwrap(context.fetch(FetchDescriptor<AISettingsRecord>()).first)
+        XCTAssertEqual(ai.credentialReference, firstID.uuidString, file: file, line: line)
+        XCTAssertEqual(ai.revision, firstID, file: file, line: line)
+        let attempt = try XCTUnwrap(context.fetch(FetchDescriptor<LessonAttempt>()).first { $0.id == secondID })
+        XCTAssertEqual(try PinnedLessonContent.decode(XCTUnwrap(attempt.pinnedContentData),
+            lessonID: attempt.lessonID, contentVersion: attempt.contentVersion), historicalPin(), file: file, line: line)
+        let legacy = try XCTUnwrap(context.fetch(FetchDescriptor<LessonAttempt>()).first { $0.id == firstID })
+        XCTAssertEqual(legacy.pinnedContentData, Data(), file: file, line: line)
+        XCTAssertFalse(context.hasChanges, file: file, line: line)
+    }
+
+    @MainActor
+    private func exportRawEvidence(_ container: ModelContainer) throws -> [Data] {
+        let context = ModelContext(container); context.autosaveEnabled = false
+        var bytes = try context.fetch(FetchDescriptor<LessonAttempt>()).sorted { $0.id.uuidString < $1.id.uuidString }
+            .map { $0.pinnedContentData ?? Data() }
+        bytes += try context.fetch(FetchDescriptor<LessonTerminalRecord>()).sorted { $0.lessonID < $1.lessonID }.map(\.payload)
+        bytes += try context.fetch(FetchDescriptor<CatalogMembership>()).sorted { $0.catalogID < $1.catalogID }.map(\.payload)
+        bytes += try context.fetch(FetchDescriptor<LessonDefinition>()).sorted { $0.id < $1.id }.map { Data($0.provenance.utf8) }
+        bytes += try context.fetch(FetchDescriptor<NewsPreferencesRecord>()).sorted { $0.key < $1.key }.flatMap {
+            [$0.selectedTopicIDsPayload, Data(String(reflecting: ($0.catalogVersion, $0.revision, $0.lastRefreshAt)).utf8)]
+        }
+        bytes += try context.fetch(FetchDescriptor<NewsFeedRecord>()).sorted { $0.id.uuidString < $1.id.uuidString }.flatMap {
+            [$0.topicIDsPayload, Data(String(reflecting: ($0.configurationRevision, $0.etag, $0.lastModified,
+                $0.lastAttemptAt, $0.lastSuccessAt, $0.lastErrorCode, $0.retryNotBefore)).utf8)]
+        }
+        return bytes
+    }
+
+    @MainActor
+    func testRepositoryEmptyPersistentStoreUsesDefaultsWithoutSeedingAcrossReopen() throws {
+        let url = exportStoreURL()
+        let expected = try configuration()
+        try autoreleasepool {
+            let container = try ModelContainerFactory().makeContainer(mode: .persistent(url))
+            let before = try exportInventory(container)
+            XCTAssertTrue(before.allSatisfy { $0 == 0 })
+            let repository: any ExportRepository = SwiftDataExportRepository(container: container)
+            for _ in 0..<2 {
+                let value = try repository.snapshot(exportedAt: instant().date, appVersion: "1.0")
+                XCTAssertEqual(value, expected)
+                XCTAssertEqual(try Export.decode(value.encoded()), expected)
+            }
+            XCTAssertEqual(try exportInventory(container), before)
+        }
+        let reopened = try ModelContainerFactory().makeContainer(mode: .persistent(url))
+        XCTAssertTrue(try exportInventory(reopened).allSatisfy { $0 == 0 })
+        XCTAssertEqual(try SwiftDataExportRepository(container: reopened)
+            .snapshot(exportedAt: instant().date, appVersion: "1.0"), expected)
+        XCTAssertTrue(try exportInventory(reopened).allSatisfy { $0 == 0 })
+    }
+
+    @MainActor
+    func testRepositoryRichCompleteCapturePreservesInventoriesExcludedRowsAndReopen() throws {
+        let url = exportStoreURL()
+        let (expected, inventory, rawEvidence) = try autoreleasepool {
+            let container = try ModelContainerFactory().makeContainer(mode: .persistent(url))
+            let expected = try seedExportStore(container), before = try exportInventory(container)
+            let raw = try exportRawEvidence(container)
+            XCTAssertTrue(before.allSatisfy { $0 > 0 }) // Every V10 model is represented.
+            let repository = SwiftDataExportRepository(container: container)
+            for _ in 0..<2 {
+                let value = try repository.snapshot(exportedAt: instant().date, appVersion: "1.0")
+                XCTAssertEqual(value, expected)
+                XCTAssertEqual(try Export.decode(value.encoded()), expected)
+                XCTAssertEqual(value.sessions[0].state, "running")
+                XCTAssertNil(value.tasks[0].completedAt)
+                XCTAssertEqual(value.learning.definitions.count, 2)
+                XCTAssertEqual(value.learning.attempts.count, 2)
+                XCTAssertNil(value.learning.attempts[0].pinnedContent)
+                XCTAssertEqual(Array(value.learning.attempts[1].answerDraft.utf8), Array(authored.utf8))
+                let text = String(decoding: try value.encoded(), as: UTF8.self)
+                for excluded in ["excluded-project", "excluded-article", "excluded-path", "excluded-validator",
+                                 "excluded-header", "excluded-diagnostic", "excluded-import", "credentialReference"] {
+                    XCTAssertFalse(text.contains(excluded), excluded)
+                }
+            }
+            XCTAssertEqual(try exportInventory(container), before)
+            try assertExportAuxiliaryRowsUnchanged(container)
+            XCTAssertEqual(try exportRawEvidence(container), raw)
+            return (expected, before, raw)
+        }
+        let reopened = try ModelContainerFactory().makeContainer(mode: .persistent(url))
+        let before = try exportInventory(reopened)
+        XCTAssertEqual(before, inventory)
+        XCTAssertEqual(try exportRawEvidence(reopened), rawEvidence)
+        XCTAssertEqual(try SwiftDataExportRepository(container: reopened)
+            .snapshot(exportedAt: instant().date, appVersion: "1.0"), expected)
+        XCTAssertEqual(try exportInventory(reopened), before)
+        try assertExportAuxiliaryRowsUnchanged(reopened)
+        XCTAssertEqual(try exportRawEvidence(reopened), rawEvidence)
+    }
+
+    @MainActor
+    func testRepositoryIgnoresUnsavedOwnersAndReturnsValuesIndependentOfLaterCommittedEdits() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let expected = try seedExportStore(container)
+        let draftOwner = ModelContext(container); draftOwner.autosaveEnabled = false
+        let task = try XCTUnwrap(draftOwner.fetch(FetchDescriptor<TaskItem>()).first)
+        let answer = try XCTUnwrap(draftOwner.fetch(FetchDescriptor<LessonAttempt>()).first { $0.id == secondID })
+        let preference = try XCTUnwrap(draftOwner.fetch(FetchDescriptor<AppPreferencesRecord>()).first)
+        task.title = "Unsaved title"; answer.answerDraft = "Unsaved answer"; preference.focusDefaultMinutes = 99
+        let repository = SwiftDataExportRepository(container: container)
+        let value = try repository.snapshot(exportedAt: instant().date, appVersion: "1.0")
+        let bytes = try value.encoded()
+        XCTAssertEqual(value, expected)
+        XCTAssertTrue(draftOwner.hasChanges)
+        XCTAssertEqual(task.title, "Unsaved title"); XCTAssertEqual(answer.answerDraft, "Unsaved answer")
+        XCTAssertEqual(preference.focusDefaultMinutes, 99)
+        try draftOwner.save()
+        let later = try repository.snapshot(exportedAt: instant().date, appVersion: "1.0")
+        XCTAssertEqual(later.tasks[0].title, "Unsaved title")
+        XCTAssertEqual(later.learning.attempts[1].answerDraft, "Unsaved answer")
+        XCTAssertEqual(later.generalPreferences.focusDefaultMinutes, 99)
+        XCTAssertNotEqual(later, value)
+        let edits = ModelContext(container); edits.autosaveEnabled = false
+        let definition = try XCTUnwrap(edits.fetch(FetchDescriptor<LessonDefinition>()).first { $0.id == "lesson" })
+        definition.title = "Changed current title"
+        let block = try XCTUnwrap(edits.fetch(FetchDescriptor<ScheduleBlock>()).first); edits.delete(block)
+        try edits.save()
+        XCTAssertEqual(try value.encoded(), bytes)
+        XCTAssertEqual(value, expected)
+        XCTAssertEqual(try repository.snapshot(exportedAt: instant().date, appVersion: "1.0").blocks, [])
+    }
+
+    @MainActor
+    func testRepositoryRejectsCorruptionInEveryIncludedCollectionWithoutRepairOrOmission() throws {
+        func first<T: PersistentModel>(_ context: ModelContext, _ type: T.Type) throws -> T {
+            try XCTUnwrap(context.fetch(FetchDescriptor<T>()).first)
+        }
+        let corruptions: [(String, (ModelContext) throws -> Void)] = [
+            ("tasks", { try first($0, TaskItem.self).title = " " }),
+            ("blocks", { try first($0, ScheduleBlock.self).endAt = self.instant().date }),
+            ("sessions", { try first($0, FocusSession.self).state = "unknown" }),
+            ("general", { try first($0, AppPreferencesRecord.self).payloadVersion = 2 }),
+            ("ai", { try first($0, AISettingsRecord.self).payloadVersion = 2 }),
+            ("news", { try first($0, NewsPreferencesRecord.self).selectedTopicIDsPayload = Data("bad".utf8) }),
+            ("feeds", { try first($0, NewsFeedRecord.self).topicIDsPayload = Data("bad".utf8) }),
+            ("topics", { try first($0, Topic.self).name = " " }),
+            ("subtopics", { try first($0, Subtopic.self).name = " " }),
+            ("concepts", { try first($0, Concept.self).name = " " }),
+            ("definitions", { try first($0, LessonDefinition.self).contentVersion = 0 }),
+            ("progress", { try first($0, LessonProgress.self).lessonID = " " }),
+            ("attempts", { try first($0, LessonAttempt.self).pinnedContentData = Data("bad".utf8) }),
+            ("slots", { try first($0, LessonSlot.self).key = "mismatched" }),
+            ("terminal", { try first($0, LessonTerminalRecord.self).payload = Data("bad".utf8) }),
+            ("membership", { try first($0, CatalogMembership.self).payload = Data("bad".utf8) })
+        ]
+        for (name, corrupt) in corruptions {
+            let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+            _ = try seedExportStore(container)
+            let edit = ModelContext(container); edit.autosaveEnabled = false
+            try corrupt(edit); try edit.save()
+            let before = try exportInventory(container)
+            let repository = SwiftDataExportRepository(container: container)
+            for _ in 0..<2 {
+                XCTAssertThrowsError(try repository.snapshot(exportedAt: instant().date, appVersion: "1.0"), name) {
+                    XCTAssertNotNil($0 as? LocalDataExportError, name)
+                }
+                XCTAssertEqual(try exportInventory(container), before, name)
+            }
+            XCTAssertFalse(edit.hasChanges, name)
+        }
+    }
+
+    @MainActor
+    func testRepositoryRejectsInvalidEnvelopeAndOrphanedFeedsWithoutSeeding() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataExportRepository(container: container)
+        let before = try exportInventory(container)
+        XCTAssertThrowsError(try repository.snapshot(exportedAt: Date(timeIntervalSince1970: .nan), appVersion: "1.0"))
+        XCTAssertThrowsError(try repository.snapshot(exportedAt: instant().date, appVersion: ""))
+        XCTAssertEqual(try exportInventory(container), before)
+        let seed = ModelContext(container); seed.autosaveEnabled = false
+        seed.insert(try configuredFeed()); try seed.save()
+        let orphaned = try exportInventory(container)
+        XCTAssertThrowsError(try repository.snapshot(exportedAt: instant().date, appVersion: "1.0")) {
+            XCTAssertEqual($0 as? LocalDataExportError, .invalidValue)
+        }
+        XCTAssertEqual(try exportInventory(container), orphaned)
+        XCTAssertEqual(try ModelContext(container).fetchCount(FetchDescriptor<NewsPreferencesRecord>()), 0)
+    }
+
     func testPrivacyFieldAllowlistsHaveNoOpaquePayloadsOrExcludedOwners() throws {
         let json = try object(rich())
         let forbidden: Set<String> = ["credentialReference", "credential", "apiKey", "password", "bookmarkData",
