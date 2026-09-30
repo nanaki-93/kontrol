@@ -1,4 +1,5 @@
 import Foundation
+import SwiftData
 import XCTest
 @testable import Kontrol
 
@@ -429,6 +430,292 @@ final class LocalDataExportTests: XCTestCase {
             let decoded = try Export.decode(value.encoded())
             XCTAssertEqual(decoded.sessions[0], value.sessions[0])
         }
+    }
+
+    @MainActor
+    private func daily(tasks: [TaskItem] = [], blocks: [ScheduleBlock] = [],
+                       sessions: [FocusSession] = []) throws -> Export {
+        try DailyDataExportProjection.project(tasks: tasks, blocks: blocks, sessions: sessions,
+            into: Export(exportedAt: instant(), appVersion: "1.0"))
+    }
+
+    @MainActor
+    private func storedSession(_ state: String = "running", id: UUID? = nil) throws -> FocusSession {
+        let start = try instant().date
+        let checkpoint = start.addingTimeInterval(60)
+        return FocusSession(id: id ?? firstID, state: state, plannedSeconds: 1500,
+            accumulatedActiveSeconds: state == "completed" ? 1500 : 12.75,
+            activeSegmentStartedAt: state == "running" ? start : nil,
+            deadline: state == "running" ? start.addingTimeInterval(1487.25) : nil,
+            pausedAt: state == "paused" ? checkpoint : nil, startedAt: start,
+            endedAt: ["completed", "ended"].contains(state) ? checkpoint : nil,
+            checkpointAt: checkpoint, recoveryRequired: state == "paused",
+            linkedTaskID: nil, linkedLessonID: "missing.historical.lesson", linkedTitleSnapshot: authored)
+    }
+
+    @MainActor
+    func testDailyProjectionMapsEveryTaskAndBlockFieldWithoutAuthoredNormalization() throws {
+        let now = try instant()
+        let later = try instant("2026-09-30T13:00:00.456Z")
+        let task = try TaskItem(id: secondID, title: "Constructor trims", createdAt: now.date,
+            notes: authored, dueAt: later.date, plannedDay: .init(calendarIdentifier: "buddhist",
+                year: 2569, month: 9, day: 30), plannedTimeZoneID: "Asia/Bangkok", completedAt: later.date)
+        task.title = authored // Stored titles need not retain constructor normalization.
+        let legacy = try TaskItem(id: firstID, title: "Legacy unplanned", createdAt: now.date)
+        let block = ScheduleBlock(id: secondID, title: authored, startAt: now.date, endAt: later.date,
+            note: authored, lessonID: "missing.historical.lesson", linkedTitleSnapshot: authored)
+        let unlinked = ScheduleBlock(id: firstID, title: "Unlinked", startAt: now.date, endAt: later.date)
+        let value = try daily(tasks: [task, legacy], blocks: [block, unlinked])
+        XCTAssertEqual(value.tasks, [
+            .init(id: firstID, title: "Legacy unplanned", notes: nil, dueAt: nil, plannedDay: nil,
+                  createdAt: now, completedAt: nil),
+            .init(id: secondID, title: authored, notes: authored, dueAt: later,
+                  plannedDay: .init(calendarIdentifier: "buddhist", year: 2569, month: 9, day: 30,
+                                    timeZoneID: "Asia/Bangkok"), createdAt: now, completedAt: later)])
+        XCTAssertEqual(value.blocks, [
+            .init(id: firstID, title: "Unlinked", startAt: now, endAt: later, note: nil,
+                  lessonID: nil, linkedTitleSnapshot: nil),
+            .init(id: secondID, title: authored, startAt: now, endAt: later, note: authored,
+                  lessonID: "missing.historical.lesson", linkedTitleSnapshot: authored)])
+        let decoded = try Export.decode(value.encoded())
+        XCTAssertEqual(decoded, value)
+        for string in [decoded.tasks[1].title, decoded.tasks[1].notes!, decoded.blocks[1].title,
+                       decoded.blocks[1].note!, decoded.blocks[1].linkedTitleSnapshot!] {
+            XCTAssertEqual(Array(string.utf8), Array(authored.utf8))
+        }
+        task.notes = ""; block.note = ""
+        XCTAssertEqual(try daily(tasks: [task], blocks: [block]).tasks[0].notes, "")
+        XCTAssertEqual(try daily(blocks: [block]).blocks[0].note, "")
+        block.lessonID = nil // Deletion can leave only a historical title snapshot.
+        XCTAssertEqual(try daily(blocks: [block]).blocks[0].linkedTitleSnapshot, authored)
+    }
+
+    @MainActor
+    func testDailyProjectionMapsEveryFocusStateTimingLinkAndRecoveryFieldWithoutAdvancement() throws {
+        let now = try instant()
+        let checkpoint = try ExportTimestamp(now.date.addingTimeInterval(60))
+        for state in ["running", "paused", "completed", "ended"] {
+            let row = try storedSession(state)
+            let before = try FocusSessionSnapshot(row)
+            let value = try daily(sessions: [row])
+            XCTAssertEqual(value.sessions, [.init(id: firstID, state: state, plannedSeconds: 1500,
+                accumulatedActiveSeconds: state == "completed" ? 1500 : 12.75,
+                activeSegmentStartedAt: state == "running" ? now : nil,
+                deadline: state == "running" ? (try ExportTimestamp(now.date.addingTimeInterval(1487.25))) : nil,
+                pausedAt: state == "paused" ? checkpoint : nil, startedAt: now,
+                endedAt: ["completed", "ended"].contains(state) ? checkpoint : nil,
+                checkpointAt: checkpoint, recoveryRequired: state == "paused", linkedTaskID: nil,
+                linkedLessonID: "missing.historical.lesson", linkedTitleSnapshot: authored)])
+            XCTAssertEqual(try FocusSessionSnapshot(row), before)
+            XCTAssertEqual(try Export.decode(value.encoded()), value)
+            XCTAssertEqual(Array(value.sessions[0].linkedTitleSnapshot!.utf8), Array(authored.utf8))
+            row.linkedLessonID = nil; row.linkedTaskID = secondID
+            XCTAssertEqual(try daily(sessions: [row]).sessions[0].linkedTaskID, secondID)
+            row.linkedTaskID = nil // Task deletion retains the saved title, no lookup.
+            XCTAssertEqual(try daily(sessions: [row]).sessions[0].linkedTitleSnapshot, authored)
+            row.linkedTitleSnapshot = nil
+            XCTAssertNil(try daily(sessions: [row]).sessions[0].linkedTitleSnapshot)
+        }
+        // A valid wall-clock rollback anchor is earlier than startedAt and must
+        // not be replaced by the later logical concurrency watermark.
+        let rollback = try storedSession()
+        rollback.activeSegmentStartedAt = now.date.addingTimeInterval(-60)
+        rollback.deadline = rollback.activeSegmentStartedAt!.addingTimeInterval(1487.25)
+        let value = try daily(sessions: [rollback])
+        XCTAssertEqual(value.sessions[0].activeSegmentStartedAt,
+                       try ExportTimestamp(now.date.addingTimeInterval(-60)))
+        XCTAssertEqual(value.sessions[0].checkpointAt, checkpoint)
+        XCTAssertEqual(value.sessions[0].deadline, try ExportTimestamp(rollback.deadline!))
+    }
+
+    @MainActor
+    func testDailyProjectionSortsByIdentityAndDetachesValuesWithoutReplacingOtherEnvelopeFields() throws {
+        let now = try instant().date
+        let tasks = try [secondID, firstID].map { try TaskItem(id: $0, title: "Task", createdAt: now) }
+        let blocks = [secondID, firstID].map {
+            ScheduleBlock(id: $0, title: "Block", startAt: now, endAt: now.addingTimeInterval(60))
+        }
+        let sessions = try [secondID, firstID].map { try storedSession("ended", id: $0) }
+        var envelope = try rich()
+        envelope.exportedAt = try instant("2026-10-01T12:00:00.000Z")
+        let value = try DailyDataExportProjection.project(tasks: tasks, blocks: blocks,
+            sessions: sessions, into: envelope)
+        let reversed = try DailyDataExportProjection.project(tasks: tasks.reversed(), blocks: blocks.reversed(),
+            sessions: sessions.reversed(), into: envelope)
+        XCTAssertEqual(value, reversed)
+        XCTAssertEqual(try value.encoded(), try reversed.encoded())
+        XCTAssertEqual(value.tasks.map(\.id), [firstID, secondID])
+        XCTAssertEqual(value.blocks.map(\.id), [firstID, secondID])
+        XCTAssertEqual(value.sessions.map(\.id), [firstID, secondID])
+        XCTAssertEqual(value.learning, envelope.canonicalized().learning)
+        XCTAssertEqual(value.generalPreferences, envelope.generalPreferences)
+        XCTAssertEqual(value.feedPreferences, envelope.canonicalized().feedPreferences)
+        XCTAssertEqual(value.exportedAt, envelope.exportedAt)
+        XCTAssertEqual(value.appVersion, envelope.appVersion)
+        let bytes = try value.encoded()
+        tasks[0].title = "Later edit"; blocks[0].note = "Later edit"
+        sessions[0].linkedTitleSnapshot = "Later edit"; sessions[0].state = "corrupt"
+        XCTAssertEqual(try value.encoded(), bytes)
+        XCTAssertEqual(try daily(), try Export(exportedAt: instant(), appVersion: "1.0"))
+    }
+
+    @MainActor
+    func testDailyProjectionRejectsDamagedTasksIncludingBothOneSidedPlannedDayCases() throws {
+        let mutations: [(TaskItem) -> Void] = [
+            { $0.title = " \n" }, { $0.createdAt = Date(timeIntervalSince1970: .nan) },
+            { $0.dueAt = Date(timeIntervalSince1970: .infinity) },
+            { $0.completedAt = Date(timeIntervalSince1970: 253_402_300_800) },
+            { $0.plannedTimeZoneID = "Europe/Rome" },
+            { $0.plannedDay = .init(calendarIdentifier: "gregorian", year: 2026, month: 9, day: 30) },
+            { $0.plannedDay = .init(calendarIdentifier: "gregorian", year: 2026, month: 2, day: 30)
+              $0.plannedTimeZoneID = "Europe/Rome" },
+            { $0.plannedDay = .init(calendarIdentifier: "unknown", year: 2026, month: 9, day: 30)
+              $0.plannedTimeZoneID = "Europe/Rome" },
+            { $0.plannedDay = .init(calendarIdentifier: "gregorian", year: 2026, month: 9, day: 30)
+              $0.plannedTimeZoneID = "unknown" },
+            { $0.plannedDay = .init(calendarIdentifier: "gregorian", year: 0, month: 9, day: 30)
+              $0.plannedTimeZoneID = "" }
+        ]
+        for mutate in mutations {
+            let row = try TaskItem(id: firstID, title: "Task", createdAt: instant().date)
+            mutate(row)
+            XCTAssertThrowsError(try daily(tasks: [row])) {
+                XCTAssertNotNil($0 as? LocalDataExportError)
+            }
+        }
+    }
+
+    @MainActor
+    func testDailyProjectionRejectsDamagedBlocksAndBoundsCollapsedByMillisecondRounding() throws {
+        let mutations: [(ScheduleBlock) -> Void] = [
+            { $0.title = " \t" }, { $0.startAt = Date(timeIntervalSince1970: -.infinity) },
+            { $0.endAt = Date(timeIntervalSince1970: .nan) }, { $0.endAt = $0.startAt },
+            { $0.endAt = $0.startAt.addingTimeInterval(-1) },
+            { $0.endAt = $0.startAt.addingTimeInterval(0.0001) },
+            { $0.lessonID = " " }, { $0.lessonID = " lesson" }
+        ]
+        for mutate in mutations {
+            let row = ScheduleBlock(id: firstID, title: "Block", startAt: try instant().date,
+                endAt: try instant().date.addingTimeInterval(60))
+            mutate(row)
+            XCTAssertThrowsError(try daily(blocks: [row])) {
+                XCTAssertNotNil($0 as? LocalDataExportError)
+            }
+        }
+    }
+
+    @MainActor
+    func testDailyProjectionRejectsCorruptFocusRecordsInsteadOfRepairingOrDroppingThem() throws {
+        let mutations: [(FocusSession) -> Void] = [
+            { $0.state = "ready" }, { $0.state = "unknown" }, { $0.plannedSeconds = 0 },
+            { $0.plannedSeconds = -1 }, { $0.accumulatedActiveSeconds = .nan },
+            { $0.accumulatedActiveSeconds = .infinity }, { $0.accumulatedActiveSeconds = -1 },
+            { $0.accumulatedActiveSeconds = 1501 }, { $0.accumulatedActiveSeconds = 1500 },
+            { $0.activeSegmentStartedAt = nil }, { $0.deadline = nil },
+            { $0.deadline = $0.activeSegmentStartedAt },
+            { $0.deadline = $0.deadline!.addingTimeInterval(1) },
+            { $0.pausedAt = $0.startedAt }, { $0.endedAt = $0.startedAt },
+            { $0.recoveryRequired = true }, { $0.linkedTaskID = self.secondID },
+            { $0.linkedLessonID = " " }, { $0.linkedLessonID = " lesson" },
+            { $0.linkedTitleSnapshot = " \n" },
+            { $0.checkpointAt = $0.startedAt.addingTimeInterval(-1) }
+        ]
+        for mutate in mutations {
+            let row = try storedSession()
+            mutate(row)
+            XCTAssertThrowsError(try daily(sessions: [row])) {
+                XCTAssertEqual($0 as? LocalDataExportError, .invalidValue)
+            }
+        }
+        let dateMutations: [(FocusSession) -> Void] = [
+            { $0.activeSegmentStartedAt = Date(timeIntervalSince1970: .nan) },
+            { $0.deadline = Date(timeIntervalSince1970: .infinity) },
+            { $0.pausedAt = Date(timeIntervalSince1970: -.infinity) },
+            { $0.startedAt = Date(timeIntervalSince1970: .nan) },
+            { $0.endedAt = Date(timeIntervalSince1970: 253_402_300_800) },
+            { $0.checkpointAt = Date(timeIntervalSince1970: -62_135_596_801) }
+        ]
+        for mutate in dateMutations {
+            let row = try storedSession(); mutate(row)
+            XCTAssertThrowsError(try daily(sessions: [row])) {
+                XCTAssertEqual($0 as? LocalDataExportError, .invalidDate)
+            }
+        }
+        for state in ["paused", "completed", "ended"] {
+            let row = try storedSession(state)
+            if state == "paused" { row.pausedAt = nil } else { row.endedAt = nil }
+            XCTAssertThrowsError(try daily(sessions: [row]))
+            let badRecovery = try storedSession(state)
+            if state == "paused" { badRecovery.activeSegmentStartedAt = badRecovery.startedAt }
+            else { badRecovery.recoveryRequired = true }
+            XCTAssertThrowsError(try daily(sessions: [badRecovery]))
+        }
+    }
+
+    @MainActor
+    func testDailyProjectionRejectsDuplicateRecordIDsAndConflictingActiveRows() throws {
+        let task = try TaskItem(id: firstID, title: "Task", createdAt: instant().date)
+        let block = ScheduleBlock(id: firstID, title: "Block", startAt: try instant().date,
+            endAt: try instant().date.addingTimeInterval(60))
+        let ended = try storedSession("ended")
+        for capture in [
+            { try self.daily(tasks: [task, task]) },
+            { try self.daily(blocks: [block, block]) },
+            { try self.daily(sessions: [ended, ended]) }
+        ] {
+            XCTAssertThrowsError(try capture()) {
+                XCTAssertEqual($0 as? LocalDataExportError, .duplicateIdentity)
+            }
+        }
+        XCTAssertThrowsError(try daily(sessions: [storedSession(), storedSession("paused", id: secondID)])) {
+            XCTAssertEqual($0 as? LocalDataExportError, .invalidValue)
+        }
+        // Namespaces are independent; shared UUIDs across collection kinds are valid.
+        XCTAssertNoThrow(try daily(tasks: [task], blocks: [block], sessions: [ended]))
+    }
+
+    @MainActor
+    func testDailyProjectionLeavesPersistedInventoryActiveSessionAndAnotherOwnersDraftUntouched() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let seed = ModelContext(container)
+        seed.autosaveEnabled = false
+        let start = try instant().date
+        seed.insert(try TaskItem(id: firstID, title: "Uncompleted", createdAt: start, notes: authored))
+        seed.insert(ScheduleBlock(id: firstID, title: "Block", startAt: start,
+            endAt: start.addingTimeInterval(60), note: authored))
+        seed.insert(try storedSession()) // Old deadline: capture must not reconcile it.
+        seed.insert(LessonProgress(lessonID: "missing.historical.lesson", status: .started, startedAt: start))
+        try seed.save()
+        let draftOwner = ModelContext(container)
+        draftOwner.autosaveEnabled = false
+        let draftTask = try XCTUnwrap(draftOwner.fetch(FetchDescriptor<TaskItem>()).first)
+        draftTask.title = "Unsaved task draft"
+        let capture = ModelContext(container)
+        capture.autosaveEnabled = false
+        let tasks = try capture.fetch(FetchDescriptor<TaskItem>())
+        let blocks = try capture.fetch(FetchDescriptor<ScheduleBlock>())
+        let sessions = try capture.fetch(FetchDescriptor<FocusSession>())
+        let originalSession = try FocusSessionSnapshot(XCTUnwrap(sessions.first))
+        XCTAssertFalse(capture.hasChanges)
+        let value = try daily(tasks: tasks, blocks: blocks, sessions: sessions)
+        XCTAssertFalse(capture.hasChanges)
+        XCTAssertEqual(try FocusSessionSnapshot(XCTUnwrap(sessions.first)), originalSession)
+        XCTAssertNil(tasks[0].completedAt)
+        XCTAssertTrue(draftOwner.hasChanges)
+        XCTAssertEqual(draftTask.title, "Unsaved task draft")
+        XCTAssertEqual(value.tasks[0].title, "Uncompleted")
+        let inspect = ModelContext(container)
+        inspect.autosaveEnabled = false
+        let persistedTasks = try inspect.fetch(FetchDescriptor<TaskItem>())
+        let persistedBlocks = try inspect.fetch(FetchDescriptor<ScheduleBlock>())
+        let persistedSessions = try inspect.fetch(FetchDescriptor<FocusSession>())
+        XCTAssertEqual([persistedTasks.count, persistedBlocks.count, persistedSessions.count], [1, 1, 1])
+        XCTAssertEqual(try daily(tasks: persistedTasks, blocks: persistedBlocks, sessions: persistedSessions), value)
+        let progress = try XCTUnwrap(inspect.fetch(FetchDescriptor<LessonProgress>()).first)
+        XCTAssertEqual(progress.status, .started)
+        XCTAssertEqual(progress.startedAt, start)
+        XCTAssertNil(progress.completedAt)
+        XCTAssertFalse(inspect.hasChanges)
     }
 
     func testPrivacyFieldAllowlistsHaveNoOpaquePayloadsOrExcludedOwners() throws {

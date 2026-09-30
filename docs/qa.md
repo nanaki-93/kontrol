@@ -1168,3 +1168,120 @@ logs, not treated as new contract failures. Test hosts **45207/46463** exited:
 failed/skipped evidence was removed. There are **no remaining Step 2.1 blockers**;
 A13/S13/B13/D13, native observations, migration investigation, and later export
 implementation remain separate mandatory checkpoints.
+
+## F13 Step 2.2 — Read-only Daily export projection (2026-09-30)
+
+Confirmed the first top-level incomplete task in `.pi/PLAN.md` matches runner
+Step 2.2. The cumulative task-4 review checklist had no previous findings.
+Initial worktree/index were clean; no applicable ancestor or target `AGENTS.md`
+or submodule was found. No workflow state, frozen schema, fixture, dependency pin,
+feature owner, or external project was changed.
+
+Added `Kontrol/Data/Export/DailyDataExportProjection.swift` with explicit app-target
+membership. Its main-actor synchronous mapping copies every persisted task, block,
+and Focus field, preserving exact authored bytes, original planned-day calendar/
+zone, optional legacy absence, historical links/titles, checkpoints and recovery
+flags. Shared contract validation and the pure `FocusSessionSnapshot` validator
+reject damaged records, duplicate IDs and multiple active sessions, without
+repair/omission. The mapper has no context, clock, save, timer transition,
+reconciliation, service, network, credential, or folder-access boundary. Fetching
+a coherent committed snapshot remains Step 2.6, not a claim made by this mapper.
+Configuration/Learning projection remains later work. Updated the format document
+with the actual mapper API and storage-specific validation rules.
+
+Environment: **Xcode 27.0 (27A266a), Swift 6.4 (swiftlang-6.4.0.34.1; driver
+1.168.6), arm64 macOS 27.0 (26A428)**; developer directory
+`/Applications/Xcode.app/Contents/Developer`; unchanged Yams **5.4.0**.
+Source base: **`bdf2e6e497dc4820d01af52e61e00f4728b64ff0`**.
+Evidence: **`/tmp/kontrol-f13-daily2.2.7bvrVR`**. Four-file implementation/test/
+format/project patch (including the new untracked source, excluding this QA
+append): `source.diff`, SHA-256
+**`8cf6bf588bfd2461c5bb5afe19069a33c96878b2678307836b5d7b61c2c5df4e`**.
+`preflight.log` records `git status --short`, `git diff --stat`,
+`git diff --cached --stat`, `git submodule status`, `git rev-parse HEAD`,
+`xcode-select -p`, `xcodebuild -version`, `xcrun swift --version`,
+`xcodebuild -list -project Kontrol.xcodeproj`, `sw_vers`, and `uname -m`.
+The retained preflight status is post-edit; initial clean status was checked
+before implementation.
+
+### Exact commands and fresh results
+
+All required commands exited **0**; no intermediate build/test failures:
+
+```sh
+set -o pipefail
+EVIDENCE=/tmp/kontrol-f13-daily2.2.7bvrVR
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  CODE_SIGNING_ALLOWED=NO build-for-testing
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
+  -resultBundlePath "$EVIDENCE/daily.xcresult" \
+  -only-testing:KontrolTests/LocalDataExportTests \
+  -only-testing:KontrolTests/FocusRepositoryTests test
+make build DERIVED_DATA=/tmp/kontrol-f13-derived
+git diff --check
+```
+
+The test command expands `f13_test LocalDataExportTests FocusRepositoryTests`
+with an explicit fresh bundle. Logs: `bft.log`, `tests.log`, `build.log`,
+`diffcheck.log`, `exit-codes.log`. **53/53 passed**: **27 LocalDataExportTests**
+(including eight new projection methods), **26 FocusRepositoryTests**; zero
+failures, skips, expected failures, or xcresult runtime warnings.
+`build-for-testing` compiled all existing hosted coverage; these selections
+exercise no native UI/AX assertions. A13/S13/B13/D13 remain separate mandatory
+gates, not inferred passes.
+
+Fresh audit/static commands also exited **0**:
+
+```sh
+xcrun xcresulttool get test-results summary \
+  --path "$EVIDENCE/daily.xcresult" --format json > "$EVIDENCE/summary.json"
+xcrun xcresulttool get test-results tests \
+  --path "$EVIDENCE/daily.xcresult" --format json > "$EVIDENCE/test-tree.json"
+python3 "$EVIDENCE/audit.py" > "$EVIDENCE/audit.log"
+python3 -m json.tool "$EVIDENCE/example-1.json" >/dev/null
+plutil -lint Kontrol.xcodeproj/project.pbxproj
+```
+
+`audit.py` compared fresh method identifiers with all source methods in both
+selected suites: **53/53 executed exactly once**, all Passed, nonempty selection.
+Every identifier/result is retained in `audit.log` and `test-tree.json`.
+The documented JSON example also parsed **1/1**. New-file whitespace inspection
+used `git diff --no-index --check /dev/null
+Kontrol/Data/Export/DailyDataExportProjection.swift`: exit **1** denotes added
+file differences, with no whitespace diagnostics (`newfile-diffcheck.log`).
+
+New methods (all `KontrolTests/LocalDataExportTests/`, Passed):
+
+- `testDailyProjectionMapsEveryTaskAndBlockFieldWithoutAuthoredNormalization`
+- `testDailyProjectionMapsEveryFocusStateTimingLinkAndRecoveryFieldWithoutAdvancement`
+- `testDailyProjectionSortsByIdentityAndDetachesValuesWithoutReplacingOtherEnvelopeFields`
+- `testDailyProjectionRejectsDamagedTasksIncludingBothOneSidedPlannedDayCases`
+- `testDailyProjectionRejectsDamagedBlocksAndBoundsCollapsedByMillisecondRounding`
+- `testDailyProjectionRejectsCorruptFocusRecordsInsteadOfRepairingOrDroppingThem`
+- `testDailyProjectionRejectsDuplicateRecordIDsAndConflictingActiveRows`
+- `testDailyProjectionLeavesPersistedInventoryActiveSessionAndAnotherOwnersDraftUntouched`
+
+These cover complete-field DTO equality, all four stored states, paused recovery,
+wall rollback anchors, missing scalar targets, retained unlinked titles, null/
+empty notes, Buddhist planned dates, exact UTF-8 authored strings, deterministic
+UUID order, independence from later edits, every corrupt date field, invalid
+state/timing/link combinations, and rejection of both one-sided planned-day
+fields. The isolated in-memory fixture confirms no context changes, task or
+Learning completion, timer advancement/recovery, persisted inventory changes,
+or another owner's draft save/overwrite. Production projection performs no IO.
+
+Existing Focus tests created **10 isolated disk-store roots**, recorded exactly
+in `focus-test-store-roots.txt` under
+`/var/folders/lz/20cqfx4x2k98r89q68w3q3ch0000gn/T/` (birth times within the fresh
+result interval). The initial `/tmp` before/after directory enumerations did not
+locate those Foundation temporary roots; the post-run audit records their actual
+paths. All roots/sidecars remain preserved; no cleanup was performed. Test host
+**51941** exited: `ps -p 51941 -o pid=,stat=,command=` returned **1** with no rows
+(`host-exit.log`). Existing multiple-destination and linkd/AppIntents diagnostics
+remain in logs, not new projection failures. No historical failed/skipped
+evidence was removed. **No remaining Step 2.2 blockers.**

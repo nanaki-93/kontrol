@@ -1,9 +1,10 @@
 # Local data export — schema version 1
 
 `LocalDataExport` in `Kontrol/Domain/LocalDataExport.swift` defines a detached,
-plain JSON serialization contract. This checkpoint defines the format only;
-persisted projections, capture, destination selection, and delivery are separate
-implementation tasks. No import/restore is provided. This is **not an encrypted
+plain JSON serialization contract. `Kontrol/Data/Export/DailyDataExportProjection.swift`
+now maps supplied persisted tasks, blocks, and Focus sessions. Configuration and
+Learning projections, coherent capture, destination selection, and delivery remain
+separate implementation tasks. No import/restore is provided. This is **not an encrypted
 backup**; the JSON contains personal authored content and saved answers.
 
 ## Common rules
@@ -118,7 +119,7 @@ The empty structural example is not seed data or a promise that a new store's
 `ethiopicAmeteMihret`, `ethiopicAmeteAlem`, `hebrew`, `iso8601`, `indian`, `islamic`,
 `islamicCivil`, `japanese`, `persian`, `republicOfChina`, `islamicTabular`,
 `islamicUmmAlQura`. Components must round-trip in that calendar/zone without
-normalization. This object is **not** a UTC midnight. A projection must reject
+normalization. This object is **not** a UTC midnight. The Daily projection rejects
 one-sided stored components/zone absence rather than inventing the missing half.
 
 ### Block
@@ -151,6 +152,46 @@ one-sided stored components/zone absence rather than inventing the missing half.
 
 All persisted states, including active/interrupted sessions, are representable.
 This format is a record of stored state, not a synthesized live timer estimate.
+
+### Persisted Daily projection
+
+`DailyDataExportProjection.project(tasks:blocks:sessions:into:)` runs synchronously
+on the main actor. It accepts already-fetched rows plus an envelope, replaces only
+its three Daily collections, validates the resulting envelope, and returns
+canonicalized detached values. Other envelope content remains unchanged except
+for contract sorting. Fetching/coherent committed capture belongs to the caller
+(the export repository will be implemented separately); this mapper does not
+read unsaved editors or claim an arbitrary supplied context is committed.
+
+- Every task field maps directly, with stored `plannedDay` components and
+  `plannedTimeZoneID` combined only when both exist. Titles and notes are not
+  passed through draft/constructor normalization. Nil legacy fields remain null;
+  empty notes remain empty. Recognized non-Gregorian calendars are retained.
+- Every block field maps directly. Invalid bounds, including bounds collapsed by
+  millisecond rounding, fail. Missing historical lesson rows do not invalidate
+  scalar links, and an unlinked retained title snapshot is not removed.
+- Every Focus field maps directly, with all dates converted (including optional
+  fields that would be incompatible with the stored state). The pure
+  `FocusSessionSnapshot` validator checks original-precision state consistency:
+  elapsed is finite and in `[0, plannedSeconds]`; checkpoint is not before start;
+  task/lesson links are mutually exclusive; present linked titles are nonblank.
+  Running requires an active anchor, matching remaining-duration deadline
+  (within the existing <1 ms tolerance), checkpoint ≥ anchor, elapsed < duration,
+  no paused/end timestamp or recovery flag. A rollback anchor may predate start.
+  Paused requires a paused timestamp between start and checkpoint, elapsed <
+  duration, no anchor/deadline/end; either recovery flag is valid. Terminal states
+  require an end between start and checkpoint, no anchor/deadline/pause/recovery;
+  completed elapsed equals duration, ended elapsed is less. Unknown states and
+  multiple active rows fail rather than authorizing automatic recovery.
+- The shared contract checks duplicate IDs, nonblank titles, planned calendar/
+  zone validity, canonical lesson IDs, and timestamp range. Any included damaged
+  row fails the entire projection; no row is filtered, repaired, deduplicated,
+  or replaced with a current linked title. Identity namespaces are independent.
+- No context save, task/progress completion, timer estimate/transition/recovery,
+  clock sample, feature loading, external folder access, or other IO occurs.
+  Later row edits cannot alter the returned values. The projected envelope still
+  passes root encoding/decoding validation; millisecond timestamp quantization
+  follows the common rules above.
 
 ## Configuration
 
@@ -321,5 +362,6 @@ before sharing it; it is not guaranteed to be free of sensitive authored content
 
 No SwiftData object, `Data` blob, arbitrary dictionary, filesystem URL/grant,
 network operation, store reset, generation, restore, or external-project mutation
-belongs to this contract. Local-only projections/capture and safe atomic delivery
-will be implemented and verified in later checkpoints before exposing export UI.
+belongs to this contract. Daily row mapping is implemented; the remaining
+projections, coherent capture, and safe atomic delivery will be implemented and
+verified in later checkpoints before exposing export UI.
