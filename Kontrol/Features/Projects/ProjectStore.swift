@@ -152,6 +152,7 @@ final class ProjectStore: ObservableObject {
     @Published private(set) var reconnectMessage: String?
     @Published private(set) var loadFailed = false
     private(set) var isLoaded = false
+    private var isInspectionAdmitted = false
 
     private let inspector: any ProjectInspecting
     private let repository: any ProjectReferenceRepository
@@ -416,22 +417,28 @@ final class ProjectStore: ObservableObject {
         }
     }
 
-    /// Call on entry to Projects, not at launch. Failed fetches may be retried on next entry.
-    func enterProjects() throws {
-        guard !isLoaded else {
-            selectInitialProjectIfNeeded()
-            return
-        }
+    /// Settings may list local references without resolving grants or inspecting folders.
+    /// Failed fetches remain retryable and never admit external inspection.
+    func loadReferencesIfNeeded() throws {
+        guard !isLoaded else { return }
         do {
             rows = try repository.fetchAll().map { ProjectRowState(reference: $0, inspection: nil) }
             isLoaded = true
             loadFailed = false
             selectInitialProjectIfNeeded()
-            refreshAll()
         } catch {
             loadFailed = true
             throw error
         }
+    }
+
+    /// Projects entry, not local-reference readiness, admits bounded initial inspection.
+    func enterProjects() throws {
+        try loadReferencesIfNeeded()
+        selectInitialProjectIfNeeded()
+        guard !isInspectionAdmitted else { return }
+        isInspectionAdmitted = true
+        refreshAll()
     }
 
     /// Requests for a waiting row merge; a running row gets just one follow-up.
@@ -442,9 +449,9 @@ final class ProjectStore: ObservableObject {
 
     /// Main-window key events can occur before Projects is opened or from either
     /// main window. Never fetch references on activation; use the same bounded,
-    /// per-row queue as manual and initial refresh once references are loaded.
+    /// per-row queue as manual and initial refresh only after Projects entry.
     func refreshOnMainWindowActivation() {
-        guard isLoaded else { return }
+        guard isInspectionAdmitted else { return }
         refreshAll()
     }
 
@@ -839,7 +846,7 @@ final class ProjectStore: ObservableObject {
         defer { adding = false }
         let generation = previewGeneration
         do {
-            try enterProjects()
+            try loadReferencesIfNeeded()
             let inspection = try await inspector.inspect(selectedFolder: candidate.folder)
             try Task.checkCancellation()
             guard generation == previewGeneration else { throw CancellationError() }

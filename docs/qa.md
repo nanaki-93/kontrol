@@ -492,3 +492,87 @@ Compiled News/Settings/shell presentation fixtures and resolving standalone HTML
 ## This package's validation
 
 The package build checks that every function row points to an existing mockup, every relative Markdown link resolves, all 44 SVG sources render to PNG, and the archive contains the referenced paths. It does not verify native Swift behavior; that work belongs to the implementation gates above.
+
+## F13 local reference readiness — Step 2.2 (2026-09-30, 10:00 UTC)
+
+**Implementation checkpoint passed; ready for review.** The first incomplete task matched runner Step 2.2. Read the complete cumulative task-1 checklist; it lists no previous findings. Initial `git status --short`, `git diff`, and `git diff --cached` were empty, so no interrupted partial work was present. Applicable ancestor checks through `/` and repository/target instruction scans found no `AGENTS.md`; `.gitmodules` and submodule configuration are absent, and `git submodule status` returned no entries. An initial broad sibling-directory search timed out; the completed repository and direct-ancestor checks establish the relevant instruction boundaries instead. No commit-rule conflict was found. This execution leaves changes uncommitted for runner review; no staging, plan/state edit, or later-task implementation occurred.
+
+### Boundary and coverage
+
+- `ProjectStore.loadReferencesIfNeeded()` fetches detached references through persistence only, publishes successful readiness, and leaves failed fetches retryable with `loadFailed`. It performs no inspector, identifier, grant resolution/creation, location, or feature-writer calls.
+- A separate private inspection-admission flag is set only after successful Projects entry. Settings-first activation remains local-only. First later entry uses the existing three-slot bounded queue; reentry neither refetches nor schedules duplicate initial work, and selection survives. Existing post-entry activation/coalescing tests remain passing.
+- Add now loads local references rather than calling `enterProjects()`. Picker-authorized preview/final reinspection, duplicate-folder identity checks (including inaccessible peers), bookmark creation and identity revalidation, durable insert, and selected-folder inspection publication remain intact. Explicit Add identity comparisons can resolve existing grants; this is not passive listing or admission to inspect unrelated saved folders.
+- Five new `ProjectStoreTests` methods cover local-only listing/activation and bounded later entry; failed local load/entry followed by retry; Settings Add reinspection/authorization without unrelated inspection; changed bookmark identity rejection; and duplicate selection without admission. Inspector/identifier/writer spies and persisted-write counts assert the boundary. Exact new identifiers:
+  - `ProjectStoreTests/testSettingsFirstListingAndActivationRemainLocalUntilBoundedProjectsEntry`
+  - `ProjectStoreTests/testFailedLocalLoadAndProjectsEntryCanRetryWithoutPrematureAdmission`
+  - `ProjectStoreTests/testSettingsAddRevalidatesAndAuthorizesWithoutInspectingSavedFoldersOrAdmittingActivation`
+  - `ProjectStoreTests/testSettingsAddRejectsChangedBookmarkIdentityWithoutAdmittingSavedFolderInspection`
+  - `ProjectStoreTests/testSettingsAddDuplicateSelectsExistingWithoutAdmittingInspection`
+- Two new disk-backed integration methods use the real repository/parser/scoped boundaries with counted in-process grants: `ProjectIntegrationTests/testSettingsFirstReopenedReferencesAndActivationDoNotAccessGrantsUntilProjectsEntry` and `ProjectIntegrationTests/testSettingsAddLeavesExistingFolderUninspectedAndUnchangedUntilProjectsEntry`. They verify reopen/local listing with a revoked peer, no access/save before admission, normal later inspection, selection, balanced scopes, and whole-tree byte preservation including `.git`, source, `.kontrol`, and absence of temporary entries. These opaque fixture grants are not OS-bookmark/signed-sandbox acceptance.
+- Confirmed completed Step 1.1a/2.1 repairs in source and the prior ledger: host-specific AX prerequisite/original assertions, submitted lesson-link retry/reset regression, process-owned preference/removal/integration fixtures, and required durable revision-checked repository deletion remain unchanged. All 19 existing completion/Undo methods passed. Reload, disconnect, Settings presentation, and export belong to later tasks and are not implemented here.
+
+### Environment and exact verification
+
+Discovery commands (all exit **0**), output `/tmp/kontrol-f13-step2.2-toolchain.log`:
+
+```sh
+xcode-select -p
+xcodebuild -version
+xcrun swift --version
+xcodebuild -list -project Kontrol.xcodeproj
+sw_vers
+uname -m
+```
+
+Environment: `/Applications/Xcode.app/Contents/Developer`, **Xcode 27.0 (27A266a)**, **Apple Swift 6.4 (swiftlang-6.4.0.34.1; swift-driver 1.168.6)**, **arm64 macOS 27.0 (26A428)**. Project discovery resolved Yams **5.4.0**, Kontrol scheme, Kontrol/KontrolTests targets, Debug/Release configurations. Swift 5/macOS 14 deployment remain unchanged; no macOS 14 runtime claim.
+
+Commands ran from the repository root with `set -o pipefail`; each exited **0**, first on the initial implementation, then again on final source after strengthening bookmark-creation spies and adding changed-grant rejection coverage:
+
+```sh
+make build DERIVED_DATA=/tmp/kontrol-f13-derived
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  CODE_SIGNING_ALLOWED=NO build-for-testing
+# Exact expansion of f13_test ProjectStoreTests ProjectIntegrationTests ProjectCompletionStoreTests:
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
+  -only-testing:KontrolTests/ProjectStoreTests \
+  -only-testing:KontrolTests/ProjectIntegrationTests \
+  -only-testing:KontrolTests/ProjectCompletionStoreTests test
+git diff --check
+```
+
+Initial logs: `/tmp/kontrol-f13-step2.2-{build,bft,tests}.log`; final logs: `/tmp/kontrol-f13-step2.2-final-{build,bft,tests}.log`. Both builds and both test-compilation actions succeeded; hosted coverage compiled but was not executed. No new source/test/resource files require project registration.
+
+| Selected suite | Initial executed/passed | Final source methods/executed/passed |
+| --- | ---: | ---: |
+| ProjectStoreTests | 33 | 34 |
+| ProjectIntegrationTests | 8 | 8 |
+| ProjectCompletionStoreTests | 19 | 19 |
+| **Total** | **60** | **61** |
+
+Both runs have **0 failures, 0 skips, 0 expected failures**. Initial fresh bundle: `/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_17-58-38-+0800.xcresult`; final fresh bundle: **`/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_17-59-57-+0800.xcresult`**. Both summaries have empty runtime-warning and test-failure arrays. Raw logs retain existing malformed-bookmark/linkd diagnostics and destination/AppIntents warnings; no `vnode unlinked while in use`, `InvalidTransition`, or AX prerequisite diagnostic appears. Marker/diagnostic audit: `/tmp/kontrol-f13-step2.2-diagnostics.log`.
+
+Fresh bundle audits, each exit **0**:
+
+```sh
+for item in '17-58-38 initial' '17-59-57 final'; do
+  read -r stamp suffix <<< "$item"
+  RESULT_BUNDLE="/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_${stamp}-+0800.xcresult"
+  PREFIX="/tmp/kontrol-f13-step2.2-${suffix}"
+  xcrun xcresulttool get test-results summary --path "$RESULT_BUNDLE" --format json > "${PREFIX}-summary.json"
+  xcrun xcresulttool get test-results tests --path "$RESULT_BUNDLE" --format json > "${PREFIX}-test-tree.json"
+  python3 /tmp/kontrol-f13-step2.2-audit.py "$PREFIX" "$suffix" > "${PREFIX}-selector-audit.log"
+done
+python3 /tmp/kontrol-f13-step2.2-cleanup.py | tee /tmp/kontrol-f13-step2.2-cleanup.log
+git diff --check
+```
+
+Audits enumerate full method identifiers/results, compare against selected source methods, require exact-once/nonempty execution and all `Passed`, and reconcile summary totals. The initial audit excludes only the named changed-bookmark-identity method introduced after that run; final audit covers all 61 current methods. Scripts, JSON summaries/trees, and exact selector logs are retained at the paths above.
+
+Guarded post-host cleanup enumerated exactly the two printed integration roots `/var/folders/lz/20cqfx4x2k98r89q68w3q3ch0000gn/T/KontrolProjectIntegrationTests-2831` and `/var/folders/lz/20cqfx4x2k98r89q68w3q3ch0000gn/T/KontrolProjectIntegrationTests-3364`. Confirmed both PIDs exited, validated TMPDIR parent/process-owned name/no symlinks, enumerated **8 SQLite stores per root**, and checked all **16** read-only `PRAGMA integrity_check` results as `ok`. Connections closed and PID exit rechecked before removing only those exact roots; both no longer exist. Exact store paths/results are in `/tmp/kontrol-f13-step2.2-cleanup.log`. Original fixtures, production data, live stores, and historical unlogged roots remain untouched.
+
+**No Step 2.2 blocker remains.** No visible/hosted selectors changed. A13 Accessibility/full-suite/native observations, S13 signed-sandbox/OS-bookmark journeys, B13 baseline runtime, and D13 distribution remain required and pending—not passed, skipped, or waived. This checkpoint is not unconditional F13/release approval.

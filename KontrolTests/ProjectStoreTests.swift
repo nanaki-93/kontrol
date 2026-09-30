@@ -9,6 +9,7 @@ private final class StubInspector: ProjectInspecting {
     var bookmarkFails = false
     var inspectionCanceled = false
     var inspectionCount = 0
+    var bookmarkedInspectionCount = 0
     var bookmarkCount = 0
 
     func inspect(selectedFolder: URL) async throws -> ProjectInspection {
@@ -16,7 +17,10 @@ private final class StubInspector: ProjectInspecting {
         if inspectionCanceled { throw CancellationError() }
         return inspections.removeFirst()
     }
-    func inspect(bookmarkData: Data) async throws -> ProjectInspection { throw CancellationError() }
+    func inspect(bookmarkData: Data) async throws -> ProjectInspection {
+        bookmarkedInspectionCount += 1
+        throw CancellationError()
+    }
     func makeBookmark(selectedFolder: URL) async throws -> Data {
         bookmarkCount += 1
         if bookmarkFails { throw ProjectFolderAccessError.bookmarkCreationFailed }
@@ -35,17 +39,61 @@ private struct StubIdentity: ProjectFolderIdentifying {
     }
 }
 
+private final class TrackingIdentity: ProjectFolderIdentifying {
+    let selectedIdentity: ProjectFolderIdentity
+    let saved: [Data: ProjectFolderIdentity]
+    var selections = 0
+    var bookmarks: [Data] = []
+    var locations: [Data] = []
+
+    init(selectedIdentity: ProjectFolderIdentity, saved: [Data: ProjectFolderIdentity] = [:]) {
+        self.selectedIdentity = selectedIdentity
+        self.saved = saved
+    }
+    func selected(_ folder: URL) async throws -> ProjectFolderIdentity {
+        selections += 1
+        return selectedIdentity
+    }
+    func bookmarked(_ data: Data) async throws -> ProjectFolderIdentity {
+        bookmarks.append(data)
+        guard let identity = saved[data] else { throw ProjectFolderAccessError.stale }
+        return identity
+    }
+    func location(bookmarked data: Data) async throws -> String {
+        locations.append(data)
+        return "Transient location"
+    }
+}
+
+private final class TrackingWriter: FeatureFileWriting {
+    var completions = 0
+    var undos = 0
+    func complete(_ request: FeatureCompletionRequest) async throws -> FeatureMutationReceipt {
+        completions += 1
+        throw FeatureMutationFailure.writeFailed
+    }
+    func undo(_ request: FeatureUndoRequest) async throws -> FeatureMutationReceipt {
+        undos += 1
+        throw FeatureMutationFailure.writeFailed
+    }
+}
+
 @MainActor
 private final class StubRepository: ProjectReferenceRepository {
     var saved: [ProjectReferenceSnapshot] = []
     var fetches = 0
+    var failFetch = false
     var inserts = 0
     var failInsert = false
     var failReadSave = false
     var failReconnect = false
     var reconnects = 0
     var successfulReads = 0
-    func fetchAll() throws -> [ProjectReferenceSnapshot] { fetches += 1; return saved }
+    func fetchAll() throws -> [ProjectReferenceSnapshot] {
+        fetches += 1
+        if failFetch { throw ProjectReferencePersistenceError.invalidReference }
+        return saved
+    }
     func insert(_ input: NewProjectReference) throws -> ProjectReferenceSnapshot {
         inserts += 1
         if failInsert { throw ProjectReferencePersistenceError.invalidReference }
@@ -106,6 +154,8 @@ private actor DeferredInspector: ProjectInspecting {
     let newBookmark: Data
     let waitSelected: Bool
     private var selectedWaiter: CheckedContinuation<ProjectInspection, Error>?
+    private var selectedStarts = 0
+    private var bookmarkCreations = 0
     init(selectedInspection: ProjectInspection? = nil, newBookmark: Data = Data([9]),
          waitSelected: Bool = false) {
         self.selectedInspection = selectedInspection
@@ -118,6 +168,7 @@ private actor DeferredInspector: ProjectInspecting {
     private var peak = 0
 
     func inspect(selectedFolder: URL) async throws -> ProjectInspection {
+        selectedStarts += 1
         guard let selectedInspection else { throw CancellationError() }
         if waitSelected {
             return try await withCheckedThrowingContinuation { selectedWaiter = $0 }
@@ -136,7 +187,11 @@ private actor DeferredInspector: ProjectInspecting {
         defer { active -= 1 }
         return try await withCheckedThrowingContinuation { waiting.append((bookmarkData, $0)) }
     }
-    func makeBookmark(selectedFolder: URL) async throws -> Data { newBookmark }
+    func makeBookmark(selectedFolder: URL) async throws -> Data {
+        bookmarkCreations += 1
+        return newBookmark
+    }
+    func selectedCounts() -> (Int, Int) { (selectedStarts, bookmarkCreations) }
     func counts() -> (Int, Int, Int) { (started.count, active, peak) }
     func starts(for data: Data) -> Int { started.filter { $0 == data }.count }
     func release(_ data: Data, result: Result<ProjectInspection, Error>) {
@@ -235,6 +290,169 @@ final class ProjectStoreTests: XCTestCase {
         XCTAssertEqual(graph.projectStore.selectedID, persisted.id)
         XCTAssertNil(graph.projectStore.selectedFeature)
         XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<ProjectReference>()).count, 1)
+    }
+
+    func testSettingsFirstListingAndActivationRemainLocalUntilBoundedProjectsEntry() async throws {
+        let io = DeferredInspector(), repo = StubRepository()
+        let refs = (1...5).map { reference(UInt8($0)) }
+        repo.saved = refs
+        let identifier = TrackingIdentity(selectedIdentity: identity)
+        let writer = TrackingWriter()
+        let subject = ProjectStore(inspector: io, repository: repo, identifier: identifier, writer: writer)
+        try subject.loadReferencesIfNeeded()
+        try subject.loadReferencesIfNeeded()
+        for _ in 0..<10 { subject.refreshOnMainWindowActivation() }
+        // Give erroneously admitted Tasks an opportunity to start before checking spies.
+        try await Task.sleep(nanoseconds: 20_000_000)
+        let localCounts = await io.counts()
+        XCTAssertEqual(localCounts.0, 0)
+        let selectedCounts = await io.selectedCounts()
+        XCTAssertEqual(selectedCounts.0, 0)
+        XCTAssertEqual(selectedCounts.1, 0)
+        XCTAssertTrue(subject.isLoaded)
+        XCTAssertFalse(subject.loadFailed)
+        XCTAssertEqual(repo.fetches, 1)
+        XCTAssertEqual(subject.rows.map(\.reference), refs)
+        XCTAssertTrue(subject.rows.allSatisfy { $0.inspection == nil && !$0.isRefreshing && $0.locationHint == nil })
+        XCTAssertEqual(identifier.selections, 0)
+        XCTAssertTrue(identifier.bookmarks.isEmpty)
+        XCTAssertTrue(identifier.locations.isEmpty)
+        XCTAssertEqual(writer.completions + writer.undos, 0)
+        XCTAssertEqual(repo.inserts + repo.reconnects + repo.successfulReads, 0)
+
+        subject.select(refs[4].id)
+        try subject.enterProjects()
+        for _ in 0..<10 { try subject.enterProjects(); try subject.loadReferencesIfNeeded() }
+        await eventually { await io.counts().0 == 3 }
+        XCTAssertEqual(subject.selectedID, refs[4].id)
+        for ref in refs.prefix(3) { await io.release(ref.bookmarkData, result: .success(inspection())) }
+        await eventually { await io.counts().0 == 5 }
+        for ref in refs.suffix(2) { await io.release(ref.bookmarkData, result: .success(inspection())) }
+        await eventually { repo.successfulReads == 5 && subject.rows.allSatisfy { !$0.isRefreshing } }
+        try subject.enterProjects()
+        try await Task.sleep(nanoseconds: 20_000_000)
+        let finalCounts = await io.counts()
+        XCTAssertEqual(finalCounts.0, 5, "Reentry must not add initial-read follow-ups")
+        XCTAssertEqual(finalCounts.2, 3)
+        XCTAssertEqual(Set(identifier.locations), Set(refs.map(\.bookmarkData)))
+        XCTAssertEqual(identifier.locations.count, 5)
+        XCTAssertTrue(identifier.bookmarks.isEmpty)
+        XCTAssertEqual(repo.fetches, 1)
+        XCTAssertEqual(writer.completions + writer.undos, 0)
+    }
+
+    func testFailedLocalLoadAndProjectsEntryCanRetryWithoutPrematureAdmission() async throws {
+        let io = StubInspector(), repo = StubRepository(), ref = reference(1)
+        repo.saved = [ref]
+        repo.failFetch = true
+        let identifier = TrackingIdentity(selectedIdentity: identity), writer = TrackingWriter()
+        let subject = ProjectStore(inspector: io, repository: repo, identifier: identifier, writer: writer)
+        XCTAssertThrowsError(try subject.loadReferencesIfNeeded())
+        XCTAssertThrowsError(try subject.enterProjects())
+        subject.refreshOnMainWindowActivation()
+        XCTAssertFalse(subject.isLoaded)
+        XCTAssertTrue(subject.loadFailed)
+        XCTAssertTrue(subject.rows.isEmpty)
+        XCTAssertNil(subject.selectedID)
+        repo.failFetch = false
+        try subject.loadReferencesIfNeeded()
+        subject.refreshOnMainWindowActivation()
+        try await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertTrue(subject.isLoaded)
+        XCTAssertFalse(subject.loadFailed)
+        XCTAssertEqual(repo.fetches, 3)
+        XCTAssertEqual(io.bookmarkedInspectionCount, 0)
+        XCTAssertEqual(subject.rows.map(\.reference), [ref])
+        XCTAssertEqual(identifier.selections, 0)
+        XCTAssertTrue(identifier.bookmarks.isEmpty)
+        XCTAssertTrue(identifier.locations.isEmpty)
+        XCTAssertEqual(writer.completions + writer.undos, 0)
+        try subject.enterProjects()
+        await eventually { io.bookmarkedInspectionCount == 1 && !subject.rows[0].isRefreshing }
+        try subject.enterProjects()
+        XCTAssertEqual(repo.fetches, 3)
+    }
+
+    func testSettingsAddRevalidatesAndAuthorizesWithoutInspectingSavedFoldersOrAdmittingActivation() async throws {
+        let io = StubInspector(), repo = StubRepository()
+        let existing = reference(1), revoked = reference(2)
+        repo.saved = [existing, revoked]
+        let identifier = TrackingIdentity(selectedIdentity: identity, saved: [
+            existing.bookmarkData: ProjectFolderIdentity(device: 1, inode: 3), Data([9]): identity])
+        let writer = TrackingWriter()
+        let subject = ProjectStore(inspector: io, repository: repo, identifier: identifier, writer: writer)
+        io.inspections = [inspection(), inspection()]
+        // Add itself must load references locally even without a prior Settings listing.
+        _ = try await subject.previewFolder(folder)
+        guard case let .added(id) = try await subject.addPreviewedProject() else { return XCTFail("Expected Add") }
+        for _ in 0..<10 { subject.refreshOnMainWindowActivation() }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(repo.fetches, 1)
+        XCTAssertEqual(repo.inserts, 1)
+        XCTAssertEqual(io.inspectionCount, 2, "Preview and final selected-folder reinspection remain required")
+        XCTAssertEqual(io.bookmarkCount, 1)
+        XCTAssertEqual(io.bookmarkedInspectionCount, 0)
+        XCTAssertEqual(identifier.selections, 1)
+        XCTAssertEqual(identifier.bookmarks, [existing.bookmarkData, revoked.bookmarkData, Data([9])])
+        XCTAssertTrue(identifier.locations.isEmpty)
+        XCTAssertEqual(writer.completions + writer.undos, 0)
+        XCTAssertEqual(subject.rows.prefix(2).map(\.reference), [existing, revoked])
+        XCTAssertTrue(subject.rows.prefix(2).allSatisfy { $0.inspection == nil && !$0.isRefreshing })
+        XCTAssertEqual(subject.selectedID, id)
+        XCTAssertEqual(subject.rows.last?.inspection?.manifest?.id, "shared")
+        XCTAssertEqual(repo.successfulReads, 0)
+        try subject.enterProjects()
+        await eventually { io.bookmarkedInspectionCount == 3 && subject.rows.allSatisfy { !$0.isRefreshing } }
+        try subject.enterProjects()
+        XCTAssertEqual(repo.fetches, 1)
+    }
+
+    func testSettingsAddRejectsChangedBookmarkIdentityWithoutAdmittingSavedFolderInspection() async throws {
+        let io = StubInspector(), repo = StubRepository(), existing = reference(1)
+        repo.saved = [existing]
+        let otherIdentity = ProjectFolderIdentity(device: 1, inode: 3)
+        let identifier = TrackingIdentity(selectedIdentity: identity,
+            saved: [existing.bookmarkData: otherIdentity, Data([9]): otherIdentity])
+        let subject = ProjectStore(inspector: io, repository: repo, identifier: identifier)
+        io.inspections = [inspection(), inspection()]
+        _ = try await subject.previewFolder(folder)
+        do { _ = try await subject.addPreviewedProject(); XCTFail("Changed grant must not insert") }
+        catch { XCTAssertEqual(error as? ProjectStoreError, .invalidPreview) }
+        subject.refreshOnMainWindowActivation()
+        try await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(subject.rows.map(\.reference), [existing])
+        XCTAssertNil(subject.rows[0].inspection)
+        XCTAssertEqual(repo.saved, [existing])
+        XCTAssertEqual(repo.inserts + repo.successfulReads, 0)
+        XCTAssertEqual(io.inspectionCount, 2)
+        XCTAssertEqual(io.bookmarkCount, 1)
+        XCTAssertEqual(io.bookmarkedInspectionCount, 0)
+        XCTAssertEqual(identifier.bookmarks, [existing.bookmarkData, Data([9])])
+        XCTAssertTrue(identifier.locations.isEmpty)
+    }
+
+    func testSettingsAddDuplicateSelectsExistingWithoutAdmittingInspection() async throws {
+        let io = StubInspector(), repo = StubRepository(), existing = reference(1)
+        repo.saved = [existing]
+        let identifier = TrackingIdentity(selectedIdentity: identity, saved: [existing.bookmarkData: identity])
+        let subject = ProjectStore(inspector: io, repository: repo, identifier: identifier)
+        try subject.loadReferencesIfNeeded()
+        io.inspections = [inspection(), inspection()]
+        _ = try await subject.previewFolder(folder)
+        let result = try await subject.addPreviewedProject()
+        subject.refreshOnMainWindowActivation()
+        try await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(result, .selectedExisting(existing.id))
+        XCTAssertEqual(subject.selectedID, existing.id)
+        XCTAssertEqual(subject.rows.map(\.reference), [existing])
+        XCTAssertNil(subject.rows[0].inspection)
+        XCTAssertEqual(io.inspectionCount, 2)
+        XCTAssertEqual(io.bookmarkedInspectionCount, 0)
+        XCTAssertEqual(io.bookmarkCount, 0)
+        XCTAssertEqual(repo.fetches, 1)
+        XCTAssertEqual(repo.inserts + repo.successfulReads, 0)
+        XCTAssertEqual(identifier.bookmarks, [existing.bookmarkData])
+        XCTAssertTrue(identifier.locations.isEmpty)
     }
 
     func testInitialRefreshIsBoundedIndependentAndCoalescesRequests() async throws {

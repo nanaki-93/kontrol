@@ -11,15 +11,19 @@ private final class IntegrationGrants: ProjectBookmarkOperations {
     private var stale: Set<Data> = []
     private var starts = 0
     private var stops = 0
+    private var resolutions = 0
+    private var creations = 0
 
     func resolve(_ data: Data) throws -> (folder: URL, isStale: Bool) {
         lock.lock(); defer { lock.unlock() }
+        resolutions += 1
         guard let folder = folders[data] else { throw ProjectFolderAccessError.unresolved }
         return (folder, stale.contains(data))
     }
 
     func createBookmark(for selectedFolder: URL) throws -> Data {
         lock.lock(); defer { lock.unlock() }
+        creations += 1
         let token = Data(UUID().uuidString.utf8)
         folders[token] = selectedFolder
         return token
@@ -39,6 +43,11 @@ private final class IntegrationGrants: ProjectBookmarkOperations {
     func invalidate(_ token: Data) {
         lock.lock(); defer { lock.unlock() }
         stale.insert(token)
+    }
+
+    var counts: [Int] {
+        lock.lock(); defer { lock.unlock() }
+        return [resolutions, creations, starts, stops]
     }
 
     var balanced: Bool {
@@ -179,6 +188,97 @@ final class ProjectIntegrationTests: XCTestCase {
         try Data("schema_version: 1\nevents: []\n".utf8)
             .write(to: folder.appendingPathComponent(".kontrol/history.yaml"))
         return folder
+    }
+
+    func testSettingsFirstReopenedReferencesAndActivationDoNotAccessGrantsUntilProjectsEntry() async throws {
+        let root = try workspace()
+        let folder = try mutationFixture(root, name: "local-listing")
+        let revokedFolder = try mutationFixture(root, name: "revoked-listing")
+        let grants = IntegrationGrants()
+        let database = root.appendingPathComponent("local-listing.store")
+        var references: [ProjectReferenceSnapshot] = []
+        do {
+            let container = try ModelContainerFactory().makeContainer(mode: .persistent(database))
+            let repository = SwiftDataProjectReferenceRepository(container: container)
+            for (order, selected) in [folder, revokedFolder].enumerated() {
+                let bookmark = try grants.createBookmark(for: selected)
+                references.append(try repository.insert(NewProjectReference(id: UUID(),
+                    manifestID: selected.lastPathComponent, bookmarkData: bookmark,
+                    displayOrder: order, displayNameHint: selected.lastPathComponent)))
+            }
+        }
+        grants.invalidate(references[1].bookmarkData)
+        let original = try tree(folder), revokedOriginal = try tree(revokedFolder)
+        let initialAccess = grants.counts
+        var saves = 0
+        let reopened = try ModelContainerFactory().makeContainer(mode: .persistent(database))
+        let subject = store(reopened, grants, beforeSave: { saves += 1 })
+        try subject.loadReferencesIfNeeded()
+        try subject.loadReferencesIfNeeded()
+        for _ in 0..<10 { subject.refreshOnMainWindowActivation() }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(grants.counts, initialAccess, "Listing/activation must not even resolve a grant")
+        XCTAssertEqual(saves, 0)
+        XCTAssertEqual(subject.rows.map(\.reference), references)
+        XCTAssertTrue(subject.rows.allSatisfy { $0.inspection == nil && $0.locationHint == nil && !$0.isRefreshing })
+        XCTAssertEqual(try tree(folder), original)
+        XCTAssertEqual(try tree(revokedFolder), revokedOriginal)
+        subject.select(references[1].id)
+        try subject.enterProjects()
+        try subject.enterProjects()
+        await wait { subject.rows.allSatisfy { !$0.isRefreshing } && subject.rows[0].inspection != nil }
+        XCTAssertEqual(subject.selectedID, references[1].id)
+        XCTAssertEqual(subject.rows[0].inspection?.featureCount, .complete(completed: 0, total: 3))
+        XCTAssertEqual(subject.rows[0].locationHint, folder.path)
+        XCTAssertEqual(subject.rows[1].refreshFailure, .inspection(.access(.staleBookmark)))
+        XCTAssertEqual(subject.rows[1].reference, references[1])
+        XCTAssertEqual(saves, 1)
+        let afterEntryAccess = grants.counts
+        try subject.enterProjects()
+        try subject.loadReferencesIfNeeded()
+        try await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(grants.counts, afterEntryAccess)
+        XCTAssertEqual(saves, 1)
+        XCTAssertEqual(try tree(folder), original)
+        XCTAssertEqual(try tree(revokedFolder), revokedOriginal)
+        XCTAssertTrue(grants.balanced)
+    }
+
+    func testSettingsAddLeavesExistingFolderUninspectedAndUnchangedUntilProjectsEntry() async throws {
+        let root = try workspace()
+        let existing = try mutationFixture(root, name: "saved-folder")
+        let added = try mutationFixture(root, name: "picked-folder")
+        let grants = IntegrationGrants()
+        let container = try ModelContainerFactory().makeContainer(mode: .persistent(root.appendingPathComponent("settings-add.store")))
+        let repository = SwiftDataProjectReferenceRepository(container: container)
+        let saved = try repository.insert(NewProjectReference(id: UUID(), manifestID: "saved-folder",
+            bookmarkData: grants.createBookmark(for: existing), displayOrder: 0, displayNameHint: "Saved"))
+        let existingBytes = try tree(existing), addedBytes = try tree(added)
+        var saves = 0
+        let subject = store(container, grants, beforeSave: { saves += 1 })
+        _ = try await subject.previewFolder(added)
+        guard case let .added(id) = try await subject.addPreviewedProject() else { return XCTFail("Expected Add") }
+        let authorizedAccess = grants.counts
+        subject.refreshOnMainWindowActivation()
+        try await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(grants.counts, authorizedAccess)
+        XCTAssertEqual(saves, 1, "Only the new reference insert may save")
+        XCTAssertEqual(subject.rows[0].reference, saved)
+        XCTAssertNil(subject.rows[0].inspection)
+        XCTAssertNil(subject.rows[0].locationHint)
+        XCTAssertEqual(subject.selectedID, id)
+        XCTAssertEqual(subject.rows[1].inspection?.manifest?.id, "picked-folder")
+        XCTAssertEqual(try repository.fetchAll().map(\.id), [saved.id, id])
+        XCTAssertEqual(try tree(existing), existingBytes)
+        XCTAssertEqual(try tree(added), addedBytes)
+        try subject.enterProjects()
+        await wait { subject.rows.allSatisfy { !$0.isRefreshing && $0.reference.lastSuccessfulReadAt != nil } }
+        XCTAssertEqual(saves, 3)
+        XCTAssertEqual(subject.rows[0].inspection?.manifest?.id, "saved-folder")
+        XCTAssertEqual(subject.selectedID, id)
+        XCTAssertEqual(try tree(existing), existingBytes)
+        XCTAssertEqual(try tree(added), addedBytes)
+        XCTAssertTrue(grants.balanced)
     }
 
     func testRealCompletionUndoAndReopenDeriveProgressFromDisk() async throws {
