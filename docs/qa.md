@@ -1700,3 +1700,106 @@ store-lifetime/migration investigation. Existing multiple-matching-destination,
 AppIntents extraction, and linkd diagnostics remain in the logs. No original
 fixtures, production stores, dependency pins, frozen schemas, or external project
 files were edited. **No Step 2.6 blockers.**
+
+## F13 Step 3.1 — validated private JSON preparation (2026-09-30)
+
+Confirmed the first incomplete item matches runner task 9. The cumulative review
+checklist has no prior findings. Initial worktree/index were clean; direct ancestor
+and repository searches found no applicable `AGENTS.md`; no submodule was listed.
+Implemented only private preparation, not destination delivery, panels, or lifecycle.
+
+Changed files: new `Kontrol/Data/Export/ExportFileWriter.swift`, new
+`KontrolTests/ExportServiceTests.swift`, explicit source/test membership in
+`Kontrol.xcodeproj/project.pbxproj`, and this evidence ledger. Base revision:
+`d641ae6d7b40708886ec61a67807571b311ccabd`. Tested implementation (including new
+untracked files) is preserved as `implementation.patch`, SHA-256
+`7d7b7f647ec47dd7a0fc41a731c7f6bea22e9084061131e66d5b93bab8c04481`.
+Per-file SHA-256 identities are in `source-sha256.txt`; this QA addition is the
+only later edit. Evidence root: **`/tmp/kontrol-f13-step3-1.qFNXOw/`**.
+Environment: macOS 27.0 (`26A428`), arm64 MacBook Pro, Xcode 27.0 (`27A266a`),
+Apple Swift 6.4, `/Applications/Xcode.app/Contents/Developer`; project remains
+Swift 5/macOS 14 with unchanged Yams 5.4.0 pin. `environment.log` records versions
+and source identity; `xcodebuild -list -project Kontrol.xcodeproj` also passed.
+
+`ExportFilePreparing` accepts only detached `LocalDataExport` values and returns
+an unforgeable, single-use `PreparedExportArtifact`. Encoding, filesystem work,
+read-back decoding/validation, and cancellation cleanup execute in a detached
+utility task. Private directories are exclusively created with `mkdtemp` (0700);
+files use exclusive, no-follow creation (0600), checked chunked writes, and checked
+close. Stored JSON must decode/validate and match both written bytes and the
+canonical input encoding. There is no destination argument or destination access.
+Errors are finite categories without content, paths, or underlying errors; neither
+writer nor new tests log exported content/private paths.
+
+Cancellation propagates to the worker and waits for actual completion even during
+noncooperative encoding/checkpoints; checks surround stages and chunked writes.
+No canceled caller receives an artifact. Artifacts serialize consume/discard across
+aliases, clean on successful/throwing consumption, support idempotent explicit
+discard, and clean on abandonment. Explicit cleanup failures report a safe category
+and retain ownership for retry; deinit is a best-effort fallback because it cannot
+throw (no claim of cleanup after process termination or filesystem denial).
+
+Exact final verification commands (repository root; all exit **0**):
+
+```sh
+set -o pipefail
+EVIDENCE=/tmp/kontrol-f13-step3-1.qFNXOw
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
+  -resultBundlePath "$EVIDENCE/preparation-final.xcresult" \
+  -only-testing:KontrolTests/ExportServiceTests \
+  -only-testing:KontrolTests/LocalDataExportTests test
+make build DERIVED_DATA=/tmp/kontrol-f13-derived
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived CODE_SIGNING_ALLOWED=NO \
+  build-for-testing
+xcrun xcresulttool get test-results summary \
+  --path "$EVIDENCE/preparation-final.xcresult" --format json \
+  > "$EVIDENCE/summary-final.json"
+xcrun xcresulttool get test-results tests \
+  --path "$EVIDENCE/preparation-final.xcresult" --format json \
+  > "$EVIDENCE/test-tree-final.json"
+python3 "$EVIDENCE/audit.py"
+plutil -lint Kontrol.xcodeproj/project.pbxproj
+git diff --check
+```
+
+Fresh final results: **71/71 Passed**, **12** ExportServiceTests and **59**
+LocalDataExportTests, zero failures/skips/expected failures/runtime warnings.
+`audit.log` confirms every expected source identifier executed exactly once;
+`executed-identifiers.txt` and `test-tree-final.json` preserve full selectors.
+Logs: `tests-final.log`, `build-final.log`, `compile.log`, `plutil.log`,
+`diffcheck.log`, `exit-codes.log`. Initial identical selection also passed **69/69**
+(`tests.log`, `preparation.xcresult`, `summary.json`, `test-tree.json`); two extra
+regressions were then added, and the new weak-variable compiler warning was fixed.
+No test failed, was weakened, or excluded.
+
+New coverage verifies private permissions, canonical/exact authored round trips,
+unchanged unrelated destination bytes, invalid input/encoder failures, malformed/
+unsupported/valid-but-wrong output, actual stored-file corruption, injected failures
+at every stage, real exclusive-file creation failure, unavailable storage, pre-start
+and every-stage cancellation, single-use concurrent aliases, explicit discard,
+abandonment, and throwing consumption cleanup. A 2.3 MB fixture and a deliberately
+blocked off-main encoder prove unrelated main-actor work runs before encoding
+finishes; all encoding/IO checkpoints assert they are not on the main thread.
+All private preparation tests use isolated temporary roots and assert owned cleanup.
+
+No UI selectors are required for Step 3.1; all hosted coverage compiled. Native
+geometry/keyboard/VoiceOver and A13/S13/B13/D13 remain separate mandatory gates.
+Existing multiple-destination and AppIntents/linkd diagnostics remain in logs;
+no final writer/test compiler warnings or SQLite vnode-unlinked diagnostics occurred.
+Test host PID **85623** exited (`ps -p 85623 -o pid=,stat=,command=` returned **1**,
+no rows; `host-exit.log`). The unchanged LocalDataExportTests capture fixtures were
+retained under `/var/folders/lz/20cqfx4x2k98r89q68w3q3ch0000gn/T/`:
+
+- `kontrol-export-capture-156945DD-6242-4B13-950D-3745CBD9FE93/`
+- `kontrol-export-capture-C1078EB6-E987-432B-81DE-7E8A76E0A9F4/`
+
+After host exit, both store/WAL/SHM inventories were enumerated and read-only SQLite
+`PRAGMA integrity_check` returned **ok** (`store-integrity.log`). No agent store
+cleanup, schema/fixture edits, production data access, network/credential/folder
+access, or dependency changes occurred. Historical evidence is preserved.
+**No remaining Step 3.1 blockers.**
