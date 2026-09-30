@@ -2,7 +2,7 @@ import SwiftData
 
 enum KontrolMigrationPlan: SchemaMigrationPlan {
     static var schemas: [any VersionedSchema.Type] {
-        [KontrolSchemaV1.self, KontrolSchemaV2.self, KontrolSchemaV3.self, KontrolSchemaV4.self, KontrolSchemaV5.self, KontrolSchemaV6.self, KontrolSchemaV7.self, KontrolSchemaV8.self, KontrolSchemaV9.self]
+        [KontrolSchemaV1.self, KontrolSchemaV2.self, KontrolSchemaV3.self, KontrolSchemaV4.self, KontrolSchemaV5.self, KontrolSchemaV6.self, KontrolSchemaV7.self, KontrolSchemaV8.self, KontrolSchemaV9.self, KontrolSchemaV10.self]
     }
 
     static var stages: [MigrationStage] {
@@ -13,6 +13,7 @@ enum KontrolMigrationPlan: SchemaMigrationPlan {
          .lightweight(fromVersion: KontrolSchemaV5.self, toVersion: KontrolSchemaV6.self),
          .lightweight(fromVersion: KontrolSchemaV6.self, toVersion: KontrolSchemaV7.self),
          .lightweight(fromVersion: KontrolSchemaV7.self, toVersion: KontrolSchemaV8.self),
-         .lightweight(fromVersion: KontrolSchemaV8.self, toVersion: KontrolSchemaV9.self)]
+         .lightweight(fromVersion: KontrolSchemaV8.self, toVersion: KontrolSchemaV9.self),
+         .lightweight(fromVersion: KontrolSchemaV9.self, toVersion: KontrolSchemaV10.self)]
     }
 }

@@ -8,7 +8,7 @@ final class SchemaTests: XCTestCase {
         try ModelContainerFactory().makeContainer(mode: .inMemory)
     }
 
-    func testReleasedIdentitiesRemainAndV9OnlyAddsNewsRecords() {
+    func testReleasedIdentitiesRemainAndV10OnlyAddsGeneralPreferences() {
         XCTAssertEqual(KontrolSchemaV1.versionIdentifier, Schema.Version(1, 0, 0))
         XCTAssertEqual(KontrolSchemaV2.versionIdentifier, Schema.Version(2, 0, 0))
         XCTAssertEqual(KontrolSchemaV3.versionIdentifier, Schema.Version(3, 0, 0))
@@ -18,7 +18,8 @@ final class SchemaTests: XCTestCase {
         XCTAssertEqual(KontrolSchemaV7.versionIdentifier, Schema.Version(7, 0, 0))
         XCTAssertEqual(KontrolSchemaV8.versionIdentifier, Schema.Version(8, 0, 0))
         XCTAssertEqual(KontrolSchemaV9.versionIdentifier, Schema.Version(9, 0, 0))
-        XCTAssertEqual(KontrolMigrationPlan.schemas.count, 9)
+        XCTAssertEqual(KontrolSchemaV10.versionIdentifier, Schema.Version(10, 0, 0))
+        XCTAssertEqual(KontrolMigrationPlan.schemas.count, 10)
         XCTAssertTrue(KontrolMigrationPlan.schemas[0] == KontrolSchemaV1.self)
         XCTAssertTrue(KontrolMigrationPlan.schemas[1] == KontrolSchemaV2.self)
         XCTAssertTrue(KontrolMigrationPlan.schemas[2] == KontrolSchemaV3.self)
@@ -28,7 +29,8 @@ final class SchemaTests: XCTestCase {
         XCTAssertTrue(KontrolMigrationPlan.schemas[6] == KontrolSchemaV7.self)
         XCTAssertTrue(KontrolMigrationPlan.schemas[7] == KontrolSchemaV8.self)
         XCTAssertTrue(KontrolMigrationPlan.schemas[8] == KontrolSchemaV9.self)
-        XCTAssertEqual(KontrolMigrationPlan.stages.count, 8)
+        XCTAssertTrue(KontrolMigrationPlan.schemas[9] == KontrolSchemaV10.self)
+        XCTAssertEqual(KontrolMigrationPlan.stages.count, 9)
         let v1 = KontrolSchemaV1.models
         XCTAssertEqual(Set(v1.map { String(describing: $0) }),
                        Set(["TaskItem", "Topic", "Subtopic", "Concept",
@@ -81,6 +83,10 @@ final class SchemaTests: XCTestCase {
         XCTAssertTrue(v9[v8.count] == NewsPreferencesRecord.self)
         XCTAssertTrue(v9[v8.count + 1] == NewsFeedRecord.self)
         XCTAssertTrue(v9[v8.count + 2] == NewsArticleRecord.self)
+        let v10 = KontrolSchemaV10.models
+        XCTAssertEqual(v10.count, v9.count + 1)
+        for (original, retained) in zip(v9, v10) { XCTAssertTrue(original == retained) }
+        XCTAssertTrue(v10.last == AppPreferencesRecord.self)
     }
 
     func testNewsAssociationPayloadsAreVersionedBoundedAndSurviveReopen() throws {

@@ -19,7 +19,7 @@ final class ContainerFactoryTests: XCTestCase {
         try ModelContext(container).fetch(FetchDescriptor<TaskItem>()).map(\.id)
     }
 
-    func testV5DiskMigratesAdditivelyAndV6EvidenceSurvivesV8Reopen() throws {
+    func testV5DiskMigratesAdditivelyAndV6EvidenceSurvivesV10Reopen() throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let url = directory.appendingPathComponent("Kontrol.store")
@@ -79,6 +79,9 @@ final class ContainerFactoryTests: XCTestCase {
         XCTAssertEqual(try SwiftDataAISettingsRepository(container: second).load(), .disabled)
         XCTAssertTrue(try ModelContext(first).fetch(FetchDescriptor<ProjectReference>()).isEmpty)
         XCTAssertTrue(try ModelContext(second).fetch(FetchDescriptor<ProjectReference>()).isEmpty)
+        XCTAssertTrue(try ModelContext(first).fetch(FetchDescriptor<AppPreferencesRecord>()).isEmpty)
+        XCTAssertTrue(try ModelContext(second).fetch(FetchDescriptor<AppPreferencesRecord>()).isEmpty)
+        XCTAssertTrue(first.schema.entities.contains { $0.name == "AppPreferencesRecord" })
     }
 
     func testClosedDiskStoreReopensAtSameLocationButNotOtherDiskOrMemory() throws {
@@ -112,7 +115,7 @@ final class ContainerFactoryTests: XCTestCase {
         XCTAssertTrue(try taskIDs(in: memory).isEmpty)
     }
 
-    func testCopiedFrozenV2AndV3StoresOpenAsV8WithoutChangingOriginals() throws {
+    func testCopiedFrozenV2AndV3StoresOpenAsV10WithoutChangingOriginals() throws {
         for version in ["V2", "V3"] {
             let source = try XCTUnwrap(Bundle(for: Self.self).url(forResource: version, withExtension: nil))
             let directory = try temporaryDirectory()
@@ -140,6 +143,7 @@ final class ContainerFactoryTests: XCTestCase {
                                version == "V3" ? 1 : 0)
                 XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonSlot>()).isEmpty)
                 XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<ProjectReference>()).isEmpty)
+                XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<AppPreferencesRecord>()).isEmpty)
             }
             try checkOpen()
             try checkOpen()
