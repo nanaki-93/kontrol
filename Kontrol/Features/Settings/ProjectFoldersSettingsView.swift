@@ -105,6 +105,30 @@ struct ProjectFoldersSettingsView: View {
     @State private var reconnectWork: Task<Void, Never>?
     @State private var reconnectFeedback: String?
     @State private var presented = false
+    @State private var removalOrigin: FocusTarget?
+    @FocusState private var focusedAction: FocusTarget?
+
+    enum FocusTarget: Hashable {
+        case add, review, reconnect(UUID), remove(UUID)
+    }
+
+    /// Resolve against the current publication, not the captured confirmation.
+    /// A removed/disabled row can never receive restored keyboard focus.
+    static func returnFocus(origin: FocusTarget, rows: [ProjectRowState],
+                            requiresReview: Bool, loadFailed: Bool,
+                            reconnectUnavailable: Bool = false) -> FocusTarget {
+        switch origin {
+        case .add, .review: return origin
+        case let .remove(id):
+            if requiresReview || loadFailed { return .review }
+            guard let row = rows.first(where: { $0.reference.id == id }) ?? ProjectsView.ordered(rows).first else { return .add }
+            return .remove(row.reference.id)
+        case let .reconnect(id):
+            if reconnectUnavailable { return .add }
+            guard let row = rows.first(where: { $0.reference.id == id }) ?? ProjectsView.ordered(rows).first else { return .add }
+            return .reconnect(row.reference.id)
+        }
+    }
 
     init(store: ProjectStore, management: ProjectFoldersSettingsState? = nil) {
         self.store = store
@@ -133,9 +157,17 @@ struct ProjectFoldersSettingsView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier("settings-folders-guidance")
             adaptiveActions(
-                ActionButton("Add folder", symbol: "plus", variant: .primary) { showingAdd = true }
+                ActionButton("Add folder", symbol: "plus", variant: .primary) {
+                    focusedAction = nil
+                    showingAdd = true
+                }
+                    .focused($focusedAction, equals: .add)
                     .accessibilityIdentifier("settings-folders-add"),
-                ActionButton("Reload & review folders") { management.review() }
+                ActionButton("Reload & review folders") {
+                    management.review()
+                    restoreFocus(.review)
+                }
+                    .focused($focusedAction, equals: .review)
                     .accessibilityIdentifier("settings-folders-reload")
             )
             if store.loadFailed {
@@ -151,7 +183,7 @@ struct ProjectFoldersSettingsView: View {
                     .accessibilityIdentifier("settings-folders-result")
             }
             if let reconnectFeedback {
-                Text(reconnectFeedback).appTypography(.body)
+                Label(reconnectFeedback, systemImage: "info.circle").appTypography(.body)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("settings-folders-reconnect-result")
             }
@@ -164,20 +196,27 @@ struct ProjectFoldersSettingsView: View {
                     Text(row.reference.displayNameHint).appTypography(.section)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityIdentifier("settings-folder-name-\(row.reference.id.uuidString)")
-                    Text(Self.status(row)).appTypography(.metadata)
+                    Label(Self.status(row), systemImage: row.refreshFailure == nil ? "folder" : "exclamationmark.triangle")
+                        .appTypography(.metadata)
                         .foregroundStyle(AppColors.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityIdentifier("settings-folder-status-\(row.reference.id.uuidString)")
                     adaptiveActions(
                         ActionButton("Reconnect folder") { chooseReconnectFolder(row.reference.id) }
                             .disabled(reconnectPicker != nil || reconnectingID != nil)
+                            .focused($focusedAction, equals: .reconnect(row.reference.id))
                             .accessibilityLabel("Reconnect folder \(row.reference.displayNameHint)")
                             .accessibilityIdentifier("settings-folder-reconnect-\(row.reference.id.uuidString)"),
                         ActionButton("Remove…", variant: .destructive) {
                             management.requestRemoval(row.reference.id)
-                            showingRemoval = management.confirmation != nil
+                            if management.confirmation != nil {
+                                removalOrigin = .remove(row.reference.id)
+                                focusedAction = nil
+                                showingRemoval = true
+                            }
                         }
                         .disabled(management.requiresReview || store.loadFailed)
+                        .focused($focusedAction, equals: .remove(row.reference.id))
                         .accessibilityLabel("Remove \(row.reference.displayNameHint) from Kontrol")
                         .accessibilityIdentifier("settings-folder-remove-\(row.reference.id.uuidString)")
                     )
@@ -198,10 +237,21 @@ struct ProjectFoldersSettingsView: View {
         .onChange(of: showingRemoval) { _, showing in
             // The native confirm action consumes the snapshot first. Cancel/Escape
             // only discard it; neither can invoke disconnect.
-            if !showing { management.cancel() }
+            if !showing {
+                management.cancel()
+                if let origin = removalOrigin {
+                    removalOrigin = nil
+                    restoreFocus(origin)
+                }
+            }
         }
-        .sheet(isPresented: $showingAdd) {
+        .sheet(isPresented: $showingAdd, onDismiss: { restoreFocus(.add) }) {
             ProjectAddView(store: store) { showingAdd = false }
+                .onExitCommand { showingAdd = false }
+        }
+        .onChange(of: store.rows.map(\.reference.id)) { _, _ in
+            // Another Settings client may remove the focused row.
+            if let focusedAction { restoreFocus(focusedAction) }
         }
         .onAppear { presented = true; management.load() }
         .onDisappear {
@@ -212,6 +262,17 @@ struct ProjectFoldersSettingsView: View {
             if let reconnectingID { store.cancelReconnect(reconnectingID) }
         }
         .accessibilityIdentifier("settings-folders-content")
+    }
+
+    private func restoreFocus(_ origin: FocusTarget) {
+        Task { @MainActor in
+            // Allow native dismissal and the surviving SwiftUI branch to settle.
+            await Task.yield()
+            guard presented, !showingRemoval, !showingAdd, reconnectPicker == nil else { return }
+            focusedAction = Self.returnFocus(origin: origin, rows: store.rows,
+                requiresReview: management.requiresReview, loadFailed: store.loadFailed,
+                reconnectUnavailable: reconnectingID != nil)
+        }
     }
 
     /// Try the actions' ideal widths before falling back to a wrapping vertical
@@ -244,16 +305,20 @@ struct ProjectFoldersSettingsView: View {
         panel.title = "Reconnect project folder"
         panel.prompt = "Reconnect folder"
         panel.message = "Choose the original project folder. Its manifest ID must match the saved reference."
+        focusedAction = nil
         reconnectPicker = panel
         panel.begin { response in
             reconnectPicker = nil
             guard presented else { return }
             guard response == .OK, let folder = panel.url else {
                 reconnectFeedback = "Reconnect canceled. The saved reference is unchanged."
+                restoreFocus(.reconnect(id))
                 return
             }
             reconnectingID = id
             reconnectFeedback = "Reconnecting selected folder…"
+            // Reconnect is disabled while validation runs; Add remains available.
+            restoreFocus(.reconnect(id))
             reconnectWork = Task {
                 do {
                     _ = try await store.reconnect(id, to: folder)
@@ -271,6 +336,7 @@ struct ProjectFoldersSettingsView: View {
                 }
                 reconnectingID = nil
                 reconnectWork = nil
+                restoreFocus(.reconnect(id))
             }
         }
     }

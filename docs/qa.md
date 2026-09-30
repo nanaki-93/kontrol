@@ -971,3 +971,81 @@ Compiled in final `build-for-testing`, **not executed or waived**:
 - `SettingsSceneTests/testFolderRemovalConfirmationCancelAndSuccessReflowAtAllSettingsSizes`
 
 Run these alongside the existing deferred ledgers with a human-reserved uncontended desktop and actual rebuilt host AX authorization. Fixtures attach captures with content-point/pixel dimensions and backing scale; **none was produced here**. Required independent observations remain: long names/recovery/confirmation wrapping, fully reachable actions at all sizes/scales, native alert target geometry, visible keyboard focus and Escape/Cancel, spoken VoiceOver, reduced motion, contrast/non-color status, and rendered comparisons against the listed references. No user attestation was supplied. Surviving-control focus implementation remains current Step 1.2, not implemented by this task. A13/S13/B13/D13 and historical evidence limitations remain release concerns; this is not unconditional F13 or V1 completion.
+
+## F13 folder surviving-control focus — current Step 1.2 (2026-09-30, 13:28 UTC)
+
+**Implementation verification passed; hosted/native acceptance remains pending A13.** The first top-level incomplete task matches runner Step 1.2. The complete cumulative task-2 checklist has no previous findings. Initial worktree/index were clean; no interrupted changes existed. Repository/target and direct ancestor instruction checks found no applicable `AGENTS.md`; no submodule was identified. No plan checkbox, workflow state, staging, commit, schema, fixture, disconnect state model, picker owner, or preference draft behavior was changed.
+
+### Implementation and coverage
+
+- `ProjectFoldersSettingsView.swift`: stable Add, review, and UUID-keyed Reconnect/Remove focus targets use the existing native `ActionButton` focus ring. Confirmation dismissal restores the captured origin only if it remains enabled and present. Stale/unavailable removal restores review; successful deletion chooses a surviving row by display order then UUID, or Add for an empty list. Failed/busy removal and canceled confirmation return to the surviving origin. Resolution happens after a UI yield against current rows, with presentation/modal guards, not against the frozen confirmation. Row publications also revalidate current focus.
+- Add sheet dismissal (Cancel or Escape) restores Add via `onDismiss`. Escape only dismisses the existing Add presentation; its existing `onDisappear` cancellation remains the owner. Reconnect picker cancellation restores the current row or a survivor. Approved selection restores Add while Reconnect is disabled, then a surviving Reconnect action after validation finishes. No picker grant, reconnect validation, or persistence semantics changed.
+- Row status and reconnect feedback now use text plus native symbols; existing outcome labels remain text plus symbol. No new status state, color-only feedback, animation, announcement loop, scroll host, or text-scale calculation was introduced.
+- `FoundationSettingsView.swift` was inspected and intentionally unchanged. Its Back handoff and per-client folder-review owner already satisfy this task. The hub keyboard-order test now checks Back → Add → review → Back inside the empty folder route, then the existing Back → folders hub action → next hub action return.
+- `SettingsSceneTests.swift`: the three required non-GUI state methods now assert focus policy for Cancel, durable survivor/last-row removal, stale review, failed reload, and failed/busy deletion without changing state assertions. Three new hosted fixtures cover logical row order, meaningful role/name/target size, Cancel and Escape with zero deletion, failed/busy removal, survivor and last-row focus, stale/failed/successful review and separate reconfirmation, Add Cancel/Escape, native Reconnect cancellation, and another client's deletion while that panel is open. These fixtures compile; **their native responder assertions and captures have not run**.
+- `ProjectsPresentationTests.swift`: a new explicitly non-GUI focus-policy method verifies fetch-order independence, display-order/UUID survivor choice, surviving origins, disabled Remove/Reconnect recovery, last-row fallback, and Add/review targets. It executed and passed.
+
+Inspected references: `docs/mockups/M41-remove-project.png` and `.mockups/flows/f13-settings-release/index.html` (removal decision branches and existing focus/status conventions). Existing references cover these states; no redesign or uncovered state was introduced. General drafts, shared ownership, and independent stale-review gates remain covered by the required preference and folder-state regressions.
+
+### Exact commands and fresh evidence
+
+Environment: **Xcode 27.0 (27A266a), Swift 6.4 (swiftlang-6.4.0.34.1; driver 1.168.6), arm64 macOS 27.0 (26A428)**; `/Applications/Xcode.app/Contents/Developer`; unchanged Yams **5.4.0**. Source base: **`3c542acbcfe000d553affd0c22fc2f2edbeb8031`**. Evidence directory: **`/tmp/kontrol-f13-folder-focus1.2.hHI3lh`**. Three-file source/test patch: `source.diff`, SHA-256 **`223cd748ea06a9eac5633caad9e52aed275b8cdf85f21bb80a610c824a052397`** (excludes this QA append).
+
+Discovery commands: `git status --short`, `git diff --stat`, `git diff --cached --stat`, `git submodule status`, `xcode-select -p`, `xcodebuild -version`, `xcrun swift --version`, `xcodebuild -list -project Kontrol.xcodeproj`, `sw_vers`, `uname -m`; successful outputs retained in `preflight.log` (initial clean status was inspected before edits; that log captures post-edit status).
+
+All following validation commands exited **0**; results and exit codes are retained in `{build,bft,required-tests,focus-policy-tests,diffcheck,exit-codes}.log`:
+
+```sh
+set -o pipefail
+EVIDENCE=/tmp/kontrol-f13-folder-focus1.2.hHI3lh
+make build DERIVED_DATA=/tmp/kontrol-f13-derived
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  CODE_SIGNING_ALLOWED=NO build-for-testing
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
+  -resultBundlePath "$EVIDENCE/required.xcresult" \
+  -only-testing:KontrolTests/ProjectDisconnectTests \
+  -only-testing:KontrolTests/AppPreferencesStoreTests \
+  -only-testing:KontrolTests/SettingsSceneTests/testFolderConfirmationCapturesNameIdentityRevisionCancelAndDurableSuccessAcrossClients \
+  -only-testing:KontrolTests/SettingsSceneTests/testFolderStaleConfirmationRequiresSuccessfulExplicitReloadAndSeparateReconfirmation \
+  -only-testing:KontrolTests/SettingsSceneTests/testFolderUnavailableMissingBusyAndFailedOutcomesNeverAutomaticallyDelete test
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
+  -resultBundlePath "$EVIDENCE/focus-policy.xcresult" \
+  -only-testing:KontrolTests/ProjectsPresentationTests/testFolderFocusPolicyUsesCurrentRowsDisplayOrderAndEnabledSurvivors test
+git diff --check
+```
+
+The required selection is the plan's `f13_test` command expanded, with a unique retained result path: **25/25 passed** (13 preferences, nine disconnect, three Settings state methods). The additional policy selection passed **1/1**. Both bundles have zero failures, skips, expected failures, or runtime warnings. `build-for-testing` compiles all hosted tests, not just these selections.
+
+Fresh audit commands, all exit **0**:
+
+```sh
+for name in required focus-policy; do
+  xcrun xcresulttool get test-results summary \
+    --path "$EVIDENCE/$name.xcresult" --format json > "$EVIDENCE/$name-summary.json"
+  xcrun xcresulttool get test-results tests \
+    --path "$EVIDENCE/$name.xcresult" --format json > "$EVIDENCE/$name-test-tree.json"
+done
+python3 "$EVIDENCE/audit.py" > "$EVIDENCE/selector-audit.log"
+```
+
+Audit compares executed identifiers with source suite methods and exact selectors: each expected method executed once, with nonempty counts and Passed results. Test hosts **38812/38884** exited (`ps -p 38812,38884 -o pid=,stat=,command=` returned 1 with no processes). Two isolated stores and sidecars remain intact under `/var/folders/lz/20cqfx4x2k98r89q68w3q3ch0000gn/T/KontrolProjectDisconnectTests-38812/{4A706585-132A-4898-B4CE-63D63DF1C3CF,C9BC53C4-FE7E-45ED-A8F7-72258C027BED}/Kontrol.store`; inventory is recorded in `selector-audit.log`. No cleanup, production-store use, or external project IO was performed. Fresh logs contain no `InvalidTransition` or live-store unlink diagnostic. Existing multiple-destination, AppIntents, linkd, and optional-value interpolation diagnostics are retained in logs (the interpolation warning is in the unchanged geometry capture helper); no historical failure was erased or converted into acceptance.
+
+### A13 — exact deferred selectors and spoken observations
+
+Compiled, **not executed or waived**:
+
+- `SettingsSceneTests/testKeyboardFolderOrderCancelFailureBusyAndRemovalRestoreOnlySurvivingActions`
+- `SettingsSceneTests/testKeyboardFolderStaleAndFailedReviewKeepReviewFocusUntilSeparateReconfirmation`
+- `SettingsSceneTests/testKeyboardFolderAddAndReconnectDismissalRestoreSurvivingActions`
+- Updated `SettingsSceneTests/testKeyboardHubOrderEditorHandoffNamesTargetsAndFocusReturn`
+- Existing `ProjectsPresentationTests/testSettingsRemovalUpdatesSharedProjectsSelectionDetailAndPickerOwnership` remains compile-only here; its prior deferred status is unchanged.
+
+Run these with the existing geometry/deferred selectors in a reserved, uncontended desktop with Accessibility authorization for the actual rebuilt host. Capture points/pixels/backing scale and compare the existing folder/removal references at the required sizes/text scales. **No native capture or spoken VoiceOver observation was produced in this task, and no user attestation was supplied.** Independently observe visible focus, Tab/Shift-Tab order, named Reconnect/Remove roles, captured target spoken in confirmation, Escape/Cancel without deletion, focus on enabled survivors after removal/panel dismissal, review/reconfirmation announcements, status without reliance on color, reduced motion, enlarged text reachability, and contrast. A13/S13/B13/D13 and historical release concerns remain pending; this is implementation verification only, not F13/V1 release approval.

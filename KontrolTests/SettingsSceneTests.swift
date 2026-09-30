@@ -115,6 +115,8 @@ final class SettingsSceneTests: XCTestCase {
         XCTAssertEqual(first.outcome, .canceled("Harbor"))
         XCTAssertTrue(repository.removals.isEmpty)
         XCTAssertEqual(store.rows.count, 2)
+        XCTAssertEqual(ProjectFoldersSettingsView.returnFocus(origin: .remove(reference.id), rows: store.rows,
+            requiresReview: first.requiresReview, loadFailed: store.loadFailed), .remove(reference.id))
         first.requestRemoval(reference.id)
         second.requestRemoval(reference.id)
         first.confirm()
@@ -123,6 +125,8 @@ final class SettingsSceneTests: XCTestCase {
         XCTAssertEqual(repository.removals.first?.1, reference.revision)
         XCTAssertEqual(store.selectedID, survivor.id)
         XCTAssertEqual(second.store.rows.map(\.reference.id), [survivor.id])
+        XCTAssertEqual(ProjectFoldersSettingsView.returnFocus(origin: .remove(reference.id), rows: store.rows,
+            requiresReview: first.requiresReview, loadFailed: store.loadFailed), .remove(survivor.id))
         second.confirm()
         XCTAssertEqual(second.outcome, .stale("Harbor"))
         XCTAssertTrue(second.requiresReview)
@@ -132,6 +136,8 @@ final class SettingsSceneTests: XCTestCase {
         second.requestRemoval(survivor.id)
         second.confirm()
         XCTAssertTrue(store.rows.isEmpty)
+        XCTAssertEqual(ProjectFoldersSettingsView.returnFocus(origin: .remove(survivor.id), rows: store.rows,
+            requiresReview: second.requiresReview, loadFailed: store.loadFailed), .add)
         XCTAssertEqual(ProjectFoldersSettingsView.summary(store), "Project folders: 0 saved references")
         store.refreshOnMainWindowActivation()
         let calls = await inspector.calls
@@ -154,6 +160,8 @@ final class SettingsSceneTests: XCTestCase {
         XCTAssertEqual(management.confirmation?.name, original.displayNameHint)
         management.confirm()
         XCTAssertEqual(management.outcome, .stale("Harbor"))
+        XCTAssertEqual(ProjectFoldersSettingsView.returnFocus(origin: .remove(original.id), rows: store.rows,
+            requiresReview: management.requiresReview, loadFailed: store.loadFailed), .review)
         XCTAssertTrue(repository.removals.isEmpty)
         management.requestRemoval(original.id)
         XCTAssertNil(management.confirmation, "Cannot silently rebase a stale confirmation")
@@ -162,6 +170,8 @@ final class SettingsSceneTests: XCTestCase {
         XCTAssertTrue(management.requiresReview)
         XCTAssertEqual(management.outcome, .unavailable)
         XCTAssertEqual(store.rows.first?.reference, revised)
+        XCTAssertEqual(ProjectFoldersSettingsView.returnFocus(origin: .review, rows: store.rows,
+            requiresReview: management.requiresReview, loadFailed: store.loadFailed), .review)
         management.requestRemoval(original.id)
         XCTAssertNil(management.confirmation)
         repository.loadFailure = nil
@@ -199,6 +209,8 @@ final class SettingsSceneTests: XCTestCase {
             management.confirm()
             XCTAssertEqual(management.outcome, expected)
             XCTAssertEqual(store.rows.first?.reference, reference)
+            XCTAssertEqual(ProjectFoldersSettingsView.returnFocus(origin: .remove(reference.id), rows: store.rows,
+                requiresReview: management.requiresReview, loadFailed: store.loadFailed), .remove(reference.id))
             XCTAssertNil(management.confirmation)
             management.confirm()
         }
@@ -581,6 +593,11 @@ final class SettingsSceneTests: XCTestCase {
             try tab(to: identifier, in: window)
             try keyboard(49, " ", in: window)
             XCTAssertEqual(try focusedIdentifier(), "settings-back")
+            if identifier == "settings-folders" {
+                try tab(to: "settings-folders-add", in: window)
+                try tab(to: "settings-folders-reload", in: window)
+                try tab(to: "settings-back", in: window)
+            }
             let back = try node("settings-back", in: window)
             XCTAssertEqual(axAttribute(back, kAXDescriptionAttribute) as? String, "Back to Settings")
             try keyboard(49, " ", in: window)
@@ -590,6 +607,133 @@ final class SettingsSceneTests: XCTestCase {
             window.selectPreviousKeyView(nil)
             settle()
         }
+    }
+
+    private func dismissFolderConfirmation(_ name: String) throws {
+        try dismissFolderDialog(name)
+    }
+
+    private func closeFolderFixture(_ window: NSWindow) {
+        if let sheet = window.attachedSheet {
+            window.endSheet(sheet, returnCode: .cancel)
+            sheet.orderOut(nil)
+        }
+        window.orderOut(nil)
+    }
+
+    func testKeyboardFolderOrderCancelFailureBusyAndRemovalRestoreOnlySurvivingActions() throws {
+        try keyboardSession()
+        let first = folderReference(name: "Harbor"), peer = folderReference(name: "Peer", order: 1)
+        let repository = SettingsFolderRepository([peer, first])
+        let store = ProjectStore(inspector: SettingsFolderInspectorSpy(), repository: repository)
+        let window = show(ScrollView { ProjectFoldersSettingsView(store: store) })
+        defer { closeFolderFixture(window) }
+        let reconnect = "settings-folder-reconnect-\(first.id.uuidString)"
+        let remove = "settings-folder-remove-\(first.id.uuidString)"
+        let peerRemove = "settings-folder-remove-\(peer.id.uuidString)"
+        window.makeFirstResponder(nil)
+        for identifier in ["settings-folders-add", "settings-folders-reload", reconnect, remove,
+                           "settings-folder-reconnect-\(peer.id.uuidString)", peerRemove] {
+            try tab(to: identifier, in: window)
+            XCTAssertGreaterThanOrEqual(try axFrame(node(identifier, in: window)).height, AppMetrics.minimumTarget)
+        }
+        let action = try node(remove, in: window)
+        XCTAssertEqual(axAttribute(action, kAXDescriptionAttribute) as? String, "Remove Harbor from Kontrol")
+        XCTAssertEqual(axAttribute(action, kAXRoleAttribute) as? String, kAXButtonRole)
+        try press(remove, in: window)
+        try dismissFolderConfirmation("Cancel")
+        XCTAssertEqual(try focusedIdentifier(), remove)
+        XCTAssertTrue(repository.removals.isEmpty)
+        try press(remove, in: window)
+        let sheet = try XCTUnwrap(window.attachedSheet)
+        try keyboard(53, "\u{1b}", in: sheet)
+        XCTAssertEqual(try focusedIdentifier(), remove)
+        XCTAssertTrue(repository.removals.isEmpty, "Escape can only cancel")
+        for failure in [ProjectReferencePersistenceError.invalidReference as Error, ProjectStoreError.busy] {
+            repository.removeFailure = failure
+            try press(remove, in: window)
+            try dismissFolderConfirmation("Remove from Kontrol")
+            XCTAssertEqual(try focusedIdentifier(), remove)
+            XCTAssertEqual(store.rows.count, 2)
+        }
+        repository.removeFailure = nil
+        try press(remove, in: window)
+        try dismissFolderConfirmation("Remove from Kontrol")
+        XCTAssertEqual(try focusedIdentifier(), peerRemove)
+        try capture("keyboard-folder-survivor-focus", window: window)
+        try keyboard(49, " ", in: window)
+        try dismissFolderConfirmation("Remove from Kontrol")
+        XCTAssertEqual(try focusedIdentifier(), "settings-folders-add")
+        _ = try node("settings-folders-empty", in: window)
+        try capture("keyboard-folder-last-removal-add-focus", window: window)
+    }
+
+    func testKeyboardFolderStaleAndFailedReviewKeepReviewFocusUntilSeparateReconfirmation() throws {
+        try keyboardSession()
+        let reference = folderReference()
+        let repository = SettingsFolderRepository([reference])
+        let store = ProjectStore(inspector: SettingsFolderInspectorSpy(), repository: repository)
+        let management = ProjectFoldersSettingsState(store: store)
+        let window = show(ScrollView { ProjectFoldersSettingsView(store: store, management: management) })
+        defer { closeFolderFixture(window) }
+        let remove = "settings-folder-remove-\(reference.id.uuidString)"
+        try press(remove, in: window)
+        repository.references = [folderReference(reference.id, name: "Renamed elsewhere")]
+        try dismissFolderConfirmation("Remove from Kontrol")
+        XCTAssertEqual(try focusedIdentifier(), "settings-folders-reload")
+        XCTAssertTrue(management.requiresReview)
+        repository.loadFailure = ProjectReferencePersistenceError.invalidReference
+        try keyboard(49, " ", in: window)
+        XCTAssertEqual(try focusedIdentifier(), "settings-folders-reload")
+        XCTAssertTrue(management.requiresReview)
+        XCTAssertEqual(store.rows.count, 1)
+        try capture("keyboard-folder-failed-review-focus", window: window)
+        repository.loadFailure = nil
+        try keyboard(49, " ", in: window)
+        XCTAssertEqual(try focusedIdentifier(), "settings-folders-reload")
+        XCTAssertFalse(management.requiresReview)
+        XCTAssertEqual(repository.removals.count, 1, "Review cannot delete or retry")
+        try press(remove, in: window)
+        XCTAssertEqual(management.confirmation?.title, "Remove Renamed elsewhere?")
+        try dismissFolderConfirmation("Cancel")
+        XCTAssertEqual(try focusedIdentifier(), remove)
+        XCTAssertEqual(repository.removals.count, 1)
+    }
+
+    func testKeyboardFolderAddAndReconnectDismissalRestoreSurvivingActions() throws {
+        try keyboardSession()
+        let reference = folderReference(), peer = folderReference(name: "Peer", order: 1)
+        let repository = SettingsFolderRepository([reference, peer])
+        let store = ProjectStore(inspector: SettingsFolderInspectorSpy(), repository: repository)
+        let window = show(ScrollView { ProjectFoldersSettingsView(store: store) })
+        defer {
+            for panel in NSApp.windows.compactMap({ $0 as? NSOpenPanel }) { panel.cancel(nil) }
+            closeFolderFixture(window)
+        }
+        try press("settings-folders-add", in: window)
+        let sheet = try XCTUnwrap(window.attachedSheet)
+        try press("project-add-cancel", in: sheet)
+        XCTAssertEqual(try focusedIdentifier(), "settings-folders-add")
+        try press("settings-folders-add", in: window)
+        try keyboard(53, "\u{1b}", in: XCTUnwrap(window.attachedSheet))
+        XCTAssertEqual(try focusedIdentifier(), "settings-folders-add")
+        let reconnect = "settings-folder-reconnect-\(reference.id.uuidString)"
+        try press(reconnect, in: window)
+        let panel = try XCTUnwrap(NSApp.windows.compactMap { $0 as? NSOpenPanel }.first { $0.isVisible })
+        panel.cancel(nil)
+        settle()
+        XCTAssertEqual(try focusedIdentifier(), reconnect)
+        XCTAssertTrue(repository.removals.isEmpty)
+        XCTAssertTrue(store.rows.contains { $0.reference.id == reference.id })
+        try capture("keyboard-folder-reconnect-canceled-focus", window: window)
+        try press(reconnect, in: window)
+        let secondPanel = try XCTUnwrap(NSApp.windows.compactMap { $0 as? NSOpenPanel }.first { $0.isVisible })
+        try store.disconnect(id: reference.id, expectedRevision: reference.revision)
+        secondPanel.cancel(nil)
+        settle()
+        XCTAssertEqual(try focusedIdentifier(), "settings-folder-reconnect-\(peer.id.uuidString)",
+                       "Another client's deletion during the panel cannot restore a deleted row")
+        XCTAssertNil(store.preview)
     }
 
     func testKeyboardValidationSaveFailureRecoveryAndEscapePreserveUnrelatedAnswers() throws {

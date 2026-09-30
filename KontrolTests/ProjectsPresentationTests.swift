@@ -113,6 +113,37 @@ final class ProjectsPresentationTests: XCTestCase {
                                  lastSuccessfulReadAt: nil, revision: UUID())
     }
 
+    // Non-GUI focus policy coverage; native responder handoff is a separate A13 fixture.
+    func testFolderFocusPolicyUsesCurrentRowsDisplayOrderAndEnabledSurvivors() throws {
+        let first = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        let second = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
+        let deleted = UUID()
+        let store = ProjectStore(inspector: ListInspector(), repository: ListRepository([
+            reference(second, order: 1), reference(first, order: 1)]))
+        try store.loadReferencesIfNeeded()
+        func target(_ origin: ProjectFoldersSettingsView.FocusTarget, review: Bool = false,
+                    failed: Bool = false, busy: Bool = false) -> ProjectFoldersSettingsView.FocusTarget {
+            ProjectFoldersSettingsView.returnFocus(origin: origin, rows: store.rows,
+                requiresReview: review, loadFailed: failed, reconnectUnavailable: busy)
+        }
+        XCTAssertEqual(target(.remove(deleted)), .remove(first), "Ties use UUID, not fetch order")
+        XCTAssertEqual(target(.reconnect(deleted)), .reconnect(first))
+        XCTAssertEqual(target(.remove(second)), .remove(second), "Cancel/failure keeps the surviving origin")
+        XCTAssertEqual(target(.remove(second), review: true), .review)
+        XCTAssertEqual(target(.remove(second), failed: true), .review)
+        XCTAssertEqual(target(.reconnect(second), busy: true), .add, "Never focus disabled Reconnect")
+        XCTAssertEqual(target(.review, failed: true), .review)
+        XCTAssertEqual(target(.add), .add)
+        let firstReference = try XCTUnwrap(store.rows.first { $0.reference.id == first }?.reference)
+        try store.disconnect(id: first, expectedRevision: firstReference.revision)
+        XCTAssertEqual(target(.remove(first)), .remove(second))
+        XCTAssertEqual(target(.reconnect(first)), .reconnect(second))
+        let last = try XCTUnwrap(store.rows.first?.reference)
+        try store.disconnect(id: last.id, expectedRevision: last.revision)
+        XCTAssertEqual(target(.remove(last.id)), .add)
+        XCTAssertEqual(target(.reconnect(last.id)), .add)
+    }
+
     func testSettingsRemovalUpdatesSharedProjectsSelectionDetailAndPickerOwnership() async throws {
         let id = UUID(), survivor = UUID()
         let inspector = CardInspector([1: cardInspection([card("next")]), 2: cardInspection([])])
