@@ -84,7 +84,201 @@ private final class SettingsFolderRepository: ProjectReferenceRepository {
 }
 
 @MainActor
+private final class SettingsExportPanel: ExportDestinationSelecting {
+    private(set) var selections = 0
+    var continuation: CheckedContinuation<ExportDestinationSelection, Never>?
+    func selectDestination(suggestedAt date: Date) async throws -> ExportDestinationSelection {
+        selections += 1
+        return await withCheckedContinuation { continuation = $0 }
+    }
+    func finish(_ selection: ExportDestinationSelection) {
+        continuation?.resume(returning: selection)
+        continuation = nil
+    }
+}
+
+@MainActor
+private final class SettingsExportRepository: ExportRepository {
+    let repository: SwiftDataExportRepository
+    var failure: Error?
+    private(set) var captures = 0
+    init(container: ModelContainer) { repository = SwiftDataExportRepository(container: container) }
+    func snapshot(exportedAt: Date, appVersion: String) throws -> LocalDataExport {
+        captures += 1
+        if let failure { throw failure }
+        // Fixture version only: production keeps the bundle-derived version.
+        return try repository.snapshot(exportedAt: exportedAt, appVersion: "1.0")
+    }
+}
+
+private actor SettingsExportPreparationGate {
+    private var opened = false
+    private var continuation: CheckedContinuation<Void, Never>?
+    func wait() async {
+        if opened { return }
+        await withCheckedContinuation { continuation = $0 }
+    }
+    func release() {
+        opened = true
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+private struct SettingsExportWriter: ExportFilePreparing, ExportFileDelivering {
+    let writer: ExportFileWriter
+    let gate: SettingsExportPreparationGate
+    func approveDestination(_ url: URL) throws -> ApprovedExportDestination { try writer.approveDestination(url) }
+    func prepare(_ snapshot: LocalDataExport) async throws -> PreparedExportArtifact {
+        await gate.wait()
+        try Task.checkCancellation()
+        return try await writer.prepare(snapshot)
+    }
+    func deliver(_ artifact: PreparedExportArtifact, to destination: ApprovedExportDestination) async throws -> ExportDeliveryOutcome {
+        try await writer.deliver(artifact, to: destination)
+    }
+}
+
+@MainActor
 final class SettingsSceneTests: XCTestCase {
+    // Non-GUI presentation contract: safe categories, truthful outcomes, explicit
+    // retry, and cancellation only while an operation still owns the lifecycle.
+    func testLocalDataPresentationUsesActualStateAndSafeFailureCategories() {
+        let fixtures: [(ExportService.State, String, String, Bool)] = [
+            (.idle, "Ready to export", "Export…", false),
+            (.selecting, "Choosing export destination…", "Export…", true),
+            (.preparing, "Preparing local data…", "Export…", true),
+            (.saved, "Export saved", "Export another snapshot…", false),
+            (.canceled, "Export canceled · no file saved", "Export again…", false)
+        ]
+        for (state, status, action, cancel) in fixtures {
+            let value = LocalDataSettingsView.presentation(state)
+            XCTAssertEqual(value.status, status)
+            XCTAssertEqual(value.actionTitle, action)
+            XCTAssertEqual(value.canCancel, cancel)
+            XCTAssertFalse(value.symbol.isEmpty)
+            XCTAssertEqual(LocalDataSettingsView.summary(state), "Local data: \(status)")
+        }
+        let failures: [ExportService.Failure] = [.selection, .answerSave, .capture, .preparation, .delivery, .cleanup]
+        let details = failures.map { LocalDataSettingsView.presentation(.failed($0)).detail }
+        XCTAssertEqual(Set(details).count, failures.count, "Each failure needs its own safe recovery category")
+        for failure in failures {
+            let value = LocalDataSettingsView.presentation(.failed(failure))
+            XCTAssertEqual(value.status, "Export not saved")
+            XCTAssertEqual(value.actionTitle, "Retry export…")
+            XCTAssertFalse(value.canCancel)
+            XCTAssertFalse(value.detail.contains("/"), "No paths or raw diagnostics belong in presentation")
+            XCTAssertEqual(LocalDataSettingsView.summary(.failed(failure)), "Local data: Export not saved")
+        }
+        XCTAssertTrue(details[1].contains("unsaved answers are retained"))
+        XCTAssertTrue(details[5].contains("cleanup could not be confirmed"))
+        XCTAssertTrue(LocalDataSettingsView.privacyGuidance.contains("No import or restore"))
+        XCTAssertTrue(LocalDataSettingsView.privacyGuidance.contains("not an encrypted backup"))
+    }
+
+    // Hosted coverage: execute with A13's reserved native desktop, not inferred
+    // from this task's non-GUI validation or compilation.
+    func testNativeLocalDataRoutesShareSelectingPreparingCanceledFailureRetryAndSavedResults() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("SettingsExport-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let panel = SettingsExportPanel()
+        let repository = SettingsExportRepository(container: container)
+        let gate = SettingsExportPreparationGate()
+        let writer = SettingsExportWriter(writer: ExportFileWriter(temporaryRoot: root), gate: gate)
+        let graph = AppDependencies(container: container, catalogRepository: SwiftDataCatalogRepository(container: container),
+                                    exportRepository: repository, exportPanel: panel, exportWriter: writer)
+        let launch = LaunchCoordinator(open: { container }, makeDependencies: { _, _ in graph })
+        await launch.start()
+        let navigation = NavigationStore()
+        navigation.select(.settings)
+        let native = show(SettingsSceneContent(launch: launch))
+        let inline = show(MainWindowContent(launch: launch, navigation: navigation))
+        defer { native.orderOut(nil); inline.orderOut(nil) }
+        let windows = [native, inline]
+        let generalClient = show(ScrollView { FoundationSettingsView(dependencies: graph) })
+        defer { generalClient.orderOut(nil) }
+        try press("settings-general", in: generalClient)
+        try choose("Duration", item: "Custom", in: generalClient)
+        try input("00037", in: generalClient)
+        func waitForPanel() async throws {
+            for _ in 0..<200 {
+                if panel.continuation != nil { return }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            XCTFail("Injected panel did not open")
+        }
+        func status(in window: NSWindow) throws -> String {
+            settle()
+            let element = try node("settings-export-status", in: window)
+            return (axAttribute(element, kAXValueAttribute) as? String) ??
+                (axAttribute(element, kAXDescriptionAttribute) as? String) ?? ""
+        }
+        for window in windows {
+            XCTAssertEqual(try value("settings-local-data-summary", in: window), "Local data: Ready to export")
+            try press("settings-local-data", in: window)
+            for identifier in ["settings-local-data-content", "settings-export-inclusions", "settings-export-exclusions",
+                               "settings-export-answer-guidance", "settings-export-privacy", "settings-export-start"] {
+                _ = try node(identifier, in: window)
+            }
+        }
+        try press("settings-export-start", in: native)
+        try await waitForPanel()
+        for window in windows {
+            XCTAssertTrue(try status(in: window).contains("Choosing export destination"))
+            _ = try node("settings-export-cancel", in: window)
+        }
+        XCTAssertFalse(graph.exportService.startExport(), "Second client cannot overlap selection")
+        try press("settings-export-cancel", in: inline)
+        panel.finish(.canceled)
+        await graph.exportService.waitForCompletion()
+        XCTAssertEqual(repository.captures, 0)
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
+        for window in windows { XCTAssertTrue(try status(in: window).contains("no file saved")) }
+        repository.failure = NSError(domain: "sensitive /private/credential", code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "/private/secret.json token=secret"])
+        try press("settings-export-start", in: inline)
+        try await waitForPanel()
+        let destination = try writer.approveDestination(root.appendingPathComponent("export.json"))
+        panel.finish(.approved(destination))
+        await graph.exportService.waitForCompletion()
+        for window in windows {
+            XCTAssertTrue(try status(in: window).contains("Export not saved"))
+            XCTAssertEqual(try value("settings-export-detail", in: window), LocalDataSettingsView.presentation(.failed(.capture)).detail)
+        }
+        repository.failure = nil
+        try press("settings-export-start", in: native)
+        try await waitForPanel()
+        panel.finish(.approved(destination))
+        for _ in 0..<200 {
+            if graph.exportService.state == .preparing { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(graph.exportService.state, .preparing)
+        for window in windows { XCTAssertTrue(try status(in: window).contains("Preparing local data")) }
+        XCTAssertFalse(graph.exportService.startExport())
+        // Leaving/reopening the section neither cancels nor resets shared work.
+        try press("settings-back", in: inline)
+        XCTAssertEqual(try value("settings-local-data-summary", in: inline), "Local data: Preparing local data…")
+        try press("settings-local-data", in: inline)
+        await gate.release()
+        await graph.exportService.waitForCompletion()
+        XCTAssertEqual(graph.exportService.state, .saved)
+        XCTAssertNoThrow(try LocalDataExport.decode(Data(contentsOf: root.appendingPathComponent("export.json"))))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), ["export.json"])
+        for window in windows {
+            XCTAssertTrue(try status(in: window).contains("Export saved"))
+            try press("settings-back", in: window)
+            XCTAssertEqual(try value("settings-local-data-summary", in: window), "Local data: Export saved")
+        }
+        XCTAssertEqual(panel.selections, 3)
+        XCTAssertEqual(try value("preferences-custom-minutes", in: generalClient), "00037",
+                       "Shared export publications must not overwrite another client's General draft")
+        XCTAssertEqual(graph.appPreferencesStore.committed, .defaults)
+        XCTAssertEqual(try SwiftDataAppPreferencesRepository(container: container).load(), .defaults)
+    }
+
     // Native adapter fixture: compile during Step 3.3; execute with the A13
     // hosted/native gate. This does not observe actual cancellation/replacement.
     func testNativeExportPanelAppliesJSONConfigurationWithoutOverridingReplacementConfirmation() throws {
@@ -581,6 +775,7 @@ final class SettingsSceneTests: XCTestCase {
         try tab(to: "settings-ai", in: window)
         try tab(to: "settings-news", in: window)
         try tab(to: "settings-folders", in: window)
+        try tab(to: "settings-local-data", in: window)
         try tab(to: "settings-general", in: window)
         try keyboard(49, " ", in: window)
         XCTAssertEqual(try focusedIdentifier(), "preferences-duration")
@@ -604,7 +799,7 @@ final class SettingsSceneTests: XCTestCase {
         try tab(to: "preferences-cancel", in: window, backwards: true)
         try keyboard(53, "\u{1b}", in: window)
         XCTAssertEqual(try focusedIdentifier(), "settings-general")
-        for (identifier, next) in [("settings-ai", "settings-news"), ("settings-news", "settings-folders"), ("settings-folders", "settings-general")] {
+        for (identifier, next) in [("settings-ai", "settings-news"), ("settings-news", "settings-folders"), ("settings-folders", "settings-local-data"), ("settings-local-data", "settings-general")] {
             try tab(to: identifier, in: window)
             try keyboard(49, " ", in: window)
             XCTAssertEqual(try focusedIdentifier(), "settings-back")
@@ -1243,7 +1438,7 @@ final class SettingsSceneTests: XCTestCase {
                     defer { window.orderOut(nil) }
                     let label = "\(inline ? "inline" : "native")-\(Int(size.width))x\(Int(size.height))-\(percent)"
                     XCTAssertEqual(window.contentView?.bounds.size, size, "Layout must not enlarge the requested content viewport")
-                    try assertReachable(["settings-general", "settings-ai", "settings-news", "settings-folders"], in: window)
+                    try assertReachable(["settings-general", "settings-ai", "settings-news", "settings-folders", "settings-local-data"], in: window)
                     try capture("\(label)-hub-bottom", window: window)
                     try press("settings-general", in: window)
                     try assertReachable(["preferences-duration", "preferences-text-size", "preferences-motion"], in: window)
@@ -1314,7 +1509,7 @@ final class SettingsSceneTests: XCTestCase {
                 let window = show(SettingsSceneContent(launch: launch).environment(\.dynamicTypeSize, textSize), size: size)
                 defer { window.orderOut(nil) }
                 let label = "native-\(Int(size.width))x\(Int(size.height))-\(percent)-read-failed"
-                try assertReachable(["settings-preferences-unavailable", "settings-preferences-retry", "settings-general", "settings-ai", "settings-news", "settings-folders"], in: window)
+                try assertReachable(["settings-preferences-unavailable", "settings-preferences-retry", "settings-general", "settings-ai", "settings-news", "settings-folders", "settings-local-data"], in: window)
                 try press("settings-preferences-retry", in: window)
                 try press("settings-general", in: window)
                 try assertReachable(["preferences-error", "preferences-review", "preferences-cancel", "preferences-save"], in: window)
@@ -1495,8 +1690,8 @@ final class SettingsSceneTests: XCTestCase {
                 (attribute($0, kAXValueAttribute) as? String == "Settings" ||
                  attribute($0, kAXDescriptionAttribute) as? String == "Settings")
             }.count, 1)
-            for identifier in ["settings-general", "settings-ai", "settings-news", "settings-folders", "settings-focus-summary",
-                               "settings-appearance-summary", "settings-ai-summary", "settings-news-summary", "settings-folders-summary"] {
+            for identifier in ["settings-general", "settings-ai", "settings-news", "settings-folders", "settings-local-data", "settings-focus-summary",
+                               "settings-appearance-summary", "settings-ai-summary", "settings-news-summary", "settings-folders-summary", "settings-local-data-summary"] {
                 XCTAssertTrue(nodes.contains { attribute($0, kAXIdentifierAttribute) as? String == identifier },
                               "Both entries must expose implemented hub capability or saved summary: \(identifier)")
             }
@@ -1578,6 +1773,11 @@ final class SettingsSceneTests: XCTestCase {
             _ = try node("settings-folders-empty", in: window)
             try press("settings-back", in: window)
             XCTAssertEqual(try value("settings-folders-summary", in: window), "Project folders: 0 saved references")
+            try press("settings-local-data", in: window)
+            _ = try node("settings-local-data-content", in: window)
+            _ = try node("settings-export-start", in: window)
+            try press("settings-back", in: window)
+            XCTAssertEqual(try value("settings-local-data-summary", in: window), "Local data: Ready to export")
         }
         XCTAssertEqual(graph.appPreferencesStore.committed, .defaults, "Opening/canceling sections does not save preferences")
 

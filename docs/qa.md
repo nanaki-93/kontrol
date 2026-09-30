@@ -2279,3 +2279,133 @@ changes, staging, or commits occurred. All hosted tests compiled; this graph-onl
 step adds no native UI selector or manual observation. Previously deferred native
 panel, rendering/keyboard/VoiceOver and A13/S13/B13/D13 remain mandatory separate
 gates. **No remaining Step 3.5 blockers.**
+
+## F13 Step 4.1 — shared Local Data route and truthful outcomes (2026-10-01)
+
+### Scope and implementation
+
+- Confirmed the first top-level incomplete task is Step 4.1, matching runner task
+  14. Read the complete cumulative checklist: no prior findings. Initial worktree
+  and index were clean; repository/target and ancestor instruction checks found no
+  applicable `AGENTS.md` or affected submodule.
+- Inspected `docs/mockups/M40-data-export.png` and supplemental references
+  `.mockups/flows/f13-settings-release/{07-export-decision,08-export-preparing,09-export-canceled,10-export-failed,11-export-success}.html`
+  plus their index. Reused existing semantic typography and native actions; no
+  design-system changes or new mockup states were required.
+- `LocalDataSettingsView.swift` observes the existing graph-owned `ExportService`.
+  Guidance appears before selection: included saved collections, excluded grants,
+  paths, credentials, cache and drafts, pending-answer save barrier, personal-data
+  protection, no encryption and no import/restore. Shared selecting/preparing
+  states offer Cancel, terminal states offer explicit retry/another export.
+  Cancellation remains a request until the service reports its actual result.
+  Each failure category has safe recovery copy; cleanup failure does not promise
+  successful cleanup. No raw error, destination path or invented record count is
+  displayed. Saved is presented only for the service's committed outcome.
+- `FoundationSettingsView.swift` adds Local Data after folders in hub order, a
+  live actual-state summary, section routing, and Back restoration to its hub
+  action. Back/re-entry does not reset or cancel an active export. Both production
+  entry points already use this same hub and dependency graph; no owner, container,
+  save barrier or draft lifecycle was changed. Registered the new file in the
+  application group and Sources build phase.
+- Updated `SettingsSceneTests.swift` hub capability, navigation/order and existing
+  reachability assertions. Added an executed non-GUI state/category presentation
+  contract and a compiled hosted fixture using both actual ready scene roots,
+  injected panel/preparation gate, in-memory persistence and isolated destinations.
+  The hosted fixture covers shared selection/preparation, cross-client Cancel,
+  no capture/artifact after panel cancellation, safe capture failure, explicit
+  retry, committed parsed JSON, cleanup, Back/re-entry, and an independent retained
+  General editor draft. It is **not executed or credited as native acceptance**.
+- Updated `AppShellTests.swift` native hub traversal to include folders and Local
+  Data. Its executed Settings save-barrier selector now also checks Local Data
+  uses the same service and retains the exact successfully saved answer buffer.
+  Existing window-close save guards are unchanged; no new close-guard pass is
+  claimed in this selection.
+
+### Environment, source identity and exact validation
+
+Evidence: `/tmp/kontrol-f13-step4-1.QRjeQP/`. Base revision
+`053cef319d5d3437b33d95f731c69a1eaa5bf79d`; final implementation file hashes are in
+`implementation-sha256.txt`, tracked patch in `implementation.patch`, and new
+source copy in `LocalDataSettingsView.swift`. `source.txt` records the initial
+implementation diff, and `environment.log` records worktree/index/submodule and
+all requested toolchain commands. Host: macOS **27.0 (26A428)**, arm64 MacBook Pro,
+Xcode **27.0 (27A266a)**, Swift **6.4** in the project's retained Swift 5 mode;
+resolved Yams remains **5.4.0**. This is not macOS 14 runtime evidence.
+
+Final commands ran from the repository root, each exited **0**:
+
+```sh
+set -o pipefail
+EVIDENCE=/tmp/kontrol-f13-step4-1.QRjeQP
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
+  -resultBundlePath "$EVIDENCE/final-service.xcresult" \
+  -only-testing:KontrolTests/ExportServiceTests \
+  -only-testing:KontrolTests/AppPreferencesStoreTests test
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
+  -resultBundlePath "$EVIDENCE/final-routing.xcresult" \
+  -only-testing:KontrolTests/AppShellTests/testSettingsDestinationRetainsLessonSaveBarrierAndRetryUsesTheSameGraph \
+  -only-testing:KontrolTests/SettingsSceneTests/testLocalDataPresentationUsesActualStateAndSafeFailureCategories test
+make build DERIVED_DATA=/tmp/kontrol-f13-derived
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived CODE_SIGNING_ALLOWED=NO \
+  build-for-testing
+for bundle in final-service final-routing; do
+  xcrun xcresulttool get test-results summary \
+    --path "$EVIDENCE/$bundle.xcresult" --format json \
+    > "$EVIDENCE/$bundle-summary.json"
+  xcrun xcresulttool get test-results tests \
+    --path "$EVIDENCE/$bundle.xcresult" --format json \
+    > "$EVIDENCE/$bundle-tests.json"
+done
+python3 "$EVIDENCE/audit.py"
+plutil -lint Kontrol.xcodeproj/project.pbxproj
+git diff --check
+```
+
+Fresh audited results: **58/58 Passed** — 43 ExportServiceTests, 13
+AppPreferencesStoreTests, one exact AppShell save-barrier method and one exact
+SettingsScene presentation method. Zero failed/skipped/expected-failure methods;
+source-to-result audit checks every selected method executed exactly once.
+Full identifiers: `executed-identifiers.txt`. Logs: `final-service.log`,
+`final-routing.log`, `final-build.log`, `final-compile.log`, `audit.log`,
+`diffcheck.log`, `exit-codes.log`; summaries/test trees and xcresults retained.
+Earlier same selections also passed (56+2), retained as `service.*`/`routing.*`;
+final rerun follows the small hosted status-settling helper adjustment.
+
+Warnings remain visible in `diagnostics.log` and `final-diagnostics.log`: existing
+optional interpolation in the folder fixture (now line 1395), initial full test
+compilation's existing unused/weak-variable warnings, AppIntents extraction and
+linkd connection diagnostics. Both final summaries have no runtime-warning
+entries; no assertion failed, and no SQLite vnode-unlinked diagnostic occurred.
+Hosts 12900/12967 and final hosts 13409/13426 exited: recorded `ps -p ... -o
+pid=,stat=,command=` returned **1** with no rows (`initial-host-exit.log`,
+`final-host-exit.log`). No production data, historical stores/fixtures/schemas,
+external projects, permissions or dependency pins were changed. No store cleanup,
+staging or commits occurred during this Builder step; approved-task commits remain
+runner-owned. `.pi/PLAN.md` and workflow state were not modified.
+
+### Deferred native observations (A13, not Step 4.1 implementation blockers)
+
+All hosted coverage compiled. Execute these new/changed selectors with the
+reserved active desktop and rebuilt host Accessibility authorization:
+
+- `SettingsSceneTests/testNativeLocalDataRoutesShareSelectingPreparingCanceledFailureRetryAndSavedResults`
+- `SettingsSceneTests/testKeyboardHubOrderEditorHandoffNamesTargetsAndFocusReturn`
+- `SettingsSceneTests/testNativeAndInlineSettingsGeometryAtCompactDesktopAndAccessibilitySizes`
+- `SettingsSceneTests/testSettingsReadFailureRetryAndRetainedEditorGuidanceReflowAtAllNativeSizes`
+- `SettingsSceneTests/testSettingsOpenedDuringInitializationAndWindowReopenUseOneGraph`
+- `AppShellTests/testRenderedNavigationAccessibilityAndKeyboardOrder`
+
+Actual picker dismissal/replacement, visible Back focus, spoken VoiceOver,
+rendered comparisons and geometry observations are not established by this
+checkpoint. Local Data's dedicated compact/enlarged layout fixtures and export
+focus/accessibility transitions remain Steps 4.2/4.3, not implemented early.
+Existing A13/S13/B13/D13 obligations and historical findings remain pending.
+**No remaining Step 4.1 implementation blockers.**

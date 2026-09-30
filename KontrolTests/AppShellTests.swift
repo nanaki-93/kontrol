@@ -213,7 +213,15 @@ final class AppShellTests: XCTestCase {
         navigation.retryTransition()
         XCTAssertEqual(AppShell.contentKind(for: navigation.selectedDestination), .settings)
         XCTAssertEqual(try repository.loadLesson(lessonID: lessonID).attempt?.answerDraft, answer)
-        XCTAssertTrue(shell.dependencies === FoundationSettingsView(dependencies: graph).dependencies)
+        let mainSettings = FoundationSettingsView(dependencies: graph)
+        let nativeSettings = FoundationSettingsView(dependencies: graph)
+        XCTAssertTrue(shell.dependencies === mainSettings.dependencies)
+        XCTAssertTrue(nativeSettings.dependencies.exportService === mainSettings.dependencies.exportService)
+        let localData = LocalDataSettingsView(service: mainSettings.dependencies.exportService)
+        XCTAssertTrue(localData.service === graph.exportService)
+        XCTAssertEqual(LocalDataSettingsView.summary(localData.service.state), "Local data: Ready to export")
+        XCTAssertEqual(graph.lessonDraftStore.buffers[attempt.id]?.text, answer)
+        XCTAssertFalse(try XCTUnwrap(graph.lessonDraftStore.buffers[attempt.id]).isDirty)
         XCTAssertNil(navigation.saveError)
     }
 
@@ -419,7 +427,7 @@ final class AppShellTests: XCTestCase {
                 settle()
                 XCTAssertEqual(try focusedIdentifier(), "navigation-\(destination.rawValue)", "size \(size), scale \(scale)")
             }
-            for identifier in ["settings-general", "settings-ai", "settings-news", "navigation-today"] {
+            for identifier in ["settings-general", "settings-ai", "settings-news", "settings-folders", "settings-local-data", "navigation-today"] {
                 window.selectNextKeyView(nil)
                 settle()
                 XCTAssertEqual(try focusedIdentifier(), identifier, "Hub actions participate in native Tab order")

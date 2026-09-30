@@ -11,14 +11,15 @@ struct FoundationSettingsView: View {
     @ObservedObject private var ai: AISettingsStore
     @ObservedObject private var news: NewsStore
     @ObservedObject private var projects: ProjectStore
+    @ObservedObject private var export: ExportService
     // Keep a stale-review gate across Back/section changes in this Settings client.
     @StateObject private var foldersManagement: ProjectFoldersSettingsState
     @State private var section: Section = .hub
     @State private var saved = false
     @FocusState private var focusedAction: HubAction?
 
-    private enum Section { case hub, general, ai, news, folders }
-    private enum HubAction: Hashable { case general, ai, news, folders, retry, back }
+    private enum Section { case hub, general, ai, news, folders, localData }
+    private enum HubAction: Hashable { case general, ai, news, folders, localData, retry, back }
 
     init(dependencies: AppDependencies) {
         self.dependencies = dependencies
@@ -26,12 +27,13 @@ struct FoundationSettingsView: View {
         _ai = ObservedObject(wrappedValue: dependencies.aiSettingsStore)
         _news = ObservedObject(wrappedValue: dependencies.newsStore)
         _projects = ObservedObject(wrappedValue: dependencies.projectStore)
+        _export = ObservedObject(wrappedValue: dependencies.exportService)
         _foldersManagement = StateObject(wrappedValue: ProjectFoldersSettingsState(store: dependencies.projectStore))
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppMetrics.space4) {
-            if section == .ai || section == .news || section == .folders {
+            if section == .ai || section == .news || section == .folders || section == .localData {
                 // Shared header moves Back below the title when its ideal width
                 // does not fit. Native Settings needs no global destination bar.
                 PageHeader("Settings") { backAction }
@@ -55,6 +57,8 @@ struct FoundationSettingsView: View {
                     .background(AppColors.surface, in: RoundedRectangle(cornerRadius: AppMetrics.mediumRadius))
             case .folders:
                 ProjectFoldersSettingsView(store: projects, management: foldersManagement)
+            case .localData:
+                LocalDataSettingsView(service: export)
             }
         }
         // The scroll host proposes an unconstrained height. Keep that natural
@@ -139,6 +143,15 @@ struct FoundationSettingsView: View {
             ActionButton("Manage project folders") { section = .folders; focusedAction = .back }
                 .focused($focusedAction, equals: .folders)
                 .accessibilityIdentifier("settings-folders")
+            Divider()
+            Text("Local data").appTypography(.section).accessibilityAddTraits(.isHeader)
+            Text(LocalDataSettingsView.summary(export.state))
+                .appTypography(.body)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("settings-local-data-summary")
+            ActionButton("Manage local data") { section = .localData; focusedAction = .back }
+                .focused($focusedAction, equals: .localData)
+                .accessibilityIdentifier("settings-local-data")
         }
     }
 
@@ -157,6 +170,7 @@ struct FoundationSettingsView: View {
             switch origin {
             case .ai: focusedAction = .ai
             case .folders: focusedAction = .folders
+            case .localData: focusedAction = .localData
             default: focusedAction = .news
             }
         }
