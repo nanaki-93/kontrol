@@ -1,9 +1,298 @@
 import Foundation
+import SwiftData
 import XCTest
 @testable import Kontrol
 
-/// Domain contract coverage; persistence coverage is added with the repository.
+/// Detached domain validation and durable, revision-checked persistence.
+@MainActor
 final class AppPreferencesRepositoryTests: XCTestCase {
+    private let factory = ModelContainerFactory()
+
+    private func withStore(_ operation: (ModelContainer, URL) throws -> Void) throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "KontrolPreferencesRepository-\(UUID().uuidString)", isDirectory: true)
+        // Release test-owned models, contexts, and containers before unlinking
+        // SQLite files. Cleanup must not invalidate a still-open coordinator.
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try autoreleasepool {
+            try operation(reopen(directory), directory)
+        }
+    }
+
+    private func reopen(_ directory: URL) throws -> ModelContainer {
+        try factory.makeContainer(mode: .persistent(directory.appendingPathComponent("Kontrol.store")))
+    }
+
+    // SQLite's shared-memory lock/read marks are not durable data. Check the
+    // database and WAL bytes before reopening (which may checkpoint the WAL).
+    private func durableBytes(_ directory: URL) throws -> [String: Data] {
+        let urls = try FileManager.default.contentsOfDirectory(at: directory,
+            includingPropertiesForKeys: nil).filter {
+                $0.lastPathComponent == "Kontrol.store" || $0.lastPathComponent == "Kontrol.store-wal"
+            }
+        XCTAssertTrue(urls.contains { $0.lastPathComponent == "Kontrol.store" })
+        return try Dictionary(uniqueKeysWithValues: urls.map {
+            ($0.lastPathComponent, try Data(contentsOf: $0))
+        })
+    }
+
+    private struct StoredRow: Equatable {
+        let key: String
+        let payloadVersion: Int
+        let focusDefaultMinutes: Int
+        let textSize: String
+        let reduceMotion: String
+        let revision: UUID
+    }
+
+    private func storedRows(_ container: ModelContainer) throws -> [StoredRow] {
+        let context = ModelContext(container)
+        context.autosaveEnabled = false
+        return try context.fetch(FetchDescriptor<AppPreferencesRecord>()).map {
+            StoredRow(key: $0.key, payloadVersion: $0.payloadVersion,
+                focusDefaultMinutes: $0.focusDefaultMinutes, textSize: $0.textSize,
+                reduceMotion: $0.reduceMotion, revision: $0.revision)
+        }.sorted { $0.key < $1.key }
+    }
+
+    private func draft(_ minutes: String = "17", textSize: AppTextSize = .large,
+                       motion: AppReduceMotion = .reduce) -> AppPreferencesDraft {
+        var draft = AppPreferencesDraft()
+        draft.focusDefaultMinutes = minutes
+        draft.textSize = textSize
+        draft.reduceMotion = motion
+        return draft
+    }
+
+    func testAbsentLoadsDefaultsWithoutInsertingOrChangingBytesAcrossReopen() throws {
+        try withStore { container, directory in
+            var saves = 0
+            let repository = SwiftDataAppPreferencesRepository(container: container, beforeSave: { saves += 1 })
+            let before = try durableBytes(directory)
+            for _ in 0..<3 { XCTAssertEqual(try repository.load(), .defaults) }
+            XCTAssertEqual(saves, 0)
+            XCTAssertEqual(try storedRows(container), [])
+            XCTAssertEqual(try durableBytes(directory), before)
+            let reopened = try reopen(directory)
+            XCTAssertEqual(try SwiftDataAppPreferencesRepository(container: reopened).load(), .defaults)
+            XCTAssertEqual(try storedRows(reopened), [])
+        }
+    }
+
+    func testFirstSaveAndUpdateReturnDurableReceiptsAcrossClosedContainerReopen() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "KontrolPreferencesReceipts-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let first = try autoreleasepool {
+            let container = try reopen(directory)
+            let repository = SwiftDataAppPreferencesRepository(container: container)
+            let first = try repository.save(draft(), expectedRevision: nil)
+            XCTAssertNotNil(first.revision)
+            XCTAssertEqual(first.preferences, try draft().validated())
+            XCTAssertEqual(try repository.load(), first)
+            XCTAssertEqual(try storedRows(container).count, 1)
+            return first
+        }
+        let second = try autoreleasepool {
+            let container = try reopen(directory)
+            let repository = SwiftDataAppPreferencesRepository(container: container)
+            XCTAssertEqual(try repository.load(), first)
+            let second = try repository.save(draft("50", textSize: .system, motion: .system),
+                                             expectedRevision: first.revision)
+            XCTAssertNotNil(second.revision)
+            XCTAssertNotEqual(second.revision, first.revision)
+            XCTAssertEqual(second.preferences, try AppPreferences(focusDefaultMinutes: 50))
+            XCTAssertEqual(try repository.load(), second)
+            XCTAssertEqual(try storedRows(container).count, 1)
+            return second
+        }
+        try autoreleasepool {
+            let container = try reopen(directory)
+            XCTAssertEqual(try SwiftDataAppPreferencesRepository(container: container).load(), second)
+            let rows = try storedRows(container)
+            XCTAssertEqual(rows.count, 1)
+            XCTAssertEqual(rows.first?.key, AppPreferencesRecord.singletonKey)
+            XCTAssertEqual(rows.first?.revision, second.revision)
+        }
+    }
+
+    func testTwoEditorsRejectStaleInitialAndUpdateSavesAndReloadFreshState() throws {
+        try withStore { container, directory in
+            let editorA = SwiftDataAppPreferencesRepository(container: container)
+            var savesB = 0
+            let editorB = SwiftDataAppPreferencesRepository(container: container, beforeSave: { savesB += 1 })
+            XCTAssertEqual(try editorA.load(), .defaults)
+            XCTAssertEqual(try editorB.load(), .defaults)
+            invalid({ try editorB.save(self.draft(), expectedRevision: UUID()) }, .staleRevision)
+            XCTAssertEqual(try storedRows(container), [])
+            let first = try editorA.save(draft(), expectedRevision: nil)
+            let before = try durableBytes(directory)
+            invalid({ try editorB.save(self.draft("15"), expectedRevision: nil) }, .staleRevision)
+            invalid({ try editorB.save(self.draft("15"), expectedRevision: UUID()) }, .staleRevision)
+            XCTAssertEqual(try durableBytes(directory), before)
+            XCTAssertEqual(try editorB.load(), first)
+            let second = try editorA.save(draft("51"), expectedRevision: first.revision)
+            let updatedBytes = try durableBytes(directory)
+            invalid({ try editorB.save(self.draft("15"), expectedRevision: first.revision) }, .staleRevision)
+            XCTAssertEqual(try durableBytes(directory), updatedBytes)
+            XCTAssertEqual(savesB, 0)
+            XCTAssertEqual(try editorB.load(), second)
+            let reviewed = try editorB.save(draft("15"), expectedRevision: second.revision)
+            XCTAssertEqual(savesB, 1)
+            XCTAssertEqual(try editorA.load(), reviewed)
+            XCTAssertEqual(try SwiftDataAppPreferencesRepository(container: reopen(directory)).load(), reviewed)
+        }
+    }
+
+    func testFailedInsertAndUpdatePreserveBytesAndStateWithoutLeakingIntoOtherContextSaves() throws {
+        enum Failure: Error { case injected }
+        try withStore { container, directory in
+            let working = SwiftDataAppPreferencesRepository(container: container)
+            var attempts = 0
+            let failing = SwiftDataAppPreferencesRepository(container: container, beforeSave: {
+                attempts += 1
+                throw Failure.injected
+            })
+            let emptyBytes = try durableBytes(directory)
+            invalid({ try failing.save(self.draft(), expectedRevision: nil) }, .persistenceFailure)
+            XCTAssertEqual(try durableBytes(directory), emptyBytes)
+            XCTAssertEqual(try working.load(), .defaults)
+            XCTAssertEqual(try storedRows(container), [])
+            XCTAssertEqual(try SwiftDataAppPreferencesRepository(container: reopen(directory)).load(), .defaults)
+
+            let original = try working.save(draft(), expectedRevision: nil)
+            let rows = try storedRows(container)
+            let bytes = try durableBytes(directory)
+            invalid({ try failing.save(self.draft("50", textSize: .system, motion: .system),
+                                       expectedRevision: original.revision) }, .persistenceFailure)
+            XCTAssertEqual(attempts, 2)
+            XCTAssertEqual(try durableBytes(directory), bytes)
+            XCTAssertEqual(try storedRows(container), rows)
+            XCTAssertEqual(try failing.load(), original)
+            XCTAssertEqual(try working.load(), original)
+            let otherContext = ModelContext(container)
+            otherContext.autosaveEnabled = false
+            otherContext.insert(try TaskItem(id: UUID(), title: "Independent transaction", createdAt: Date()))
+            try otherContext.save()
+            XCTAssertEqual(try storedRows(container), rows)
+            let reopened = try reopen(directory)
+            XCTAssertEqual(try SwiftDataAppPreferencesRepository(container: reopened).load(), original)
+            XCTAssertEqual(try ModelContext(reopened).fetch(FetchDescriptor<TaskItem>()).count, 1)
+            let retried = try working.save(draft("50"), expectedRevision: original.revision)
+            XCTAssertEqual(try working.load(), retried)
+            XCTAssertNotEqual(retried.revision, original.revision)
+        }
+    }
+
+    func testInvalidDraftsNeverCommitOrReplaceExistingPreferences() throws {
+        try withStore { container, directory in
+            var saves = 0
+            let repository = SwiftDataAppPreferencesRepository(container: container, beforeSave: { saves += 1 })
+            let values = ["", "0", "-1", "+5", "1.5", "1e2", "１２", "١٢"]
+            let before = try durableBytes(directory)
+            for value in values {
+                invalid({ try repository.save(self.draft(value), expectedRevision: nil) },
+                        .invalidFocusDuration(.invalidCustomMinutes))
+            }
+            XCTAssertEqual(try storedRows(container), [])
+            XCTAssertEqual(try durableBytes(directory), before)
+            XCTAssertEqual(saves, 0)
+            let original = try repository.save(draft(), expectedRevision: nil)
+            let savedBytes = try durableBytes(directory)
+            for value in values {
+                invalid({ try repository.save(self.draft(value), expectedRevision: original.revision) },
+                        .invalidFocusDuration(.invalidCustomMinutes))
+            }
+            invalid({ try repository.save(self.draft(String(Int.max / 60 + 1)),
+                                          expectedRevision: original.revision) },
+                    .invalidFocusDuration(.durationOverflow))
+            XCTAssertEqual(saves, 1)
+            XCTAssertEqual(try durableBytes(directory), savedBytes)
+            XCTAssertEqual(try repository.load(), original)
+            XCTAssertEqual(try SwiftDataAppPreferencesRepository(container: reopen(directory)).load(), original)
+        }
+    }
+
+    func testCorruptAndUnsupportedStoredRowsBlockBothLoadAndSaveWithoutReplacement() throws {
+        let cases: [(() -> AppPreferencesRecord, AppPreferencesError)] = [
+            ({ AppPreferencesRecord(key: "foreign.preferences") }, .invalidStoredData),
+            ({ AppPreferencesRecord(payloadVersion: 0) }, .unsupportedPayloadVersion(0)),
+            ({ AppPreferencesRecord(payloadVersion: 2) }, .unsupportedPayloadVersion(2)),
+            ({ AppPreferencesRecord(textSize: "Large") }, .unsupportedTextSize("Large")),
+            ({ AppPreferencesRecord(reduceMotion: "off") }, .unsupportedReduceMotion("off")),
+            ({ AppPreferencesRecord(focusDefaultMinutes: 0) }, .invalidFocusDuration(.invalidCustomMinutes)),
+            ({ AppPreferencesRecord(focusDefaultMinutes: -1) }, .invalidFocusDuration(.invalidCustomMinutes)),
+            ({ AppPreferencesRecord(focusDefaultMinutes: Int.max) }, .invalidFocusDuration(.durationOverflow))
+        ]
+        for (makeRow, error) in cases {
+            try withStore { container, directory in
+                let context = ModelContext(container)
+                context.autosaveEnabled = false
+                let row = makeRow()
+                context.insert(row)
+                try context.save()
+                let rows = try storedRows(container)
+                let bytes = try durableBytes(directory)
+                var saves = 0
+                let repository = SwiftDataAppPreferencesRepository(container: container, beforeSave: { saves += 1 })
+                invalid({ try repository.load() }, error)
+                // Even knowing the stored revision does not authorize repairing corrupt data.
+                invalid({ try repository.save(self.draft(), expectedRevision: row.revision) }, error)
+                invalid({ try repository.save(self.draft(), expectedRevision: nil) }, error)
+                XCTAssertEqual(saves, 0)
+                XCTAssertEqual(try durableBytes(directory), bytes)
+                XCTAssertEqual(try storedRows(container), rows)
+                let reopened = try reopen(directory)
+                invalid({ try SwiftDataAppPreferencesRepository(container: reopened).load() }, error)
+                XCTAssertEqual(try storedRows(reopened), rows)
+            }
+        }
+    }
+
+    func testMultipleSingletonRowsAreRejectedRatherThanSelectingCanonicalRow() throws {
+        try withStore { container, directory in
+            let context = ModelContext(container)
+            context.autosaveEnabled = false
+            let canonical = AppPreferencesRecord()
+            context.insert(canonical)
+            // Unique keys prevent duplicate canonical keys but not extra singleton rows.
+            context.insert(AppPreferencesRecord(key: "other.preferences", focusDefaultMinutes: 50))
+            try context.save()
+            let before = try durableBytes(directory)
+            let rows = try storedRows(container)
+            XCTAssertEqual(rows.count, 2)
+            var saves = 0
+            let repository = SwiftDataAppPreferencesRepository(container: container, beforeSave: { saves += 1 })
+            invalid({ try repository.load() }, .duplicateRecords)
+            invalid({ try repository.save(self.draft(), expectedRevision: canonical.revision) }, .duplicateRecords)
+            invalid({ try repository.save(self.draft(), expectedRevision: nil) }, .duplicateRecords)
+            XCTAssertEqual(saves, 0)
+            XCTAssertEqual(try durableBytes(directory), before)
+            let reopened = try reopen(directory)
+            invalid({ try SwiftDataAppPreferencesRepository(container: reopened).load() }, .duplicateRecords)
+            XCTAssertEqual(try storedRows(reopened), rows)
+        }
+    }
+
+    func testRepositoryDoesNotReadOrSaveUncommittedMainContextWork() throws {
+        try withStore { container, directory in
+            container.mainContext.autosaveEnabled = false
+            container.mainContext.insert(AppPreferencesRecord(focusDefaultMinutes: 50))
+            container.mainContext.insert(try TaskItem(id: UUID(), title: "Unsaved task", createdAt: Date()))
+            let repository = SwiftDataAppPreferencesRepository(container: container)
+            XCTAssertEqual(try repository.load(), .defaults)
+            let receipt = try repository.save(draft(), expectedRevision: nil)
+            XCTAssertEqual(try repository.load(), receipt)
+            XCTAssertEqual(try storedRows(container).count, 1)
+            XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<TaskItem>()).count, 0)
+            XCTAssertTrue(container.mainContext.hasChanges)
+            container.mainContext.rollback()
+            let reopened = try reopen(directory)
+            XCTAssertEqual(try SwiftDataAppPreferencesRepository(container: reopened).load(), receipt)
+            XCTAssertEqual(try ModelContext(reopened).fetch(FetchDescriptor<TaskItem>()).count, 0)
+        }
+    }
+
     private func invalid(_ operation: () throws -> Any, _ expected: AppPreferencesError,
                          file: StaticString = #filePath, line: UInt = #line) {
         XCTAssertThrowsError(try operation(), file: file, line: line) {
