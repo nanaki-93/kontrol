@@ -3312,3 +3312,298 @@ picker/export/project/offline loops, B13 actual macOS 14/current-runtime journey
 and D13 externally authorized signing/notary/final extracted-artifact approval
 remain pending, not passed by this documentation checkpoint. No later task was
 implemented and no plan checkbox was marked.
+
+## F13 Step 6.1 — Integrated non-GUI implementation verification (2026-09-30, 19:22 UTC)
+
+First top-level incomplete task matched runner **22/27, Step 6.1**. Read SPEC,
+ANALYSIS, PLAN and the complete task-22 cumulative checklist: **no prior findings**.
+Initial worktree/index were clean; no interrupted partial work existed. Direct
+ancestor and repository/target instruction searches found no applicable `AGENTS.md`
+or submodule. Changed only `KontrolTests/NewsRepositoryTests.swift`,
+`KontrolTests/NewsStoreTests.swift` and this appended ledger. No production source,
+workflow state, `.pi/PLAN.md`, schema, original fixture, dependency, permission or
+later release task changed. Changes remain uncommitted for runner review.
+
+Base revision **`2aff12e952ea4c32278a7927c8460a6c8bdff36a`**. Evidence root
+**`/tmp/kontrol-f13-step6-1.EnL6tS/`** (`EVIDENCE` below). Final test-only repair:
+`test-repair.patch`, SHA-256
+**`22394ef390b3b3dba6f9dbf631737745631f855ce52f9d7f915da2cfc6250c78`**.
+The final integrated source is that revision plus this patch; this ledger does not
+change the tested binaries. `environment.log` records revision/worktree/index,
+submodules, developer directory, Xcode/Swift/project listing, OS/architecture and
+UTC time: arm64 MacBook Pro, macOS **27.0 (26A428)**, Xcode **27.0 (27A266a)**,
+Apple Swift **6.4**, `/Applications/Xcode.app/Contents/Developer`. Project remains
+macOS 14 deployment/Swift 5 mode; this is not macOS 14 runtime evidence.
+
+### Integrated contract audit and narrow regression-backed repairs
+
+- Inspected all 23 detached DTO shapes, required keys/nulls, timestamp bounds,
+  identity/version/canonical-order validators, both complete projections and their
+  field-level tests. `serialized-fields.json` inventories every serialized field
+  and type. Tasks/planned calendar-zone, blocks/links, all persisted Focus states,
+  taxonomy/accepted definitions, progress/exact saved answers/attempt milestones,
+  historical pins/completed snapshots, slots/terminal metadata/catalog membership,
+  validated effective General/AI/feed defaults are covered. Meaningful teaching
+  sequence and authored whitespace/secret-looking text remain verbatim; missing
+  historical evidence is null rather than today's definition. Corrupt present
+  payloads, unsupported versions, duplicates and mismatches fail, not omit data.
+- Inspected structural privacy allowlists and fresh complete-field/privacy tests.
+  No exported credential/reference, project/grant/path, article transport/cache,
+  diagnostics/raw errors, opaque payload or unsaved editor fields appear. The
+  invalid excluded project/article fixtures remain unread and unchanged. General
+  and AI defaults insert nothing; News defaults apply only when both row kinds
+  are absent. No export networking, Keychain, folder inspection, seeding, catalog
+  reconciliation or timer advancement was introduced.
+- Inspected panel/service/repository/writer and graph/routes. Native approval and
+  cancellation checks precede the existing answer-owner flush; failed flush retains
+  failed/unvisited exact answers and aborts capture. One fresh non-autosaving context
+  performs synchronous reads without suspension/save; returned values are detached
+  from later edits. Both Settings clients share one graph/container/answer/export
+  owner. Fresh lifecycle/launch/shell tests verify call ordering, defaults/no initial
+  side effects, shared results, duplicate rejection and retained ownership until
+  actual callback/worker completion. Lesson navigation save barriers remain intact.
+- Fresh IO tests verify restrictive private preparation, read-back decode/validation,
+  off-main responsiveness, unsafe/symlink/directory rejection, transient access
+  balance, captured/rechecked replacement identity, exclusive new-file creation,
+  coordinated same-volume atomic delivery and cleanup. Every pre-commit failure or
+  cancellation preserves destination bytes; post-commit cancellation reports saved.
+  Coordination is not a promise against every uncoordinated editor race. Actual
+  native panel/bookmark behavior remains S13/A13, not inferred from injection seams.
+- Rich V9 preservation/reopen and ten-schema/nine-stage regressions passed. The
+  explained live-V3-WAL versus independently closed SQLite backup reproduction
+  passed again; Step 5.1's fixture-boundary closure and historical failure records
+  remain intact. No production migration defect or reset/unlink recovery was added.
+- The initial five-group run passed **495/495**, but raw `export.log` exposed live
+  SQLite unlink diagnostics in `NewsRepositoryTests` and continuation leaks in two
+  `NewsStoreTests` scheduling fixtures. These diagnostics are retained, not hidden
+  by the empty xcresult warning arrays. Repository tests deleted their directory
+  in `defer` while containers/contexts or asynchronous Core Data teardown still
+  owned handles. They now use logged PID/UUID roots and retain all opened stores
+  and sidecars until host exit, including both reopen-only helpers. New regression
+  `NewsRepositoryTests/testFixtureStoreRemainsReadableAfterSwiftOwnersLeaveScope`
+  checks initial store/WAL/SHM existence and exact snapshot reopen after Swift
+  owners leave scope. Existing persistence/content/revision/corruption assertions
+  were not weakened; unused URL bindings became `_`.
+- The scheduling tests overwrote a single non-cancellation-aware sleep continuation
+  during timer rescheduling, abandoning prior owners. New test-only `HeldNewsSleep`
+  owns each UUID-keyed continuation independently and resumes it exactly once on
+  cancellation/wake. Both existing scheduling tests retain their eligibility,
+  retry-deadline, request-count and delay assertions, now also assert zero pending
+  sleeps after deactivation. New regression
+  `NewsStoreTests/testScheduledSleepSeamRetainsEachOwnerAcrossCancellationAndWake`
+  verifies two independent owners, cancellation without disturbing the survivor,
+  normal wake, duplicate wake and pre-start cancellation. Production News behavior
+  was unchanged. All final selections and three same-host repetitions of these
+  four implicated/new methods have **no unlink or continuation-misuse diagnostics**.
+
+### Exact verification commands and fresh results
+
+From repository root, all final build/test/static commands below exited **0**.
+`final/run.sh`, `final/commands.log`, individual `final/*.log` and
+`final/exit-codes.log` retain exact expansions and outcomes. Initial commands and
+bundles remain separately at the evidence root, never overwritten by final runs.
+
+```bash
+set -o pipefail
+EVIDENCE=/tmp/kontrol-f13-step6-1.EnL6tS
+f13_test() {
+  local name="$1"; shift
+  local flags=() suite
+  for suite in "$@"; do flags+=("-only-testing:KontrolTests/$suite"); done
+  xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+    -configuration Debug -destination 'platform=macOS' \
+    -derivedDataPath /tmp/kontrol-f13-derived -parallel-testing-enabled NO \
+    CODE_SIGNING_ALLOWED=NO -resultBundlePath "$EVIDENCE/final/$name.xcresult" \
+    "${flags[@]}" test
+}
+f13_test preferences AppPreferencesRepositoryTests AppPreferencesStoreTests \
+  FocusPreferencesTests FocusTimingTests FocusServiceTests DesignSystemTokenTests
+f13_test projects ProjectReferenceRepositoryTests ProjectDisconnectTests \
+  ProjectStoreTests ProjectCompletionStoreTests ProjectIntegrationTests
+f13_test export LocalDataExportTests ExportServiceTests NewsRepositoryTests \
+  FocusRepositoryTests LearningHistoryTests LessonExperienceRepositoryTests \
+  GeneratedLessonRepositoryTests LessonExperienceStoreTests \
+  LaunchCoordinatorTests NewsStoreTests AISettingsStoreTests
+f13_test shell AppShellTests/testOneStorePerDependencyGraphAcrossRoutesAndWindows \
+  AppShellTests/testSettingsDestinationRetainsLessonSaveBarrierAndRetryUsesTheSameGraph
+f13_test migration AppPreferencesMigrationTests SchemaTests ContainerFactoryTests \
+  V1FixtureTests LaunchRecoveryTests
+make build DERIVED_DATA=/tmp/kontrol-f13-derived
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived CODE_SIGNING_ALLOWED=NO build-for-testing
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived CODE_SIGNING_ALLOWED=NO analyze
+make build CONFIGURATION=Release DERIVED_DATA=/tmp/kontrol-f13-release-build
+plutil -lint Kontrol.xcodeproj/project.pbxproj Kontrol/Kontrol.entitlements
+python3 -m json.tool Kontrol/Resources/starter-catalog.json >/dev/null
+python3 -m json.tool Kontrol/Resources/generation-objectives.json >/dev/null
+python3 -m json.tool Kontrol/Resources/default-feeds.json >/dev/null
+python3 -m json.tool Kontrol.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved >/dev/null
+xcodebuild -showBuildSettings -project Kontrol.xcodeproj -scheme Kontrol -configuration Release
+f13_test settings-policy \
+  SettingsSceneTests/testLocalDataPresentationUsesActualStateAndSafeFailureCategories \
+  SettingsSceneTests/testFolderConfirmationCapturesNameIdentityRevisionCancelAndDurableSuccessAcrossClients \
+  SettingsSceneTests/testFolderStaleConfirmationRequiresSuccessfulExplicitReloadAndSeparateReconfirmation \
+  SettingsSceneTests/testFolderUnavailableMissingBusyAndFailedOutcomesNeverAutomaticallyDelete \
+  ProjectsPresentationTests/testFolderFocusPolicyUsesCurrentRowsDisplayOrderAndEnabledSurvivors
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived -parallel-testing-enabled NO \
+  CODE_SIGNING_ALLOWED=NO -resultBundlePath "$EVIDENCE/final/news-repeat.xcresult" \
+  -test-iterations 3 -test-repetition-relaunch-enabled NO \
+  -only-testing:KontrolTests/NewsRepositoryTests/testFixtureStoreRemainsReadableAfterSwiftOwnersLeaveScope \
+  -only-testing:KontrolTests/NewsStoreTests/testEligibilityManualOverrideRetryDeadlineAndNextScheduledCheck \
+  -only-testing:KontrolTests/NewsStoreTests/testScheduledCheckRunsWhenForegroundAndBecomesEligible \
+  -only-testing:KontrolTests/NewsStoreTests/testScheduledSleepSeamRetainsEachOwnerAcrossCancellationAndWake test
+for name in preferences projects export shell migration settings-policy news-repeat; do
+  xcrun xcresulttool get test-results summary \
+    --path "$EVIDENCE/final/$name.xcresult" --format json \
+    > "$EVIDENCE/final/$name-summary.log"
+  xcrun xcresulttool get test-results tests \
+    --path "$EVIDENCE/final/$name.xcresult" --format json \
+    > "$EVIDENCE/final/$name-tests.log"
+done
+python3 "$EVIDENCE/audit.py"
+python3 "$EVIDENCE/stores.py"
+git diff --check
+```
+
+| Fresh final bundle (`$EVIDENCE/final/`) | Actual passed methods/executions |
+| --- | --- |
+| `preferences.xcresult` | **90/90**: repository 17, store 13, Focus preferences 8, timing 16, service 29, tokens 7 |
+| `projects.xcresult` | **93/93**: reference repository 9, disconnect 9, store 44, completion 21, integration 10 |
+| `export.xcresult` | **276/276**: LocalDataExport 59, ExportService 43, News repository 18, Focus repository 26, Learning history 11, lesson repository 31, generated repository 11, lesson store 30, launch 7, News store 23, AI 17 |
+| `shell.xcresult` | **2/2**, the exact ownership and Settings lesson-save-barrier selectors |
+| `migration.xcresult` | **36/36**: preferences migration 4, schemas 10, container 9, V1 2, recovery 11 |
+| `settings-policy.xcresult` | **5/5**, the exact non-GUI selectors above |
+| `news-repeat.xcresult` | **4 identifiers × 3 repetitions = 12/12 executions**, not merely four executions |
+
+Required five selections total **497 methods**, plus **5** policy/presentation
+contract methods = **502 unique final methods**. Every selected source method ran
+exactly once in its primary bundle and Passed; the repeat audit checks all twelve
+Repetition children. Zero failed, skipped or expected-failure methods and empty
+runtime-warning/failure arrays. `executed-identifiers.txt` enumerates every unique
+selector. Both builds, all hosted test compilation, analyzer, plist/JSON checks,
+Release settings and final whitespace validation pass. Existing multiple-destination,
+AppIntents/linkd messages and intentional malformed-store Core Data errors remain
+in raw logs; these are not native acceptance. No assertion skip/expected failure
+or production error suppression was added.
+
+Auxiliary audit development failures are preserved separately: first `audit.py`
+exit **1** (`audit-initial-partial.log`) assumed all PBX build files have `fileRef`,
+but Yams uses `productRef`; the parser now handles both. Second exit **1**
+(`audit-second-partial.log`) incorrectly assumed `ENABLE_APP_SANDBOX=YES` and
+`ENABLE_DEBUG_DYLIB=NO` build-setting spellings. Sandbox is supplied by the four
+source entitlements, not that NO build-setting default; the Release environment
+recovery injection is `#if DEBUG`, not the YES debug-dylib setting. Removed those
+unsupported audit assumptions, not permissions/assertions in the app. Final
+`audit.py` verifies the actual source entitlement dictionary, Release settings,
+built versions/resources and source membership. `stores.py` initially exited
+**1** (`store-integrity-initial-partial.log`) because `/var/folders` resolves to
+`/private/var/folders`; resolving both sides repaired only the safe-root guard.
+Both complete final audits exit **0**, including after this ledger append.
+No XCTest/build/analyzer/static command failed in either run.
+
+### Resources, packaging and preservation evidence
+
+- Parsed PBX membership: **134 app Swift files**, **90 test Swift files**, all
+  exactly once in the proper Sources phases; all six fixture folders are test
+  Resources. All four app resources are explicitly registered. Membership lists
+  are `Kontrol-membership.json` / `KontrolTests-membership.json`.
+- Fresh Debug/Release Info.plists both contain **version/build 1.0/1**. Release
+  hardening/macOS 14/Swift 5 settings and exactly four source permissions are
+  verified; no actual signed-entitlement or runtime acceptance is claimed.
+- Source and fresh Debug/Release bytes match for curriculum, generation objectives,
+  feed catalog and notices (sizes/SHA-256 in `audit.log`). Both clean Yams checkouts
+  remain at **5.4.0 / 3d6871d5b4a5cd519adf233fbb576e0a2af71c17**. Complete Yams
+  LICENSE and three copyright headers match packaged notice bytes; libyaml License
+  bytes match all four immutable revisions using the existing source checkout
+  `/private/tmp/kontrol-f13-step5-3.UUkjkG/libyaml`, not guessed text.
+- Available unsigned packaging smoke ran (each exit **0**):
+
+  ```sh
+  APP=/tmp/kontrol-f13-release-build/Build/Products/Release/Kontrol.app
+  ditto -c -k --keepParent "$APP" "$EVIDENCE/Kontrol-unsigned-smoke.zip"
+  ditto -x -k "$EVIDENCE/Kontrol-unsigned-smoke.zip" "$EVIDENCE/extracted"
+  shasum -a 256 "$EVIDENCE/Kontrol-unsigned-smoke.zip"
+  ```
+
+  `package.log` records SHA-256
+  **`6a70927bee0d208ecc8b603357890728d38657e6e58cafd3235c6f5c154bffdd`**.
+  `extracted-audit.log` compares every one of the **seven** extracted regular files
+  against the built artifact, all identical, and confirms the executable lacks
+  `KONTROL_F00_RECOVERY_TEST`. `release-binary.log` identifies the arm64 executable.
+  No app launch, production-store use, signed sandbox, Gatekeeper, notarization or
+  distribution approval was attempted; this ZIP is **not a distributable**.
+- `protected-before.json` / `protected-after.json` match **60 files** exactly:
+  historical fixtures/generators/feed inputs, frozen persistence sources, example
+  external `.kontrol` project, resources and dependency pin. All **12 V1–V4
+  originals (eight sidecars)** remain unchanged. Fresh ProjectIntegration tests
+  compare every copied external tree entry/byte including `.kontrol`, hidden Git
+  and source through failure/disconnect/reopen, with zero grant/writer admission.
+  Their complete post-run inventories are retained in `retained-inventories.json`.
+- `host-exit.log` checks all twelve exact initial/final/auxiliary host PIDs with
+  `ps -p PID -o pid=,stat=,command=`: exit **1**, no rows. `store-integrity.log`
+  enumerates **20 precisely logged retained roots**, store/WAL/SHM paths/sizes and
+  read-only SQLite integrity: **137 valid stores, all `ok`**; **four intentionally
+  malformed preservation fixtures** are identified and retained. Roots are under
+  `$TMPDIR`: `Kontrol{ContainerTests,PreferencesMigration,V1Reopen}-{57497,59501}`,
+  `KontrolPreferencesTests-{57416,59249}`,
+  `KontrolProject{DisconnectTests,IntegrationTests,RemovalTests}-{57428,59265}`,
+  `KontrolNewsRepositoryTests-{59366,62028}`, and four UUID capture roots (full
+  identities in that log). The News roots contain **18** final primary fixtures
+  and **three** repeated regression fixtures. No agent cleanup occurred. The
+  initial old News harness itself removed its UUID directories and emitted the
+  preserved diagnostics; those removed bytes are not claimed recovered. Final
+  fixtures remain intact. SQLite immutable mode is used only for host-exited,
+  no-WAL closed artifacts; stores with WAL use ordinary read-only access.
+
+### Exact outstanding hosted selectors and native observations
+
+`build-for-testing` compiled **all** current hosted coverage. The complete source
+inventory minus the 502 executed methods is recorded as **625 exact selectors** in
+`$EVIDENCE/compiled-not-executed-identifiers.txt`, grouped by suite; these are
+**not executed in this checkpoint**, not all necessarily GUI. This inventory is
+not a new waiver and does not replace existing README/QA deferred ledgers or A13's
+serial full suite. In particular, **all 22 DesignSystemComponentTests** and all
+remaining Settings/Projects/Today/Focus/Learning/News presentation/native selectors
+retain their earlier required acceptance status and historical failures/skips.
+
+The **32** remaining `SettingsSceneTests` selectors are explicitly enumerated in
+that file (four pure state/presentation methods ran above). Required F13 native
+coverage includes panel JSON/replacement configuration; shared native Local Data
+state/retry results; folder route/unavailable/review/removal; General editor and
+cross-window stale/unreadable recovery; hub/General/folder/export keyboard focus;
+all five folder and six Local Data geometry-state fixtures; compact/native/inline
+recovery and scene reopen. Exact names remain in the preceding Steps 1.1/1.2,
+3.3/4.1/4.2/4.3 ledgers, not replaced by this summary. Projects' Settings-removal
+shared selection/detail/picker fixture and shell rendered-navigation selector are
+also compiled but not executed here.
+
+Before assessing evidence availability, enumerated existing capture directories
+and filenames under `/tmp`, `.mockups` and `docs` into
+`existing-capture-directories.txt`. Existing evidence includes
+`/tmp/kontrol-f13-step2.4-final-captures/`,
+`/tmp/kontrol-f13-step2.4-geometry-r1-captures/`,
+`/tmp/kontrol-f13-step2.4-diagnostic-r2-captures/` and
+`/tmp/kontrol-shell-captures/`; it is **not claimed missing**, newly rendered or
+compared by this checkpoint. Step 6.1 requires non-GUI verification, not rendered
+acceptance; no before/after visual comparison or new screenshot/native observation
+is credited. Actual comparison to applicable F00–F13/supplemental references remains
+A13, with recorded points/pixels/backing scale at 520×340, 1000×700 and 1440×940,
+standard/130%/larger text. No human attestation was supplied.
+
+Independently observed keyboard-only journeys, visible/restored surviving focus,
+Escape/Cancel, spoken VoiceOver status/names/roles/recovery, no repeated progress
+announcements, reduced motion, non-color status, ≥32-point targets, ≥4.5:1 text
+and ≥3:1 essential focus/boundary contrast remain **pending A13**, not passed by
+compilation/token tests. S13 isolated signed/offline/relaunch/native picker/bookmark,
+project/export journeys; B13 actual macOS 14/current-runtime journeys; and D13
+external signing/notary/final extracted distribution/install/update acceptance
+remain separate mandatory gates. Historical F02/F06/AX findings remain open there.
+
+**Step 6.1 implementation integration is ready for review; no remaining checkpoint
+blocker. F13/V1 is not release-approved.** No later task was executed or checkbox
+marked; all changes are left uncommitted.

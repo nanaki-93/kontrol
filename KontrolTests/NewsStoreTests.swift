@@ -183,6 +183,46 @@ private actor EditorNewsService: NewsRefreshing {
     }
 }
 
+/// Independently owns each scheduled sleep, including cancellation/rescheduling.
+/// A single overwritten continuation loses the canceled timer's ownership.
+@MainActor
+private final class HeldNewsSleep {
+    private(set) var intervals: [TimeInterval] = []
+    private var pending: [UUID: CheckedContinuation<Void, Error>] = [:]
+    private var order: [UUID] = []
+    var pendingCount: Int { pending.count }
+
+    func sleep(_ seconds: TimeInterval) async throws {
+        try Task.checkCancellation()
+        let id = UUID()
+        intervals.append(seconds)
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                if Task.isCancelled {
+                    continuation.resume(throwing: CancellationError())
+                } else {
+                    pending[id] = continuation
+                    order.append(id)
+                }
+            }
+        } onCancel: {
+            Task { @MainActor in self.finish(id, canceled: true) }
+        }
+    }
+
+    func wakeFirst() {
+        guard let id = order.first else { return }
+        finish(id, canceled: false)
+    }
+
+    private func finish(_ id: UUID, canceled: Bool) {
+        guard let continuation = pending.removeValue(forKey: id) else { return }
+        order.removeAll { $0 == id }
+        if canceled { continuation.resume(throwing: CancellationError()) }
+        else { continuation.resume() }
+    }
+}
+
 @MainActor
 private final class StubNewsBrowserOpener: NewsBrowserOpening {
     var urls: [URL] = []
@@ -417,13 +457,9 @@ final class NewsStoreTests: XCTestCase {
                                          retry: now.addingTimeInterval(3600))
         let repo = StubNewsRepository(cached)
         let service = HeldNewsService()
-        var wake: CheckedContinuation<Void, Error>?
-        var intervals: [TimeInterval] = []
+        let sleeper = HeldNewsSleep()
         let store = NewsStore(repository: repo, service: service, catalog: catalog,
-            clock: { instant }, sleep: { interval in
-                intervals.append(interval)
-                try await withCheckedThrowingContinuation { wake = $0 }
-            })
+            clock: { instant }, sleep: sleeper.sleep)
         store.setVisible(true, windowID: UUID())
         store.setAppActive(true)
         await waitFor(service, count: 1)
@@ -431,8 +467,8 @@ final class NewsStoreTests: XCTestCase {
         await service.finish(outcomes([cached.feeds[1]], instant))
         for _ in 0..<10_000 where store.isRefreshing { await Task.yield() }
         XCTAssertFalse(store.isRefreshing)
-        for _ in 0..<10_000 where intervals.isEmpty { await Task.yield() }
-        XCTAssertFalse(intervals.isEmpty)
+        for _ in 0..<10_000 where sleeper.intervals.isEmpty { await Task.yield() }
+        XCTAssertFalse(sleeper.intervals.isEmpty)
         let manual = Task { await store.refresh(.manual) }
         await waitFor(service, count: 2)
         await assertIDs(service, [secondID]) // retry deadline still gates first
@@ -442,8 +478,8 @@ final class NewsStoreTests: XCTestCase {
         // Scheduled checks stop when app deactivates even though this window remains visible.
         store.setAppActive(false)
         let oldCount = await service.count()
-        wake?.resume()
-        await Task.yield()
+        for _ in 0..<10_000 where sleeper.pendingCount != 0 { await Task.yield() }
+        XCTAssertEqual(sleeper.pendingCount, 0, "Deactivation must release all canceled sleeps")
         await assertCount(service, oldCount)
     }
 
@@ -575,25 +611,47 @@ final class NewsStoreTests: XCTestCase {
         let (catalog, cached) = fixture([now, now])
         let repo = StubNewsRepository(cached)
         let service = HeldNewsService()
-        var wake: CheckedContinuation<Void, Error>?
-        var delay: TimeInterval?
+        let sleeper = HeldNewsSleep()
         let store = NewsStore(repository: repo, service: service, catalog: catalog,
-            clock: { instant }, sleep: { seconds in
-                delay = seconds
-                try await withCheckedThrowingContinuation { wake = $0 }
-            })
+            clock: { instant }, sleep: sleeper.sleep)
         store.setVisible(true, windowID: UUID())
         store.setAppActive(true)
-        for _ in 0..<10_000 where wake == nil { await Task.yield() }
-        XCTAssertEqual(delay, 1800)
+        for _ in 0..<10_000 where sleeper.pendingCount == 0 { await Task.yield() }
+        XCTAssertEqual(sleeper.intervals.last, 1800)
         await assertCount(service, 0)
         instant = now.addingTimeInterval(1800)
-        wake?.resume()
+        sleeper.wakeFirst()
         await waitFor(service, count: 2)
         await assertIDs(service, [firstID, secondID])
         await service.finish(outcomes(cached.feeds, instant))
         for _ in 0..<10_000 where store.isRefreshing { await Task.yield() }
         XCTAssertEqual(store.snapshot?.preferences.lastRefreshAt, instant)
+        store.setAppActive(false)
+        for _ in 0..<10_000 where sleeper.pendingCount != 0 { await Task.yield() }
+        XCTAssertEqual(sleeper.pendingCount, 0)
+    }
+
+    func testScheduledSleepSeamRetainsEachOwnerAcrossCancellationAndWake() async throws {
+        let sleeper = HeldNewsSleep()
+        let first = Task { try await sleeper.sleep(10) }
+        for _ in 0..<10_000 where sleeper.pendingCount != 1 { await Task.yield() }
+        XCTAssertEqual(sleeper.pendingCount, 1)
+        let second = Task { try await sleeper.sleep(20) }
+        for _ in 0..<10_000 where sleeper.pendingCount != 2 { await Task.yield() }
+        XCTAssertEqual(sleeper.pendingCount, 2)
+        first.cancel()
+        do { try await first.value; XCTFail("Canceled sleep must throw") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(sleeper.pendingCount, 1, "Cancellation must not overwrite or wake another owner")
+        sleeper.wakeFirst()
+        try await second.value
+        XCTAssertEqual(sleeper.pendingCount, 0)
+        sleeper.wakeFirst() // late/duplicate wake cannot resume twice
+        let canceled = Task { try await sleeper.sleep(30) }
+        canceled.cancel()
+        do { try await canceled.value; XCTFail("Pre-canceled sleep must throw") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(sleeper.pendingCount, 0)
     }
 
     func testForegroundRespectsPerFeedThirtyMinutesAndHiddenWindowsDoNotRefresh() async {

@@ -7,10 +7,37 @@ import XCTest
 final class NewsRepositoryTests: XCTestCase {
     private let instant = Date(timeIntervalSince1970: 1_750_000_000)
 
+    private func directory() -> URL {
+        // Core Data's SQLite handles can outlive Swift owners/autoreleasepool.
+        // Retain every opened fixture and sidecar until this test host exits.
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "KontrolNewsRepositoryTests-\(ProcessInfo.processInfo.processIdentifier)")
+        print("News repository test store cleanup after host exit: \(root.path)")
+        return root.appendingPathComponent(UUID().uuidString)
+    }
+
     private func store() throws -> (ModelContainer, URL) {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let directory = directory()
         return (try ModelContainerFactory().makeContainer(mode: .persistent(
             directory.appendingPathComponent("Kontrol.store"))), directory)
+    }
+
+    func testFixtureStoreRemainsReadableAfterSwiftOwnersLeaveScope() throws {
+        let (directory, saved) = try autoreleasepool {
+            let (container, directory) = try store()
+            let repo = SwiftDataNewsRepository(container: container, now: { self.instant })
+            let saved = try repo.loadOrInitialize(catalog())
+            for name in ["Kontrol.store", "Kontrol.store-wal", "Kontrol.store-shm"] {
+                XCTAssertTrue(FileManager.default.fileExists(atPath: directory.appendingPathComponent(name).path))
+            }
+            return (directory, saved)
+        }
+        // Swift scope exit is not permission to unlink a process-owned database.
+        let url = directory.appendingPathComponent("Kontrol.store")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+        let reopened = try ModelContainerFactory().makeContainer(mode: .persistent(url))
+        XCTAssertEqual(try SwiftDataNewsRepository(container: reopened, now: { self.instant })
+            .loadOrInitialize(catalog()), saved)
     }
 
     private func catalog(version: Int = 1, name: String = "Original") -> DefaultFeedCatalog {
@@ -37,7 +64,6 @@ final class NewsRepositoryTests: XCTestCase {
 
     func testDisabledDraftOfflineAndRevisionCheckedEditsSurviveReopen() throws {
         let (container, directory) = try store()
-        defer { try? FileManager.default.removeItem(at: directory) }
         let repo = SwiftDataNewsRepository(container: container, now: { self.instant })
         let original = try repo.loadOrInitialize(catalog())
         let added = try repo.saveFeed(draft())
@@ -64,8 +90,7 @@ final class NewsRepositoryTests: XCTestCase {
     }
 
     func testInvalidDuplicateLimitAndValidationReceiptsLeaveRowsIntact() throws {
-        let (container, directory) = try store()
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let (container, _) = try store()
         let repo = SwiftDataNewsRepository(container: container, now: { self.instant })
         let original = try repo.loadOrInitialize(catalog())
         for invalid in [draft(name: "   "), draft(url: "http://bad.example.com/rss"),
@@ -102,8 +127,7 @@ final class NewsRepositoryTests: XCTestCase {
     }
 
     func testEnablingUnvalidatedFeedNeedsReceiptAndNameOnlyEditNeedsNone() throws {
-        let (container, directory) = try store()
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let (container, _) = try store()
         let repo = SwiftDataNewsRepository(container: container, now: { self.instant })
         let initial = try repo.loadOrInitialize(catalog())
         let disabled = try XCTUnwrap(repo.saveFeed(draft()).feeds.first { $0.name == "Custom" })
@@ -127,7 +151,6 @@ final class NewsRepositoryTests: XCTestCase {
     func testEndpointEditAndRemovalCleanOnlyTheirContributionAndFailedSaveIsAtomic() throws {
         enum Failure: Error { case injected }
         let (container, directory) = try store()
-        defer { try? FileManager.default.removeItem(at: directory) }
         let repo = SwiftDataNewsRepository(container: container, now: { self.instant })
         let initial = try repo.loadOrInitialize(catalog())
         let primary = initial.feeds[0]
@@ -198,7 +221,6 @@ final class NewsRepositoryTests: XCTestCase {
 
     func testDefaultsOnlyOnceAndZeroSelectionSurvivesReopenAndCatalogUpdate() throws {
         let (container, directory) = try store()
-        defer { try? FileManager.default.removeItem(at: directory) }
         let repo = SwiftDataNewsRepository(container: container, now: { self.instant })
         let original = try repo.loadOrInitialize(catalog())
         XCTAssertEqual(original.preferences.selectedTopicIDs, ["go"])
@@ -229,8 +251,7 @@ final class NewsRepositoryTests: XCTestCase {
     }
 
     func testRevisionChecksAndInvalidSelectionDoNotChangeFeeds() throws {
-        let (container, directory) = try store()
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let (container, _) = try store()
         let repo = SwiftDataNewsRepository(container: container)
         let first = try repo.loadOrInitialize(catalog())
         XCTAssertThrowsError(try repo.savePreferences(.init(selectedTopicIDs: ["unknown"]),
@@ -250,7 +271,6 @@ final class NewsRepositoryTests: XCTestCase {
     func testFailedInitialAndPreferenceSavesNeverPublishOrPersist() throws {
         enum Failure: Error { case injected }
         let (container, directory) = try store()
-        defer { try? FileManager.default.removeItem(at: directory) }
         let failing = SwiftDataNewsRepository(container: container, beforeSave: { throw Failure.injected })
         XCTAssertThrowsError(try failing.loadOrInitialize(catalog())) {
             XCTAssertTrue($0 is Failure)
@@ -271,8 +291,7 @@ final class NewsRepositoryTests: XCTestCase {
 
     func testCorruptPayloadAndReadFailureNeverInitializeEmptyState() throws {
         enum Failure: Error { case injected }
-        let (container, directory) = try store()
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let (container, _) = try store()
         let brokenRead = SwiftDataNewsRepository(container: container,
                                                   beforeRead: { throw Failure.injected })
         XCTAssertThrowsError(try brokenRead.loadOrInitialize(catalog())) {
@@ -292,7 +311,6 @@ final class NewsRepositoryTests: XCTestCase {
 
     func testPersistedArticleIsDetachedAndUnsafeOrCorruptDataIsNotAnEmptyFeed() throws {
         let (container, directory) = try store()
-        defer { try? FileManager.default.removeItem(at: directory) }
         let repo = SwiftDataNewsRepository(container: container, now: { self.instant })
         let first = try repo.loadOrInitialize(catalog())
         let context = ModelContext(container)
@@ -322,7 +340,6 @@ final class NewsRepositoryTests: XCTestCase {
     func testLoadTrimsValidOverLimitCacheAndSaveFailurePreservesRows() throws {
         enum Failure: Error { case injected }
         let (container, directory) = try store()
-        defer { try? FileManager.default.removeItem(at: directory) }
         let repo = SwiftDataNewsRepository(container: container, now: { self.instant })
         let initial = try repo.loadOrInitialize(catalog())
         let context = ModelContext(container)
@@ -357,7 +374,6 @@ final class NewsRepositoryTests: XCTestCase {
 
     func testSharedArticleRestoresEachSourcesLinkAndTitleAfterReopen() throws {
         let (container, directory) = try store()
-        defer { try? FileManager.default.removeItem(at: directory) }
         let repo = SwiftDataNewsRepository(container: container, now: { self.instant })
         let initial = try repo.loadOrInitialize(catalog())
         let primary = initial.feeds[0]
@@ -423,7 +439,6 @@ final class NewsRepositoryTests: XCTestCase {
     func testRefreshBatchIsAtomicAndPreservesCacheOnFailure304AndEmptySuccess() throws {
         enum Failure: Error { case injected }
         let (container, directory) = try store()
-        defer { try? FileManager.default.removeItem(at: directory) }
         let repo = SwiftDataNewsRepository(container: container, now: { self.instant })
         let initial = try repo.loadOrInitialize(catalog())
         let first = initial.feeds[0]
@@ -490,7 +505,6 @@ final class NewsRepositoryTests: XCTestCase {
 
     func testPartialRefreshKeepsFailedSourcesAndReopenPreservesSharedProvenance() throws {
         let (container, directory) = try store()
-        defer { try? FileManager.default.removeItem(at: directory) }
         let repo = SwiftDataNewsRepository(container: container, now: { self.instant })
         let primary = try repo.loadOrInitialize(catalog()).feeds[0]
         let draft = draft(enabled: true)
@@ -530,8 +544,7 @@ final class NewsRepositoryTests: XCTestCase {
     }
 
     func testLateRefreshFencesRemovedDisabledAndEditedFeedsAndBoundsRepeatedMerges() throws {
-        let (container, directory) = try store()
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let (container, _) = try store()
         let repo = SwiftDataNewsRepository(container: container, now: { self.instant })
         let original = try repo.loadOrInitialize(catalog()).feeds[0]
         let otherDraft = draft(enabled: true)
@@ -587,8 +600,7 @@ final class NewsRepositoryTests: XCTestCase {
     }
 
     func testGUIDMoveThenURLReissuePersistsDistinctRowsAcrossReopen() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let directory = directory()
         let storeURL = directory.appendingPathComponent("Kontrol.store")
         // Each invocation releases its repository/container before the next disk open.
         func open(at date: Date, path: String? = nil, guid: String? = nil) throws -> NewsSnapshot {
@@ -632,8 +644,7 @@ final class NewsRepositoryTests: XCTestCase {
     }
 
     func testFuturePublicationExpiresAtFirstFetchBoundaryAcrossReopenAnd304() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let directory = directory()
         let storeURL = directory.appendingPathComponent("Kontrol.store")
         let publication = instant.addingTimeInterval(20 * 86_400)
         func open(at date: Date, result: FeedRefreshResult? = nil) throws -> NewsSnapshot {
@@ -675,8 +686,7 @@ final class NewsRepositoryTests: XCTestCase {
 
     func testLoadTrimsExpiredArticlesAndFailureLeavesThemUntouched() throws {
         enum Failure: Error { case injected }
-        let (container, directory) = try store()
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let (container, _) = try store()
         let repo = SwiftDataNewsRepository(container: container, now: { self.instant })
         let original = try repo.loadOrInitialize(catalog())
         let context = ModelContext(container)
