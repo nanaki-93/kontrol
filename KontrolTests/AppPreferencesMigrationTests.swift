@@ -10,9 +10,13 @@ final class AppPreferencesMigrationTests: XCTestCase {
     private let when = Date(timeIntervalSince1970: 1_700_000_000)
 
     private func directory() throws -> URL {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "KontrolPreferencesMigration-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
+        // Core Data teardown is asynchronous even after autoreleasepool. Keep
+        // process-owned stores and sidecars intact until the test host exits.
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "KontrolPreferencesMigration-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
+        print("Preferences migration store cleanup after host exit: \(root.path)")
+        let url = root.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }
 
@@ -106,7 +110,6 @@ final class AppPreferencesMigrationTests: XCTestCase {
 
     func testRichV9MigratesWithAllFieldsAndRowIdentitiesUnchangedAcrossReopen() throws {
         let folder = try directory()
-        defer { try? FileManager.default.removeItem(at: folder) }
         let url = folder.appendingPathComponent("Kontrol.store")
         let taskID = UUID(), focusID = UUID(), feedID = UUID()
         let (identity, before): (PersistentIdentifier, StoreRows) = try autoreleasepool {
@@ -217,7 +220,6 @@ final class AppPreferencesMigrationTests: XCTestCase {
             let original = try files(in: source)
             XCTAssertNotNil(original["Kontrol.store"])
             let folder = try directory()
-            defer { try? FileManager.default.removeItem(at: folder) }
             // Include the complete SQLite sidecar set; never open the source fixture.
             for name in original.keys {
                 try FileManager.default.copyItem(at: source.appendingPathComponent(name),
@@ -248,7 +250,6 @@ final class AppPreferencesMigrationTests: XCTestCase {
 
     func testV10PreferenceDefaultsAndCustomScalarValuesSurviveDistinctOpens() throws {
         let folder = try directory()
-        defer { try? FileManager.default.removeItem(at: folder) }
         let url = folder.appendingPathComponent("Kontrol.store")
         let revision = UUID()
         try autoreleasepool {
@@ -284,7 +285,6 @@ final class AppPreferencesMigrationTests: XCTestCase {
 
     func testRepeatedFailedOpensPreserveStoreAndExistingSidecarBytes() throws {
         let folder = try directory()
-        defer { try? FileManager.default.removeItem(at: folder) }
         for name in ["Kontrol.store", "Kontrol.store-wal", "Kontrol.store-shm"] {
             try Data("Invalid SQLite file: preserve \(name)".utf8).write(to: folder.appendingPathComponent(name))
         }

@@ -38,10 +38,13 @@ final class V1FixtureTests: XCTestCase {
             ($0.lastPathComponent, try Data(contentsOf: $0))
         })
 
-        let work = FileManager.default.temporaryDirectory
-            .appendingPathComponent("KontrolV1Reopen-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: work, withIntermediateDirectories: false)
-        defer { try? FileManager.default.removeItem(at: work) }
+        // Test-owned scopes do not synchronously close SQLite worker handles.
+        // Retain copies until the host exits, never unlink a live WAL/SHM.
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "KontrolV1Reopen-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
+        print("V1 fixture store cleanup after host exit: \(root.path)")
+        let work = root.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
         // Copy the complete closed SQLite file set; a WAL/SHM or other sidecar
         // belongs with its database. Never open the bundle's read-only source.
         for file in originalFiles {

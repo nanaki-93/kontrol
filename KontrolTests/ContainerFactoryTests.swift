@@ -9,10 +9,57 @@ final class ContainerFactoryTests: XCTestCase {
     private let factory = ModelContainerFactory()
 
     private func temporaryDirectory() throws -> URL {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("KontrolContainerTests-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        // Releasing Swift owners does not synchronously close Core Data's SQLite
+        // worker handles. Never unlink an opened store before this host exits.
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "KontrolContainerTests-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
+        print("Container test store cleanup after host exit: \(root.path)")
+        let directory = root.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory
+    }
+
+    private func files(in directory: URL) throws -> [String: Data] {
+        let urls = try FileManager.default.contentsOfDirectory(at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey]).filter {
+                try $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true
+            }
+        return try Dictionary(uniqueKeysWithValues: urls.map {
+            ($0.lastPathComponent, try Data(contentsOf: $0))
+        })
+    }
+
+    // A generated SwiftData source is not a closed fixture, even after its Swift
+    // owners leave scope. SQLite backup reads the committed WAL transaction and
+    // produces a separate closed artifact with no Core Data teardown owner.
+    private func closedSnapshot(from source: URL, to destination: URL) throws {
+        var reader: OpaquePointer?, writer: OpaquePointer?
+        defer {
+            if let reader { sqlite3_close(reader) }
+            if let writer { sqlite3_close(writer) }
+        }
+        try requireSQLite(sqlite3_open_v2(source.path, &reader, SQLITE_OPEN_READONLY, nil))
+        try requireSQLite(sqlite3_open_v2(destination.path, &writer,
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil))
+        try requireSQLite(sqlite3_busy_timeout(reader, 5_000))
+        try requireSQLite(sqlite3_busy_timeout(writer, 5_000))
+        let backup = try XCTUnwrap(sqlite3_backup_init(writer, "main", reader, "main"))
+        let status = sqlite3_backup_step(backup, -1)
+        let finished = sqlite3_backup_finish(backup)
+        try requireSQLite(status, expected: SQLITE_DONE)
+        try requireSQLite(finished)
+        try requireSQLite(sqlite3_close(reader))
+        reader = nil
+        try requireSQLite(sqlite3_close(writer))
+        writer = nil
+    }
+
+    private func requireSQLite(_ status: Int32, expected: Int32 = SQLITE_OK) throws {
+        guard status == expected else {
+            throw NSError(domain: "ContainerFixtureSQLite", code: Int(status), userInfo: [
+                NSLocalizedDescriptionKey: "SQLite status \(status), expected \(expected)"
+            ])
+        }
     }
 
     private func taskIDs(in container: ModelContainer) throws -> [UUID] {
@@ -21,7 +68,6 @@ final class ContainerFactoryTests: XCTestCase {
 
     func testV5DiskMigratesAdditivelyAndV6EvidenceSurvivesV10Reopen() throws {
         let directory = try temporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
         let url = directory.appendingPathComponent("Kontrol.store")
         let attemptID = UUID()
         func createV5() throws {
@@ -86,7 +132,6 @@ final class ContainerFactoryTests: XCTestCase {
 
     func testClosedDiskStoreReopensAtSameLocationButNotOtherDiskOrMemory() throws {
         let directory = try temporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
         let firstURL = directory.appendingPathComponent("first/Kontrol.store")
         let otherURL = directory.appendingPathComponent("other/Kontrol.store")
         let id = UUID()
@@ -119,7 +164,6 @@ final class ContainerFactoryTests: XCTestCase {
         for version in ["V2", "V3"] {
             let source = try XCTUnwrap(Bundle(for: Self.self).url(forResource: version, withExtension: nil))
             let directory = try temporaryDirectory()
-            defer { try? FileManager.default.removeItem(at: directory) }
             let files = try FileManager.default.contentsOfDirectory(at: source,
                 includingPropertiesForKeys: [.isRegularFileKey]).filter {
                     try $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true
@@ -158,20 +202,22 @@ final class ContainerFactoryTests: XCTestCase {
 
     func testCopiedV3DefinitionMigratesWithIdentityAndObjectiveDefault() throws {
         let directory = try temporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
         let source = directory.appendingPathComponent("source", isDirectory: true)
         let copy = directory.appendingPathComponent("copy", isDirectory: true)
         try FileManager.default.createDirectory(at: source, withIntermediateDirectories: false)
         try FileManager.default.createDirectory(at: copy, withIntermediateDirectories: false)
         let sourceURL = source.appendingPathComponent("Kontrol.store")
         let copiedURL = copy.appendingPathComponent("Kontrol.store")
+        let writerDirectory = directory.appendingPathComponent("writer", isDirectory: true)
+        try FileManager.default.createDirectory(at: writerDirectory, withIntermediateDirectories: false)
+        let writerURL = writerDirectory.appendingPathComponent("Kontrol.store")
         let lessonID = "go.historical.v1"
         let attemptID = UUID()
         let startedAt = Date(timeIntervalSince1970: 1_700_000_000)
         // Write against the released V3 schema, without the production migration plan.
-        func writeV3AndClose() throws -> PersistentIdentifier {
+        func writeV3Snapshot() throws -> PersistentIdentifier {
             let schema = Schema(versionedSchema: KontrolSchemaV3.self)
-            let config = ModelConfiguration(schema: schema, url: sourceURL, cloudKitDatabase: .none)
+            let config = ModelConfiguration(schema: schema, url: writerURL, cloudKitDatabase: .none)
             let container = try ModelContainer(for: schema, configurations: [config])
             let context = ModelContext(container)
             let historical = KontrolSchemaV1.LessonDefinition(
@@ -187,19 +233,12 @@ final class ContainerFactoryTests: XCTestCase {
                                          answerDraft: "Do not discard"))
             context.insert(CatalogImportState(catalogID: "kontrol.starter", lastImportedVersion: 1))
             try context.save()
-            return historical.persistentModelID
+            return try withExtendedLifetime(container) {
+                try closedSnapshot(from: writerURL, to: sourceURL)
+                return historical.persistentModelID
+            }
         }
-        let originalIdentity = try writeV3AndClose()
-        // Drain the source WAL before snapshotting fixture bytes. Core Data can
-        // checkpoint asynchronously after releasing the writing container; a
-        // live WAL copy otherwise races the source's own normal close.
-        var database: OpaquePointer?
-        XCTAssertEqual(sqlite3_open_v2(sourceURL.path, &database, SQLITE_OPEN_READWRITE, nil), SQLITE_OK)
-        defer { if database != nil { sqlite3_close(database) } }
-        XCTAssertEqual(sqlite3_wal_checkpoint_v2(database, nil, SQLITE_CHECKPOINT_TRUNCATE, nil, nil),
-                       SQLITE_OK)
-        XCTAssertEqual(sqlite3_close(database), SQLITE_OK)
-        database = nil
+        let originalIdentity = try writeV3Snapshot()
         let originals = try FileManager.default.contentsOfDirectory(at: source,
             includingPropertiesForKeys: [.isRegularFileKey]).filter {
                 try $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true
@@ -247,9 +286,96 @@ final class ContainerFactoryTests: XCTestCase {
         }
     }
 
+    func testCheckpointChangesLiveV3BytesButClosedBackupPreservesCommittedWALAndMigrationSource() throws {
+        let directory = try temporaryDirectory()
+        let live = directory.appendingPathComponent("live", isDirectory: true)
+        let frozen = directory.appendingPathComponent("snapshot", isDirectory: true)
+        let copy = directory.appendingPathComponent("copy", isDirectory: true)
+        for folder in [live, frozen, copy] {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        }
+        let liveURL = live.appendingPathComponent("Kontrol.store")
+        let frozenURL = frozen.appendingPathComponent("Kontrol.store")
+        let schema = Schema(versionedSchema: KontrolSchemaV3.self)
+        let container = try ModelContainer(for: schema, configurations: [
+            ModelConfiguration(schema: schema, url: liveURL, cloudKitDatabase: .none)
+        ])
+        let context = ModelContext(container)
+        context.autosaveEnabled = false
+
+        // Hold a real SQLite reader at the pre-save snapshot. This prevents an
+        // automatic checkpoint from erasing the WAL before we can inspect it;
+        // no timing sleep or hoped-for asynchronous teardown is involved.
+        var observer: OpaquePointer?
+        try requireSQLite(sqlite3_open_v2(liveURL.path, &observer, SQLITE_OPEN_READWRITE, nil))
+        defer { if let observer { sqlite3_close(observer) } }
+        try requireSQLite(sqlite3_busy_timeout(observer, 5_000))
+        // Even a successful early checkpoint (the previous fixture workaround)
+        // cannot freeze bytes while SQLite/Core Data still owns the live store.
+        try requireSQLite(sqlite3_wal_checkpoint_v2(observer, nil, SQLITE_CHECKPOINT_TRUNCATE, nil, nil))
+        try requireSQLite(sqlite3_exec(observer,
+            "BEGIN; SELECT COUNT(*) FROM ZTASKITEM", nil, nil, nil))
+        let id = UUID()
+        let createdAt = Date(timeIntervalSince1970: 1_700_000_000)
+        context.insert(try TaskItem(id: id, title: "Committed in WAL", createdAt: createdAt,
+            notes: "Exact notes\n  preserved"))
+        try context.save()
+        let before = try files(in: live)
+        let wal = try XCTUnwrap(before["Kontrol.store-wal"])
+        XCTAssertGreaterThan(wal.count, 32, "Saved WAL must contain frames, not just a header")
+        XCTAssertTrue([Data([0x37, 0x7f, 0x06, 0x82]), Data([0x37, 0x7f, 0x06, 0x83])]
+            .contains(Data(wal.prefix(4))), "Inspect a real SQLite WAL")
+        XCTAssertNotNil(before["Kontrol.store-shm"])
+        try closedSnapshot(from: liveURL, to: frozenURL)
+        let original = try files(in: frozen)
+        XCTAssertEqual(Set(original.keys), ["Kontrol.store"], "Backup must be a closed standalone database")
+        for name in original.keys {
+            try FileManager.default.copyItem(at: frozen.appendingPathComponent(name),
+                to: copy.appendingPathComponent(name))
+        }
+
+        // Reproduce the historical 0-vs-nonzero WAL byte mismatch without any
+        // migration or logical mutation of the source. A checkpoint is ordinary
+        // SQLite lifecycle work, not lost committed data.
+        try requireSQLite(sqlite3_exec(observer, "ROLLBACK", nil, nil, nil))
+        var logFrames: Int32 = -1, checkpointed: Int32 = -1
+        try requireSQLite(sqlite3_wal_checkpoint_v2(observer, nil, SQLITE_CHECKPOINT_TRUNCATE,
+            &logFrames, &checkpointed))
+        XCTAssertEqual(logFrames, 0)
+        XCTAssertEqual(checkpointed, 0)
+        let after = try files(in: live)
+        XCTAssertEqual(after["Kontrol.store-wal"]?.count, 0)
+        XCTAssertNotEqual(after["Kontrol.store"], before["Kontrol.store"])
+        XCTAssertNotEqual(after, before, "Live file bytes are not a frozen-fixture contract")
+        XCTAssertEqual(try files(in: frozen), original, "Closed backup has no source teardown owner")
+        print("V3 snapshot reproduction: \(live.path); WAL \(wal.count) -> 0 bytes; " +
+            "checkpoint frames \(logFrames)/\(checkpointed); closed snapshot \(frozen.path)")
+
+        for _ in 0..<2 {
+            try autoreleasepool {
+                let reopened = try factory.makeContainer(mode: .persistent(
+                    copy.appendingPathComponent("Kontrol.store")))
+                let read = ModelContext(reopened)
+                read.autosaveEnabled = false
+                let task = try XCTUnwrap(read.fetch(FetchDescriptor<TaskItem>()).first)
+                XCTAssertEqual(try read.fetchCount(FetchDescriptor<TaskItem>()), 1)
+                XCTAssertEqual(task.id, id)
+                XCTAssertEqual(task.title, "Committed in WAL")
+                XCTAssertEqual(task.createdAt, createdAt)
+                XCTAssertEqual(task.notes, "Exact notes\n  preserved")
+                XCTAssertFalse(read.hasChanges)
+            }
+        }
+        let saved = try XCTUnwrap(context.fetch(FetchDescriptor<TaskItem>()).first)
+        XCTAssertEqual(saved.id, id)
+        XCTAssertEqual(saved.notes, "Exact notes\n  preserved")
+        XCTAssertFalse(context.hasChanges)
+        XCTAssertEqual(try files(in: frozen), original, "Migrating the copy must not alter closed source bytes")
+        withExtendedLifetime(container) {}
+    }
+
     func testFreshFactoryStorePersistsV3FocusV2BlockAndV1TaskAcrossReopen() throws {
         let directory = try temporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
         let url = directory.appendingPathComponent("Kontrol.store")
         let blockID = UUID()
         let taskID = UUID()
@@ -311,7 +437,6 @@ final class ContainerFactoryTests: XCTestCase {
 
     func testOpenErrorPropagatesWithoutReplacingExistingFiles() throws {
         let directory = try temporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
         let store = directory.appendingPathComponent("Kontrol.store")
         let original = Data("not a SQLite database; preserve these bytes".utf8)
         try original.write(to: store)

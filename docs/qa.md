@@ -2663,3 +2663,177 @@ injected callbacks do not substitute. Capture/rendered comparisons and spoken
 results are pending, not inferred from builds or tests. A13/S13/B13/D13 remain
 separate mandatory acceptance gates. **No remaining Step 4.3 implementation
 blockers.**
+
+## F13 Step 5.1 — Migration preservation and snapshot investigation (2026-10-01)
+
+**Scope:** `AppPreferencesMigrationTests.swift`, `ContainerFactoryTests.swift`,
+`V1FixtureTests.swift`, and this ledger only. First unchecked task matched runner
+Step 5.1; cumulative task-17 checklist had no previous review findings. Initial
+worktree/index were clean, no submodule or applicable ancestor/target `AGENTS.md`
+was found. HEAD **`bdbf1d5451dd`** (full identity in `source-head.txt` below).
+Environment: Xcode **27.0 / 27A266a**, Apple Swift **6.4**, macOS **27.0 / 26A428**,
+arm64; existing macOS 14 deployment and Swift 5 mode unchanged.
+
+Evidence directory **`/tmp/kontrol-f13-migration5.1.kZNVRO`** (`EVIDENCE` below).
+Final test patch: `test-source.diff`, SHA-256
+**`c0155e718a4ad15ccfbbc11540718a46ddd655408abecc68fa95cca3263c42ed`**.
+`environment.txt` records status/index/submodules/toolchain/OS; initial
+`xcodebuild -list -project Kontrol.xcodeproj` exited 0, reporting Kontrol and
+KontrolTests targets, Debug/Release, Kontrol scheme and unchanged Yams 5.4.0.
+
+### Explained fixture-boundary cause and repair
+
+The historical F11 record remains unchanged: **188/189**, exit 65, three
+source-file byte assertion failures in
+`ContainerFactoryTests/testCopiedV3DefinitionMigratesWithIdentityAndObjectiveDefault`
+(including WAL 0 versus 86,552 bytes), followed by isolated/full passing retries.
+Enumerated `/private/tmp` and explicitly checked all five recorded F11 raw log/
+result paths: **unavailable** (`historical-paths.txt`,
+`historical-artifact-check.log`). Thus this investigation does not claim to have
+re-read the missing failure bundle or identified that historical worker's exact
+schedule. Git source/history is retained in `historical-container-test.swift`
+and `container-history.diff`: the generated V3 source had a live SwiftData/Core
+Data origin, and the older checkpoint workaround (introduced in `de3198f`) did
+not create a separately owned closed source. Leaving a function/autoreleasepool
+is not a synchronous Core Data close; byte comparisons against that file set
+can observe later checkpoint/sidecar lifecycle activity. SHM read marks are also
+not immutable user data. This is a test-fixture boundary defect, not evidence
+that migration of the separate copy deletes committed source records.
+
+New regression:
+`ContainerFactoryTests/testCheckpointChangesLiveV3BytesButClosedBackupPreservesCommittedWALAndMigrationSource`.
+It uses a real V3 container and an independent SQLite read transaction to pin
+pre-save WAL visibility, verifies a nonempty WAL with SQLite magic and SHM,
+and backs up committed data to a separate closed database. After releasing the
+reader, successful TRUNCATE checkpointing **deterministically changes the main
+file and WAL bytes without changing saved user records or invoking source
+migration**: **61,832 → 0 WAL bytes**, checkpoint counts **0/0**. An initial
+successful checkpoint is deliberately included: it cannot freeze a still-owned
+store against subsequent SQLite work. The closed backup remains byte-identical
+while its copy migrates/reopens twice with the exact task ID, timestamps and
+multiline notes. No timing sleep or an unexplained passing retry is the evidence
+for this cause. Actual live/snapshot paths and measured transitions are printed
+in every test log; e.g. final run:
+
+- Live: `$TMPDIR/KontrolContainerTests-27566/667558DF-CED2-4D53-BA46-9AD4155DCD83/live`.
+- Closed source: same parent, `snapshot/Kontrol.store`.
+- Migrated destination: same parent, `copy/Kontrol.store`.
+
+The implicated existing selector now writes to a distinct `writer/` location,
+keeps its container alive while SQLite's backup API captures the committed
+transaction, closes both backup connections successfully, then copies only the
+closed `source/` artifact. **All existing identity/content/objective-default,
+answer/revision/progress/import-marker, repeated-open and source filename/byte
+assertions remain.** Frozen bundled fixtures still copy every original file,
+including WAL and SHM; they are never opened in place. All three changed suites
+now log PID-owned UUID roots and retain opened stores/sidecars until host exit,
+rather than unlinking them in `defer`. This fixes the fixture lifetime, not
+production recovery. No schema, migration stage, factory behavior, store-reset
+path, assertion skip/expected failure, or production file was changed.
+
+**Conclusion:** the mutable generated-source snapshot contract has an explained,
+controlled reproduction and is removed by an independent closed SQLite artifact.
+The F11 fixture reliability concern is closed at that test-boundary level, not
+by its old passing retry and not by claiming forensic access to absent artifacts.
+No production migration defect was established or needs a separate repair task.
+Future logical-preservation failures still block release; this checkpoint is
+not A13/S13/B13/D13 approval.
+
+### Exact commands and fresh results
+
+From repository root (logs redirected to the evidence directory):
+
+```bash
+EVIDENCE=/tmp/kontrol-f13-migration5.1.kZNVRO
+f13_test() {
+  local flags=() suite
+  for suite in "$@"; do flags+=("-only-testing:KontrolTests/$suite"); done
+  xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+    -configuration Debug -destination 'platform=macOS' \
+    -derivedDataPath /tmp/kontrol-f13-derived -parallel-testing-enabled NO \
+    CODE_SIGNING_ALLOWED=NO -resultBundlePath "$RESULT_BUNDLE" "${flags[@]}" test
+}
+make build DERIVED_DATA=/tmp/kontrol-f13-derived
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived CODE_SIGNING_ALLOWED=NO build-for-testing
+RESULT_BUNDLE="$EVIDENCE/verified.xcresult" f13_test \
+  AppPreferencesMigrationTests SchemaTests ContainerFactoryTests \
+  V1FixtureTests LaunchRecoveryTests
+for run in 1 2 3; do
+  RESULT_BUNDLE="$EVIDENCE/repeat-$run.xcresult" f13_test \
+    'ContainerFactoryTests/testCopiedV3DefinitionMigratesWithIdentityAndObjectiveDefault' \
+    'ContainerFactoryTests/testCheckpointChangesLiveV3BytesButClosedBackupPreservesCommittedWALAndMigrationSource' \
+    'AppPreferencesMigrationTests/testRichV9MigratesWithAllFieldsAndRowIdentitiesUnchangedAcrossReopen'
+done
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived -parallel-testing-enabled NO \
+  CODE_SIGNING_ALLOWED=NO -resultBundlePath "$EVIDENCE/same-host.xcresult" \
+  -test-iterations 10 -test-repetition-relaunch-enabled NO \
+  -only-testing:KontrolTests/ContainerFactoryTests/testCopiedV3DefinitionMigratesWithIdentityAndObjectiveDefault \
+  -only-testing:KontrolTests/ContainerFactoryTests/testCheckpointChangesLiveV3BytesButClosedBackupPreservesCommittedWALAndMigrationSource \
+  -only-testing:KontrolTests/AppPreferencesMigrationTests/testRichV9MigratesWithAllFieldsAndRowIdentitiesUnchangedAcrossReopen test
+for run in baseline verified repeat-1 repeat-2 repeat-3 same-host; do
+  xcrun xcresulttool get test-results summary --path "$EVIDENCE/$run.xcresult" \
+    --format json > "$EVIDENCE/$run-summary.json"
+  xcrun xcresulttool get test-results tests --path "$EVIDENCE/$run.xcresult" \
+    --format json > "$EVIDENCE/$run-tree.json"
+done
+python3 "$EVIDENCE/audit.py" > "$EVIDENCE/audit.log" 2>&1
+git diff --check
+```
+
+All commands above exited **0** on the final source. Build/test compilation logs
+are `build-final.log`/`compile-final.log`. Baseline before edits: `baseline.log` /
+`baseline.xcresult`, **35/35**. Intermediate implementation: `final.log` /
+`final.xcresult`, **36/36**. Final five-suite gate `verified.log` /
+`verified.xcresult`: **36 passed, zero failed/skipped/expected failures**:
+preferences migration **4**, schemas **10**, container **9**, V1 **2**, recovery
+**11**. `SchemaTests` confirms **ten versions/nine stages**, retained identities
+and additive V10 only. Rich V9 coverage snapshots **every persisted field and
+primary row key in every V9 entity**, including opaque payloads, credentials/
+bookmarks, News cache/transport and active/paused Focus; compares unchanged rows
+on **three** V10 reopens, with no preference seeding/context changes. V10 custom
+scalar/revision and repeated corrupt-store/sidecar preservation checks also pass.
+
+`repeat-{1,2,3}.log` / matching `.xcresult`: **3/3 each**, fresh hosts
+**27596/27622/27648**. `same-host.log` / `same-host.xcresult`: **three identifiers,
+ten repetitions each = 30 passed executions**, host **27666**, not merely three
+executions. Audit checks every repetition child, exact identifiers/execution
+counts and source-method selection (including baseline before the added method).
+All summary warning/failure arrays are empty. Raw output retains intentional
+malformed-store Core Data errors, linkd/AppIntents and multiple-destination
+messages; no SQLite vnode-unlinked or `InvalidTransition` diagnostic occurred.
+
+An initial **auxiliary integrity-audit command failed**, not an XCTest:
+`python3 "$EVIDENCE/audit.py" > "$EVIDENCE/audit.log"` exited **1** with
+`sqlite3.OperationalError: unable to open database file` on a standalone backup
+whose header retains WAL mode but which has no WAL/SHM. Partial output is
+preserved as `audit-initial-partial.log` and
+`store-integrity-initial-partial.log`. Repaired only the audit URI: use read-only
+`immutable=1` for verified **host-exited, no-WAL closed artifacts**, ordinary
+read-only SQLite for stores with WAL. This prevents sidecar creation; never use
+immutable mode to hide a nonempty WAL. The full audit reran and passed (exit 0).
+
+### Original-byte and lifetime evidence
+
+`fixtures-before.json` and `fixtures-after.json` enumerate **all 12 original
+V1–V4 files (eight sidecars)** with sizes and SHA-256. Inventories, sizes and
+hashes match exactly. Tests independently byte-compare bundled originals after
+copy migration. No original store was opened or regenerated. `host-exit.log`
+confirms final/repeat PIDs exited (`ps` exit 1, no rows); the integrity audit also
+checks each root PID, TMPDIR parent and absence of symlinks before reading.
+
+`store-integrity.log` enumerates **14** precisely logged retained roots from
+intermediate/final/repeat runs under
+`/var/folders/lz/20cqfx4x2k98r89q68w3q3ch0000gn/T/`:
+`KontrolContainerTests-{27155,27566,27596,27622,27648,27666}`,
+`KontrolPreferencesMigration-{27155,27566,27596,27622,27648,27666}`,
+`KontrolV1Reopen-{27155,27566}`. **131 valid SQLite stores: all integrity_check=ok**;
+**four intentionally malformed preservation stores** are identified and retained,
+not mislabeled corrupt production data. All connections closed; no agent cleanup
+was performed. Exact store and sidecar paths/sizes remain in that log. Existing
+baseline/LaunchRecovery cleanup outside this task was not changed; no corresponding
+unlink diagnostic was observed here. No GUI/spoken/native/runtime/signing claim
+is made. **No remaining Step 5.1 implementation blockers.**
