@@ -1049,3 +1049,122 @@ Compiled, **not executed or waived**:
 - Existing `ProjectsPresentationTests/testSettingsRemovalUpdatesSharedProjectsSelectionDetailAndPickerOwnership` remains compile-only here; its prior deferred status is unchanged.
 
 Run these with the existing geometry/deferred selectors in a reserved, uncontended desktop with Accessibility authorization for the actual rebuilt host. Capture points/pixels/backing scale and compare the existing folder/removal references at the required sizes/text scales. **No native capture or spoken VoiceOver observation was produced in this task, and no user attestation was supplied.** Independently observe visible focus, Tab/Shift-Tab order, named Reconnect/Remove roles, captured target spoken in confirmation, Escape/Cancel without deletion, focus on enabled survivors after removal/panel dismissal, review/reconfirmation announcements, status without reliance on color, reduced motion, enlarged text reachability, and contrast. A13/S13/B13/D13 and historical release concerns remain pending; this is implementation verification only, not F13/V1 release approval.
+
+## F13 Step 2.1 — detached version-1 export contract (2026-09-30)
+
+The first incomplete task matched runner task 3, **Step 2.1**. The cumulative
+review checklist had no previous findings. Initial worktree/index were clean;
+repository/target and direct ancestor checks found no applicable `AGENTS.md` or
+submodule. Changes are limited to `Kontrol/Domain/LocalDataExport.swift`,
+`KontrolTests/LocalDataExportTests.swift`, `docs/export-format.md`, explicit source/
+test membership in `Kontrol.xcodeproj/project.pbxproj`, and this evidence append.
+No workflow state, frozen schema, dependency pin, fixture, or later export task
+was changed. Projections, persisted capture, file IO/service, and UI remain later
+checkpoints; this is not F13/release completion.
+
+The contract includes all required envelope fields/nine Learning collections,
+detached `Codable`/`Sendable` values, typed finite UTC millisecond instants,
+required nullable keys, identity/version validation, deterministic identity/set
+ordering, exact authored section/self-check/answer text, allowlisted provenance,
+and honest legacy nulls. No SwiftData object, opaque blob, credential reference,
+project grant/path, article cache/transport, diagnostics, or unsaved editor owner
+exists in the DTO graph. The format document enumerates every field/default/null/
+validation/ordering rule and explicitly disclaims encrypted backup and restore.
+
+Environment: **Xcode 27.0 (27A266a), Swift 6.4 (swiftlang-6.4.0.34.1; driver
+1.168.6), arm64 macOS 27.0 (26A428)**; developer directory
+`/Applications/Xcode.app/Contents/Developer`; unchanged Yams **5.4.0**. Source
+base: **`9af422eeee72f9100ade8c95d133ae7b981ac7b0`**. Evidence directory:
+**`/tmp/kontrol-f13-contract2.1.hxbnhK`**. Four-file patch (including new untracked
+files, excluding this QA append): `source.diff`, SHA-256
+**`ba34d8ed752a025121fec8a2179bd007cf77c85a887ec7ca093cef7b60cfcdd6`**.
+Discovery outputs are retained in `preflight.log`: `git status --short`,
+`git diff --stat`, `git diff --cached --stat`, `git submodule status`,
+`git rev-parse HEAD`, `xcode-select -p`, `xcodebuild -version`,
+`xcrun swift --version`, `xcodebuild -list -project Kontrol.xcodeproj`, `sw_vers`,
+`uname -m`. Initial clean status was inspected before edits; the saved preflight
+captures post-edit status.
+
+### Commands and fresh results
+
+Final source validation, all exit **0** (logs `build-final.log`, `bft-final.log`,
+`tests-final.log`, `diffcheck.log`, and `exit-codes.log`):
+
+```sh
+set -o pipefail
+EVIDENCE=/tmp/kontrol-f13-contract2.1.hxbnhK
+make build DERIVED_DATA=/tmp/kontrol-f13-derived
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  CODE_SIGNING_ALLOWED=NO build-for-testing
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
+  -resultBundlePath "$EVIDENCE/contract-final.xcresult" \
+  -only-testing:KontrolTests/LocalDataExportTests test
+git diff --check
+```
+
+The test command is `f13_test LocalDataExportTests` expanded with a fresh retained
+result bundle. **19/19 methods passed**, zero failures, skips, expected failures,
+or xcresult runtime warnings. `build-for-testing` compiled all existing hosted
+coverage as well as the new tests; no UI/AX/native acceptance was executed or
+inferred. The new suite is pure value serialization/validation, with no test
+store, external project, credentials, network, or destination access.
+
+Fresh audits and documented JSON parsing, all exit **0**:
+
+```sh
+xcrun xcresulttool get test-results summary \
+  --path "$EVIDENCE/contract-final.xcresult" --format json \
+  > "$EVIDENCE/contract-final-summary.json"
+xcrun xcresulttool get test-results tests \
+  --path "$EVIDENCE/contract-final.xcresult" --format json \
+  > "$EVIDENCE/contract-final-test-tree.json"
+python3 "$EVIDENCE/audit.py" > "$EVIDENCE/selector-example-audit.log"
+python3 -m json.tool "$EVIDENCE/example-1.json" >/dev/null
+plutil -lint Kontrol.xcodeproj/project.pbxproj
+```
+
+`audit.py` extracts every JSON fence from `docs/export-format.md`, parses it,
+checks the exact envelope/nine collection keys, and saves the actual example as
+`example-1.json`: **1/1 parsed**. It compares fresh executed identifiers with all
+source test methods, requiring every expected method exactly once with Passed
+results: **19/19**, nonempty. Full method identifiers/results are recorded in
+`selector-example-audit.log` and `contract-final-test-tree.json`. Coverage includes
+empty/rich round trips, every nullable key, required empty arrays, all collection
+identities and set duplicates, malformed UUIDs/versions/dates, pin/slot/terminal
+identity mismatches, planned zone/components, every persisted Focus state,
+complete deterministic collection ordering, ordered teaching/self-check content,
+exact whitespace/Unicode/secret-looking strings, allowlisted fields, and legacy
+absence without substitution.
+
+### Intermediate failures and repairs (preserved)
+
+- Initial `make build` passed (`build.log`, exit 0).
+- Initial `build-for-testing` failed (`bft.log`, exit **65**) with two new-test
+  diagnostics: `call can throw but is not marked with 'try'` on the second
+  arguments of encoding equality assertions. Added the two missing `try`
+  keywords; the same command passed (`bft-repair.log`, exit 0), followed by
+  **15/15** initial tests (`tests.log`, `contract.xcresult`, exit 0). These original
+  logs/results remain intact; final validation above supersedes them.
+- Timestamp inspection found Foundation's default Gregorian formatter switches
+  to Julian dates before 1582. Set `gregorianStartDate` to the lower allowed
+  instant, then added lower-bound/proleptic-date regressions and more null,
+  state, UTF-8 slot-key, and all-collection ordering tests. The final build,
+  compilation, and **19/19** test run validate those changes.
+- Additional new-file whitespace checks used
+  `git diff --no-index --check /dev/null <new-file>` for the three new files.
+  Each emitted no whitespace diagnostics (`newfile-diffcheck.log`); exit **1**
+  denotes file differences under `--no-index`, not a whitespace error. The final
+  tracked `git diff --check` passed with exit 0.
+
+Existing multiple-destination/AppIntents/linkd host diagnostics are retained in
+logs, not treated as new contract failures. Test hosts **45207/46463** exited:
+`ps -p 45207,46463 -o pid=,stat=,command=` returned 1 with no rows
+(`host-exit.log`). No fixture/store cleanup was needed or performed. No historical
+failed/skipped evidence was removed. There are **no remaining Step 2.1 blockers**;
+A13/S13/B13/D13, native observations, migration investigation, and later export
+implementation remain separate mandatory checkpoints.
