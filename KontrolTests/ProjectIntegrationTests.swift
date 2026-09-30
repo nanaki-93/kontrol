@@ -50,9 +50,13 @@ private final class IntegrationGrants: ProjectBookmarkOperations {
 @MainActor
 final class ProjectIntegrationTests: XCTestCase {
     private func workspace() throws -> URL {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        // Workspaces contain persistent stores whose Core Data handles may outlive
+        // test teardown. Retain the exact logged process-owned root until host exit.
+        let processRoot = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "KontrolProjectIntegrationTests-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
+        print("Project integration test store cleanup after host exit: \(processRoot.path)")
+        let root = processRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         return root
     }
 

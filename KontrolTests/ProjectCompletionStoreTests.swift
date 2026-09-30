@@ -99,6 +99,15 @@ private final class CompletionRepository: ProjectReferenceRepository {
     var successfulReads = 0
     func fetchAll() throws -> [ProjectReferenceSnapshot] { references }
     func insert(_ input: NewProjectReference) throws -> ProjectReferenceSnapshot { throw ProjectStoreError.busy }
+    func remove(id: UUID, expectedRevision: UUID) throws {
+        guard let index = references.firstIndex(where: { $0.id == id }) else {
+            throw ProjectReferencePersistenceError.notFound
+        }
+        guard references[index].revision == expectedRevision else {
+            throw ProjectReferencePersistenceError.staleRevision
+        }
+        references.remove(at: index)
+    }
     func reconnect(id: UUID, expectedRevision: UUID,
                    input: ReconnectedProjectReference) throws -> ProjectReferenceSnapshot {
         let index = references.firstIndex { $0.id == id }!

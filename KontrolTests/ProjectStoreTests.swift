@@ -55,6 +55,15 @@ private final class StubRepository: ProjectReferenceRepository {
         saved.append(receipt)
         return receipt
     }
+    func remove(id: UUID, expectedRevision: UUID) throws {
+        guard let index = saved.firstIndex(where: { $0.id == id }) else {
+            throw ProjectReferencePersistenceError.notFound
+        }
+        guard saved[index].revision == expectedRevision else {
+            throw ProjectReferencePersistenceError.staleRevision
+        }
+        saved.remove(at: index)
+    }
     func reconnect(id: UUID, expectedRevision: UUID,
                    input: ReconnectedProjectReference) throws -> ProjectReferenceSnapshot {
         guard let index = saved.firstIndex(where: { $0.id == id }) else {

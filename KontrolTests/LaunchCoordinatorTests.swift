@@ -105,6 +105,9 @@ final class LaunchProjectRepository: ProjectReferenceRepository {
     func insert(_ input: NewProjectReference) throws -> ProjectReferenceSnapshot {
         throw ProjectReferencePersistenceError.invalidReference
     }
+    func remove(id: UUID, expectedRevision: UUID) throws {
+        throw ProjectReferencePersistenceError.invalidReference
+    }
     func reconnect(id: UUID, expectedRevision: UUID,
                    input: ReconnectedProjectReference) throws -> ProjectReferenceSnapshot {
         throw ProjectReferencePersistenceError.invalidReference

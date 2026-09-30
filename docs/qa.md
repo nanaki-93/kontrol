@@ -345,6 +345,85 @@ All **22 current `KontrolTests/DesignSystemComponentTests` methods** remain requ
 
 **Step 1.1a acceptance is verified and ready for review**, with no checkpoint blocker. No later task was implemented, and no plan checkbox was changed. This ledger-only checkpoint required no separate `make build`/`build-for-testing`; the required test action built its existing host/bundle, and no new source, protocol, membership, or presentation change was made. Hosted/native and distribution release approval remain explicitly pending. The runner manages approved-task commits; this execution leaves the preserved worktree uncommitted for review.
 
+## F13 durable reference deletion — Step 2.1 (2026-09-30)
+
+**Implementation checkpoint passed; ready for review.** The first incomplete task matched runner Step 2.1; its cumulative checklist had no previous findings. Initial worktree was clean. Ancestor/root/target instruction checks found no applicable `AGENTS.md` or submodule. Only the repository/protocol, its four conforming test doubles, repository tests, a narrow lifetime repair in the required `ProjectIntegrationTests` validation suite, and this required QA ledger changed. No ProjectStore disconnect/loading/UI work, schema/fixture change, plan checkbox, staging, or commit occurred in this execution. The runner retains approved-task commit ownership.
+
+### Implementation and coverage
+
+- `ProjectReferenceRepository.remove(id:expectedRevision:)` is a required method with no default implementation. The SwiftData implementation reads authoritative identity/revision through a fresh non-autosaving context, deletes only that row, commits before returning, and explicitly rolls back/rethrows any failure. It has no folder-access, inspector, identifier, or writer dependency; opaque bookmark bytes are never resolved.
+- Four new non-GUI repository methods cover matching removal with malformed/unresolvable bookmark bytes, unchanged ordered survivors and unrelated Tasks through disk reopen; stale confirmations after both successful-read revision advancement and Reconnect; a missing identity even when its revision matches another row; and injected pre-commit failure retaining exact references, revisions, pending work in another context, and disk rows before explicit retry. Successful retry survives another reopen. Missing/stale cases never invoke the save hook, and repeated removal reports `notFound` without saving.
+- Mutable Store/Completion doubles validate identity/revision and delete only the matching value. Launch/read-only presentation doubles explicitly throw rather than silently succeeding. All compile with the changed protocol. No visible behavior or hosted test methods changed; no new A13 selector is introduced. Hosted/native Accessibility and other release gates remain required and pending, not passed or waived.
+
+### Exact validation and evidence
+
+Environment commands `xcodebuild -version`, `xcrun swift --version`, `sw_vers`, and `uname -m` exited **0**: **Xcode 27.0 (27A266a)**, **Apple Swift 6.4 (swiftlang-6.4.0.34.1; swift-driver 1.168.6)**, **arm64 macOS 27.0 (26A428)**. Existing Swift 5 language mode/macOS 14 deployment are unchanged; this is not macOS 14 runtime acceptance.
+
+Commands ran from the repository root with `set -o pipefail` (each exit **0**). The first test execution used the plan's `f13_test ProjectReferenceRepositoryTests ProjectStoreTests ProjectCompletionStoreTests ProjectIntegrationTests` helper, expanded identically to the test command below. After tightening **new** deletion-fixture lifetime to process-owned stores until host exit, all three commands reran. A subsequent raw-log audit exposed the same hazard in older fixtures; the repair and final-source rerun are recorded below:
+
+```sh
+make build DERIVED_DATA=/tmp/kontrol-f13-derived
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  CODE_SIGNING_ALLOWED=NO build-for-testing
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
+  -only-testing:KontrolTests/ProjectReferenceRepositoryTests \
+  -only-testing:KontrolTests/ProjectStoreTests \
+  -only-testing:KontrolTests/ProjectCompletionStoreTests \
+  -only-testing:KontrolTests/ProjectIntegrationTests test
+git diff --check
+```
+
+Initial logs: `/tmp/kontrol-f13-step2.1-{build,bft,tests}.log`; intermediate logs: `/tmp/kontrol-f13-step2.1-final-{build,bft,tests}.log` (the historical `final` filename predates the repair). Both builds and both `build-for-testing` actions succeeded; hosted suites were compiled, **not executed**. Both selected runs passed **63/63**, with **0 failures, 0 skips, 0 expected failures**:
+
+| Selected suite | Executed/passed (each run) |
+| --- | ---: |
+| ProjectReferenceRepositoryTests | 9 |
+| ProjectStoreTests | 29 |
+| ProjectCompletionStoreTests | 19 |
+| ProjectIntegrationTests | 6 |
+
+Initial fresh result: `/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_17-21-18-+0800.xcresult`; intermediate fresh result: `/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_17-22-38-+0800.xcresult`. Result audits (all exit **0**) ran:
+
+```sh
+for item in '17-21-18 step2.1' '17-22-38 step2.1-final'; do
+  read -r stamp suffix <<< "$item"
+  RESULT_BUNDLE="/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_${stamp}-+0800.xcresult"
+  PREFIX="/tmp/kontrol-f13-${suffix}"
+  xcrun xcresulttool get test-results summary --path "$RESULT_BUNDLE" --format json > "${PREFIX}-summary.json"
+  xcrun xcresulttool get test-results tests --path "$RESULT_BUNDLE" --format json > "${PREFIX}-test-tree.json"
+  python3 /tmp/kontrol-f13-step2.1-audit.py "$PREFIX" > "${PREFIX}-selector-audit.log"
+done
+python3 /tmp/kontrol-f13-step2.1-cleanup.py | tee /tmp/kontrol-f13-step2.1-cleanup.log
+```
+
+Each audit compares every executed full method identifier against the four selected source files, asserts exact-once/nonempty selection and all `Passed`, and checks summary totals. Both summaries report no test failures or runtime warnings. Build output retains multiple-destination/AppIntents warnings; raw test output retains linkd and existing Store-test malformed-bookmark diagnostics. A subsequent diagnostic assertion **failed** on `vnode unlinked while in use`: despite passed test assertions, older repository fixtures and the integration `failure.store` were being unlinked with SQLite handles still owned by Core Data. These raw diagnostics are retained, not treated as evidence of sound fixture cleanup; see the repaired current gate below. Historical foundation failures and all three existing repairs remain untouched.
+
+Guarded post-host cleanup enumerated **no preferences-test root** in either log and **one exact project-removal root** in the intermediate log: `/var/folders/lz/20cqfx4x2k98r89q68w3q3ch0000gn/T/KontrolProjectRemovalTests-91458`. Confirmed PID **91458** exited, validated the process-owned name, TMPDIR parent, and absence of symlinks; enumerated **4** SQLite stores, checked each read-only `PRAGMA integrity_check=ok`, closed connections, rechecked PID exit, and removed only that root. It no longer exists. Exact store paths/results and the cleanup/audit scripts are retained under `/tmp/kontrol-f13-step2.1-*`; no historical, checked-in, live, or unlogged store was removed by this procedure.
+
+### Fixture-lifetime repair and current gate
+
+The extra diagnostic audit's `AssertionError` came from asserting absence of SQLite unlink messages in the initial log. This was repaired, not ignored: **all** `ProjectReferenceRepositoryTests` stores now use the logged process-owned helper, removing the five legacy in-test unlinks, and the required `ProjectIntegrationTests.workspace()` retains its six workspaces until host exit rather than deleting them in teardown. Existing behavior/byte-inventory assertions are unchanged. No production cleanup, private close API, delay, skip, or later-task behavior was added.
+
+The exact three build/test commands above ran again with stdout/stderr redirected to `/tmp/kontrol-f13-step2.1-repair-{build,bft,tests}.log`; all exited **0** on the final source. Final fresh result: **`/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_17-27-36-+0800.xcresult`**, **63 passed / 0 failed / 0 skipped / 0 expected failures**, suite counts unchanged. Audit commands (all exit **0**):
+
+```sh
+RESULT_BUNDLE='/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_17-27-36-+0800.xcresult'
+xcrun xcresulttool get test-results summary --path "$RESULT_BUNDLE" --format json > /tmp/kontrol-f13-step2.1-repair-summary.json
+xcrun xcresulttool get test-results tests --path "$RESULT_BUNDLE" --format json > /tmp/kontrol-f13-step2.1-repair-test-tree.json
+python3 /tmp/kontrol-f13-step2.1-audit.py /tmp/kontrol-f13-step2.1-repair > /tmp/kontrol-f13-step2.1-repair-selector-audit.log
+python3 /tmp/kontrol-f13-step2.1-cleanup.py | tee /tmp/kontrol-f13-step2.1-repair-cleanup.log
+git diff --check
+```
+
+The exact-once selector audit passed for all 63 current methods. The diagnostic assertion reran on the repaired test log and passed: **no `vnode unlinked while in use` or `InvalidTransition`**. Evidence `/tmp/kontrol-f13-step2.1-repair-diagnostics.log` also confirms both build success markers. Summary runtime warnings remain empty; this does not erase the earlier raw-log findings.
+
+The cleanup script was extended to handle integration workspaces and the repaired run's log. It enumerated zero preferences roots and exactly two printed roots under `/var/folders/lz/20cqfx4x2k98r89q68w3q3ch0000gn/T/`: **`KontrolProjectRemovalTests-93113` (9 stores)** and **`KontrolProjectIntegrationTests-93113` (6 stores)**. After confirming PID **93113** exited and validating root names/TMPDIR parent/no symlinks, all **15** read-only SQLite integrity checks returned `ok`. Connections closed, PID exit was rechecked, and only those exact roots were removed; both no longer exist. All exact store paths/results are recorded in the repair cleanup log. No task-local blocker remains; later store-level disconnect/concurrency and hosted/native/sandbox/distribution acceptance are not claimed here.
+
 ## F12 implementation evidence (2026-09-30)
 
 The [F12 README ledger](../README.md#f12-topic-news-non-gui-implementation-gate-2026-09-30) records exact commands, per-suite counts, specification coverage, toolchain, diagnostics, historical failures and live endpoint observations. Xcode **27.0 (27A266a)** / Swift **6.4**, arm64 macOS **27.0 (26A428)**, Swift 5 language mode / macOS 14.0 minimum: `make build DERIVED_DATA=/tmp/kontrol-f12-derived` and the same unsigned macOS `xcodebuild ... build-for-testing` passed. The explicit **17 non-GUI suites plus two focused AppShell methods** ran **136 passed, 0 failed, 0 skipped, 0 expected failures**; every selector's execution was audited. Result **`/tmp/kontrol-f12-gate-selected.xcresult`**, summary `/tmp/kontrol-f12-gate-summary.json`, selector audit `/tmp/kontrol-f12-gate-selector-audit.log`, logs `/tmp/kontrol-f12-gate-{toolchain,build,bft,tests,plutil}.log`. `plutil -lint Kontrol.xcodeproj/project.pbxproj Kontrol/Kontrol.entitlements`, JSON validation and final `git diff --check` all returned 0.

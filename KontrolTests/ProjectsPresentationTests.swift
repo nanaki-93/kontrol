@@ -31,6 +31,7 @@ private final class ListRepository: ProjectReferenceRepository {
     init(_ references: [ProjectReferenceSnapshot]) { self.references = references }
     func fetchAll() throws -> [ProjectReferenceSnapshot] { references }
     func insert(_ input: NewProjectReference) throws -> ProjectReferenceSnapshot { throw CancellationError() }
+    func remove(id: UUID, expectedRevision: UUID) throws { throw CancellationError() }
     func reconnect(id: UUID, expectedRevision: UUID,
                    input: ReconnectedProjectReference) throws -> ProjectReferenceSnapshot { throw CancellationError() }
     func recordSuccessfulRead(id: UUID, expectedRevision: UUID,

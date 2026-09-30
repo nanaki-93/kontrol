@@ -38,6 +38,7 @@ enum ProjectReferencePersistenceError: Error, Equatable {
 protocol ProjectReferenceRepository {
     func fetchAll() throws -> [ProjectReferenceSnapshot]
     func insert(_ input: NewProjectReference) throws -> ProjectReferenceSnapshot
+    func remove(id: UUID, expectedRevision: UUID) throws
     func reconnect(id: UUID, expectedRevision: UUID,
                    input: ReconnectedProjectReference) throws -> ProjectReferenceSnapshot
     func recordSuccessfulRead(id: UUID, expectedRevision: UUID,
@@ -125,6 +126,20 @@ final class SwiftDataProjectReferenceRepository: ProjectReferenceRepository {
         }
         guard row.revision == expectedRevision else { throw ProjectReferencePersistenceError.staleRevision }
         return row
+    }
+
+    func remove(id: UUID, expectedRevision: UUID) throws {
+        // Local reference deletion never resolves the opaque grant or accesses the folder.
+        // Re-read the authoritative revision in an isolated, non-autosaving transaction.
+        let context = context()
+        do {
+            let row = try row(id: id, expectedRevision: expectedRevision, in: context)
+            context.delete(row)
+            try commit(context)
+        } catch {
+            context.rollback()
+            throw error
+        }
     }
 
     func reconnect(id: UUID, expectedRevision: UUID,
