@@ -1,9 +1,211 @@
 import Darwin
 import Foundation
 import XCTest
+import UniformTypeIdentifiers
 @testable import Kontrol
 
 final class ExportServiceTests: XCTestCase {
+    @MainActor
+    private final class PanelSpy: ExportSavePanelPresenting {
+        var configurations: [ExportSavePanelConfiguration] = []
+        var completion: (@MainActor (Bool, URL?) -> Void)?
+        var onBegin: (() -> Void)?
+        var onCancel: (() -> Void)?
+        private(set) var begins = 0
+        private(set) var cancels = 0
+        func configure(_ configuration: ExportSavePanelConfiguration) { configurations.append(configuration) }
+        func begin(_ completion: @escaping @MainActor (Bool, URL?) -> Void) {
+            XCTAssertTrue(Thread.isMainThread)
+            begins += 1
+            self.completion = completion
+            onBegin?()
+        }
+        func cancel() {
+            XCTAssertTrue(Thread.isMainThread)
+            cancels += 1
+            onCancel?()
+        }
+    }
+
+    func testPanelConfigurationRestrictsJSONAndNamesInjectedDateInUTCGregorianCalendar() throws {
+        for (timestamp, filename) in [
+            ("2026-09-30T23:59:59.999Z", "kontrol-export-2026-09-30.json"),
+            ("2027-01-01T00:00:00.000Z", "kontrol-export-2027-01-01.json"),
+            ("2028-02-29T12:00:00.000Z", "kontrol-export-2028-02-29.json")
+        ] {
+            let configuration = ExportSavePanelConfiguration(date: try ExportTimestamp(value: timestamp).date)
+            XCTAssertEqual(configuration.suggestedFilename, filename)
+            XCTAssertEqual(configuration.allowedContentTypes, [.json])
+            XCTAssertFalse(configuration.allowsOtherFileTypes)
+            XCTAssertFalse(configuration.isExtensionHidden)
+            XCTAssertTrue(configuration.canCreateDirectories)
+        }
+    }
+
+    @MainActor
+    func testPanelCancelIgnoresAnyURLAndCreatesNoDestinationOrArtifact() async throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let spy = PanelSpy()
+        let target = root.appendingPathComponent("destination.json")
+        spy.onBegin = { [weak spy] in spy?.completion?(false, target) }
+        var approvals = 0
+        let panel: any ExportDestinationSelecting = ExportSavePanel(makePanel: { spy }, approve: {
+            approvals += 1
+            return try ExportFileWriter().approveDestination($0)
+        })
+        let date = try ExportTimestamp(value: "2026-09-30T00:00:00.000Z").date
+        let result = try await panel.selectDestination(suggestedAt: date)
+        guard case .canceled = result else { return XCTFail("Canceled panel returned destination") }
+        XCTAssertEqual(approvals, 0)
+        XCTAssertEqual(spy.begins, 1)
+        XCTAssertEqual(spy.configurations, [ExportSavePanelConfiguration(date: date)])
+        try assertEmpty(root)
+    }
+
+    @MainActor
+    func testAlreadyCanceledSelectionNeverConstructsOrApprovesPanel() async throws {
+        var creations = 0
+        var approvals = 0
+        let panel = ExportSavePanel(makePanel: { creations += 1; return PanelSpy() }, approve: {
+            approvals += 1
+            return try ExportFileWriter().approveDestination($0)
+        })
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await panel.selectDestination(suggestedAt: Date())
+        }
+        let result = try await task.value
+        guard case .canceled = result else { return XCTFail("Canceled caller selected destination") }
+        XCTAssertEqual(creations, 0)
+        XCTAssertEqual(approvals, 0)
+    }
+
+    @MainActor
+    func testPanelApprovedNewAndExistingDestinationsCaptureIntentWithoutWritingUntilDelivery() async throws {
+        for replacing in [false, true] {
+            let root = try root()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let target = root.appendingPathComponent("destination.json")
+            let original = Data("native-approved replacement bytes".utf8)
+            if replacing { try original.write(to: target) }
+            let ledger = AccessLedger()
+            let writer = ExportFileWriter(temporaryRoot: root, deliveryHooks: .init(
+                startAccess: { _ in ledger.start(); return true }, stopAccess: { _ in ledger.stop() }))
+            let spy = PanelSpy()
+            spy.onBegin = { [weak spy] in spy?.completion?(true, target) }
+            var approvals = 0
+            let panel = ExportSavePanel(makePanel: { spy }, approve: { url in
+                XCTAssertEqual(url, target)
+                approvals += 1
+                return try writer.approveDestination(url)
+            })
+            let result = try await panel.selectDestination(suggestedAt: Date())
+            guard case .approved(let destination) = result else { return XCTFail("Approved panel canceled") }
+            XCTAssertEqual(approvals, 1)
+            XCTAssertEqual(ledger.counts, [1, 1], "Approval never retains acquired authorization")
+            try assertDeliveryClean(root, destinationExists: replacing)
+            if replacing { XCTAssertEqual(try Data(contentsOf: target), original) }
+            let snapshot = try snapshot()
+            let artifact = try await writer.prepare(snapshot)
+            let outcome = try await writer.deliver(artifact, to: destination)
+            XCTAssertEqual(outcome, .committed)
+            XCTAssertEqual(try Data(contentsOf: target), try snapshot.encoded())
+            XCTAssertEqual(ledger.counts, [2, 2])
+            try assertDeliveryClean(root)
+        }
+    }
+
+    @MainActor
+    func testPanelMissingAndUnsafeApprovedDestinationsFailWithoutArtifactsAndAllowExplicitRetry() async throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let spy = PanelSpy()
+        let panel = ExportSavePanel(makePanel: { spy })
+        spy.onBegin = { [weak spy] in spy?.completion?(true, nil) }
+        do { _ = try await panel.selectDestination(suggestedAt: Date()); XCTFail("Missing URL approved") }
+        catch { XCTAssertEqual(error as? ExportSavePanelError, .missingDestination) }
+        spy.onBegin = { [weak spy] in spy?.completion?(true, root) }
+        do { _ = try await panel.selectDestination(suggestedAt: Date()); XCTFail("Directory approved") }
+        catch { XCTAssertEqual(error as? ExportFileWriterError, .unsafeDestination) }
+        spy.onBegin = { [weak spy] in spy?.completion?(false, nil) }
+        let retried = try await panel.selectDestination(suggestedAt: Date())
+        guard case .canceled = retried else { return XCTFail("Explicit retry failed") }
+        XCTAssertEqual(spy.begins, 3)
+        try assertEmpty(root)
+    }
+
+    @MainActor
+    func testPanelCancellationWaitsForDismissalRejectsOverlapAndIgnoresDuplicateOldCallbacks() async throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let spy = PanelSpy()
+        let begun = expectation(description: "Panel started")
+        let canceled = expectation(description: "Native cancel requested")
+        spy.onBegin = { begun.fulfill() }
+        spy.onCancel = { canceled.fulfill() }
+        var approvals = 0
+        let panel = ExportSavePanel(makePanel: { spy }, approve: {
+            approvals += 1
+            return try ExportFileWriter().approveDestination($0)
+        })
+        var completed = false
+        let task = Task {
+            let result = try await panel.selectDestination(suggestedAt: Date())
+            completed = true
+            return result
+        }
+        await fulfillment(of: [begun], timeout: 5)
+        task.cancel()
+        await fulfillment(of: [canceled], timeout: 5)
+        XCTAssertFalse(completed, "Cancellation retains ownership until the real callback")
+        do { _ = try await panel.selectDestination(suggestedAt: Date()); XCTFail("Overlapping panel admitted") }
+        catch { XCTAssertEqual(error as? ExportSavePanelError, .selectionInProgress) }
+        XCTAssertEqual(spy.begins, 1)
+        XCTAssertEqual(spy.cancels, 1)
+        let oldCallback = try XCTUnwrap(spy.completion)
+        oldCallback(true, root.appendingPathComponent("destination.json"))
+        let result = try await task.value
+        guard case .canceled = result else { return XCTFail("Late approval defeated cancellation") }
+        XCTAssertEqual(approvals, 0)
+        let retried = expectation(description: "Explicit retry started")
+        spy.onBegin = { retried.fulfill() }
+        let retry = Task { try await panel.selectDestination(suggestedAt: Date()) }
+        await fulfillment(of: [retried], timeout: 5)
+        oldCallback(true, root.appendingPathComponent("obsolete.json"))
+        oldCallback(false, nil)
+        spy.completion?(false, nil)
+        let retryResult = try await retry.value
+        guard case .canceled = retryResult else { return XCTFail("Old callback affected retry") }
+        XCTAssertEqual(approvals, 0)
+        XCTAssertEqual(spy.begins, 2)
+        try assertEmpty(root)
+    }
+
+    @MainActor
+    func testCallerCancellationRacingAcceptedCallbackNeverApprovesDestination() async throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let spy = PanelSpy()
+        let begun = expectation(description: "Panel started")
+        spy.onBegin = { begun.fulfill() }
+        var approvals = 0
+        let panel = ExportSavePanel(makePanel: { spy }, approve: {
+            approvals += 1
+            return try ExportFileWriter().approveDestination($0)
+        })
+        let task = Task { try await panel.selectDestination(suggestedAt: Date()) }
+        await fulfillment(of: [begun], timeout: 5)
+        // Same main-actor turn: callback wins dismissal but caller cancellation
+        // precedes continuation resumption, before the cancel-handler task runs.
+        spy.completion?(true, root.appendingPathComponent("destination.json"))
+        task.cancel()
+        let result = try await task.value
+        guard case .canceled = result else { return XCTFail("Racing cancellation approved URL") }
+        XCTAssertEqual(approvals, 0)
+        try assertEmpty(root)
+    }
+
     private func root() throws -> URL {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("kontrol-export-test-\(UUID())")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)

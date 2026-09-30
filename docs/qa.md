@@ -1921,3 +1921,113 @@ Exact inventories/results are in `audit.log`. No capture store was removed; writ
 fixtures clean their owned isolated non-SwiftData directories after each operation.
 No production-data access or native signing/authorization acceptance was attempted.
 **No remaining Step 3.2 blockers.**
+
+## F13 Step 3.3 — native JSON destination approval (2026-09-30, 16:10 UTC)
+
+First unchecked task matches runner task 11/27. The cumulative checklist has no
+previous findings. Initial worktree/index were clean; repository/target and direct
+ancestor checks found no applicable `AGENTS.md`; no submodule was listed. Only the
+panel boundary, its tests/project membership, and this required ledger changed.
+No lifecycle service, dependency ownership, Local Data routing, or later task was
+implemented; workflow state and `.pi/PLAN.md` were not modified.
+
+Source base: `bcdfbea0c1e6c93acca4e2b7fc708c4b381f2b59`. Evidence root:
+**`/tmp/kontrol-f13-step3-3/`**. Tested implementation/test/membership patch
+(including the new untracked source, excluding this ledger): `implementation.patch`,
+SHA-256 `c23485f28d4add598e4071050d9169beff03151649cd92001a8a33da3dd39950`.
+Per-file hashes are in `source-sha256.txt`. Environment: arm64 MacBook Pro,
+macOS 27.0 (`26A428`), Xcode 27.0 (`27A266a`), Apple Swift 6.4,
+`/Applications/Xcode.app/Contents/Developer`. Project remains Swift 5/macOS 14;
+Yams 5.4.0 pin is unchanged. Environment/source checks and
+`xcodebuild -list -project Kontrol.xcodeproj` succeeded (`environment.log`,
+`project-list.log`).
+
+### Implemented and covered boundary
+
+- `ExportDestinationSelecting` is main-actor injectable; `ExportSavePanel` returns
+  cancellation or the writer's opaque transient destination/replacement identity.
+  Native UI is constructed lazily, only for an uncanceled selection. Approval
+  capture runs only after `.OK` and a caller cancellation check. No flush, snapshot,
+  preparation, file creation, bookmark generation, or persisted authorization is
+  introduced by the adapter. The existing writer balances transient access while
+  capturing identity; end-to-end tests verify approval alone leaves bytes unchanged.
+- `NativeExportSavePanel` configures `NSSavePanel.allowedContentTypes = [.json]`,
+  disallows other types, shows the extension, permits directory creation, and uses
+  injected-date `kontrol-export-YYYY-MM-DD.json`. Formatting explicitly uses UTC,
+  Gregorian calendar, and POSIX locale. No delegate/accessory validation override
+  bypasses AppKit's native replacement confirmation.
+- Cancellation calls native Cancel with no arbitrary timer. Ownership remains
+  until the dismissal callback actually arrives, even if noncooperative; concurrent
+  selection is rejected. Duplicate/obsolete callbacks cannot resume twice or affect
+  explicit retry. A callback/cancellation race is checked in the caller's task
+  before destination identity capture. Missing/unsafe approved URLs fail safely.
+- Seven added non-GUI `ExportServiceTests` methods cover configuration/date bounds,
+  cancellation with a stray URL and no artifacts, pre-canceled caller with zero
+  panel construction/approval, new/existing intent through actual writer delivery,
+  transient access balance, invalid approval/retry, delayed dismissal/overlap/old
+  callbacks, and accepted-callback cancellation races. All use injected presenters
+  and isolated temporary destinations; no actual native panel is opened.
+
+### Exact verification and audit
+
+From repository root, all final commands below exited **0**:
+
+```sh
+set -o pipefail
+EVIDENCE=/tmp/kontrol-f13-step3-3
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
+  -resultBundlePath "$EVIDENCE/panel-final.xcresult" \
+  -only-testing:KontrolTests/ExportServiceTests test
+make build DERIVED_DATA=/tmp/kontrol-f13-derived
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived CODE_SIGNING_ALLOWED=NO \
+  build-for-testing
+xcrun xcresulttool get test-results summary \
+  --path "$EVIDENCE/panel-final.xcresult" --format json \
+  > "$EVIDENCE/summary-final.json"
+xcrun xcresulttool get test-results tests \
+  --path "$EVIDENCE/panel-final.xcresult" --format json \
+  > "$EVIDENCE/test-tree-final.json"
+python3 "$EVIDENCE/audit.py"
+plutil -lint Kontrol.xcodeproj/project.pbxproj
+git diff --check
+```
+
+Fresh final result: **33/33 ExportServiceTests Passed**, zero failures, skips,
+expected failures, or xcresult runtime warnings. `audit.log` compares the complete
+source selection against fresh identifiers, confirming each ran exactly once;
+`executed-identifiers.txt` records all selectors. Logs: `tests-final.log`,
+`build-final.log`, `compile-final.log`, `plutil.log`, `diffcheck.log`,
+`exit-codes.log`. All hosted tests, including the new native adapter fixture,
+compiled. New source has explicit app Sources membership.
+
+Historical local attempt evidence is retained: initial identical test-compilation
+command exited **65** (`compile.log`), because the nested selection owner's
+`cancel()` was not explicitly main-actor isolated. Adding `@MainActor` to that
+owner fixed the actual isolation error; `compile-repaired.log` exited **0**. The
+first complete selection also passed **33/33** (`panel.xcresult`, `tests.log`,
+`summary.json`, `test-tree.json`). After removing test-spy closure cycles and an
+unnecessary pre-presentation URL assumption, the fresh final selection passed
+**33/33** again. No assertions were weakened to bypass acceptance, no tests were
+skipped, and no production errors were suppressed.
+
+Deferred native selector (compiled, **not executed**):
+`KontrolTests/SettingsSceneTests/testNativeExportPanelAppliesJSONConfigurationWithoutOverridingReplacementConfirmation`.
+Actual native Cancel/Escape, replacement confirmation accept/cancel, real sandbox
+picker authorization, and keyboard/VoiceOver observations remain required A13/S13
+acceptance; this non-GUI checkpoint does not claim those observations. There is no
+Step 3.3 implementation blocker; A13/S13/B13/D13 remain separate mandatory gates.
+
+Existing multiple-destination, AppIntents/linkd diagnostics and the pre-existing
+Settings geometry optional-interpolation compiler warning remain in logs. No new
+panel/export compiler warnings or SQLite unlink/API-violation diagnostics occurred.
+Final host PID **95303** exited (`ps -p 95303 -o pid=,stat=,command=` exit **1**, no
+rows; `audit.log`). This selection uses no SwiftData fixtures; writer tests assert
+cleanup of only their owned non-store temporary directories. No original fixture,
+frozen schema, external project, production store, or dependency was changed.
+Final ledger whitespace check initially exited **2** (extra blank line at EOF);
+removing that blank line restored `git diff --check` exit **0**.

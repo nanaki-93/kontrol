@@ -85,6 +85,21 @@ private final class SettingsFolderRepository: ProjectReferenceRepository {
 
 @MainActor
 final class SettingsSceneTests: XCTestCase {
+    // Native adapter fixture: compile during Step 3.3; execute with the A13
+    // hosted/native gate. This does not observe actual cancellation/replacement.
+    func testNativeExportPanelAppliesJSONConfigurationWithoutOverridingReplacementConfirmation() throws {
+        let adapter = NativeExportSavePanel()
+        let date = try ExportTimestamp(value: "2026-09-30T23:59:59.999Z").date
+        adapter.configure(ExportSavePanelConfiguration(date: date))
+        XCTAssertEqual(adapter.panel.allowedContentTypes.map(\.identifier), ["public.json"])
+        XCTAssertFalse(adapter.panel.allowsOtherFileTypes)
+        XCTAssertFalse(adapter.panel.isExtensionHidden)
+        XCTAssertTrue(adapter.panel.canCreateDirectories)
+        XCTAssertEqual(adapter.panel.nameFieldStringValue, "kontrol-export-2026-09-30.json")
+        XCTAssertNil(adapter.panel.delegate, "Native replacement validation must not be overridden")
+        XCTAssertNil(adapter.panel.accessoryView)
+    }
+
     private func folderReference(_ id: UUID = UUID(), revision: UUID = UUID(), name: String = "Harbor", order: Int = 0) -> ProjectReferenceSnapshot {
         ProjectReferenceSnapshot(id: id, manifestID: "harbor", bookmarkData: Data([1]), displayOrder: order,
                                  displayNameHint: name, lastSuccessfulReadAt: nil, revision: revision)
