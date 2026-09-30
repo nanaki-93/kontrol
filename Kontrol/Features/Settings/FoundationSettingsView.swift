@@ -58,7 +58,7 @@ struct FoundationSettingsView: View {
             case .folders:
                 ProjectFoldersSettingsView(store: projects, management: foldersManagement)
             case .localData:
-                LocalDataSettingsView(service: export)
+                LocalDataSettingsView(service: export, onBack: returnToHub)
             }
         }
         // The scroll host proposes an unconstrained height. Keep that natural
@@ -164,18 +164,20 @@ struct FoundationSettingsView: View {
     }
 
     private var backAction: some View {
-        ActionButton("Back to Settings", symbol: "chevron.left") {
-            let origin = section
-            section = .hub
-            switch origin {
-            case .ai: focusedAction = .ai
-            case .folders: focusedAction = .folders
-            case .localData: focusedAction = .localData
-            default: focusedAction = .news
-            }
-        }
+        ActionButton("Back to Settings", symbol: "chevron.left", action: returnToHub)
         .focused($focusedAction, equals: .back)
         .accessibilityHint("Return to the Settings hub")
         .accessibilityIdentifier("settings-back")
+    }
+
+    private func returnToHub() {
+        let origin = section
+        section = .hub
+        switch origin {
+        case .ai: focusedAction = .ai
+        case .folders: focusedAction = .folders
+        case .localData: focusedAction = .localData
+        default: focusedAction = .news
+        }
     }
 }

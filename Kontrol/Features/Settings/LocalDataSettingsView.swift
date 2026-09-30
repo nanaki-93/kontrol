@@ -4,6 +4,19 @@ import SwiftUI
 /// The enclosing scene/shell remains the sole scroll-document owner.
 struct LocalDataSettingsView: View {
     @ObservedObject var service: ExportService
+    var onBack: () -> Void = {}
+    @FocusState private var focusedAction: FocusTarget?
+    @State private var presented = false
+    @State private var returnAfterPanel = false
+    @State private var focusReturnTask: Task<Void, Never>?
+
+    // The same native action survives every state, including explicit retry.
+    // Its label/identifier change, but restoration never targets a removed branch.
+    private enum FocusTarget: Hashable { case operation }
+    private struct FocusReturnRequest: Equatable {
+        let state: ExportService.State
+        let requested: Bool
+    }
 
     static let inclusions = "Includes saved tasks, schedule blocks, all persisted Focus sessions, local Learning content and exact saved answers, News topics and feeds, general preferences and nonsecret AI configuration."
     static let exclusions = "Excludes credentials and credential references, project folder permissions, paths and contents, cached News articles, diagnostics and unsaved editor drafts."
@@ -16,6 +29,14 @@ struct LocalDataSettingsView: View {
         let detail: String
         let actionTitle: String
         let canCancel: Bool
+
+        var controlTitle: String { canCancel ? "Cancel export" : actionTitle }
+        var controlIdentifier: String { canCancel ? "settings-export-cancel" : "settings-export-start" }
+        var controlHint: String {
+            canCancel
+                ? "Request cancellation before commit. Wait for the actual result; a completed save cannot be undone."
+                : "Open the JSON destination picker. No export starts until you approve a destination."
+        }
     }
 
     static func presentation(_ state: ExportService.State) -> Presentation {
@@ -87,25 +108,64 @@ struct LocalDataSettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } icon: {
-                Image(systemName: presentation.symbol)
+                Image(systemName: presentation.symbol).accessibilityHidden(true)
             }
                 .appTypography(.body)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Export status")
+                .accessibilityValue(presentation.status)
                 .accessibilityIdentifier("settings-export-status")
             guidance(presentation.detail, identifier: "settings-export-detail")
-            if presentation.canCancel {
-                ActionButton("Cancel export") { service.cancel() }
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("settings-export-cancel")
-            } else {
-                ActionButton(presentation.actionTitle, symbol: "square.and.arrow.up", variant: .primary,
-                             isEnabled: !service.isBusy) { service.startExport() }
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("settings-export-start")
+            ActionButton(presentation.controlTitle,
+                         symbol: presentation.canCancel ? nil : "square.and.arrow.up",
+                         variant: presentation.canCancel ? .secondary : .primary,
+                         isEnabled: presentation.canCancel || !service.isBusy) {
+                if presentation.canCancel { cancelExport() }
+                else if service.startExport() {
+                    returnAfterPanel = true
+                    // Let the native panel own keyboard focus until dismissal.
+                    focusedAction = nil
+                }
             }
+            .fixedSize(horizontal: false, vertical: true)
+            .focused($focusedAction, equals: .operation)
+            .accessibilityHint(presentation.controlHint)
+            .accessibilityIdentifier(presentation.controlIdentifier)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        // No animation or live-region announcements: progress has no ticking
+        // updates, and inherited reduced motion needs no additional resolution.
+        .onAppear { presented = true }
+        .onDisappear {
+            presented = false
+            returnAfterPanel = false
+            focusReturnTask?.cancel()
+        }
+        .onChange(of: FocusReturnRequest(state: service.state, requested: returnAfterPanel)) { _, request in
+            focusReturnTask?.cancel()
+            guard request.state != .selecting, request.requested else { return }
+            focusReturnTask = Task { @MainActor in
+                // Include the local request in observation: a fast retry can
+                // finish with the same failure before SwiftUI renders selecting.
+                await Task.yield()
+                guard !Task.isCancelled, presented, service.state == request.state else { return }
+                focusedAction = .operation
+                returnAfterPanel = false
+            }
+        }
+        .onExitCommand {
+            // Never leave a hidden cancellation request running or report a
+            // terminal result early. The service retains ownership until done.
+            if Self.presentation(service.state).canCancel { cancelExport() }
+            else { onBack() }
+        }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("settings-local-data-content")
+    }
+
+    private func cancelExport() {
+        returnAfterPanel = true
+        service.cancel()
     }
 
     private func guidance(_ text: String, identifier: String) -> some View {

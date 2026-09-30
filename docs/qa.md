@@ -2528,3 +2528,138 @@ native selectors remain required. No rendered attachment/comparison, native
 geometry or spoken VoiceOver result is claimed here. Export focus/accessibility
 transition implementation remains Step 4.3; A13/S13/B13/D13 remain mandatory
 separate acceptance gates. **No remaining Step 4.2 implementation blockers.**
+
+## F13 Step 4.3 — Export keyboard and accessible status transitions (2026-10-01 local)
+
+First incomplete task matched runner task 16/27, Step 4.3. Read SPEC, ANALYSIS,
+PLAN and the complete cumulative task-16 checklist (no prior findings). Worktree
+and index were clean; repository/target and direct ancestor checks found no
+applicable `AGENTS.md` or submodule. Reused M40 and supplemental export decision /
+preparing / canceled / failed / saved references under
+`.mockups/flows/f13-settings-release/`; no new visible state or redesign.
+
+### Implementation and coverage
+
+- `Kontrol/Features/Settings/LocalDataSettingsView.swift`: one persistent native
+  `ActionButton` changes between Export/Retry and Cancel. The same focus target
+  survives every publication, including commit; there is no removed conditional
+  action to restore to. Reuses the existing visible focus ring and ≥32pt targets.
+  Panel ownership temporarily clears local focus. Per-client restoration returns
+  to the operation action after approval, dismissal or failure. The observation
+  includes the local request as well as state, covering fast repeated failures
+  whose selecting publication can be coalesced by SwiftUI. Deferred restoration
+  is canceled/fenced on section disappearance; background shared results do not
+  initiate focus changes in clients that did not request restoration.
+- Escape requests cancellation while selecting/preparing and waits for the real
+  outcome without leaving the section or claiming success. At idle/terminal
+  states it only returns to the hub. Cancel remains keyboard-addressable; retry
+  explicitly opens the same shared picker, never automatically retries.
+- Status exposes a single named `Export status` element with a readable state
+  value and a decorative symbol. Action labels/roles remain native; safe hints
+  explain destination approval and pre-commit cancellation. No live announcement,
+  ticking progress, animation or duplicate motion/text-scale resolution added.
+- `Kontrol/Features/Settings/FoundationSettingsView.swift`: the existing Back
+  callback is shared with Local Data Escape, preserving hub focus return to
+  `settings-local-data`. Folder/General handoffs and hub ordering are unchanged.
+- `KontrolTests/SettingsSceneTests.swift`: non-GUI presentation assertions now
+  cover every state's action identity/title/hint. The full hub-order fixture also
+  tabs through Local Data Back → Export → Back. Three new hosted fixtures cover
+  panel cancellation, immediate and repeated selection failure, capture failure,
+  explicit retry, selecting and preparing Escape, approval → Cancel focus,
+  committed success → Export focus, backward Tab, native button roles/names and
+  targets, textual status, and leaving/reopening a section without stealing
+  General focus. Both real scene roots are exercised for the main transition
+  journey under the committed Reduce motion preference. Real injected service
+  boundaries hold transitions; committed output is parsed and owned-file cleanup
+  checked. Hosted compilation does **not** establish those native observations.
+
+### Exact validation and evidence
+
+Base revision: `b9687db4f20bc627729a80578f73a4008cfa57c5`. Evidence:
+**`/tmp/kontrol-f13-step4-3.7Aqnom/`**. Tested source/test patch:
+`final-implementation.patch`, SHA-256
+`df516db3dcd9dd480051bde761320150fbb9a44a461f890332ef0b5bcbaf62d4`.
+`final-source-sha256.txt` identifies the three tested files; this ledger is the
+only subsequent source-tree edit. `environment.log`: macOS 27.0 (26A428), arm64
+MacBook Pro, Xcode 27.0 (27A266a), Swift 6.4,
+`/Applications/Xcode.app/Contents/Developer`, project listing and Git identity.
+Swift 5/macOS 14 project settings, dependency pin and permissions are unchanged;
+this is not baseline-runtime acceptance.
+
+Commands from repository root (final executions each exited **0**):
+
+```sh
+set -o pipefail
+EVIDENCE=/tmp/kontrol-f13-step4-3.7Aqnom
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
+  -resultBundlePath "$EVIDENCE/validation.xcresult" \
+  -only-testing:KontrolTests/ExportServiceTests \
+  -only-testing:KontrolTests/AppPreferencesStoreTests \
+  -only-testing:KontrolTests/SettingsSceneTests/testLocalDataPresentationUsesActualStateAndSafeFailureCategories test
+make build DERIVED_DATA=/tmp/kontrol-f13-derived
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived CODE_SIGNING_ALLOWED=NO \
+  build-for-testing
+xcrun xcresulttool get test-results summary \
+  --path "$EVIDENCE/validation.xcresult" --format json \
+  > "$EVIDENCE/summary.json"
+xcrun xcresulttool get test-results tests \
+  --path "$EVIDENCE/validation.xcresult" --format json \
+  > "$EVIDENCE/test-tree.json"
+python3 "$EVIDENCE/audit.py"
+git diff --check
+```
+
+Fresh audited result: **57/57 Passed** — 43 ExportServiceTests, 13
+AppPreferencesStoreTests, one exact non-GUI Settings presentation method. No
+failed/skipped/expected-failure tests or xcresult runtime-warning entries.
+`audit.py` compares source method names with fresh result identifiers, checking
+that each selected method executed exactly once (`audit.log`,
+`executed-identifiers.txt`). All hosted coverage compiled. Final logs:
+`tests.log`, `final-build.log`, `final-compile.log`, `diffcheck.log`,
+`diagnostics.log`, `exit-codes.log`. Before the final focus-request refinement,
+the same 57-method selection passed too (`pre-final-validation.xcresult`,
+`pre-final-tests.log`).
+
+Two earlier test-compilation attempts exited **65**: the new fixture initially
+tried to write read-only `accessibilityReduceMotion`, then omitted the required
+`focusDefaultMinutes` initializer argument (`compile.log`, `compile-retry.log`).
+Fixed by injecting a committed `.reduce` preference through the existing owner
+with explicit 25-minute duration. Subsequent test compilation, selected tests,
+Debug build and final test compilation all passed against the final patch.
+Existing folder-fixture optional-interpolation warning (now line 1836),
+AppIntents metadata-extraction warning, multiple-destination and linkd diagnostics
+remain recorded, not silently repaired. No new production compiler warning or
+SQLite vnode-unlinked diagnostic occurred. Test host PID 23208 exited (final
+process scan returned **1**, no rows, `host-exit.log`). No agent store cleanup
+was performed. Frozen schemas, fixtures, external projects, production data,
+workflow files and `.pi/PLAN.md` were not changed. Changes remain uncommitted for
+review; approved-task commits remain runner-owned.
+
+### A13 hosted selectors and spoken-observation ledger
+
+Compiled, **not executed** here; require the reserved active desktop and actual
+rebuilt-host Accessibility authorization:
+
+- `SettingsSceneTests/testKeyboardLocalDataPanelDismissalFailuresRetryAndSuccessRestoreStableAction`
+- `SettingsSceneTests/testKeyboardLocalDataPreparingEscapeWaitsForResultAndRestoresExportAgain`
+- `SettingsSceneTests/testKeyboardLocalDataLeavingSectionFencesRestorationAndDoesNotStealGeneralFocus`
+- Updated `SettingsSceneTests/testKeyboardHubOrderEditorHandoffNamesTargetsAndFocusReturn`
+
+Existing deferred Local Data route/geometry, folder, General and historical
+native selectors remain required. **No spoken VoiceOver observations were made.**
+At A13, independently record actual utterances for `Export status` and each
+ready/selecting/preparing/saved/canceled/failed value; Export/Retry/Cancel button
+names and roles; cancellation/recovery hints; and panel dismissal/restored focus.
+Check no duplicate decorative-symbol reading or repeated unsolicited progress
+announcements, non-color comprehension, visible focus/ring and logical order at
+standard/130%/larger sizes, with inherited system/app reduced motion. Real panel
+Escape/replacement and post-commit cancellation still need native observation;
+injected callbacks do not substitute. Capture/rendered comparisons and spoken
+results are pending, not inferred from builds or tests. A13/S13/B13/D13 remain
+separate mandatory acceptance gates. **No remaining Step 4.3 implementation
+blockers.**

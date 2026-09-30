@@ -171,6 +171,9 @@ final class SettingsSceneTests: XCTestCase {
             XCTAssertEqual(value.actionTitle, action)
             XCTAssertEqual(value.canCancel, cancel)
             XCTAssertFalse(value.symbol.isEmpty)
+            XCTAssertEqual(value.controlTitle, cancel ? "Cancel export" : action)
+            XCTAssertEqual(value.controlIdentifier, cancel ? "settings-export-cancel" : "settings-export-start")
+            XCTAssertTrue(value.controlHint.contains(cancel ? "before commit" : "destination picker"))
             XCTAssertEqual(LocalDataSettingsView.summary(state), "Local data: \(status)")
         }
         let failures: [ExportService.Failure] = [.selection, .answerSave, .capture, .preparation, .delivery, .cleanup]
@@ -180,6 +183,9 @@ final class SettingsSceneTests: XCTestCase {
             let value = LocalDataSettingsView.presentation(.failed(failure))
             XCTAssertEqual(value.status, "Export not saved")
             XCTAssertEqual(value.actionTitle, "Retry export…")
+            XCTAssertEqual(value.controlTitle, "Retry export…")
+            XCTAssertEqual(value.controlIdentifier, "settings-export-start")
+            XCTAssertTrue(value.controlHint.contains("approve a destination"))
             XCTAssertFalse(value.canCancel)
             XCTAssertFalse(value.detail.contains("/"), "No paths or raw diagnostics belong in presentation")
             XCTAssertEqual(LocalDataSettingsView.summary(.failed(failure)), "Local data: Export not saved")
@@ -821,6 +827,9 @@ final class SettingsSceneTests: XCTestCase {
                 try tab(to: "settings-folders-add", in: window)
                 try tab(to: "settings-folders-reload", in: window)
                 try tab(to: "settings-back", in: window)
+            } else if identifier == "settings-local-data" {
+                try tab(to: "settings-export-start", in: window)
+                try tab(to: "settings-back", in: window)
             }
             let back = try node("settings-back", in: window)
             XCTAssertEqual(axAttribute(back, kAXDescriptionAttribute) as? String, "Back to Settings")
@@ -831,6 +840,228 @@ final class SettingsSceneTests: XCTestCase {
             window.selectPreviousKeyView(nil)
             settle()
         }
+    }
+
+    private func waitForExportPanel(_ panel: SettingsExportPanel) async throws {
+        for _ in 0..<200 {
+            if panel.continuation != nil { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        throw NSError(domain: "SettingsSceneTests", code: 3,
+                      userInfo: [NSLocalizedDescriptionKey: "Injected export panel did not open"])
+    }
+
+    private func waitForExportState(_ state: ExportService.State, service: ExportService) async throws {
+        for _ in 0..<200 {
+            if service.state == state { settle(); return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        throw NSError(domain: "SettingsSceneTests", code: 4,
+                      userInfo: [NSLocalizedDescriptionKey: "Export did not reach expected state \(state)"])
+    }
+
+    private func assertExportAction(_ title: String, identifier: String, in window: NSWindow) throws {
+        let action = try node(identifier, in: window)
+        XCTAssertEqual(axAttribute(action, kAXRoleAttribute) as? String, kAXButtonRole)
+        XCTAssertEqual(axAttribute(action, kAXDescriptionAttribute) as? String, title)
+        XCTAssertEqual((axAttribute(action, kAXEnabledAttribute) as? NSNumber)?.boolValue, true)
+        XCTAssertGreaterThanOrEqual(try axFrame(action).height, AppMetrics.minimumTarget)
+        XCTAssertGreaterThanOrEqual(try axFrame(action).width, AppMetrics.minimumTarget)
+        let status = try node("settings-export-status", in: window)
+        XCTAssertEqual(axAttribute(status, kAXDescriptionAttribute) as? String, "Export status")
+        XCTAssertFalse((axAttribute(status, kAXValueAttribute) as? String ?? "").isEmpty,
+                       "Status must be readable as text without interpreting its symbol/color")
+    }
+
+    // Exact hosted keyboard/AX selectors for A13. Injected callbacks exercise
+    // real service transitions; they do not attest native panel or spoken VO.
+    func testKeyboardLocalDataPanelDismissalFailuresRetryAndSuccessRestoreStableAction() async throws {
+        try keyboardSession()
+        for inline in [false, true] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("SettingsExportKeyboard-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+            let panel = SettingsExportPanel()
+            let repository = SettingsExportRepository(container: container)
+            let gate = SettingsExportPreparationGate()
+            let writer = SettingsExportWriter(writer: ExportFileWriter(temporaryRoot: root), gate: gate)
+            let preferences = SettingsPreferencesSpy()
+            preferences.value = AppPreferencesSnapshot(preferences: try AppPreferences(focusDefaultMinutes: 25, reduceMotion: .reduce), revision: UUID())
+            let graph = AppDependencies(container: container, catalogRepository: SwiftDataCatalogRepository(container: container),
+                                        appPreferencesRepository: preferences,
+                                        exportRepository: repository, exportPanel: panel, exportWriter: writer)
+            let launch = LaunchCoordinator(open: { container }, makeDependencies: { _, _ in graph })
+            await launch.start()
+            let navigation = NavigationStore()
+            navigation.select(.settings)
+            let scene = Group {
+                if inline { MainWindowContent(launch: launch, navigation: navigation) }
+                else { SettingsSceneContent(launch: launch) }
+            }
+            let window = show(scene, size: inline ? CGSize(width: 1000, height: 700) : CGSize(width: 520, height: 340))
+            defer { window.orderOut(nil) }
+            try press("settings-local-data", in: window)
+            XCTAssertEqual(try focusedIdentifier(), "settings-back")
+            try tab(to: "settings-export-start", in: window)
+            try assertExportAction("Export…", identifier: "settings-export-start", in: window)
+            try capture("keyboard-export-\(inline ? "inline" : "native")-idle-focus", window: window)
+
+            // Native Cancel/Escape is represented by panel dismissal, with no
+            // separate service cancellation and zero persisted capture or IO.
+            try keyboard(49, " ", in: window)
+            try await waitForExportPanel(panel)
+            panel.finish(.canceled)
+            await graph.exportService.waitForCompletion()
+            settle()
+            XCTAssertEqual(graph.exportService.state, .canceled)
+            XCTAssertEqual(try focusedIdentifier(), "settings-export-start")
+            try assertExportAction("Export again…", identifier: "settings-export-start", in: window)
+            XCTAssertEqual(repository.captures, 0)
+            XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
+
+            // Immediate selection failure must not leave restoration behind the
+            // transient selecting publication, even without a panel callback.
+            panel.failure = ExportFileWriterError.unsafeDestination
+            try keyboard(49, " ", in: window)
+            await graph.exportService.waitForCompletion()
+            settle()
+            XCTAssertEqual(graph.exportService.state, .failed(.selection))
+            XCTAssertEqual(try focusedIdentifier(), "settings-export-start")
+            try assertExportAction("Retry export…", identifier: "settings-export-start", in: window)
+            try keyboard(49, " ", in: window)
+            await graph.exportService.waitForCompletion()
+            settle()
+            XCTAssertEqual(graph.exportService.state, .failed(.selection))
+            XCTAssertEqual(try focusedIdentifier(), "settings-export-start", "A coalesced retry to the same failure must restore focus too")
+            panel.failure = nil
+
+            // Explicit retry: selecting Cancel remains keyboard-addressable in
+            // the injected fixture. Escape requests cancellation, not success.
+            try keyboard(49, " ", in: window)
+            try await waitForExportPanel(panel)
+            window.makeFirstResponder(nil)
+            try tab(to: "settings-back", in: window)
+            try tab(to: "settings-export-cancel", in: window)
+            try assertExportAction("Cancel export", identifier: "settings-export-cancel", in: window)
+            try tab(to: "settings-back", in: window, backwards: true)
+            try tab(to: "settings-export-cancel", in: window)
+            try keyboard(53, "\u{1b}", in: window)
+            XCTAssertEqual(graph.exportService.state, .selecting, "Cancellation is not a terminal receipt")
+            XCTAssertTrue(graph.exportService.isBusy)
+            panel.finish(.canceled)
+            await graph.exportService.waitForCompletion()
+            settle()
+            XCTAssertEqual(try focusedIdentifier(), "settings-export-start")
+            XCTAssertEqual(repository.captures, 0)
+
+            let destination = try writer.approveDestination(root.appendingPathComponent("export.json"))
+            repository.failure = ExportFileWriterError.invalidPreparation
+            try keyboard(49, " ", in: window)
+            try await waitForExportPanel(panel)
+            panel.finish(.approved(destination))
+            await graph.exportService.waitForCompletion()
+            settle()
+            XCTAssertEqual(graph.exportService.state, .failed(.capture))
+            XCTAssertEqual(try focusedIdentifier(), "settings-export-start")
+            try assertExportAction("Retry export…", identifier: "settings-export-start", in: window)
+            try capture("keyboard-export-\(inline ? "inline" : "native")-failure-focus", window: window)
+            XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
+
+            repository.failure = nil
+            try keyboard(49, " ", in: window)
+            try await waitForExportPanel(panel)
+            panel.finish(.approved(destination))
+            try await waitForExportState(.preparing, service: graph.exportService)
+            XCTAssertEqual(try focusedIdentifier(), "settings-export-cancel", "Panel approval returns to the surviving Cancel action")
+            try assertExportAction("Cancel export", identifier: "settings-export-cancel", in: window)
+            try capture("keyboard-export-\(inline ? "inline" : "native")-preparing-focus", window: window)
+            await gate.release()
+            await graph.exportService.waitForCompletion()
+            settle()
+            XCTAssertEqual(graph.exportService.state, .saved)
+            XCTAssertEqual(try focusedIdentifier(), "settings-export-start", "The focused native action survives commit")
+            try assertExportAction("Export another snapshot…", identifier: "settings-export-start", in: window)
+            try capture("keyboard-export-\(inline ? "inline" : "native")-saved-focus", window: window)
+            XCTAssertNoThrow(try LocalDataExport.decode(Data(contentsOf: root.appendingPathComponent("export.json"))))
+            XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), ["export.json"])
+            try tab(to: "settings-back", in: window, backwards: true)
+            try tab(to: "settings-export-start", in: window)
+            try keyboard(53, "\u{1b}", in: window)
+            XCTAssertEqual(try focusedIdentifier(), "settings-local-data", "Terminal Escape only leaves the section")
+            XCTAssertEqual(graph.exportService.state, .saved)
+            try tab(to: "settings-general", in: window)
+            XCTAssertEqual(graph.appPreferencesStore.committed, preferences.value)
+            XCTAssertEqual(preferences.saves, 0)
+        }
+    }
+
+    func testKeyboardLocalDataPreparingEscapeWaitsForResultAndRestoresExportAgain() async throws {
+        try keyboardSession()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("SettingsExportCancelKeyboard-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let panel = SettingsExportPanel()
+        let gate = SettingsExportPreparationGate()
+        let writer = SettingsExportWriter(writer: ExportFileWriter(temporaryRoot: root), gate: gate)
+        let graph = AppDependencies(container: container, catalogRepository: SwiftDataCatalogRepository(container: container),
+                                    exportPanel: panel, exportWriter: writer)
+        let window = show(ScrollView { FoundationSettingsView(dependencies: graph) })
+        defer { window.orderOut(nil) }
+        try press("settings-local-data", in: window)
+        try tab(to: "settings-export-start", in: window)
+        try keyboard(49, " ", in: window)
+        try await waitForExportPanel(panel)
+        panel.finish(.approved(try writer.approveDestination(root.appendingPathComponent("export.json"))))
+        try await waitForExportState(.preparing, service: graph.exportService)
+        XCTAssertEqual(try focusedIdentifier(), "settings-export-cancel")
+        try keyboard(53, "\u{1b}", in: window)
+        XCTAssertEqual(graph.exportService.state, .preparing)
+        XCTAssertTrue(graph.exportService.isBusy, "The noncooperative preparation gate still owns work")
+        _ = try node("settings-local-data-content", in: window)
+        await gate.release()
+        await graph.exportService.waitForCompletion()
+        settle()
+        XCTAssertEqual(graph.exportService.state, .canceled)
+        XCTAssertEqual(try focusedIdentifier(), "settings-export-start")
+        try assertExportAction("Export again…", identifier: "settings-export-start", in: window)
+        try capture("keyboard-export-preparing-escape-canceled-focus", window: window)
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
+        try keyboard(53, "\u{1b}", in: window)
+        XCTAssertEqual(try focusedIdentifier(), "settings-local-data")
+        XCTAssertEqual(graph.exportService.state, .canceled)
+    }
+
+    func testKeyboardLocalDataLeavingSectionFencesRestorationAndDoesNotStealGeneralFocus() async throws {
+        try keyboardSession()
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let panel = SettingsExportPanel()
+        let graph = AppDependencies(container: container, catalogRepository: SwiftDataCatalogRepository(container: container),
+                                    exportPanel: panel)
+        let window = show(ScrollView { FoundationSettingsView(dependencies: graph) })
+        defer { window.orderOut(nil) }
+        try press("settings-local-data", in: window)
+        try tab(to: "settings-export-start", in: window)
+        try keyboard(49, " ", in: window)
+        try await waitForExportPanel(panel)
+        // Back is an explicit navigation action, not an export cancellation.
+        try press("settings-back", in: window)
+        XCTAssertEqual(try focusedIdentifier(), "settings-local-data")
+        try tab(to: "settings-general", in: window)
+        try keyboard(49, " ", in: window)
+        XCTAssertEqual(try focusedIdentifier(), "preferences-duration")
+        panel.finish(.canceled)
+        await graph.exportService.waitForCompletion()
+        settle()
+        XCTAssertEqual(try focusedIdentifier(), "preferences-duration", "Obsolete restoration cannot target an unmounted section")
+        try keyboard(53, "\u{1b}", in: window)
+        XCTAssertEqual(try focusedIdentifier(), "settings-general")
+        try press("settings-local-data", in: window)
+        XCTAssertEqual(try focusedIdentifier(), "settings-back", "Reopening a finished export preserves the hub's handoff")
+        try tab(to: "settings-export-start", in: window)
+        try keyboard(53, "\u{1b}", in: window)
+        XCTAssertEqual(try focusedIdentifier(), "settings-local-data")
     }
 
     private func dismissFolderConfirmation(_ name: String) throws {
