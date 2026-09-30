@@ -150,6 +150,7 @@ final class ProjectStore: ObservableObject {
     @Published private(set) var preview: ProjectAddPreview?
     @Published private(set) var addMessage: String?
     @Published private(set) var reconnectMessage: String?
+    private var reconnectMessageProjectID: UUID?
     @Published private(set) var loadFailed = false
     private(set) var isLoaded = false
     private var isInspectionAdmitted = false
@@ -486,6 +487,48 @@ final class ProjectStore: ObservableObject {
         // Occupied owners finish normally and drain surviving pre-existing work.
     }
 
+    /// Remove only the confirmed local reference. Admission and durable deletion are
+    /// synchronous: no transient state is discarded unless the repository commits.
+    /// In-flight reads retain their slots until their existing owners finish.
+    func disconnect(id: UUID, expectedRevision: UUID) throws {
+        guard let reference = rows.first(where: { $0.reference.id == id })?.reference else {
+            throw ProjectReferencePersistenceError.notFound
+        }
+        guard reference.revision == expectedRevision else {
+            throw ProjectReferencePersistenceError.staleRevision
+        }
+        guard !mutating.contains(id), reconciliations[id] == nil, !reconnecting.contains(id) else {
+            throw ProjectStoreError.busy
+        }
+        try repository.remove(id: id, expectedRevision: expectedRevision)
+
+        if var operation = refreshOperations[id] {
+            operation.task?.cancel()
+            operation.publicationInvalidated = true
+            operation.followUp = false
+            operation.queued = false
+            if operation.task == nil {
+                refreshOperations.removeValue(forKey: id)
+            } else {
+                refreshOperations[id] = operation
+            }
+        }
+        refreshQueue.removeAll { $0 == id }
+        refreshAfterMutation.remove(id)
+        undoTokens.removeValue(forKey: id)
+        reconnectGenerations.removeValue(forKey: id)
+        if reconnectMessageProjectID == id {
+            reconnectMessage = nil
+            reconnectMessageProjectID = nil
+        }
+        rows.removeAll { $0.reference.id == id }
+        if selectedFeature?.projectID == id { selectedFeature = nil }
+        if selectionNotice?.projectID == id { selectionNotice = nil }
+        selectInitialProjectIfNeeded()
+        // No queue drain or inspection admission: disconnect is local-only. Occupied
+        // readers finish normally and drain any surviving pre-existing requests.
+    }
+
     /// Projects entry, not local-reference readiness, admits bounded initial inspection.
     func enterProjects() throws {
         try loadReferencesIfNeeded()
@@ -806,6 +849,7 @@ final class ProjectStore: ObservableObject {
         reconnectGenerations[id] = generation
         defer { reconnecting.remove(id) }
         reconnectMessage = nil
+        reconnectMessageProjectID = nil
         do {
             let selectedIdentity = try await identifier.selected(folder)
             try Task.checkCancellation()
@@ -852,10 +896,12 @@ final class ProjectStore: ObservableObject {
             rows[index].isRetainedInspection = false
             rows[index].refreshFailure = nil
             reconnectMessage = nil
+            reconnectMessageProjectID = nil
             refresh(id)
             return receipt
         } catch {
             if !(error is CancellationError) && reconnectGenerations[id] == generation {
+                reconnectMessageProjectID = id
                 switch error {
                 case ProjectStoreError.manifestMismatch: reconnectMessage = "Different project selected"
                 case ProjectStoreError.invalidReconnect: reconnectMessage = "Selected project is not valid"

@@ -646,3 +646,90 @@ The source/selector audit verifies nonempty exact-once execution and all results
 Guarded post-host cleanup enumerated the single exact printed root `/var/folders/lz/20cqfx4x2k98r89q68w3q3ch0000gn/T/KontrolProjectIntegrationTests-7354`. Confirmed PID **7354** exited, validated TMPDIR parent/process-owned name/no symlinks, enumerated **9 SQLite stores**, and checked all read-only `PRAGMA integrity_check` results as **ok**. Closed connections and rechecked host exit before removing only that root; it no longer exists. Exact store paths/results: `/tmp/kontrol-f13-step2.2b-cleanup.log`. Production data, original fixtures, and historical unlogged roots were untouched.
 
 **No Step 2.2b blocker remains.** Accessibility gate A13 and native/sandbox/baseline/distribution release gates remain required and pending—not passed, skipped, or waived. No visible surface or hosted method changed in this checkpoint.
+
+## F13 durable store disconnect — Step 2.3 (2026-09-30, 10:32 UTC)
+
+**Implementation checkpoint passed; ready for review.** First incomplete task matches runner Step 2.3. The complete cumulative task-3 review checklist has no previous findings. Initial worktree/index diffs were empty, with no interrupted partial work. Repository/target and direct-ancestor checks through `/` found no applicable `AGENTS.md`; no `.gitmodules` or configured submodules were found. Existing regression repairs remain intact. No plan, workflow state, later task, schema, or presentation was changed. Changes remain uncommitted for this step's runner review.
+
+### Implementation and acceptance coverage
+
+- `ProjectStore.disconnect(id:expectedRevision:)` validates local identity/revision and rejects that identity's active completion (including validation), Undo execution, reconnect, and saved-write reconciliation before calling persistence. The repository independently validates the authoritative revision; missing/stale results propagate without adopting newer state or implicitly reloading.
+- Deletion commits synchronously before publication or transient cleanup. Failure retains the reference, inspection, location, feature detail/selection, notices, completion outcome, and usable idle Undo. No automatic deletion/retry or cancellation of irreversible operations occurs. Busy completion/Undo owners still finish successfully after rejection; an unrelated reference can be disconnected during reconnect.
+- Success removes only the reference and its row-owned inspection/location/completion plus selected detail/notices, Undo, reconnect generation, and queued follow-ups. Reconnect notices now retain their owning identity, so an unrelated notice survives. Unrelated selection/detail/inspection/location/completion/Undo remain usable. Removed selection falls back to display order then UUID; deleting the last row clears selection.
+- Running refresh task/generation bookkeeping remains occupied, publication-invalidated, until the existing `finishRefresh` owner releases its slot. Waiting requests/follow-ups for the removed identity are discarded without admitting or draining new external reads. The comprehensive disconnect race/capacity and copied-tree byte-inventory checkpoint remains Step 2.4; this entry does not certify those later checks.
+- New `ProjectDisconnectTests.swift` is explicitly registered in the test target/group/build phase. Eight methods exercise local-only removal with unusable opaque bookmarks, commit-before-publication, durable reopen/survivors/unrelated tasks, selection ordering/last-row cleanup, unrelated inspected detail preservation, injected durable failure/explicit retry, local and authoritative stale/missing confirmations, external access/read failures, feature/reconnect notice retention and cleanup, and reconnect busy admission. Inspector, identity, location, bookmark-creation, and writer spies show no added external calls from disconnect.
+- Two additional completion methods cover rejection throughout validation/write/saved-read/Undo/saved-Undo-read, successful owner completion with no deferred deletion, failure retaining idle Undo, and successful removal clearing only the affected token/detail. Exact new identifiers:
+  - `ProjectDisconnectTests/testLocalOnlyDisconnectCommitsBeforePublicationAndReopensWithSurvivors`
+  - `ProjectDisconnectTests/testSelectedRemovalUsesDisplayOrderThenUUIDAndLastRemovalClearsSelection`
+  - `ProjectDisconnectTests/testRemovalPreservesUnrelatedInspectedSelectionDetailAndLocation`
+  - `ProjectDisconnectTests/testFailedDurableDeletionRetainsUsableDetailLocationAndRequiresExplicitRetry`
+  - `ProjectDisconnectTests/testStaleAndMissingConfirmationsLeaveRowsAndDetailForExplicitReview`
+  - `ProjectDisconnectTests/testRemovalClearsObsoleteFeatureNoticeAndExternalFailuresRemainRemovable`
+  - `ProjectDisconnectTests/testDisconnectClearsOnlyItsReconnectNoticeAfterDurableSuccess`
+  - `ProjectDisconnectTests/testReconnectBusyRejectionDoesNotCancelOwnerOrQueueDeletion`
+  - `ProjectCompletionStoreTests/testDisconnectRejectsCompletionValidationWriteReconciliationAndUndoWithoutCancelingOwners`
+  - `ProjectCompletionStoreTests/testDisconnectFailurePreservesIdleUndoThenSuccessClearsOnlyRemovedTokenAndDetail`
+
+### Exact commands and results
+
+Discovery commands all exited **0**: `xcode-select -p`, `xcodebuild -version`, `xcrun swift --version`, `xcodebuild -list -project Kontrol.xcodeproj`, `sw_vers`, `uname -m`. Environment: `/Applications/Xcode.app/Contents/Developer`, **Xcode 27.0 (27A266a), Apple Swift 6.4 (swiftlang-6.4.0.34.1; swift-driver 1.168.6), arm64 macOS 27.0 (26A428)**; Yams **5.4.0**. Swift 5/macOS 14 deployment remain unchanged; no macOS 14 runtime claim.
+
+Commands below ran from repository root initially and again on final source after adding identity-owned reconnect-notice cleanup and strengthening failure/notice coverage. Every command exited **0**:
+
+```sh
+set -o pipefail
+make build DERIVED_DATA=/tmp/kontrol-f13-derived
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  CODE_SIGNING_ALLOWED=NO build-for-testing
+# Exact expansion of f13_test ProjectDisconnectTests ProjectStoreTests ProjectCompletionStoreTests ProjectIntegrationTests:
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
+  -only-testing:KontrolTests/ProjectDisconnectTests \
+  -only-testing:KontrolTests/ProjectStoreTests \
+  -only-testing:KontrolTests/ProjectCompletionStoreTests \
+  -only-testing:KontrolTests/ProjectIntegrationTests test
+git diff --check
+```
+
+Initial logs: `/tmp/kontrol-f13-step2.3-{build,bft,tests}.log`. Final logs: `/tmp/kontrol-f13-step2.3-final-{build,bft,tests}.log`. Both builds and both test-compilation actions succeeded. Hosted fixtures compiled but were not executed; no visible surface/hosted identifier changed.
+
+| Selected suite | Initial executed/passed | Final source methods/executed/passed |
+| --- | ---: | ---: |
+| ProjectDisconnectTests | 7 | 8 |
+| ProjectStoreTests | 41 | 41 |
+| ProjectCompletionStoreTests | 21 | 21 |
+| ProjectIntegrationTests | 9 | 9 |
+| **Total** | **78** | **79** |
+
+Both runs have **0 failures, 0 skips, 0 expected failures**. Initial bundle: `/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_18-27-51-+0800.xcresult`; final bundle: **`/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_18-30-08-+0800.xcresult`**. Both summaries have empty runtime-warning and test-failure arrays. Raw logs retain existing malformed-bookmark/linkd and destination/AppIntents diagnostics. `/tmp/kontrol-f13-step2.3-diagnostics.log` records the diagnostic audit; no SQLite `vnode unlinked while in use`, `InvalidTransition`, or AX prerequisite diagnostic appears.
+
+Fresh bundle audits, each exit **0**:
+
+```sh
+RESULT_BUNDLE=/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_18-27-51-+0800.xcresult
+xcrun xcresulttool get test-results summary --path "$RESULT_BUNDLE" --format json \
+  > /tmp/kontrol-f13-step2.3-summary.json
+xcrun xcresulttool get test-results tests --path "$RESULT_BUNDLE" --format json \
+  > /tmp/kontrol-f13-step2.3-test-tree.json
+RESULT_BUNDLE=/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_18-30-08-+0800.xcresult
+xcrun xcresulttool get test-results summary --path "$RESULT_BUNDLE" --format json \
+  > /tmp/kontrol-f13-step2.3-final-summary.json
+xcrun xcresulttool get test-results tests --path "$RESULT_BUNDLE" --format json \
+  > /tmp/kontrol-f13-step2.3-final-test-tree.json
+python3 /tmp/kontrol-f13-step2.3-audit.py /tmp/kontrol-f13-step2.3 initial \
+  > /tmp/kontrol-f13-step2.3-selector-audit.log
+python3 /tmp/kontrol-f13-step2.3-audit.py /tmp/kontrol-f13-step2.3-final \
+  > /tmp/kontrol-f13-step2.3-final-selector-audit.log
+python3 /tmp/kontrol-f13-step2.3-cleanup.py | tee /tmp/kontrol-f13-step2.3-cleanup.log
+git diff --check
+```
+
+Selector audits enumerate full method identifiers/results, require nonempty exact-once execution and every result `Passed`, and reconcile summary totals. The initial audit excludes only the reconnect-notice method added after that run; final audit covers all 79 current methods.
+
+Guarded post-host cleanup enumerated the four exact logged roots under `/var/folders/lz/20cqfx4x2k98r89q68w3q3ch0000gn/T/`: `KontrolProjectDisconnectTests-11378`, `KontrolProjectDisconnectTests-11885`, `KontrolProjectIntegrationTests-11378`, and `KontrolProjectIntegrationTests-11885`. Both host PIDs were confirmed exited; TMPDIR parent/process-owned names/no symlinks were validated. Enumerated **2 + 2 + 9 + 9 SQLite stores** and checked all **22** read-only `PRAGMA integrity_check` results as **ok**. Connections closed and PID exit rechecked before removing only these roots; all four no longer exist. Exact store paths/results: `/tmp/kontrol-f13-step2.3-cleanup.log`. Original fixtures, production data, live stores, and historical unlogged roots were untouched.
+
+**No Step 2.3 blocker remains.** A13 Accessibility and native/sandbox/baseline/distribution acceptance remain required and pending—not passed, skipped, or waived. This non-GUI checkpoint is not F13/release acceptance.

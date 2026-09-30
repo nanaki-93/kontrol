@@ -97,6 +97,8 @@ private final class CompletionRepository: ProjectReferenceRepository {
     var references: [ProjectReferenceSnapshot] = []
     var failReadSave = false
     var successfulReads = 0
+    var failRemoval = false
+    var removals = 0
     func fetchAll() throws -> [ProjectReferenceSnapshot] { references }
     func insert(_ input: NewProjectReference) throws -> ProjectReferenceSnapshot { throw ProjectStoreError.busy }
     func remove(id: UUID, expectedRevision: UUID) throws {
@@ -106,6 +108,8 @@ private final class CompletionRepository: ProjectReferenceRepository {
         guard references[index].revision == expectedRevision else {
             throw ProjectReferencePersistenceError.staleRevision
         }
+        removals += 1
+        if failRemoval { throw ProjectReferencePersistenceError.invalidReference }
         references.remove(at: index)
     }
     func reconnect(id: UUID, expectedRevision: UUID,
@@ -871,6 +875,118 @@ final class ProjectCompletionStoreTests: XCTestCase {
         await io.release(ref.bookmarkData, .success(original))
         await eventually { store.rows[0].inspection?.readAt == original.readAt }
         XCTAssertTrue(store.canMarkComplete("ready", in: ref.id))
+    }
+
+    func testDisconnectRejectsCompletionValidationWriteReconciliationAndUndoWithoutCancelingOwners() async throws {
+        let io = CompletionInspector(), writer = CompletionWriter(), repo = CompletionRepository()
+        let gate = CompletionValidationGate()
+        let ref = reference(71), peer = reference(72)
+        repo.references = [ref, peer]
+        let store = ProjectStore(inspector: io, repository: repo, writer: writer,
+            completionValidator: { source, feature in await gate.validate(source, feature) })
+        try store.enterProjects()
+        await eventually {
+            let first = await io.count(ref.bookmarkData), other = await io.count(peer.bookmarkData)
+            return first == 1 && other == 1
+        }
+        let original = inspection(["ready": .ready])
+        await io.release(ref.bookmarkData, .success(original))
+        await io.release(peer.bookmarkData, .success(original))
+        await eventually { repo.successfulReads == 2 }
+        func rejectDisconnect() {
+            let current = store.rows.first { $0.reference.id == ref.id }!.reference
+            XCTAssertThrowsError(try store.disconnect(id: ref.id, expectedRevision: current.revision)) {
+                XCTAssertEqual($0 as? ProjectStoreError, .busy)
+            }
+            XCTAssertEqual(repo.removals, 0, "Admission must reject before persistence")
+            XCTAssertEqual(store.rows.count, 2)
+        }
+        let completion = Task { await store.markComplete("ready", in: ref.id) }
+        await eventually { await gate.hasEntered() }
+        rejectDisconnect() // Includes off-main validation, before writer IO.
+        await gate.release(true)
+        await eventually { await writer.count() == 1 }
+        rejectDisconnect()
+        store.refresh(ref.id) // A rejected disconnect must not cancel queued verification.
+        await writer.succeed()
+        await eventually { await io.count(ref.bookmarkData) == 1 }
+        XCTAssertEqual(store.rows[0].completion, .refreshing("ready"))
+        rejectDisconnect()
+        let saved = savedInspection(original, featureID: "ready")
+        await io.release(ref.bookmarkData, .success(saved))
+        await completion.value
+        XCTAssertEqual(store.rows[0].completion, .saved("ready"))
+        XCTAssertTrue(store.canUndoCompletion(in: ref.id))
+        XCTAssertEqual(repo.removals, 0, "No deferred automatic deletion after completion")
+        let undo = Task { await store.undoCompletion(in: ref.id) }
+        await eventually { await writer.undoCount() == 1 }
+        rejectDisconnect()
+        store.refresh(ref.id)
+        await writer.succeedUndo()
+        await eventually { await io.count(ref.bookmarkData) == 1 }
+        XCTAssertEqual(store.rows[0].completion, .refreshing("ready"))
+        rejectDisconnect()
+        await io.release(ref.bookmarkData, .success(original))
+        await undo.value
+        XCTAssertEqual(store.rows[0].completion, .undone("ready"))
+        XCTAssertEqual(store.rows[0].inspection, original)
+        XCTAssertEqual(repo.removals, 0, "No deferred automatic deletion after Undo")
+        try store.disconnect(id: ref.id, expectedRevision: store.rows[0].reference.revision)
+        XCTAssertEqual(repo.removals, 1)
+        XCTAssertEqual(store.rows.map(\.reference.id), [peer.id])
+    }
+
+    func testDisconnectFailurePreservesIdleUndoThenSuccessClearsOnlyRemovedTokenAndDetail() async throws {
+        let io = CompletionInspector(), writer = CompletionWriter(), repo = CompletionRepository()
+        let ref = reference(73), peer = reference(74)
+        repo.references = [ref, peer]
+        let store = ProjectStore(inspector: io, repository: repo, writer: writer)
+        try store.enterProjects()
+        await eventually {
+            let first = await io.count(ref.bookmarkData), other = await io.count(peer.bookmarkData)
+            return first == 1 && other == 1
+        }
+        let original = inspection(["ready": .ready]), saved = savedInspection(inspection(["ready": .ready]), featureID: "ready")
+        await io.release(ref.bookmarkData, .success(original))
+        await io.release(peer.bookmarkData, .success(original))
+        await eventually { repo.successfulReads == 2 }
+        for reference in [ref, peer] {
+            let completion = Task { await store.markComplete("ready", in: reference.id) }
+            await eventually { await writer.count() == (reference.id == ref.id ? 1 : 2) }
+            await writer.succeed()
+            await eventually { await io.count(reference.bookmarkData) == 1 }
+            await io.release(reference.bookmarkData, .success(saved))
+            await completion.value
+        }
+        store.selectFeature("ready", in: ref.id)
+        let current = store.rows[0].reference, expiration = store.undoExpiration(in: ref.id)
+        let peerRow = store.rows[1], peerExpiration = store.undoExpiration(in: peer.id)
+        repo.failRemoval = true
+        XCTAssertThrowsError(try store.disconnect(id: ref.id, expectedRevision: current.revision))
+        XCTAssertEqual(store.rows[0].completion, .saved("ready"))
+        XCTAssertEqual(store.selectedFeatureContent?.status, .completed)
+        XCTAssertEqual(store.undoExpiration(in: ref.id), expiration)
+        XCTAssertTrue(store.canUndoCompletion(in: ref.id))
+        await Task.yield()
+        XCTAssertEqual(repo.removals, 1, "Failure requires an explicit retry")
+        repo.failRemoval = false
+        try store.disconnect(id: ref.id, expectedRevision: current.revision)
+        XCTAssertEqual(store.rows.count, 1)
+        XCTAssertEqual(store.selectedID, peer.id)
+        XCTAssertNil(store.selectedFeature)
+        XCTAssertNil(store.selectedFeatureContent)
+        XCTAssertNil(store.selectionNotice)
+        XCTAssertNil(store.undoExpiration(in: ref.id))
+        XCTAssertNil(store.undoFeatureID(in: ref.id))
+        XCTAssertFalse(store.canUndoCompletion(in: ref.id))
+        XCTAssertEqual(store.rows[0].reference, peerRow.reference)
+        XCTAssertEqual(store.rows[0].inspection, peerRow.inspection)
+        XCTAssertEqual(store.rows[0].completion, peerRow.completion)
+        XCTAssertEqual(store.undoExpiration(in: peer.id), peerExpiration)
+        XCTAssertTrue(store.canUndoCompletion(in: peer.id))
+        await store.undoCompletion(in: ref.id)
+        let undoWrites = await writer.undoCount()
+        XCTAssertEqual(undoWrites, 0)
     }
 
     func testReconnectReplacementClearsTokenButFailedReconnectKeepsIt() async throws {
