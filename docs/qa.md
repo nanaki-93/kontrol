@@ -1803,3 +1803,121 @@ After host exit, both store/WAL/SHM inventories were enumerated and read-only SQ
 cleanup, schema/fixture edits, production data access, network/credential/folder
 access, or dependency changes occurred. Historical evidence is preserved.
 **No remaining Step 3.1 blockers.**
+
+## F13 atomic export delivery — Step 3.2 (2026-09-30, 15:55 UTC)
+
+**Implementation verification passed; native/release gates remain separate.** The
+first incomplete task matched runner task 10, and its cumulative review checklist
+had no previous findings. Initial worktree/index were clean; repository/target and
+ancestor instruction checks found no applicable `AGENTS.md`, and no submodule was
+listed. Only `ExportFileWriter.swift`, `ExportServiceTests.swift`, and this required
+QA ledger changed. No workflow state, plan checkbox, project membership, schema,
+dependency, or historical fixture changed.
+
+Source base: `a5642cbf7910cdf13fdb99da41bc40752a0b1e26`; implementation/test
+`git diff -- Kontrol/Data/Export/ExportFileWriter.swift KontrolTests/ExportServiceTests.swift | shasum -a 256`:
+`9a8fb4001bbeee2054eada186f8c3614d5bb3ad112aa08dafcb5838c374c8fd7`.
+Evidence directory: **`/tmp/kontrol-f13-step3-2.crM1aj`**. `environment.log` records
+Xcode 27.0 (27A266a), Swift 6.4, arm64 macOS 27.0 (26A428), source identity and diff
+hash; `project-list.log` records the unchanged project/scheme/Yams 5.4.0 resolution.
+Swift 5 language mode and macOS 14 deployment remain unchanged, not baseline-runtime
+acceptance.
+
+### Delivery boundary and covered acceptance
+
+- Added an opaque, transient approved-destination value and `ExportFileDelivering`
+  boundary. Approval captures absent/existing intent with `lstat` device/inode,
+  size, modification/change seconds and nanoseconds. Non-file URLs, directories,
+  symlinks (including dangling links), and other nonregular targets are rejected.
+  This is the writer boundary for the later native-panel task, not a claim that
+  NSSavePanel has already been implemented.
+- Off-main delivery uses `NSFileCoordinator` with replacing intent and revalidates
+  destination identity both on entry and immediately before atomic IO. A restrictive
+  0600, exclusive sibling is staged on the destination volume, written in chunks,
+  synced, closed, and compared with validated private JSON. Private artifact cleanup
+  completes before commit. Creation uses `renamex_np(..., RENAME_EXCL)` so an appeared
+  target is never overwritten; existing approved files use atomic `rename`.
+- Cancellation is checked immediately before commit. The caller awaits actual worker
+  completion even with noncooperative checkpoints. A successful rename is committed
+  success regardless of later cancellation/checkpoint errors; no post-await check
+  falsely reports canceled. Sibling/private staging is removed on covered success,
+  failure, and cancellation paths. Filesystem cleanup denial reports a safe category;
+  no promise is made about process termination or impossible filesystem cleanup.
+- Security-scoped access is transient and balanced only when acquired, on approval
+  and delivery paths. A false start result is normal for nonscoped accessible files;
+  coordination/IO determines actual access. No bookmark or authorization is persisted.
+  Failures carry no raw paths/content/errors. Coordination and identity checks do
+  **not** exclude all races with uncoordinated external editors.
+- Fourteen new non-GUI methods cover creation/replacement round trips, authorization
+  balance, nonscoped access, directory/symlink rejection, changed inode/in-place edit,
+  changes during staging, appeared/removed/unsafe targets, injected access denial,
+  failures at every precommit stage, disk/replacement failure, a real partial sibling
+  write followed by injected ENOSPC, missing-parent IO failure, exclusive-creation
+  race, cancellation before delivery and at every delivery stage, sibling permissions
+  and location, private cleanup before commit, and late-error committed success.
+  Existing preparation/privacy/projection/capture regressions remain unchanged.
+
+### Exact verification and fresh result audit
+
+Commands below ran from the repository root, each exit **0** (the test command is
+`f13_test ExportServiceTests LocalDataExportTests` expanded with a fresh bundle):
+
+```sh
+EVIDENCE=/tmp/kontrol-f13-step3-2.crM1aj
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
+  -resultBundlePath "$EVIDENCE/delivery-final.xcresult" \
+  -only-testing:KontrolTests/ExportServiceTests \
+  -only-testing:KontrolTests/LocalDataExportTests test
+make build DERIVED_DATA=/tmp/kontrol-f13-derived
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived CODE_SIGNING_ALLOWED=NO \
+  build-for-testing
+xcrun xcresulttool get test-results summary \
+  --path "$EVIDENCE/delivery-final.xcresult" --format json \
+  > "$EVIDENCE/summary-final.json"
+xcrun xcresulttool get test-results tests \
+  --path "$EVIDENCE/delivery-final.xcresult" --format json \
+  > "$EVIDENCE/test-tree-final.json"
+python3 "$EVIDENCE/audit.py"
+git diff --check
+```
+
+Logs: `tests-final.log`, `build-final.log`, `compile-final.log`, `audit.log`,
+`diffcheck.log`. Fresh final result: **85/85 Passed**, **26 ExportServiceTests** and
+**59 LocalDataExportTests**, zero failures/skips/expected failures/runtime warnings.
+The audit compares every selected source method against fresh test-tree identifiers
+and proves exact-once, nonempty selection; full selectors are retained in
+`executed-identifiers.txt`. All hosted coverage compiled; no GUI methods were
+required or deferred by this delivery-only task. Native panel/sandbox, geometry,
+keyboard/VoiceOver and A13/S13/B13/D13 remain pending their own required gates.
+
+Historical attempt evidence is retained: the initial identical `build-for-testing`
+command exited **65** (`compile-initial.log`), with async XCTest autoclosure and
+missing-`try` errors in new assertions. Fix: await outcomes before asserting and
+mark encoding calls `try`. The first complete selection then passed **83/83**
+(`delivery.xcresult`, `tests.log`, `summary.json`, `test-tree.json`); after adding
+partial-write and sibling-lifetime tests, the full fresh final selection passed
+**85/85**. No assertions were weakened or skipped. Both builds and final test
+compilation passed. Existing multiple-destination, AppIntents and linkd diagnostics
+remain in logs; no writer/test compiler warning or SQLite vnode-unlinked diagnostic
+occurred in the final test run.
+
+After hosts **90249** (initial selection) and **90932** (final selection) exited,
+`audit.py` checked `ps -p PID -o pid=,stat=,command=` (exit **1**, no rows), enumerated
+all four exact logged capture roots and their store/WAL/SHM inventories, and ran
+read-only SQLite `PRAGMA integrity_check`: **all four `ok`**. Roots retained under
+`/var/folders/lz/20cqfx4x2k98r89q68w3q3ch0000gn/T/`:
+
+- `kontrol-export-capture-3D0C0B75-6002-46DC-818B-CCA32E594E7B/`
+- `kontrol-export-capture-5A9A4B56-637C-40D9-ACB1-4EA0BDADEF93/`
+- `kontrol-export-capture-C16EE805-AB61-4142-9FFB-2199186DDD8B/`
+- `kontrol-export-capture-5F4E6C66-F466-4365-B073-DF8E7ED9938C/`
+
+Exact inventories/results are in `audit.log`. No capture store was removed; writer
+fixtures clean their owned isolated non-SwiftData directories after each operation.
+No production-data access or native signing/authorization acceptance was attempted.
+**No remaining Step 3.2 blockers.**

@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import XCTest
 @testable import Kontrol
@@ -252,6 +253,372 @@ final class ExportServiceTests: XCTestCase {
         XCTAssertEqual(consumed, 1)
         try artifact.discard()
         try assertEmpty(root)
+    }
+
+    private final class AccessLedger: @unchecked Sendable {
+        private let lock = NSLock()
+        private var starts = 0
+        private var stops = 0
+        func start() { lock.lock(); defer { lock.unlock() }; starts += 1 }
+        func stop() { lock.lock(); defer { lock.unlock() }; stops += 1 }
+        var counts: [Int] { lock.lock(); defer { lock.unlock() }; return [starts, stops] }
+    }
+
+    private func assertDeliveryClean(_ root: URL, destinationExists: Bool = true,
+                                     file: StaticString = #filePath, line: UInt = #line) throws {
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path).sorted(),
+                       destinationExists ? ["destination.json"] : [], file: file, line: line)
+    }
+
+    func testAtomicCreationAndReplacementRoundTripAndBalanceTransientAuthorization() async throws {
+        for replacing in [false, true] {
+            let root = try root()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let target = root.appendingPathComponent("destination.json")
+            if replacing { try Data("previous bytes".utf8).write(to: target) }
+            let ledger = AccessLedger()
+            let hooks = ExportFileWriter.DeliveryHooks(startAccess: { _ in ledger.start(); return true },
+                                                       stopAccess: { _ in ledger.stop() }, checkpoint: { _, _ in
+                XCTAssertFalse(Thread.isMainThread)
+            })
+            let writer = ExportFileWriter(temporaryRoot: root, deliveryHooks: hooks)
+            let destination = try writer.approveDestination(target)
+            let snapshot = try snapshot()
+            let artifact = try await writer.prepare(snapshot)
+            let outcome = try await writer.deliver(artifact, to: destination)
+            XCTAssertEqual(outcome, .committed)
+            XCTAssertEqual(try Data(contentsOf: target), try snapshot.encoded())
+            XCTAssertEqual(try LocalDataExport.decode(Data(contentsOf: target)), snapshot)
+            XCTAssertEqual(ledger.counts, [2, 2])
+            let attributes = try FileManager.default.attributesOfItem(atPath: target.path)
+            XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+            try assertDeliveryClean(root)
+            XCTAssertThrowsError(try artifact.consume { _ in XCTFail("Delivered artifact reused") }) {
+                XCTAssertEqual($0 as? ExportFileWriterError, .artifactUnavailable)
+            }
+        }
+    }
+
+    func testOrdinaryNonscopedDestinationDoesNotStopUnacquiredAuthorization() async throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let ledger = AccessLedger()
+        let hooks = ExportFileWriter.DeliveryHooks(startAccess: { _ in ledger.start(); return false },
+                                                   stopAccess: { _ in ledger.stop() })
+        let writer = ExportFileWriter(temporaryRoot: root, deliveryHooks: hooks)
+        let destination = try writer.approveDestination(root.appendingPathComponent("destination.json"))
+        let artifact = try await writer.prepare(snapshot())
+        let outcome = try await writer.deliver(artifact, to: destination)
+        XCTAssertEqual(outcome, .committed)
+        XCTAssertEqual(ledger.counts, [2, 0])
+        try assertDeliveryClean(root)
+    }
+
+    func testApprovalRejectsDirectoriesSymlinksAndDanglingSymlinksWithoutChangingBytes() throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let original = Data("untouched".utf8)
+        let target = root.appendingPathComponent("destination.json")
+        try original.write(to: target)
+        let link = root.appendingPathComponent("link")
+        let dangling = root.appendingPathComponent("dangling")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+        try FileManager.default.createSymbolicLink(at: dangling, withDestinationURL: root.appendingPathComponent("missing"))
+        let ledger = AccessLedger()
+        let hooks = ExportFileWriter.DeliveryHooks(startAccess: { _ in ledger.start(); return true },
+                                                   stopAccess: { _ in ledger.stop() })
+        let writer = ExportFileWriter(temporaryRoot: root, deliveryHooks: hooks)
+        for unsafe in [root, link, dangling, URL(string: "https://example.com/export.json")!] {
+            XCTAssertThrowsError(try writer.approveDestination(unsafe)) {
+                XCTAssertEqual($0 as? ExportFileWriterError, .unsafeDestination)
+            }
+        }
+        XCTAssertEqual(ledger.counts, [3, 3])
+        XCTAssertEqual(try Data(contentsOf: target), original)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path).count, 3)
+    }
+
+    func testChangedReplacementInodeAndInPlaceEditAreRejectedAndPreserveCurrentBytes() async throws {
+        for replaceInode in [false, true] {
+            let root = try root()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let target = root.appendingPathComponent("destination.json")
+            try Data("original".utf8).write(to: target)
+            let writer = ExportFileWriter(temporaryRoot: root)
+            let approved = try writer.approveDestination(target)
+            let current = Data("externally changed bytes".utf8)
+            try current.write(to: target, options: replaceInode ? .atomic : [])
+            let artifact = try await writer.prepare(snapshot())
+            do { _ = try await writer.deliver(artifact, to: approved); XCTFail("Changed identity replaced") }
+            catch { XCTAssertEqual(error as? ExportFileWriterError, .destinationChanged) }
+            XCTAssertEqual(try Data(contentsOf: target), current)
+            try assertDeliveryClean(root)
+        }
+    }
+
+    func testIdentityIsRecheckedImmediatelyBeforeCommitAndCleansSibling() async throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let target = root.appendingPathComponent("destination.json")
+        try Data("original".utf8).write(to: target)
+        let current = Data("external replacement during staging".utf8)
+        let hooks = ExportFileWriter.DeliveryHooks(checkpoint: { stage, _ in
+            if stage == .beforeCommit { try current.write(to: target, options: .atomic) }
+        })
+        let writer = ExportFileWriter(temporaryRoot: root, deliveryHooks: hooks)
+        let approved = try writer.approveDestination(target)
+        let artifact = try await writer.prepare(snapshot())
+        do { _ = try await writer.deliver(artifact, to: approved); XCTFail("Changed target replaced") }
+        catch { XCTAssertEqual(error as? ExportFileWriterError, .destinationChanged) }
+        XCTAssertEqual(try Data(contentsOf: target), current)
+        try assertDeliveryClean(root)
+    }
+
+    func testAppearedAndRemovedDestinationsAndNewUnsafeTargetsFailSafely() async throws {
+        for change in 0..<4 {
+            let root = try root()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let target = root.appendingPathComponent("destination.json")
+            let existing = Data("current bytes".utf8)
+            if change == 1 { try existing.write(to: target) }
+            let writer = ExportFileWriter(temporaryRoot: root)
+            let approved = try writer.approveDestination(target)
+            switch change {
+            case 0: try existing.write(to: target)
+            case 1: try FileManager.default.removeItem(at: target)
+            case 2: try FileManager.default.createDirectory(at: target, withIntermediateDirectories: false)
+            default: try FileManager.default.createSymbolicLink(at: target, withDestinationURL: root.appendingPathComponent("missing"))
+            }
+            let artifact = try await writer.prepare(snapshot())
+            do { _ = try await writer.deliver(artifact, to: approved); XCTFail("Changed target accepted") }
+            catch {
+                XCTAssertEqual(error as? ExportFileWriterError, change < 2 ? .destinationChanged : .unsafeDestination)
+            }
+            if change == 0 { XCTAssertEqual(try Data(contentsOf: target), existing) }
+            if change == 2 { XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: target.path), []) }
+            if change == 3 { XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: target.path), root.appendingPathComponent("missing").path) }
+            try assertDeliveryClean(root, destinationExists: change != 1)
+        }
+    }
+
+    func testDeniedAuthorizationCleansArtifactWithoutStoppingUnacquiredScope() async throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let target = root.appendingPathComponent("destination.json")
+        let original = Data("preserve denied destination".utf8)
+        try original.write(to: target)
+        let approved = try ExportFileWriter().approveDestination(target)
+        let ledger = AccessLedger()
+        let hooks = ExportFileWriter.DeliveryHooks(startAccess: { _ in
+            ledger.start()
+            throw NSError(domain: "private access denied", code: Int(EACCES))
+        }, stopAccess: { _ in ledger.stop() })
+        let writer = ExportFileWriter(temporaryRoot: root, deliveryHooks: hooks)
+        let artifact = try await writer.prepare(snapshot())
+        do { _ = try await writer.deliver(artifact, to: approved); XCTFail("Denied access saved") }
+        catch { XCTAssertEqual(error as? ExportFileWriterError, .deliveryFailed) }
+        XCTAssertEqual(ledger.counts, [1, 0])
+        XCTAssertEqual(try Data(contentsOf: target), original)
+        try assertDeliveryClean(root)
+    }
+
+    func testEveryPrecommitFailurePreservesDestinationAndBalancesAuthorization() async throws {
+        for failingStage in ExportFileWriter.DeliveryStage.allCases where failingStage != .committed {
+            let root = try root()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let target = root.appendingPathComponent("destination.json")
+            let original = Data("preserve failure destination".utf8)
+            try original.write(to: target)
+            let ledger = AccessLedger()
+            let hooks = ExportFileWriter.DeliveryHooks(startAccess: { _ in ledger.start(); return true },
+                                                       stopAccess: { _ in ledger.stop() }, checkpoint: { stage, _ in
+                if stage == failingStage { throw NSError(domain: "private disk failure", code: Int(ENOSPC)) }
+            })
+            let writer = ExportFileWriter(temporaryRoot: root, deliveryHooks: hooks)
+            let approved = try writer.approveDestination(target)
+            let artifact = try await writer.prepare(snapshot())
+            do { _ = try await writer.deliver(artifact, to: approved); XCTFail("Failed delivery saved") }
+            catch { XCTAssertEqual(error as? ExportFileWriterError, .deliveryFailed) }
+            XCTAssertEqual(ledger.counts, [2, 2])
+            XCTAssertEqual(try Data(contentsOf: target), original)
+            try assertDeliveryClean(root)
+        }
+    }
+
+    func testDiskAndAtomicReplacementFailuresPreserveOriginalAndCleanAllStaging() async throws {
+        for code in [ENOSPC, EACCES, EIO] {
+            let root = try root()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let target = root.appendingPathComponent("destination.json")
+            let original = Data("original replacement bytes".utf8)
+            try original.write(to: target)
+            let hooks = ExportFileWriter.DeliveryHooks(commit: { _, _, replacing in
+                XCTAssertTrue(replacing)
+                throw NSError(domain: "sensitive filesystem path", code: Int(code))
+            })
+            let writer = ExportFileWriter(temporaryRoot: root, deliveryHooks: hooks)
+            let approved = try writer.approveDestination(target)
+            let artifact = try await writer.prepare(snapshot())
+            do { _ = try await writer.deliver(artifact, to: approved); XCTFail("Commit failure saved") }
+            catch { XCTAssertEqual(error as? ExportFileWriterError, .deliveryFailed) }
+            XCTAssertEqual(try Data(contentsOf: target), original)
+            try assertDeliveryClean(root)
+        }
+    }
+
+    func testPartialStagingWriteAndDiskFullFailureNeverChangeDestination() async throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let target = root.appendingPathComponent("destination.json")
+        let original = Data("original disk-full destination".utf8)
+        try original.write(to: target)
+        let hooks = ExportFileWriter.DeliveryHooks(writeStaging: { bytes, descriptor in
+            // Model ENOSPC after a real partial write, not just before staging.
+            let partial = bytes.prefix(32)
+            try partial.withUnsafeBytes {
+                guard Darwin.write(descriptor, $0.baseAddress!, $0.count) == $0.count else {
+                    throw ExportFileWriterError.deliveryFailed
+                }
+            }
+            throw NSError(domain: "private disk-full path", code: Int(ENOSPC))
+        })
+        let writer = ExportFileWriter(temporaryRoot: root, deliveryHooks: hooks)
+        let approved = try writer.approveDestination(target)
+        let artifact = try await writer.prepare(snapshot())
+        do { _ = try await writer.deliver(artifact, to: approved); XCTFail("Partial write saved") }
+        catch { XCTAssertEqual(error as? ExportFileWriterError, .deliveryFailed) }
+        XCTAssertEqual(try Data(contentsOf: target), original)
+        try assertDeliveryClean(root)
+    }
+
+    func testSiblingIsPrivateAndOnDestinationVolumeAndPrivateArtifactIsRemovedBeforeCommit() async throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let privateRoot = root.appendingPathComponent("private")
+        try FileManager.default.createDirectory(at: privateRoot, withIntermediateDirectories: false)
+        let target = root.appendingPathComponent("destination.json")
+        let snapshot = try snapshot()
+        let bytes = try snapshot.encoded()
+        let hooks = ExportFileWriter.DeliveryHooks(checkpoint: { stage, url in
+            if stage == .staged {
+                XCTAssertEqual(url.deletingLastPathComponent().standardizedFileURL.path, root.standardizedFileURL.path)
+                let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+                XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+                XCTAssertEqual(try Data(contentsOf: url), bytes)
+                XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: privateRoot.path).count, 1)
+            }
+            if stage == .beforeCommit || stage == .committed {
+                XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: privateRoot.path), [])
+            }
+            if stage == .committed {
+                throw NSError(domain: "late noncancellation failure cannot negate saved", code: 1)
+            }
+        })
+        let writer = ExportFileWriter(temporaryRoot: privateRoot, deliveryHooks: hooks)
+        let approved = try writer.approveDestination(target)
+        let artifact = try await writer.prepare(snapshot)
+        let outcome = try await writer.deliver(artifact, to: approved)
+        XCTAssertEqual(outcome, .committed)
+        XCTAssertEqual(try Data(contentsOf: target), bytes)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path).sorted(), ["destination.json", "private"])
+        try assertEmpty(privateRoot)
+    }
+
+    func testRealMissingParentAndExclusiveCreationRaceDoNotOverwriteUnrelatedBytes() async throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let missingTarget = root.appendingPathComponent("absent/destination.json")
+        let writer = ExportFileWriter(temporaryRoot: root)
+        let approved = try writer.approveDestination(missingTarget)
+        let artifact = try await writer.prepare(snapshot())
+        do { _ = try await writer.deliver(artifact, to: approved); XCTFail("Missing parent saved") }
+        catch { XCTAssertEqual(error as? ExportFileWriterError, .deliveryFailed) }
+        try assertEmpty(root)
+        let target = root.appendingPathComponent("destination.json")
+        let current = Data("created just before rename".utf8)
+        let hooks = ExportFileWriter.DeliveryHooks(commit: { sibling, destination, replacing in
+            XCTAssertFalse(replacing)
+            try current.write(to: destination)
+            guard renamex_np(sibling.path, destination.path, UInt32(RENAME_EXCL)) == 0 else {
+                throw ExportFileWriterError.deliveryFailed
+            }
+        })
+        let raceWriter = ExportFileWriter(temporaryRoot: root, deliveryHooks: hooks)
+        let newApproved = try raceWriter.approveDestination(target)
+        let raceArtifact = try await raceWriter.prepare(snapshot())
+        do { _ = try await raceWriter.deliver(raceArtifact, to: newApproved); XCTFail("Exclusive creation overwrote target") }
+        catch { XCTAssertEqual(error as? ExportFileWriterError, .deliveryFailed) }
+        XCTAssertEqual(try Data(contentsOf: target), current)
+        try assertDeliveryClean(root)
+    }
+
+    func testCancellationBeforeDeliveryCleansArtifactWithoutAcquiringAuthorization() async throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let target = root.appendingPathComponent("destination.json")
+        let original = Data("preserve canceled destination".utf8)
+        try original.write(to: target)
+        let ledger = AccessLedger()
+        let hooks = ExportFileWriter.DeliveryHooks(startAccess: { _ in ledger.start(); return true },
+                                                   stopAccess: { _ in ledger.stop() })
+        let writer = ExportFileWriter(temporaryRoot: root, deliveryHooks: hooks)
+        let approved = try writer.approveDestination(target)
+        let artifact = try await writer.prepare(snapshot())
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await writer.deliver(artifact, to: approved)
+        }
+        do { _ = try await task.value; XCTFail("Canceled delivery saved") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(ledger.counts, [1, 1])
+        XCTAssertEqual(try Data(contentsOf: target), original)
+        try assertDeliveryClean(root)
+    }
+
+    @MainActor
+    func testCancellationAtEveryDeliveryStagePreservesPrecommitBytesButReportsPostcommitSaved() async throws {
+        for cancellationStage in ExportFileWriter.DeliveryStage.allCases {
+            let root = try root()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let target = root.appendingPathComponent("destination.json")
+            let original = Data("original before cancellation".utf8)
+            try original.write(to: target)
+            let ledger = AccessLedger()
+            let reached = expectation(description: "Delivery reached \(cancellationStage)")
+            let release = DispatchSemaphore(value: 0)
+            let hooks = ExportFileWriter.DeliveryHooks(startAccess: { _ in ledger.start(); return true },
+                                                       stopAccess: { _ in ledger.stop() }, checkpoint: { stage, _ in
+                XCTAssertFalse(Thread.isMainThread)
+                if stage == cancellationStage {
+                    reached.fulfill()
+                    guard release.wait(timeout: .now() + 10) == .success else {
+                        throw ExportFileWriterError.deliveryFailed
+                    }
+                    if stage == .committed { throw CancellationError() }
+                }
+            })
+            let writer = ExportFileWriter(temporaryRoot: root, deliveryHooks: hooks)
+            let approved = try writer.approveDestination(target)
+            let snapshot = try snapshot()
+            let artifact = try await writer.prepare(snapshot)
+            let task = Task { try await writer.deliver(artifact, to: approved) }
+            await fulfillment(of: [reached], timeout: 5)
+            task.cancel()
+            // A blocked noncooperative worker still owns the operation/scope.
+            XCTAssertEqual(ledger.counts, [2, 1])
+            release.signal()
+            if cancellationStage == .committed {
+                let outcome = try await task.value
+                XCTAssertEqual(outcome, .committed)
+                XCTAssertEqual(try Data(contentsOf: target), try snapshot.encoded())
+            } else {
+                do { _ = try await task.value; XCTFail("Precommit cancellation saved") }
+                catch { XCTAssertTrue(error is CancellationError) }
+                XCTAssertEqual(try Data(contentsOf: target), original)
+            }
+            XCTAssertEqual(ledger.counts, [2, 2])
+            try assertDeliveryClean(root)
+        }
     }
 
     func testExplicitDiscardAbandonmentAndThrowingConsumptionCleanArtifacts() async throws {
