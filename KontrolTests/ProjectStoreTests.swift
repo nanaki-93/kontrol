@@ -89,6 +89,7 @@ private final class StubRepository: ProjectReferenceRepository {
     var failReconnect = false
     var reconnects = 0
     var successfulReads = 0
+    var readAttempts: [UUID] = []
     func fetchAll() throws -> [ProjectReferenceSnapshot] {
         fetches += 1
         if failFetch { throw ProjectReferencePersistenceError.invalidReference }
@@ -130,6 +131,7 @@ private final class StubRepository: ProjectReferenceRepository {
     }
     func recordSuccessfulRead(id: UUID, expectedRevision: UUID, nameHint: String,
                               readAt: Date) throws -> ProjectReferenceSnapshot {
+        readAttempts.append(id)
         guard let index = saved.firstIndex(where: { $0.id == id }) else {
             throw ProjectReferencePersistenceError.notFound
         }
@@ -202,16 +204,20 @@ private actor DeferredInspector: ProjectInspecting {
 }
 
 private actor DeferredLocation: ProjectFolderIdentifying {
-    private var waiting: CheckedContinuation<String, Error>?
+    private var waiting: [(Data, CheckedContinuation<String, Error>)] = []
     private var starts = 0
     func selected(_ folder: URL) async throws -> ProjectFolderIdentity { throw CancellationError() }
     func bookmarked(_ data: Data) async throws -> ProjectFolderIdentity { throw CancellationError() }
     func location(bookmarked data: Data) async throws -> String {
         starts += 1
-        return try await withCheckedThrowingContinuation { waiting = $0 }
+        return try await withCheckedThrowingContinuation { waiting.append((data, $0)) }
     }
     func count() -> Int { starts }
-    func release() { waiting?.resume(returning: "Obsolete location"); waiting = nil }
+    func pending() -> Int { waiting.count }
+    func release(_ data: Data? = nil) {
+        guard let index = waiting.firstIndex(where: { data == nil || $0.0 == data }) else { return }
+        waiting.remove(at: index).1.resume(returning: "Obsolete location")
+    }
 }
 
 private actor ReloadMutationWriter: FeatureFileWriting {
@@ -687,6 +693,144 @@ final class ProjectStoreTests: XCTestCase {
         XCTAssertNil(subject.rows[0].refreshFailure)
         XCTAssertFalse(subject.rows[0].isStale || subject.rows[0].isRefreshing)
         XCTAssertEqual(repo.successfulReads, 0)
+    }
+
+    func testDisconnectSaturatedNoncooperativeReadsRecoverExactlyThreeSlotsAndSurvivorsProgress() async throws {
+        let io = DeferredInspector(), repo = StubRepository()
+        let refs = (1...8).map { reference(UInt8($0)) }
+        repo.saved = refs
+        let identifier = TrackingIdentity(selectedIdentity: identity), writer = TrackingWriter()
+        let subject = ProjectStore(inspector: io, repository: repo, identifier: identifier, writer: writer)
+        try subject.enterProjects()
+        await eventually { await io.counts().0 == 3 }
+        // Coalesced follow-ups and a waiting removal must not survive disconnect.
+        for _ in 0..<5 { subject.refresh(refs[0].id); subject.refresh(refs[1].id) }
+        for index in [0, 1, 4] {
+            try subject.disconnect(id: refs[index].id, expectedRevision: refs[index].revision)
+            subject.refresh(refs[index].id)
+            subject.cancelRefresh(refs[index].id)
+        }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        let held = await io.counts()
+        XCTAssertEqual(held.0, 3)
+        XCTAssertEqual(held.1, 3, "Disconnected noncooperative owners still occupy their slots")
+        XCTAssertTrue(repo.readAttempts.isEmpty)
+        await io.release(refs[0].bookmarkData, result: .success(inspection()))
+        await eventually { await io.starts(for: refs[3].bookmarkData) == 1 }
+        let afterOne = await io.counts()
+        XCTAssertEqual(afterOne.0, 4, "One completion releases exactly one slot")
+        XCTAssertEqual(afterOne.1, 3)
+        await io.release(refs[1].bookmarkData, result: .failure(ProjectInspectionFailure.unreadableFolder))
+        await eventually { await io.starts(for: refs[5].bookmarkData) == 1 }
+        let afterTwo = await io.counts()
+        XCTAssertEqual(afterTwo.0, 5)
+        XCTAssertEqual(afterTwo.1, 3)
+        let survivors = [refs[2], refs[3], refs[5], refs[6], refs[7]]
+        for ref in survivors {
+            await eventually { await io.starts(for: ref.bookmarkData) == 1 }
+            await io.release(ref.bookmarkData, result: .success(inspection()))
+        }
+        await eventually { repo.successfulReads == 5 && subject.rows.allSatisfy { !$0.isRefreshing } }
+        XCTAssertEqual(Set(repo.readAttempts), Set(survivors.map(\.id)))
+        XCTAssertEqual(repo.readAttempts.count, 5, "Removed callbacks cannot even attempt metadata persistence")
+        XCTAssertEqual(subject.rows.map(\.reference.id), survivors.map(\.id))
+        XCTAssertEqual(identifier.locations.count, 5)
+        for ref in [refs[0], refs[1], refs[4]] {
+            let starts = await io.starts(for: ref.bookmarkData)
+            XCTAssertEqual(starts, ref.id == refs[4].id ? 0 : 1)
+        }
+        // Re-saturate after all old owners finish: a leak gives <3, a double release >3.
+        subject.refreshAll()
+        await eventually { await io.counts().0 == 10 }
+        let secondWave = await io.counts()
+        XCTAssertEqual(secondWave.1, 3)
+        XCTAssertEqual(secondWave.2, 3)
+        for ref in survivors {
+            await eventually { await io.starts(for: ref.bookmarkData) == 2 }
+            await io.release(ref.bookmarkData, result: .success(inspection()))
+        }
+        await eventually { repo.successfulReads == 10 && subject.rows.allSatisfy { !$0.isRefreshing } }
+        let finished = await io.counts()
+        XCTAssertEqual(finished.0, 12)
+        XCTAssertEqual(finished.1, 0)
+        XCTAssertEqual(finished.2, 3)
+        XCTAssertEqual(writer.completions + writer.undos, 0)
+        XCTAssertEqual(identifier.selections, 0)
+        XCTAssertTrue(identifier.bookmarks.isEmpty)
+    }
+
+    func testDisconnectRetainsSaturatedDelayedLocationSlotsUntilEachOwnerReturns() async throws {
+        let io = DeferredInspector(), repo = StubRepository(), identifier = DeferredLocation()
+        let refs = (1...5).map { reference(UInt8($0)) }
+        repo.saved = refs
+        let subject = ProjectStore(inspector: io, repository: repo, identifier: identifier,
+                                   writer: TrackingWriter())
+        try subject.enterProjects()
+        await eventually { await io.counts().0 == 3 }
+        for ref in refs.prefix(3) { await io.release(ref.bookmarkData, result: .success(inspection())) }
+        await eventually { await identifier.pending() == 3 }
+        for _ in 0..<5 { subject.refresh(refs[0].id) }
+        try subject.disconnect(id: refs[0].id, expectedRevision: refs[0].revision)
+        try await Task.sleep(nanoseconds: 20_000_000)
+        let held = await io.counts()
+        XCTAssertEqual(held.0, 3, "Finishing inspection does not free a slot occupied by delayed location")
+        let locations = await identifier.pending()
+        XCTAssertEqual(locations, 3, "Disconnect cannot interrupt noncooperative location IO")
+        XCTAssertTrue(repo.readAttempts.isEmpty)
+        await identifier.release(refs[0].bookmarkData)
+        await eventually { await io.starts(for: refs[3].bookmarkData) == 1 }
+        let oneSlot = await io.counts()
+        XCTAssertEqual(oneSlot.0, 4, "A returned location frees one slot, not two")
+        XCTAssertTrue(repo.readAttempts.isEmpty)
+        XCTAssertEqual(subject.rows.map(\.reference.id), refs.dropFirst().map(\.id))
+        await identifier.release(refs[1].bookmarkData)
+        await eventually { await io.starts(for: refs[4].bookmarkData) == 1 }
+        await identifier.release(refs[2].bookmarkData)
+        for ref in refs.suffix(2) { await io.release(ref.bookmarkData, result: .success(inspection())) }
+        await eventually { await identifier.count() == 5 }
+        for ref in refs.suffix(2) { await identifier.release(ref.bookmarkData) }
+        await eventually { repo.successfulReads == 4 && subject.rows.allSatisfy { !$0.isRefreshing } }
+        XCTAssertEqual(Set(repo.readAttempts), Set(refs.dropFirst().map(\.id)))
+        XCTAssertEqual(repo.readAttempts.count, 4)
+        let removedStarts = await io.starts(for: refs[0].bookmarkData)
+        XCTAssertEqual(removedStarts, 1, "Removed location callback cannot schedule its old follow-up")
+        XCTAssertTrue(subject.rows.allSatisfy { $0.inspection != nil && $0.locationHint != nil })
+    }
+
+    func testDisconnectDelayedLocationCannotPublishEvenAfterSameReferenceIsReintroduced() async throws {
+        let io = DeferredInspector(), repo = StubRepository(), ref = reference(1), peer = reference(2)
+        let identifier = DeferredLocation(), writer = TrackingWriter()
+        repo.saved = [ref]
+        let subject = ProjectStore(inspector: io, repository: repo, identifier: identifier, writer: writer)
+        try subject.enterProjects()
+        await eventually { await io.starts(for: ref.bookmarkData) == 1 }
+        await io.release(ref.bookmarkData, result: .success(inspectionWithFeatures([feature("F1")])))
+        await eventually { await identifier.count() == 1 }
+        subject.refresh(ref.id) // Pending follow-up must be discarded.
+        try subject.disconnect(id: ref.id, expectedRevision: ref.revision)
+        XCTAssertTrue(subject.rows.isEmpty)
+        XCTAssertNil(subject.selectedID)
+        repo.saved = [ref, peer] // Deliberately reuse identity AND revision, not just the folder.
+        try subject.reloadReferences()
+        subject.refresh(peer.id)
+        await eventually { await io.starts(for: peer.bookmarkData) == 1 }
+        await identifier.release()
+        // Finish the peer through the same delayed-location seam to synchronize publication.
+        await io.release(peer.bookmarkData, result: .success(inspection()))
+        await eventually { await identifier.count() == 2 }
+        await identifier.release()
+        await eventually { repo.successfulReads == 1 && !subject.rows[1].isRefreshing }
+        XCTAssertEqual(repo.readAttempts, [peer.id])
+        XCTAssertEqual(subject.rows[0].reference, ref)
+        XCTAssertNil(subject.rows[0].inspection)
+        XCTAssertNil(subject.rows[0].locationHint)
+        XCTAssertNil(subject.rows[0].lastReadAt)
+        XCTAssertNil(subject.rows[0].refreshFailure)
+        XCTAssertFalse(subject.rows[0].isRefreshing || subject.rows[0].isStale)
+        XCTAssertNil(subject.selectedFeatureContent)
+        let starts = await io.starts(for: ref.bookmarkData)
+        XCTAssertEqual(starts, 1, "No removed-row follow-up can run after reintroduction")
+        XCTAssertEqual(writer.completions + writer.undos, 0)
     }
 
     func testReloadRejectsReconnectAndAddWithoutCancelingOrQueuingWork() async throws {

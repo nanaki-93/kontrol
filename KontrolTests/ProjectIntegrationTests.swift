@@ -56,6 +56,23 @@ private final class IntegrationGrants: ProjectBookmarkOperations {
     }
 }
 
+/// Counts writer admission while retaining the real coordinated external-file writer.
+private actor IntegrationWriterSpy: FeatureFileWriting {
+    private let writer: FeatureFileWriter
+    private var completions = 0
+    private var undos = 0
+    init(access: ProjectFolderAccess) { writer = FeatureFileWriter(access: access) }
+    func complete(_ request: FeatureCompletionRequest) async throws -> FeatureMutationReceipt {
+        completions += 1
+        return try await writer.complete(request)
+    }
+    func undo(_ request: FeatureUndoRequest) async throws -> FeatureMutationReceipt {
+        undos += 1
+        return try await writer.undo(request)
+    }
+    func counts() -> [Int] { [completions, undos] }
+}
+
 @MainActor
 final class ProjectIntegrationTests: XCTestCase {
     private func workspace() throws -> URL {
@@ -366,6 +383,86 @@ final class ProjectIntegrationTests: XCTestCase {
         XCTAssertEqual(try tree(first), original)
         XCTAssertEqual(try tree(peer), peerBytes)
         XCTAssertEqual(try tree(replacement), replacementBytes)
+        XCTAssertTrue(grants.balanced)
+    }
+
+    func testDisconnectCopiedTreesFailedSaveAndReopenNeverAccessOrChangeExternalBytes() async throws {
+        let root = try workspace()
+        let original = try mutationFixture(root, name: "disconnect-original")
+        // Copy a complete tree: inventory includes .kontrol, hidden Git, source, and directories.
+        let copy = root.appendingPathComponent("disconnect-copy", isDirectory: true)
+        try FileManager.default.copyItem(at: original, to: copy)
+        let malformed = try mutationFixture(root, name: "disconnect-malformed")
+        try Data("schema_version: invalid\n".utf8).write(to: malformed.appendingPathComponent(".kontrol/project.yaml"))
+        let revoked = try mutationFixture(root, name: "disconnect-revoked")
+        let missing = root.appendingPathComponent("disconnect-missing", isDirectory: true)
+        let folders = [copy, malformed, revoked, missing]
+        let baselines = try [original, copy, malformed, revoked].map { try tree($0) }
+        for sentinel in [".git/HEAD", ".git/index", "Sources/App.swift", ".kontrol/history.yaml",
+                         ".kontrol/features/first.md", ".kontrol/roadmap.yaml"] {
+            XCTAssertNotNil(baselines[1][sentinel], "Missing copied-tree sentinel")
+        }
+        let grants = IntegrationGrants(), access = ProjectFolderAccess(operations: grants)
+        let writer = IntegrationWriterSpy(access: access)
+        let database = root.appendingPathComponent("disconnect.store")
+        let container = try ModelContainerFactory().makeContainer(mode: .persistent(database))
+        let repository = SwiftDataProjectReferenceRepository(container: container)
+        var refs: [ProjectReferenceSnapshot] = []
+        for (index, folder) in folders.enumerated() {
+            refs.append(try repository.insert(NewProjectReference(id: UUID(),
+                manifestID: index == 0 ? "disconnect-original" : folder.lastPathComponent,
+                bookmarkData: grants.createBookmark(for: folder), displayOrder: index,
+                displayNameHint: folder.lastPathComponent)))
+        }
+        grants.invalidate(refs[2].bookmarkData)
+        enum SaveFailure: Error { case injected }
+        var fail = false, saves = 0
+        let subject = ProjectStore(inspector: ProjectInspector(access: access),
+            repository: SwiftDataProjectReferenceRepository(container: container, beforeSave: {
+                saves += 1
+                if fail { throw SaveFailure.injected }
+            }), identifier: ScopedProjectFolderIdentifier(access: access), writer: writer)
+        try subject.enterProjects()
+        await wait { subject.rows.count == 4 && subject.rows.allSatisfy { !$0.isRefreshing } }
+        XCTAssertNotNil(subject.rows[0].inspection)
+        XCTAssertTrue(subject.rows[1].isStale)
+        XCTAssertEqual(subject.rows[2].refreshFailure, .inspection(.access(.staleBookmark)))
+        XCTAssertNotNil(subject.rows[3].refreshFailure)
+        subject.selectFeature("F1", in: refs[0].id)
+        let detail = subject.selectedFeatureContent
+        XCTAssertNotNil(detail)
+        let accesses = grants.counts, initialSaves = saves
+        let writerBefore = await writer.counts()
+        XCTAssertEqual(writerBefore, [0, 0])
+        fail = true
+        let confirmed = subject.rows[0].reference
+        XCTAssertThrowsError(try subject.disconnect(id: confirmed.id, expectedRevision: confirmed.revision)) {
+            XCTAssertTrue($0 is SaveFailure)
+        }
+        XCTAssertEqual(subject.selectedFeatureContent, detail)
+        XCTAssertEqual(try repository.fetchAll().count, 4)
+        XCTAssertEqual(grants.counts, accesses)
+        XCTAssertEqual(try [original, copy, malformed, revoked].map { try tree($0) }, baselines)
+        fail = false
+        for ref in subject.rows.map(\.reference) {
+            try subject.disconnect(id: ref.id, expectedRevision: ref.revision)
+            XCTAssertEqual(grants.counts, accesses, "Removal cannot resolve, locate, identify, or scope external folders")
+            XCTAssertEqual(try [original, copy, malformed, revoked].map { try tree($0) }, baselines,
+                           "Every external entry and byte must survive disconnect, including malformed peers")
+        }
+        XCTAssertEqual(saves, initialSaves + 5, "One failed attempt and four explicit durable removals only")
+        XCTAssertTrue(subject.rows.isEmpty)
+        XCTAssertNil(subject.selectedFeatureContent)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: missing.path), "Removal cannot create missing folders")
+        let reopened = try ModelContainerFactory().makeContainer(mode: .persistent(database))
+        let newSubject = store(reopened, grants)
+        try newSubject.loadReferencesIfNeeded()
+        XCTAssertTrue(newSubject.rows.isEmpty)
+        XCTAssertTrue(try SwiftDataProjectReferenceRepository(container: reopened).fetchAll().isEmpty)
+        XCTAssertEqual(grants.counts, accesses)
+        let writerAfter = await writer.counts()
+        XCTAssertEqual(writerAfter, [0, 0], "Disconnect cannot enter FeatureFileWriter, even for malformed/revoked/missing trees")
+        XCTAssertEqual(try [original, copy, malformed, revoked].map { try tree($0) }, baselines)
         XCTAssertTrue(grants.balanced)
     }
 

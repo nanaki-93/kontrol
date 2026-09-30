@@ -733,3 +733,76 @@ Selector audits enumerate full method identifiers/results, require nonempty exac
 Guarded post-host cleanup enumerated the four exact logged roots under `/var/folders/lz/20cqfx4x2k98r89q68w3q3ch0000gn/T/`: `KontrolProjectDisconnectTests-11378`, `KontrolProjectDisconnectTests-11885`, `KontrolProjectIntegrationTests-11378`, and `KontrolProjectIntegrationTests-11885`. Both host PIDs were confirmed exited; TMPDIR parent/process-owned names/no symlinks were validated. Enumerated **2 + 2 + 9 + 9 SQLite stores** and checked all **22** read-only `PRAGMA integrity_check` results as **ok**. Connections closed and PID exit rechecked before removing only these roots; all four no longer exist. Exact store paths/results: `/tmp/kontrol-f13-step2.3-cleanup.log`. Original fixtures, production data, live stores, and historical unlogged roots were untouched.
 
 **No Step 2.3 blocker remains.** A13 Accessibility and native/sandbox/baseline/distribution acceptance remain required and pending—not passed, skipped, or waived. This non-GUI checkpoint is not F13/release acceptance.
+
+## F13 disconnect races, capacity, and external-byte safety — Step 2.4 (2026-09-30, 10:43 UTC)
+
+**Implementation checkpoint passed; ready for review.** The first incomplete task matches runner Step 2.4. Read the complete cumulative task-4 checklist: no previous findings. Initial worktree/index diffs were empty; no interrupted partial work existed. Repository/target searches and direct ancestor checks through `/` found no applicable `AGENTS.md`; no submodules or `.gitmodules` were found. Existing regression repairs, frozen schemas, original fixtures, and workflow state remain untouched. This checkpoint changes three existing test files and this ledger only; no production defect was exposed, so `ProjectStore.swift` needs no speculative repair.
+
+### Acceptance coverage and exact new identifiers
+
+- `ProjectStoreTests/testDisconnectSaturatedNoncooperativeReadsRecoverExactlyThreeSlotsAndSurvivorsProgress`: holds three noncooperative inspections in an eight-row queue; disconnects two running identities and one waiting identity; repeatedly requests removed-row follow-ups. No slot is released early. Returning success/failure owners each admits exactly one survivor. Removed callbacks cannot even **attempt** `recordSuccessfulRead` (the repository spy counts before identity validation); removed queued work never starts. All five survivors publish. A second saturated wave verifies exactly three active slots, no leaks/double release, zero active readers at finish, and no writer/identity access.
+- `ProjectStoreTests/testDisconnectRetainsSaturatedDelayedLocationSlotsUntilEachOwnerReturns`: releases inspections into three suspended location lookups, then disconnects one owner. Slots remain occupied throughout location IO; returning the disconnected location admits exactly one queued survivor without publication/writeback/follow-up. All four survivors finish with inspections and locations.
+- `ProjectStoreTests/testDisconnectDelayedLocationCannotPublishEvenAfterSameReferenceIsReintroduced`: disconnects during delayed location, then locally reintroduces the **same ID and revision** before releasing the old callback. Inspection/location/read date/error/detail remain absent, no old metadata attempt or follow-up occurs, and the peer progresses. `DeferredLocation` now holds per-bookmark continuations; existing reload-location tests still pass.
+- `ProjectDisconnectTests/testFailedDisconnectDuringReadPreservesOwnerAndCoalescedFollowUp`: injected durable deletion failure retains the occupied reader and exactly one coalesced follow-up. Both reads subsequently publish/persist normally; no automatic deletion or external writer invocation occurs.
+- `ProjectIntegrationTests/testDisconnectCopiedTreesFailedSaveAndReopenNeverAccessOrChangeExternalBytes`: copies a complete isolated tree, including `.kontrol`, hidden Git sentinels, source files, and directories. Full entry/byte inventories are compared before/after initial inspection, failed deletion, **every** successful removal, and reopen. Healthy, malformed, revoked, and missing folders remain locally removable. Bookmark resolve/create/scope counters do not change during removal/reopen; an injected forwarding `FeatureFileWriter` spy reports **zero completion and Undo admissions**. All four references are durably absent after reopen; missing folders remain absent. Neither source nor Git nor `.kontrol` entries/bytes are altered or deleted.
+
+The tests inspect existing refresh bookkeeping behavior: disconnect fences publication and drops waiting/follow-up work, while the occupied operation remains until `finishRefresh` releases its slot once. Continuation release, not filesystem timing or cooperative cancellation, controls these races. Short bounded scheduler opportunities check negative assertions; every positive transition is synchronized on observed starts/publication.
+
+### Exact commands, environment, and results
+
+Discovery commands exited **0**: `xcode-select -p`, `xcodebuild -version`, `xcrun swift --version`, `xcodebuild -list -project Kontrol.xcodeproj`, `sw_vers`, `uname -m`. Project listing: `/tmp/kontrol-f13-step2.4-project-list.log`. Environment: **Xcode 27.0 (27A266a), Apple Swift 6.4 (swiftlang-6.4.0.34.1; swift-driver 1.168.6), arm64 macOS 27.0 (26A428)**, developer directory `/Applications/Xcode.app/Contents/Developer`, resolved Yams **5.4.0**. Swift 5/macOS 14 deployment are preserved; no macOS 14 runtime acceptance is claimed.
+
+Using the unchanged plan `f13_test` helper, these commands ran initially and again on final source after adding the saturated delayed-location regression; every command exited **0**:
+
+```sh
+set -o pipefail
+make build DERIVED_DATA=/tmp/kontrol-f13-derived
+f13_test ProjectReferenceRepositoryTests ProjectDisconnectTests ProjectStoreTests ProjectCompletionStoreTests ProjectIntegrationTests
+git diff --check
+```
+
+The test command expands to:
+
+```sh
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
+  -only-testing:KontrolTests/ProjectReferenceRepositoryTests \
+  -only-testing:KontrolTests/ProjectDisconnectTests \
+  -only-testing:KontrolTests/ProjectStoreTests \
+  -only-testing:KontrolTests/ProjectCompletionStoreTests \
+  -only-testing:KontrolTests/ProjectIntegrationTests test
+```
+
+| Run | Fresh result bundle | Executed / passed | Failures / skips / expected failures |
+| --- | --- | --- | --- |
+| Initial | `/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_18-41-19-+0800.xcresult` | 92 / 92 | 0 / 0 / 0 |
+| Final | `/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_18-43-04-+0800.xcresult` | **93 / 93** | **0 / 0 / 0** |
+
+Final per-suite counts: **9 reference repository, 9 disconnect, 44 store, 21 completion store, 10 integration**. Initial store count was 43; all other counts match final. Build/test logs: `/tmp/kontrol-f13-step2.4-{build,tests}.log` and `/tmp/kontrol-f13-step2.4-final-{build,tests}.log`. Tests compiled all changed existing fixtures; no new file, protocol, target membership, or presentation change requires a separate `build-for-testing` command.
+
+Fresh bundle audits and guarded post-host cleanup ran with these exact commands, all exit **0**:
+
+```sh
+RESULT_BUNDLE='/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_18-41-19-+0800.xcresult'
+PREFIX=/tmp/kontrol-f13-step2.4
+xcrun xcresulttool get test-results summary --path "$RESULT_BUNDLE" --format json > "${PREFIX}-summary.json"
+xcrun xcresulttool get test-results tests --path "$RESULT_BUNDLE" --format json > "${PREFIX}-test-tree.json"
+python3 /tmp/kontrol-f13-step2.4-audit.py "$PREFIX" initial > "${PREFIX}-selector-audit.log"
+RESULT_BUNDLE='/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_18-43-04-+0800.xcresult'
+PREFIX=/tmp/kontrol-f13-step2.4-final
+xcrun xcresulttool get test-results summary --path "$RESULT_BUNDLE" --format json > "${PREFIX}-summary.json"
+xcrun xcresulttool get test-results tests --path "$RESULT_BUNDLE" --format json > "${PREFIX}-test-tree.json"
+python3 /tmp/kontrol-f13-step2.4-audit.py "$PREFIX" > "${PREFIX}-selector-audit.log"
+python3 /tmp/kontrol-f13-step2.4-cleanup.py > /tmp/kontrol-f13-step2.4-cleanup.log
+git diff --check
+```
+
+Both selector audits compare full executed identifiers/results against selected source methods, require nonempty exact-once execution and every result `Passed`, and reconcile summary counts. Only the method introduced after the initial run is excluded from that initial audit. Both summaries have empty runtime-warning/test-failure arrays. Diagnostic assertions passed for both raw test/build logs: success markers present; no `vnode unlinked while in use`, `InvalidTransition`, or AX prerequisite diagnostics. Evidence: `/tmp/kontrol-f13-step2.4-diagnostics.log`. Existing malformed-bookmark/linkd diagnostics and multiple-destination/AppIntents warnings remain in raw logs; no behavior assertion, skip, or expected failure was weakened/added.
+
+Guarded cleanup enumerated exactly six printed process-owned roots under `/var/folders/lz/20cqfx4x2k98r89q68w3q3ch0000gn/T/`: `KontrolProjectDisconnectTests-{14220,14423}` (**2 stores each**), `KontrolProjectIntegrationTests-{14220,14423}` (**10 each**), and `KontrolProjectRemovalTests-{14220,14423}` (**9 each**). Both PIDs exited; TMPDIR parent/process-owned names/no symlinks were checked. All **42** read-only SQLite `PRAGMA integrity_check` results were **ok**. Connections closed and host exit rechecked before removing only those exact roots; all six no longer exist. Exact store paths/results are in `/tmp/kontrol-f13-step2.4-cleanup.log`.
+
+External fixture evidence was captured before cleanup: each of four existing external trees contains **14 entries**. Final fixture workspace was `/var/folders/lz/20cqfx4x2k98r89q68w3q3ch0000gn/T/KontrolProjectIntegrationTests-14423/B84B5452-78AC-4E09-920A-8B6D95F3D118/`, with `disconnect-{original,copy,malformed,revoked}` and absent `disconnect-missing`. The XCTest performs the before/after full-byte comparisons; additionally, post-run original/copy full-entry SHA-256 inventories matched in **both** runs. After-run entry kinds/sizes/hashes and exact paths are retained at `/tmp/kontrol-f13-step2.4-external-inventories.json`; this file is after-run evidence, not a separate before-capture. Original checked-in fixtures, production data, live stores, and historical unlogged roots were untouched.
+
+**No Step 2.4 blocker remains.** No hosted identifiers or visible surfaces changed. A13 Accessibility/full-suite/native observations, S13 signed sandbox and real OS-bookmark journeys, B13 runtime matrix, and D13 distribution acceptance remain mandatory and pending—not passed, skipped, or waived. This checkpoint verifies non-GUI disconnect safety, not unconditional F13/release acceptance.

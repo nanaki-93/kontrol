@@ -350,6 +350,46 @@ final class ProjectDisconnectTests: XCTestCase {
         XCTAssertNil(subject.reconnectMessage)
     }
 
+    func testFailedDisconnectDuringReadPreservesOwnerAndCoalescedFollowUp() async throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repo = SwiftDataProjectReferenceRepository(container: container), io = DisconnectIO()
+        let ref = try repo.insert(input(1))
+        var fail = false, attempts = 0
+        let removing = SwiftDataProjectReferenceRepository(container: container, beforeSave: {
+            attempts += 1
+            if fail { throw SaveFailure.injected }
+        })
+        let subject = store(removing, io)
+        try subject.enterProjects()
+        await eventually { await io.count(ref.bookmarkData) == 1 }
+        for _ in 0..<5 { subject.refresh(ref.id) }
+        let before = await io.history()
+        fail = true
+        XCTAssertThrowsError(try subject.disconnect(id: ref.id, expectedRevision: ref.revision)) {
+            XCTAssertTrue($0 is SaveFailure)
+        }
+        XCTAssertEqual(subject.rows.map(\.reference), [ref])
+        XCTAssertTrue(subject.rows[0].isRefreshing)
+        XCTAssertEqual(try repo.fetchAll(), [ref])
+        XCTAssertEqual(attempts, 1)
+        let after = await io.history()
+        XCTAssertEqual(after, before)
+        fail = false
+        await io.release(ref.bookmarkData, .success(try inspection()))
+        await eventually { attempts == 2 && subject.rows[0].inspection != nil }
+        await eventually { await io.count(ref.bookmarkData) == 1 }
+        await io.release(ref.bookmarkData, .success(try inspection()))
+        await eventually { attempts == 3 && !subject.rows[0].isRefreshing }
+        let history = await io.history()
+        XCTAssertEqual(history.filter { $0 == "bookmark inspection" }.count, 2,
+                       "Failed removal cannot cancel the owner or discard its one coalesced follow-up")
+        XCTAssertEqual(history.filter { $0 == "location" }.count, 2)
+        XCTAssertFalse(history.contains("complete") || history.contains("undo"))
+        XCTAssertEqual(try repo.fetchAll(), subject.rows.map(\.reference))
+        XCTAssertNotNil(subject.rows[0].reference.lastSuccessfulReadAt)
+        XCTAssertNil(subject.rows[0].refreshFailure)
+    }
+
     func testReconnectBusyRejectionDoesNotCancelOwnerOrQueueDeletion() async throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         let repo = SwiftDataProjectReferenceRepository(container: container), io = DisconnectIO()
