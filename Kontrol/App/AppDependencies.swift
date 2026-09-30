@@ -9,6 +9,7 @@ final class AppDependencies {
     let catalogRepository: any CatalogRepository
     let learningCatalogStore: LearningCatalogStore
     let aiSettingsStore: AISettingsStore
+    let appPreferencesStore: AppPreferencesStore
     let credentialStore: any CredentialStore
     let lessonGenerationStore: LessonGenerationStore
     let lessonDraftStore: LessonDraftStore
@@ -31,6 +32,7 @@ final class AppDependencies {
          focusMonotonicClock: @escaping () -> ContinuousClock.Instant = { ContinuousClock().now },
          draftClock: @escaping () -> Date = Date.init,
          draftScheduler: LessonDraftStore.Scheduler? = nil,
+         appPreferencesRepository: (any AppPreferencesRepository)? = nil,
          aiSettingsRepository: (any AISettingsRepository)? = nil,
          credentialStore: (any CredentialStore)? = nil,
          aiGenerator: ((String, String, any CredentialStore) -> any LessonGenerator)? = nil,
@@ -41,6 +43,10 @@ final class AppDependencies {
          newsCatalogLoader: () throws -> DefaultFeedCatalog = { try BundledFeedCatalog.load() }) {
         self.container = container
         self.catalogRepository = catalogRepository
+        // General preferences are independently retryable. An unreadable record
+        // must not prevent construction or disable unrelated offline features.
+        appPreferencesStore = AppPreferencesStore(repository: appPreferencesRepository ??
+            SwiftDataAppPreferencesRepository(container: container))
         // LaunchCoordinator validates the required resource before publishing this graph.
         // Directly constructed graphs also surface a catalog failure on the News route
         // rather than trapping or treating a missing resource as an empty feed.

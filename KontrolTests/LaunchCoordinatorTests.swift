@@ -47,6 +47,38 @@ private actor LaunchProvider: LessonGenerator, OpenAIConnectionTesting {
     func testConnection() async throws { connections += 1 }
 }
 
+private actor LaunchNewsService: NewsRefreshing {
+    private(set) var refreshes = 0
+    private(set) var validations = 0
+    func refresh(_ feeds: [FeedSourceSnapshot]) async -> [FeedRefreshOutcome] {
+        refreshes += 1
+        return []
+    }
+    func validate(_ draft: FeedDraft) async throws -> ValidatedFeed {
+        validations += 1
+        throw FeedServiceError(code: .offline, retryNotBefore: nil)
+    }
+}
+
+@MainActor
+private final class LaunchPreferencesRepository: AppPreferencesRepository {
+    var failRead = true
+    var loads = 0
+    var saves = 0
+    var value: AppPreferencesSnapshot = .defaults
+    func load() throws -> AppPreferencesSnapshot {
+        loads += 1
+        if failRead { throw AppPreferencesError.invalidStoredData }
+        return value
+    }
+    func save(_ draft: AppPreferencesDraft, expectedRevision: UUID?) throws -> AppPreferencesSnapshot {
+        saves += 1
+        guard expectedRevision == value.revision else { throw AppPreferencesError.staleRevision }
+        value = AppPreferencesSnapshot(preferences: try draft.validated(), revision: UUID())
+        return value
+    }
+}
+
 // Shared launch test seams: a bookmark grant fails only after Projects is entered.
 actor LaunchProjectInspector: ProjectInspecting {
     private(set) var reads = 0
@@ -138,6 +170,9 @@ final class LaunchCoordinatorTests: XCTestCase {
         XCTAssertTrue(try rows(LessonProgress.self, in: container).isEmpty)
         XCTAssertTrue(try rows(LessonAttempt.self, in: container).isEmpty)
         XCTAssertTrue(try rows(TaskItem.self, in: container).isEmpty)
+        XCTAssertEqual(graph.appPreferencesStore.state, .loaded)
+        XCTAssertEqual(graph.appPreferencesStore.committed, .defaults)
+        XCTAssertTrue(try rows(AppPreferencesRecord.self, in: container).isEmpty)
         await coordinator.start()
         await coordinator.retry()
         XCTAssertTrue(coordinator.dependencies === graph)
@@ -214,6 +249,72 @@ final class LaunchCoordinatorTests: XCTestCase {
         XCTAssertEqual(enabledConnections, 0)
         await coordinator.start()
         XCTAssertTrue(coordinator.dependencies === graph)
+    }
+
+    func testPreferencesReadFailureIsIsolatedAndExplicitRecoveryAndSaveNeverContactNetwork() async throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let preferences = LaunchPreferencesRepository()
+        let provider = LaunchProvider()
+        let news = LaunchNewsService()
+        let coordinator = LaunchCoordinator(open: { container }, makeDependencies: { container, catalog in
+            AppDependencies(container: container, catalogRepository: catalog,
+                appPreferencesRepository: preferences,
+                aiSettingsRepository: LaunchAISettingsRepository(), credentialStore: LaunchCredentials(),
+                aiGenerator: { _, _, _ in provider }, aiConnectionTester: { _, _, _ in provider },
+                newsService: news)
+        })
+        await coordinator.start()
+        XCTAssertEqual(coordinator.state, .ready)
+        let graph = try XCTUnwrap(coordinator.dependencies)
+        let mainPreferences = graph.appPreferencesStore
+        let nativePreferences = try XCTUnwrap(coordinator.dependencies).appPreferencesStore
+        XCTAssertTrue(mainPreferences === nativePreferences)
+        XCTAssertEqual(mainPreferences.state, .failed(.invalidStoredData))
+        XCTAssertNil(mainPreferences.committed)
+        XCTAssertEqual(preferences.loads, 1)
+        XCTAssertEqual(preferences.saves, 0)
+        XCTAssertNil(graph.newsStore.snapshot, "Construction must not load or refresh News")
+        XCTAssertFalse(graph.aiSettingsStore.presentation.enabled)
+        // Independent persisted offline operations still work with damaged preferences.
+        let task = try graph.taskStore.create(input: TaskInput(title: "Offline work"))
+        graph.taskStore.refresh()
+        XCTAssertEqual(graph.taskStore.readState, .loaded)
+        XCTAssertEqual(graph.taskStore.snapshots, [task])
+        graph.learningCatalogStore.loadIfNeeded()
+        let lessonID = try XCTUnwrap(graph.learningCatalogStore.state.snapshot?.slots.first?.lessonID)
+        _ = try graph.learningCatalogStore.openLesson(lessonID: lessonID)
+        await coordinator.start()
+        await coordinator.retry()
+        XCTAssertTrue(coordinator.dependencies === graph)
+        XCTAssertEqual(preferences.loads, 1, "Launch must not silently retry preferences")
+        let generationsBefore = await provider.generations
+        let connectionsBefore = await provider.connections
+        let refreshesBefore = await news.refreshes
+        let validationsBefore = await news.validations
+        XCTAssertEqual(generationsBefore, 0)
+        XCTAssertEqual(connectionsBefore, 0)
+        XCTAssertEqual(refreshesBefore, 0)
+        XCTAssertEqual(validationsBefore, 0)
+        preferences.failRead = false
+        nativePreferences.retry()
+        XCTAssertEqual(mainPreferences.state, .loaded)
+        let editor = AppPreferencesEditorDraft(snapshot: nativePreferences.editableSnapshot)
+        editor.draft.focusDefaultMinutes = "37"
+        editor.draft.textSize = .large
+        try editor.save(using: nativePreferences)
+        XCTAssertEqual(mainPreferences.committed, preferences.value)
+        XCTAssertEqual(mainPreferences.committed?.preferences.focusDefaultMinutes, 37)
+        XCTAssertEqual(preferences.saves, 1)
+        XCTAssertEqual(preferences.loads, 2)
+        XCTAssertEqual(graph.taskStore.snapshots, [task])
+        let generationsAfter = await provider.generations
+        let connectionsAfter = await provider.connections
+        let refreshesAfter = await news.refreshes
+        let validationsAfter = await news.validations
+        XCTAssertEqual(generationsAfter, 0)
+        XCTAssertEqual(connectionsAfter, 0)
+        XCTAssertEqual(refreshesAfter, 0)
+        XCTAssertEqual(validationsAfter, 0)
     }
 
     func testCatalogFailureDoesNotPublishGraphAndExplicitRetryKeepsStore() async throws {
