@@ -86,27 +86,7 @@ struct NewsView: View {
             content(at: timeline.date)
         }
         .sheet(isPresented: $showingTopics) {
-            // Read-only entry until the shared editing surface is added in Step 4.5.
-            ScrollView {
-                VStack(alignment: .leading, spacing: AppMetrics.space4) {
-                    PageHeader("Topics & feeds")
-                    if let snapshot = store.snapshot {
-                        Text("Selected topics: \(Self.selectedTopics(in: snapshot).map(\.name).joined(separator: ", "))")
-                            .appTypography(.body)
-                        Text("Feeds")
-                            .appTypography(.section)
-                            .accessibilityAddTraits(.isHeader)
-                        ForEach(snapshot.feeds) { feed in
-                            Text("\(feed.name) · \(feed.isEnabled ? "Enabled" : "Disabled")")
-                                .appTypography(.body)
-                        }
-                    }
-                    ActionButton("Close") { showingTopics = false }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(AppMetrics.space8)
-            }
-            .frame(minWidth: 360, minHeight: 280)
+            NewsManagementSheet(store: store)
         }
     }
 

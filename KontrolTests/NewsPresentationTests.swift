@@ -111,6 +111,60 @@ final class NewsPresentationTests: XCTestCase {
         XCTAssertTrue(NewsView.failureText(.rateLimited, in: never).contains("rate-limited"))
     }
 
+    func testManagementCountMappingsAndRevisionCheckedEnableDraft() {
+        let snapshot = fixture()
+        XCTAssertEqual(NewsManagementView.selectedCountText(snapshot), "2 topics selected")
+        XCTAssertEqual(NewsManagementView.selectedCountText(fixture(selected: [])), "0 topics selected")
+        XCTAssertEqual(NewsManagementView.selectedCountText(fixture(selected: ["go"])), "1 topic selected")
+        let feed = snapshot.feeds[0]
+        XCTAssertEqual(NewsManagementView.topicNames(for: feed, in: snapshot), "Go")
+        let draft = NewsManagementView.enabledDraft(for: feed, enabled: false)
+        XCTAssertEqual(draft.id, feed.id)
+        XCTAssertEqual(draft.expectedRevision, feed.configurationRevision)
+        XCTAssertEqual(draft.name, feed.name)
+        XCTAssertEqual(draft.urlText, feed.url.absoluteString)
+        XCTAssertEqual(draft.topicIDs, feed.topicIDs)
+        XCTAssertFalse(draft.isEnabled)
+        XCTAssertEqual(NewsManagementView.FeedAction.add.title, "Add feed")
+        XCTAssertEqual(NewsManagementView.FeedAction.edit(feed).title, "Edit feed")
+        XCTAssertEqual(NewsManagementView.FeedAction.remove(feed).title, "Remove feed")
+        XCTAssertNotEqual(NewsManagementView.FeedAction.edit(feed).id,
+                          NewsManagementView.FeedAction.remove(feed).id)
+        XCTAssertTrue(NewsManagementView.errorMessage(NewsRepositoryError.staleRevision).contains("Reload and review"))
+    }
+
+    func testManagementEntryPointsObserveOneStoreIncludingZeroStates() async throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let catalog = DefaultFeedCatalog(version: 1, topics: fixture().topics,
+            initialSelectedTopicIDs: ["go"], feeds: [
+                .init(id: goID, name: "Go Blog", url: URL(string: "https://feeds.test/go")!, topicIDs: ["go"])])
+        let store = NewsStore(repository: SwiftDataNewsRepository(container: container),
+                              service: PresentationService(), catalog: catalog)
+        let newsEntry = NewsManagementSheet(store: store)
+        let settingsEntry = NewsManagementView(store: store)
+        XCTAssertTrue(newsEntry.store === settingsEntry.store)
+        XCTAssertNil(store.snapshot, "Building management must not initialize or fetch feeds")
+        store.loadIfNeeded()
+        try settingsEntry.store.saveSelectedTopics([])
+        XCTAssertEqual(NewsManagementView.selectedCountText(try XCTUnwrap(newsEntry.store.snapshot)), "0 topics selected")
+        let feed = try XCTUnwrap(store.snapshot?.feeds.first)
+        try await newsEntry.store.saveFeed(NewsManagementView.enabledDraft(for: feed, enabled: false))
+        XCTAssertFalse(try XCTUnwrap(settingsEntry.store.snapshot?.feeds.first).isEnabled)
+        try settingsEntry.store.saveSelectedTopics(["security"])
+        XCTAssertEqual(newsEntry.store.snapshot?.preferences.selectedTopicIDs, ["security"])
+        XCTAssertEqual(NewsManagementView.selectedCountText(try XCTUnwrap(newsEntry.store.snapshot)), "1 topic selected")
+        let emptyCatalog = DefaultFeedCatalog(version: 1, topics: fixture().topics,
+            initialSelectedTopicIDs: [], feeds: [])
+        let emptyContainer = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let emptyStore = NewsStore(repository: SwiftDataNewsRepository(container: emptyContainer),
+                                  service: PresentationService(), catalog: emptyCatalog)
+        emptyStore.loadIfNeeded()
+        _ = NewsManagementView(store: emptyStore)
+        XCTAssertTrue(try XCTUnwrap(emptyStore.snapshot).feeds.isEmpty)
+        try emptyStore.saveSelectedTopics(["go"])
+        XCTAssertEqual(emptyStore.snapshot?.preferences.selectedTopicIDs, ["go"])
+    }
+
     private func compiledStoreFixture() throws -> NewsStore {
         // A static fixture compiles the native view without creating a window or a live service.
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)

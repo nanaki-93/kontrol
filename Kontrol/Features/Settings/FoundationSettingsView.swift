@@ -10,6 +10,9 @@ struct FoundationSettingsView: View {
         VStack(alignment: .leading, spacing: AppMetrics.space4) {
             PageHeader("Settings")
             AISettingsView(store: dependencies.aiSettingsStore)
+            NewsManagementView(store: dependencies.newsStore)
+                .padding(AppMetrics.space4)
+                .background(AppColors.surface, in: RoundedRectangle(cornerRadius: AppMetrics.mediumRadius))
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
