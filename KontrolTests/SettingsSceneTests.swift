@@ -18,8 +18,223 @@ private actor SettingsCatalogGate {
     }
 }
 
+private actor SettingsNewsSpy: NewsRefreshing {
+    private(set) var requests = 0
+    func refresh(_ feeds: [FeedSourceSnapshot]) async -> [FeedRefreshOutcome] { requests += 1; return [] }
+    func validate(_ draft: FeedDraft) async throws -> ValidatedFeed {
+        requests += 1
+        throw FeedServiceError(code: .offline, retryNotBefore: nil)
+    }
+}
+
+@MainActor
+private final class SettingsPreferencesSpy: AppPreferencesRepository {
+    var value: AppPreferencesSnapshot = .defaults
+    var readFailure: AppPreferencesError?
+    var saveFailure: AppPreferencesError?
+    private(set) var saves = 0
+    private(set) var loads = 0
+    func load() throws -> AppPreferencesSnapshot {
+        loads += 1
+        if let readFailure { throw readFailure }
+        return value
+    }
+    func save(_ draft: AppPreferencesDraft, expectedRevision: UUID?) throws -> AppPreferencesSnapshot {
+        saves += 1
+        if let saveFailure { throw saveFailure }
+        guard expectedRevision == value.revision else { throw AppPreferencesError.staleRevision }
+        value = AppPreferencesSnapshot(preferences: try draft.validated(), revision: UUID())
+        return value
+    }
+}
+
 @MainActor
 final class SettingsSceneTests: XCTestCase {
+    private func show<V: View>(_ view: V) -> NSWindow {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 1000),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.title = "Settings behavior \(UUID().uuidString)"
+        window.contentView = NSHostingView(rootView: view)
+        window.makeKeyAndOrderFront(nil)
+        return window
+    }
+
+    private func settle() { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+
+    private func node(_ identifier: String, in window: NSWindow) throws -> AXUIElement {
+        let root = try axWindow(window)
+        let deadline = Date().addingTimeInterval(2)
+        repeat {
+            if let found = axDescendants(root).first(where: {
+                axAttribute($0, kAXIdentifierAttribute) as? String == identifier
+            }) { return found }
+            settle()
+        } while Date() < deadline
+        let identifiers = axDescendants(root).compactMap { axAttribute($0, kAXIdentifierAttribute) as? String }
+        throw NSError(domain: "SettingsSceneTests", code: 1,
+                      userInfo: [NSLocalizedDescriptionKey: "Missing rendered control: \(identifier); present: \(identifiers)"])
+    }
+
+    private func press(_ identifier: String, in window: NSWindow) throws {
+        XCTAssertEqual(AXUIElementPerformAction(try node(identifier, in: window), kAXPressAction as CFString), .success)
+        settle()
+    }
+
+    private func input(_ text: String, in window: NSWindow) throws {
+        window.makeKeyAndOrderFront(nil)
+        XCTAssertEqual(AXUIElementSetAttributeValue(try node("preferences-custom-minutes", in: window),
+                                                  kAXFocusedAttribute as CFString, kCFBooleanTrue), .success)
+        let editor = try XCTUnwrap(window.firstResponder as? NSTextView)
+        XCTAssertTrue(editor.isFieldEditor)
+        editor.insertText(text, replacementRange: NSRange(location: 0, length: editor.string.utf16.count))
+        settle()
+    }
+
+    private func value(_ identifier: String, in window: NSWindow) throws -> String {
+        try XCTUnwrap(axAttribute(try node(identifier, in: window), kAXValueAttribute) as? String)
+    }
+
+    /// Dispatch the real native popup's target/action, not an editor/test binding.
+    private func choose(_ title: String, item: String, in window: NSWindow) throws {
+        func popups(_ view: NSView) -> [NSPopUpButton] {
+            (view as? NSPopUpButton).map { [$0] } ?? view.subviews.flatMap(popups)
+        }
+        let popup = try XCTUnwrap(window.contentView.flatMap { popups($0).first { $0.accessibilityLabel() == title } })
+        let index = popup.indexOfItem(withTitle: item)
+        XCTAssertGreaterThanOrEqual(index, 0)
+        popup.selectItem(at: index)
+        XCTAssertTrue(popup.sendAction(popup.action, to: popup.target))
+        settle()
+    }
+
+    func testNativeGeneralEditorPresetsCustomValidationSaveCancelAndCommittedSummaries() async throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SettingsPreferencesSpy()
+        let news = SettingsNewsSpy()
+        var generators = 0
+        let graph = AppDependencies(container: container, catalogRepository: SwiftDataCatalogRepository(container: container),
+            appPreferencesRepository: repository, aiGenerator: { model, reference, credentials in
+                generators += 1
+                return OpenAILessonGenerator(model: model, credentialReference: reference, credentials: credentials)
+            }, newsService: news)
+        let window = show(FoundationSettingsView(dependencies: graph))
+        defer { window.orderOut(nil) }
+        try press("settings-general", in: window)
+        try choose("Duration", item: "15 minutes", in: window)
+        try press("preferences-save", in: window)
+        XCTAssertEqual(try value("settings-focus-summary", in: window), "Focus default: 15 minutes")
+        XCTAssertEqual(repository.saves, 1)
+        try press("settings-general", in: window)
+        try choose("Duration", item: "50 minutes", in: window)
+        try press("preferences-cancel", in: window)
+        XCTAssertEqual(repository.saves, 1, "Cancel must not persist")
+        XCTAssertEqual(try value("settings-focus-summary", in: window), "Focus default: 15 minutes")
+        try press("settings-general", in: window)
+        try choose("Duration", item: "Custom", in: window)
+        try input("1.5", in: window)
+        try choose("Text size", item: "Large · at least 130%", in: window)
+        try choose("Motion", item: "Reduce", in: window)
+        try press("preferences-save", in: window)
+        _ = try node("preferences-error", in: window)
+        XCTAssertEqual(try value("preferences-custom-minutes", in: window), "1.5")
+        XCTAssertEqual(repository.saves, 1, "Invalid input never reaches persistence")
+        XCTAssertEqual(graph.appPreferencesStore.committed?.preferences.focusDefaultMinutes, 15)
+        try input("25", in: window)
+        XCTAssertEqual(try value("preferences-custom-minutes", in: window), "25", "Typing a preset must not collapse Custom")
+        try input("00037", in: window)
+        try press("preferences-save", in: window)
+        XCTAssertEqual(try value("settings-focus-summary", in: window), "Focus default: 37 minutes")
+        XCTAssertEqual(try value("settings-appearance-summary", in: window), "37 minutes · Large text · Reduced motion")
+        XCTAssertEqual(repository.saves, 2)
+        _ = try node("settings-preferences-saved", in: window)
+        try press("settings-ai", in: window)
+        for identifier in ["ai-settings", "ai-edit", "ai-enable", "ai-test-connection"] { _ = try node(identifier, in: window) }
+        try press("settings-back", in: window)
+        try press("settings-news", in: window)
+        _ = try node("news-management", in: window)
+        try press("settings-back", in: window)
+        let snapshot = try XCTUnwrap(graph.newsStore.snapshot)
+        let enabled = snapshot.feeds.filter(\.isEnabled).count
+        XCTAssertEqual(try value("settings-news-summary", in: window),
+                       "News: \(NewsManagementView.selectedCountText(snapshot)) · \(enabled) of \(snapshot.feeds.count) feeds enabled")
+        let requests = await news.requests
+        XCTAssertEqual(requests, 0, "Opening every Settings section and saving general preferences must not refresh/validate feeds")
+        XCTAssertEqual(generators, 0, "Opening Settings must not construct a lesson generator")
+        XCTAssertNoThrow(try graph.lessonDraftStore.flushAll())
+    }
+
+    func testNativeSaveFailureAndCrossWindowStaleReviewRetainDraftUntilExplicitSave() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SettingsPreferencesSpy()
+        let graph = AppDependencies(container: container, catalogRepository: SwiftDataCatalogRepository(container: container),
+                                    appPreferencesRepository: repository)
+        let first = show(FoundationSettingsView(dependencies: graph))
+        let second = show(FoundationSettingsView(dependencies: graph))
+        defer { first.orderOut(nil); second.orderOut(nil) }
+        try press("settings-general", in: first)
+        try press("settings-general", in: second)
+        try choose("Duration", item: "50 minutes", in: first)
+        try choose("Duration", item: "Custom", in: second)
+        try input("00037", in: second)
+        try choose("Text size", item: "Large · at least 130%", in: second)
+        try choose("Motion", item: "Reduce", in: second)
+        repository.saveFailure = .persistenceFailure
+        try press("preferences-save", in: second)
+        _ = try node("preferences-error", in: second)
+        XCTAssertEqual(try value("preferences-custom-minutes", in: second), "00037")
+        XCTAssertEqual(graph.appPreferencesStore.committed, .defaults)
+        repository.saveFailure = nil
+        try press("preferences-save", in: first)
+        _ = try node("preferences-review", in: second)
+        XCTAssertEqual(try value("preferences-custom-minutes", in: second), "00037")
+        let beforeReview = repository.saves
+        try press("preferences-review", in: second)
+        XCTAssertEqual(repository.saves, beforeReview, "Review reads/rebases only; never saves")
+        XCTAssertEqual(try value("preferences-latest-saved", in: second), "Latest saved: 50 minutes · System text · System motion")
+        repository.value = AppPreferencesSnapshot(preferences: try AppPreferences(focusDefaultMinutes: 15), revision: UUID())
+        try press("preferences-save", in: second)
+        _ = try node("preferences-error", in: second)
+        _ = try node("preferences-review", in: second)
+        XCTAssertEqual(try value("preferences-custom-minutes", in: second), "00037")
+        XCTAssertEqual(repository.value.preferences.focusDefaultMinutes, 15, "External stale baseline cannot be overwritten")
+        try press("preferences-review", in: second)
+        XCTAssertEqual(try value("preferences-latest-saved", in: second), "Latest saved: 15 minutes · System text · System motion")
+        XCTAssertEqual(try value("preferences-custom-minutes", in: second), "00037")
+        try press("preferences-save", in: second)
+        XCTAssertEqual(repository.value.preferences, try AppPreferences(focusDefaultMinutes: 37, textSize: .large, reduceMotion: .reduce))
+        for window in [first, second] {
+            XCTAssertEqual(try value("settings-focus-summary", in: window), "Focus default: 37 minutes")
+        }
+    }
+
+    func testUnreadablePreferencesHaveExplicitRetryAndReviewWithoutAuthorizingFallbackSave() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SettingsPreferencesSpy()
+        repository.readFailure = .invalidStoredData
+        let graph = AppDependencies(container: container, catalogRepository: SwiftDataCatalogRepository(container: container),
+                                    appPreferencesRepository: repository)
+        let window = show(FoundationSettingsView(dependencies: graph))
+        defer { window.orderOut(nil) }
+        _ = try node("settings-preferences-unavailable", in: window)
+        try press("settings-preferences-retry", in: window)
+        XCTAssertEqual(repository.loads, 2)
+        XCTAssertEqual(repository.saves, 0)
+        try press("settings-general", in: window)
+        XCTAssertEqual((axAttribute(try node("preferences-save", in: window), kAXEnabledAttribute) as? NSNumber)?.boolValue, false)
+        try choose("Duration", item: "Custom", in: window)
+        try input("37", in: window)
+        try press("preferences-review", in: window)
+        XCTAssertEqual(try value("preferences-custom-minutes", in: window), "37")
+        XCTAssertEqual(repository.saves, 0)
+        repository.readFailure = nil
+        try press("preferences-review", in: window)
+        XCTAssertEqual(try value("preferences-custom-minutes", in: window), "37")
+        try press("preferences-save", in: window)
+        XCTAssertEqual(try value("settings-focus-summary", in: window), "Focus default: 37 minutes")
+        XCTAssertEqual(repository.saves, 1)
+        XCTAssertNil(graph.focusService.activeSession)
+    }
+
     private func axAttribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
         var value: CFTypeRef?
         return AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success ? value : nil
@@ -53,54 +268,27 @@ final class SettingsSceneTests: XCTestCase {
         return CGRect(origin: origin, size: dimensions)
     }
 
-    func testUnfinishedDestinationsShowHonestNoninteractiveFoundationStates() throws {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 340),
-                              styleMask: [.titled], backing: .buffered, defer: false)
-        window.title = "Foundation destination inspection"
-        let host = NSHostingView(rootView: FoundationView(destination: .projects)
-            .environment(\.appTextScaleOverride, 1.3))
-        window.contentView = host
-        window.center()
-        window.makeKeyAndOrderFront(nil)
+    func testProjectsAndFocusRoutesRenderImplementedActionsNotFoundationPlaceholders() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let graph = AppDependencies(container: container, catalogRepository: SwiftDataCatalogRepository(container: container))
+        let navigation = NavigationStore()
+        let window = show(AppShell(navigation: navigation, dependencies: graph))
         defer { window.orderOut(nil) }
-        let appAX = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
-
-        func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
-            var value: CFTypeRef?
-            return AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success ? value : nil
-        }
-        func descendants(_ element: AXUIElement) -> [AXUIElement] {
-            let children = attribute(element, kAXChildrenAttribute) as? [AXUIElement] ?? []
-            return children.flatMap { [$0] + descendants($0) }
-        }
-        for destination in [AppDestination.projects, .focus] {
-            host.rootView = FoundationView(destination: destination)
-                .environment(\.appTextScaleOverride, 1.3)
-            host.layoutSubtreeIfNeeded()
-            var destinationWindow: AXUIElement?
-            let deadline = Date().addingTimeInterval(2)
-            repeat {
-                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
-                let windows = attribute(appAX, kAXWindowsAttribute) as? [AXUIElement] ?? []
-                destinationWindow = windows.first { attribute($0, kAXTitleAttribute) as? String == window.title }
-            } while destinationWindow == nil && Date() < deadline
-            let axWindow = try XCTUnwrap(destinationWindow)
-            let surface = try XCTUnwrap(descendants(axWindow).first {
-                attribute($0, kAXIdentifierAttribute) as? String == "\(destination.rawValue)-content"
+        for (destination, label) in [(AppDestination.projects, "Add project"), (.focus, "Start")] {
+            navigation.select(destination)
+            settle()
+            // Projects currently inherits its container identifier on children.
+            // Match the real action's role/name, not the superseded placeholder.
+            let action = try XCTUnwrap(axDescendants(try axWindow(window)).first {
+                axAttribute($0, kAXRoleAttribute) as? String == kAXButtonRole &&
+                axAttribute($0, kAXDescriptionAttribute) as? String == label
             })
-            let nodes = [surface] + descendants(surface)
-            func hasText(_ text: String, role: String? = nil) -> Bool {
-                nodes.contains {
-                    (role == nil || attribute($0, kAXRoleAttribute) as? String == role) &&
-                    (attribute($0, kAXValueAttribute) as? String == text ||
-                     attribute($0, kAXDescriptionAttribute) as? String == text)
-                }
-            }
-            XCTAssertTrue(hasText(destination.title, role: kAXHeadingRole), "\(destination) heading")
-            XCTAssertTrue(hasText(destination.foundationMessage), "\(destination) honest empty state")
-            XCTAssertFalse(nodes.contains { attribute($0, kAXRoleAttribute) as? String == kAXButtonRole },
-                           "\(destination) has no action until its feature ships")
+            XCTAssertFalse(try axFrame(action).isEmpty)
+            XCTAssertEqual((axAttribute(action, kAXEnabledAttribute) as? NSNumber)?.boolValue, true)
+            XCTAssertEqual(AppShell.contentKind(for: destination), destination == .projects ? .projects : .focus)
         }
+        XCTAssertTrue(graph.projectStore.rows.isEmpty)
+        XCTAssertNil(graph.focusService.activeSession)
     }
 
     func testCompactSettingsRecoveryActionsRemainVisibleAt130Percent() async throws {
@@ -233,33 +421,31 @@ final class SettingsSceneTests: XCTestCase {
                 attribute($0, kAXIdentifierAttribute) as? String == "settings-content"
             })
         }
-        func assertFoundationContent(_ surface: AXUIElement) {
+        func assertHubContent(_ surface: AXUIElement) {
             let nodes = [surface] + descendants(surface)
             XCTAssertEqual(nodes.filter {
                 attribute($0, kAXRoleAttribute) as? String == kAXHeadingRole &&
                 (attribute($0, kAXValueAttribute) as? String == "Settings" ||
                  attribute($0, kAXDescriptionAttribute) as? String == "Settings")
             }.count, 1)
-            XCTAssertTrue(nodes.contains {
-                attribute($0, kAXIdentifierAttribute) as? String == "ai-settings"
-            }, "Both entries must expose the shared AI configuration surface")
-            for identifier in ["ai-enabled-status", "ai-key-status", "ai-edit", "ai-enable", "ai-test-connection"] {
+            for identifier in ["settings-general", "settings-ai", "settings-news", "settings-focus-summary",
+                               "settings-appearance-summary", "settings-ai-summary", "settings-news-summary"] {
                 XCTAssertTrue(nodes.contains { attribute($0, kAXIdentifierAttribute) as? String == identifier },
-                              "Missing accessible AI control or status: \(identifier)")
+                              "Both entries must expose implemented hub capability or saved summary: \(identifier)")
             }
         }
         try await Task.sleep(for: .milliseconds(100))
-        // At 130% the Settings scene retains a compact viewport. The first
-        // status and the edit action remain visible; lower controls scroll.
+        // The shared hub replaces the superseded AI-only foundation surface.
+        // Its first committed summary remains visible; lower sections scroll.
         let settingsAX = try axWindow(settingsWindow)
         let settingsBounds = try axFrame(settingsAX)
         XCTAssertGreaterThanOrEqual(settingsBounds.width, 520)
         XCTAssertGreaterThanOrEqual(settingsBounds.height, 340)
         let settingsNodes = axDescendants(settingsAX)
         let status = try XCTUnwrap(settingsNodes.first {
-            axAttribute($0, kAXIdentifierAttribute) as? String == "ai-enabled-status"
+            axAttribute($0, kAXIdentifierAttribute) as? String == "settings-focus-summary"
         })
-        XCTAssertEqual(axAttribute(status, kAXValueAttribute) as? String, "AI lessons: Off")
+        XCTAssertEqual(axAttribute(status, kAXValueAttribute) as? String, "Focus default: 25 minutes")
         XCTAssertTrue(settingsBounds.contains(try axFrame(status)), "130% status must be visible in compact Settings")
         let enlargedHeading = try XCTUnwrap(settingsNodes.first {
             axAttribute($0, kAXRoleAttribute) as? String == kAXHeadingRole &&
@@ -298,8 +484,28 @@ final class SettingsSceneTests: XCTestCase {
         let visible = try XCTUnwrap(windows as? [AXUIElement])
         for title in ["Settings scene test", "Main window test"] {
             let window = try XCTUnwrap(visible.first { attribute($0, kAXTitleAttribute) as? String == title })
-            assertFoundationContent(try settingsSurface(window))
+            assertHubContent(try settingsSurface(window))
         }
+
+        // Exercise the real local routes from both isolated ready scene roots,
+        // not just their hub labels or construction-time graph identities.
+        for window in [settingsWindow, mainWindow] {
+            try press("settings-general", in: window)
+            for identifier in ["general-preferences-editor", "preferences-duration", "preferences-text-size",
+                               "preferences-motion", "preferences-save", "preferences-cancel"] {
+                _ = try node(identifier, in: window)
+            }
+            try press("preferences-cancel", in: window)
+            try press("settings-ai", in: window)
+            for identifier in ["ai-settings", "ai-edit", "ai-enable", "ai-test-connection"] {
+                _ = try node(identifier, in: window)
+            }
+            try press("settings-back", in: window)
+            try press("settings-news", in: window)
+            _ = try node("news-management", in: window)
+            try press("settings-back", in: window)
+        }
+        XCTAssertEqual(graph.appPreferencesStore.committed, .defaults, "Opening/canceling sections does not save preferences")
 
         // A native Settings scene supplies the standard application-menu command.
         func menuItems(_ menu: NSMenu) -> [NSMenuItem] {
@@ -322,7 +528,7 @@ final class SettingsSceneTests: XCTestCase {
         let nativeAX = try XCTUnwrap((nativeWindows as? [AXUIElement])?.first {
             attribute($0, kAXTitleAttribute) as? String == nativeSettings.title
         })
-        assertFoundationContent(try settingsSurface(nativeAX))
+        assertHubContent(try settingsSurface(nativeAX))
         XCTAssertTrue(launch.dependencies === graph)
         XCTAssertEqual(opens, 1)
         XCTAssertEqual(imports, 1)

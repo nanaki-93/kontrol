@@ -46,8 +46,8 @@ struct AppShell: View {
     @Environment(\.dynamicTypeSize) private var systemTextSize
     @Environment(\.appTextScaleOverride) private var previewTextScale
 
-    /// Foundation routes remain only for features that have not shipped.
-    enum ContentKind: Equatable { case today, learning, projects, focus, tasks, news, settings, foundation(AppDestination) }
+    /// Every destination now routes to its implemented feature surface.
+    enum ContentKind: Equatable { case today, learning, projects, focus, tasks, news, settings }
 
     static func contentKind(for destination: AppDestination) -> ContentKind {
         switch destination {
@@ -58,7 +58,6 @@ struct AppShell: View {
         case .tasks: .tasks
         case .news: .news
         case .settings: .settings
-        default: .foundation(destination)
         }
     }
 
@@ -125,8 +124,6 @@ struct AppShell: View {
                         NewsRouteView(store: dependencies.newsStore)
                     case .settings:
                         FoundationSettingsView(dependencies: dependencies)
-                    case .foundation(let destination):
-                        FoundationView(destination: destination)
                     }
                 }
                 .frame(maxWidth: .infinity, minHeight: 500, alignment: .topLeading)

@@ -45,6 +45,9 @@ final class AppShellTests: XCTestCase {
         XCTAssertTrue(second.dependencies.projectStore === sharedProjects)
         XCTAssertTrue(first.dependencies.newsStore === sharedNews)
         XCTAssertTrue(second.dependencies.newsStore === sharedNews)
+        XCTAssertTrue(first.dependencies.appPreferencesStore === dependencies.appPreferencesStore)
+        XCTAssertTrue(second.dependencies.appPreferencesStore === dependencies.appPreferencesStore)
+        XCTAssertTrue(FoundationSettingsView(dependencies: dependencies).dependencies === first.dependencies)
         XCTAssertTrue(first.dependencies.container === second.dependencies.container)
         let requestsBeforeEntry = await service.requests
         XCTAssertEqual(requestsBeforeEntry, 0, "Building two window routes must not fetch feeds")
@@ -165,6 +168,42 @@ final class AppShellTests: XCTestCase {
         XCTAssertEqual(navigation.learningRoute, .choices)
     }
 
+    func testSettingsDestinationRetainsLessonSaveBarrierAndRetryUsesTheSameGraph() throws {
+        enum Injected: Error { case save }
+        var fail = false
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataCatalogRepository(container: container, beforeSave: {
+            if fail { throw Injected.save }
+        })
+        _ = try repository.importIfNeeded(BundledCatalogLoader.load())
+        let graph = AppDependencies(container: container, catalogRepository: repository)
+        graph.learningCatalogStore.loadIfNeeded()
+        let lessonID = try XCTUnwrap(graph.learningCatalogStore.state.snapshot?.slots.first?.lessonID)
+        let opened = try graph.learningCatalogStore.openLesson(lessonID: lessonID)
+        let attempt = try XCTUnwrap(opened.detail.attempt)
+        graph.lessonDraftStore.observe(opened.detail)
+        let navigation = NavigationStore()
+        navigation.attachDrafts(graph.lessonDraftStore)
+        navigation.enterLesson(id: lessonID)
+        let shell = AppShell(navigation: navigation, dependencies: graph)
+        let answer = "  retained Settings answer 🧪\n"
+        graph.lessonDraftStore.edit(answer, attemptID: attempt.id)
+        fail = true
+        navigation.select(.settings)
+        XCTAssertEqual(navigation.selectedDestination, .learning)
+        XCTAssertEqual(navigation.learningRoute, .detail(lessonID))
+        XCTAssertNotNil(navigation.pendingTransition)
+        XCTAssertTrue(AppShell.showsStayHere(for: navigation))
+        XCTAssertEqual(graph.lessonDraftStore.buffers[attempt.id]?.text, answer)
+        XCTAssertTrue(try XCTUnwrap(graph.lessonDraftStore.buffers[attempt.id]).isDirty)
+        fail = false
+        navigation.retryTransition()
+        XCTAssertEqual(AppShell.contentKind(for: navigation.selectedDestination), .settings)
+        XCTAssertEqual(try repository.loadLesson(lessonID: lessonID).attempt?.answerDraft, answer)
+        XCTAssertTrue(shell.dependencies === FoundationSettingsView(dependencies: graph).dependencies)
+        XCTAssertNil(navigation.saveError)
+    }
+
     func testNavigationMetadataAndRouting() throws {
         let destinations = AppDestination.allCases
         XCTAssertEqual(destinations.map(\.title), ["Today", "Learning", "Projects", "Focus", "Tasks", "News", "Settings"])
@@ -187,9 +226,6 @@ final class AppShellTests: XCTestCase {
                 XCTAssertEqual(AppShell.contentKind(for: destination), .news)
             } else if destination == .settings {
                 XCTAssertEqual(AppShell.contentKind(for: destination), .settings)
-            } else {
-                XCTAssertEqual(AppShell.contentKind(for: destination), .foundation(destination))
-                XCTAssertFalse(destination.foundationMessage.isEmpty)
             }
         }
         // The shell consumes the same coherent destination + ID route published
@@ -357,7 +393,7 @@ final class AppShellTests: XCTestCase {
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
                 try renderedPixels().write(to: directory.appendingPathComponent(
                     "today-\(Int(size.width))x\(Int(size.height))-\(scale == 1 ? "standard" : "130pct").png"))
-                navigation.select(.settings) // No content action interrupts wraparound tab order.
+                navigation.select(.settings) // Hub actions follow the seven global destinations.
                 settle()
             }
             let unfocused = try renderedPixels()
@@ -370,9 +406,11 @@ final class AppShellTests: XCTestCase {
                 settle()
                 XCTAssertEqual(try focusedIdentifier(), "navigation-\(destination.rawValue)", "size \(size), scale \(scale)")
             }
-            window.selectNextKeyView(nil)
-            settle()
-            XCTAssertEqual(try focusedIdentifier(), "navigation-today")
+            for identifier in ["settings-general", "settings-ai", "settings-news", "navigation-today"] {
+                window.selectNextKeyView(nil)
+                settle()
+                XCTAssertEqual(try focusedIdentifier(), identifier, "Hub actions participate in native Tab order")
+            }
 
             // Invoke the rendered accessibility buttons, not NavigationStore directly.
             for destination in expected {
