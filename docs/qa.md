@@ -2837,3 +2837,92 @@ was performed. Exact store and sidecar paths/sizes remain in that log. Existing
 baseline/LaunchRecovery cleanup outside this task was not changed; no corresponding
 unlink diagnostic was observed here. No GUI/spoken/native/runtime/signing claim
 is made. **No remaining Step 5.1 implementation blockers.**
+
+## F13 Step 5.2 — Application metadata and Release hardening (2026-09-30, 17:59 UTC)
+
+First incomplete task matched runner task **18/27, Step 5.2**. Read SPEC,
+ANALYSIS, PLAN and the complete cumulative task-18 checklist (no prior findings).
+Initial worktree/index were clean; repository/target and direct ancestor checks
+found no applicable `AGENTS.md`, and no submodule was listed. Changed only
+`Kontrol.xcodeproj/project.pbxproj` and this required evidence ledger. No workflow
+state, plan checkbox, signing credential, dependency pin, fixture, schema, source
+entitlement or development command changed; changes remain uncommitted for review.
+
+Base revision **`83ddcee666663b4027719a1a952161cb1f486152`**. Evidence directory
+**`/tmp/kontrol-f13-step5-2.Plb6kJ/`** (`EVIDENCE` below). `implementation.patch`
+SHA-256 **`e5910270a5efb5c56fa4b04023f9087bd6237fd3e23357d552fdc019e6f82beb`**
+identifies the tested configuration delta; this ledger is the only subsequent
+edit. `environment.log`: macOS **27.0 / 26A428**, arm64, Xcode **27.0 / 27A266a**,
+Apple Swift **6.4**, `/Applications/Xcode.app/Contents/Developer`. Initial
+`xcodebuild -list -project Kontrol.xcodeproj` passed: existing Kontrol/KontrolTests
+targets, one Kontrol scheme, Debug/Release and Yams 5.4.0.
+
+### Implementation and acceptance audit
+
+- App Debug and Release now set `MARKETING_VERSION = 1.0` and
+  `CURRENT_PROJECT_VERSION = 1`. Release sets `ENABLE_HARDENED_RUNTIME = YES`
+  and `CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO`, explicitly preventing Xcode base
+  debugging-entitlement injection. No team or identity is embedded; existing
+  unsigned defaults and external signing overrides remain intact.
+- `audit.py` parses both current and HEAD project plists and asserts the **entire
+  project delta** consists solely of those additions to the two app configurations.
+  Target/resource membership, test configurations, signing inputs, dependency
+  settings, macOS **14.0** and Swift **5.0** remain unchanged.
+- Effective Release settings confirm hardening YES, base-entitlement injection NO,
+  testability NO, unsigned default NO signing, and no DEBUG compilation condition.
+  Inspected `makeAppLaunchCoordinator`'s existing `#if DEBUG` boundary; all **six**
+  emitted Release app swiftc commands omit `-D DEBUG`. Binary byte checks find
+  neither `KONTROL_F00_RECOVERY_TEST` nor `KontrolF00Recovery-` in Release, while
+  both are present in Debug (positive control). No app was launched.
+- Source entitlements are byte-identical to HEAD and contain **exactly four true
+  values**: sandbox, outbound network, user-selected read/write, app-scope bookmarks.
+  No `get-task-allow` is requested there. This is configuration/binary inspection,
+  **not actual signed-entitlement acceptance**; S13/D13 remain separate gates.
+- Both built Info.plists contain version/build **1.0/1** and minimum OS **14.0**.
+  Release executable is **x86_64 + arm64**, SHA-256
+  `d5c9e15c885f30394f482d7fe2cc88a4bc8688eaaa328d4de019ce1500c9d944`.
+  Debug executable is arm64, SHA-256
+  `346576705300bc0aa0942d4441c7071246167da0945247019a2c02e322c5ad79`.
+- Enumerated actual `Contents/Resources` in both build products: exactly
+  `starter-catalog.json`, `generation-objectives.json`, `default-feeds.json`.
+  Each parses as JSON and is byte-identical to its source. Full paths/hashes are
+  recorded in `audit.log`. Notices are not packaged yet and remain **Step 5.3**,
+  not a missing acceptance requirement silently credited here.
+
+### Exact validation and results
+
+Ran from repository root; **every command exited 0**:
+
+```sh
+EVIDENCE=/tmp/kontrol-f13-step5-2.Plb6kJ
+make build CONFIGURATION=Release DERIVED_DATA=/tmp/kontrol-f13-release-build
+xcodebuild -showBuildSettings -project Kontrol.xcodeproj \
+  -scheme Kontrol -configuration Release
+plutil -lint Kontrol.xcodeproj/project.pbxproj Kontrol/Kontrol.entitlements
+plutil -p /tmp/kontrol-f13-release-build/Build/Products/Release/Kontrol.app/Contents/Info.plist
+make build DERIVED_DATA=/tmp/kontrol-f13-derived
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived CODE_SIGNING_ALLOWED=NO build-for-testing
+for config in Release Debug; do
+  xcodebuild -showBuildSettings -json -project Kontrol.xcodeproj \
+    -scheme Kontrol -configuration "$config" \
+    > "$EVIDENCE/$config-settings.json" 2> "$EVIDENCE/$config-settings.stderr"
+done
+python3 "$EVIDENCE/audit.py"
+git diff --check
+```
+
+Logs: `release-build.log`, `release-settings.log`, `plist-lint.log`,
+`release-info.log`, `debug-build.log`, `test-compilation.log`, `audit.log`,
+`diff-check.log`, `exit-codes.log`; emitted commands retained in
+`release-swift-commands.txt`. Final whitespace check reran after this ledger edit.
+Debug and Release builds **SUCCEEDED**; hosted test compilation **SUCCEEDED**;
+plist lint and configuration/binary/resource assertions passed. **No XCTest
+methods were executed and no test result bundle is claimed**: this task requires
+build-for-testing, not a test selection. Existing AppIntents/multiple-destination
+messages are preserved in raw logs and warning lines in `diagnostics.log`.
+No production store, external project, native desktop, or temporary test store
+was accessed; no store cleanup occurred. Previously deferred A13 accessibility,
+S13 signed sandbox, B13 runtime matrix and D13 distribution acceptance are not
+satisfied by these checks. **No remaining Step 5.2 blockers.**
