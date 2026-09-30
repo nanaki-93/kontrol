@@ -1,4 +1,6 @@
+import Combine
 import Darwin
+import SwiftData
 import Foundation
 import XCTest
 import UniformTypeIdentifiers
@@ -204,6 +206,434 @@ final class ExportServiceTests: XCTestCase {
         guard case .canceled = result else { return XCTFail("Racing cancellation approved URL") }
         XCTAssertEqual(approvals, 0)
         try assertEmpty(root)
+    }
+
+    @MainActor
+    private final class LifecycleRepository: ExportRepository {
+        var calls: [(Date, String)] = []
+        var fail = false
+        var onCapture: (() -> Void)?
+        func snapshot(exportedAt: Date, appVersion: String) throws -> LocalDataExport {
+            XCTAssertTrue(Thread.isMainThread)
+            calls.append((exportedAt, appVersion))
+            onCapture?()
+            if fail { throw NSError(domain: "private capture details", code: 1) }
+            return LocalDataExport(exportedAt: try ExportTimestamp(exportedAt), appVersion: appVersion)
+        }
+    }
+
+    private actor LifecycleWriter: ExportFilePreparing, ExportFileDelivering {
+        let real: ExportFileWriter
+        var snapshots: [LocalDataExport] = []
+        var deliveries = 0
+        var failPreparation = false
+        var failDelivery = false
+        var prepared: XCTestExpectation?
+        var continuation: CheckedContinuation<Void, Never>?
+
+        init(root: URL) { real = ExportFileWriter(temporaryRoot: root) }
+        nonisolated func approveDestination(_ url: URL) throws -> ApprovedExportDestination {
+            try real.approveDestination(url)
+        }
+        func setFailure(preparation: Bool = false, delivery: Bool = false) {
+            failPreparation = preparation
+            failDelivery = delivery
+        }
+        func suspendAfterPreparation(_ entered: XCTestExpectation) { prepared = entered }
+        func resumePreparation() { continuation?.resume(); continuation = nil }
+        func counts() -> [Int] { [snapshots.count, deliveries] }
+        func prepare(_ snapshot: LocalDataExport) async throws -> PreparedExportArtifact {
+            snapshots.append(snapshot)
+            if failPreparation { throw NSError(domain: "private encoding details", code: 2) }
+            let artifact = try await real.prepare(snapshot)
+            if let prepared {
+                // Deliberately noncooperative: cancellation must not relinquish
+                // lifecycle ownership, and the late artifact must be discarded.
+                await withCheckedContinuation { continuation in
+                    self.continuation = continuation
+                    prepared.fulfill()
+                }
+            }
+            return artifact
+        }
+        func deliver(_ artifact: PreparedExportArtifact,
+                     to destination: ApprovedExportDestination) async throws -> ExportDeliveryOutcome {
+            deliveries += 1
+            if failDelivery { throw NSError(domain: "private destination details", code: 3) }
+            return try await real.deliver(artifact, to: destination)
+        }
+    }
+
+    @MainActor
+    func testServicePanelCancelAndSelectionFailureNeverFlushCapturePrepareOrWrite() async throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let spy = PanelSpy()
+        let repository = LifecycleRepository()
+        let writer = LifecycleWriter(root: root)
+        var flushes = 0
+        var versions = 0
+        let service = ExportService(repository: repository, panel: ExportSavePanel(makePanel: { spy }),
+            writer: writer, appVersion: { versions += 1; return "1.0" }, flushAnswers: { flushes += 1 })
+        XCTAssertEqual(service.state, .idle)
+        for missingURL in [false, true] {
+            spy.onBegin = { [weak spy] in spy?.completion?(missingURL, nil) }
+            XCTAssertTrue(service.startExport())
+            await service.waitForCompletion()
+            XCTAssertEqual(service.state, missingURL ? .failed(.selection) : .canceled)
+            XCTAssertFalse(service.isBusy)
+            XCTAssertEqual(flushes, 0)
+            XCTAssertEqual(versions, 0)
+            XCTAssertTrue(repository.calls.isEmpty)
+            let counts = await writer.counts()
+            XCTAssertEqual(counts, [0, 0])
+            try assertEmpty(root)
+        }
+    }
+
+    @MainActor
+    func testServiceSuccessfulSequenceUsesInjectedCaptureMetadataAndOnlyCommitPublishesSaved() async throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let target = root.appendingPathComponent("destination.json")
+        let repository = LifecycleRepository()
+        let writer = LifecycleWriter(root: root)
+        let spy = PanelSpy()
+        var events: [String] = []
+        spy.onBegin = { [weak spy] in events.append("panel"); spy?.completion?(true, target) }
+        repository.onCapture = { events.append("capture") }
+        let selectingDate = Date(timeIntervalSince1970: 1_000)
+        let captureDate = Date(timeIntervalSince1970: 2_000)
+        var clocks = 0
+        let service = ExportService(repository: repository, panel: ExportSavePanel(makePanel: { spy }),
+            writer: writer, clock: { clocks += 1; return clocks == 1 ? selectingDate : captureDate },
+            appVersion: { events.append("version"); return "9.8.7" },
+            flushAnswers: { events.append("flush") })
+        var states: [ExportService.State] = []
+        let subscription = service.$state.sink { states.append($0) }
+        defer { subscription.cancel() }
+        XCTAssertTrue(service.startExport())
+        XCTAssertEqual(service.state, .selecting)
+        XCTAssertFalse(service.startExport())
+        await service.waitForCompletion()
+        XCTAssertEqual(events, ["panel", "flush", "version", "capture"])
+        XCTAssertEqual(states, [.idle, .selecting, .preparing, .saved])
+        XCTAssertEqual(repository.calls.count, 1)
+        XCTAssertEqual(repository.calls.first?.0, captureDate)
+        XCTAssertEqual(repository.calls.first?.1, "9.8.7")
+        XCTAssertEqual(spy.configurations, [ExportSavePanelConfiguration(date: selectingDate)])
+        let counts = await writer.counts()
+        XCTAssertEqual(counts, [1, 1])
+        let exported = try LocalDataExport.decode(Data(contentsOf: target))
+        XCTAssertEqual(exported.exportedAt, try ExportTimestamp(captureDate))
+        XCTAssertEqual(exported.appVersion, "9.8.7")
+        XCTAssertFalse(service.isBusy)
+        service.cancel()
+        XCTAssertEqual(service.state, .saved)
+        try assertDeliveryClean(root)
+    }
+
+    @MainActor
+    func testServiceFailuresAbortAtBoundaryCleanArtifactsAndRequireExplicitRetry() async throws {
+        for failure in [ExportService.Failure.answerSave, .capture, .preparation, .delivery] {
+            let root = try root()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let target = root.appendingPathComponent("destination.json")
+            let original = Data("unchanged precommit bytes".utf8)
+            try original.write(to: target)
+            let spy = PanelSpy()
+            spy.onBegin = { [weak spy] in spy?.completion?(true, target) }
+            let repository = LifecycleRepository()
+            repository.fail = failure == .capture
+            let writer = LifecycleWriter(root: root)
+            await writer.setFailure(preparation: failure == .preparation, delivery: failure == .delivery)
+            var failFlush = failure == .answerSave
+            var flushes = 0
+            let service = ExportService(repository: repository, panel: ExportSavePanel(makePanel: { spy }),
+                writer: writer, appVersion: { "1.0" }, flushAnswers: {
+                    flushes += 1
+                    if failFlush { throw NSError(domain: "private answer details", code: 4) }
+                })
+            XCTAssertTrue(service.startExport())
+            await service.waitForCompletion()
+            XCTAssertEqual(service.state, .failed(failure))
+            XCTAssertFalse(service.isBusy)
+            XCTAssertEqual(flushes, 1)
+            XCTAssertEqual(repository.calls.count, failure == .answerSave ? 0 : 1)
+            let counts = await writer.counts()
+            XCTAssertEqual(counts, failure == .delivery ? [1, 1] : failure == .preparation ? [1, 0] : [0, 0])
+            XCTAssertEqual(try Data(contentsOf: target), original)
+            try assertDeliveryClean(root)
+            // No automatic re-entry even after unrelated actor work.
+            await Task.yield()
+            XCTAssertEqual(spy.begins, 1)
+            failFlush = false
+            repository.fail = false
+            await writer.setFailure()
+            XCTAssertTrue(service.startExport())
+            await service.waitForCompletion()
+            XCTAssertEqual(service.state, .saved)
+            XCTAssertEqual(spy.begins, 2)
+            XCTAssertEqual(flushes, 2)
+            _ = try LocalDataExport.decode(Data(contentsOf: target))
+            try assertDeliveryClean(root)
+        }
+    }
+
+    @MainActor
+    func testServiceRealFlushFailureRetainsDirtyAnswersAndEarlierDurableSavesThenExplicitRetryExportsThem() async throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        var failOnSecondSave = false
+        var saves = 0
+        let repository = SwiftDataCatalogRepository(container: container, beforeSave: {
+            if failOnSecondSave {
+                saves += 1
+                if saves == 2 { throw NSError(domain: "injected save failure", code: 1) }
+            }
+        })
+        _ = try repository.importIfNeeded(BundledCatalogLoader.load())
+        let graph = AppDependencies(container: container, catalogRepository: repository,
+            draftScheduler: { _, _ in {} })
+        graph.learningCatalogStore.loadIfNeeded()
+        let slots = try XCTUnwrap(graph.learningCatalogStore.state.snapshot?.slots)
+        for slot in slots.prefix(3) {
+            let opened = try graph.learningCatalogStore.openLesson(lessonID: slot.lessonID)
+            graph.lessonDraftStore.observe(opened.detail)
+            let attempt = try XCTUnwrap(opened.detail.attempt)
+            graph.lessonDraftStore.edit("  pending \(attempt.id) 🔐\n", attemptID: attempt.id)
+        }
+        let buffers = graph.lessonDraftStore.buffers.values.sorted { $0.attemptID.uuidString < $1.attemptID.uuidString }
+        XCTAssertEqual(buffers.count, 3)
+        let capture = SwiftDataExportRepository(container: container)
+        let writer = LifecycleWriter(root: root)
+        let spy = PanelSpy()
+        let target = root.appendingPathComponent("destination.json")
+        // Cancel must leave even real pending buffers untouched.
+        spy.onBegin = { [weak spy] in spy?.completion?(false, nil) }
+        let service = ExportService(repository: capture, panel: ExportSavePanel(makePanel: { spy }),
+            writer: writer, appVersion: { "1.0" }, flushAnswers: graph.lessonDraftStore.flushAll)
+        XCTAssertTrue(service.startExport())
+        await service.waitForCompletion()
+        XCTAssertEqual(service.state, .canceled)
+        XCTAssertEqual(graph.lessonDraftStore.buffers.values.filter(\.isDirty).count, 3)
+        failOnSecondSave = true
+        spy.onBegin = { [weak spy] in spy?.completion?(true, target) }
+        XCTAssertTrue(service.startExport())
+        await service.waitForCompletion()
+        XCTAssertEqual(service.state, .failed(.answerSave))
+        for (index, buffer) in buffers.enumerated() {
+            let current = try XCTUnwrap(graph.lessonDraftStore.buffers[buffer.attemptID])
+            XCTAssertEqual(current.text, buffer.text)
+            XCTAssertEqual(current.isDirty, index != 0)
+            let durable = try repository.loadLesson(lessonID: buffer.lessonID)
+            XCTAssertEqual(durable.attempt?.answerDraft, index == 0 ? buffer.text : "")
+        }
+        XCTAssertEqual(graph.lessonDraftStore.buffers[buffers[1].attemptID]?.status, .notSaved(.persistenceFailure))
+        let failedCounts = await writer.counts()
+        XCTAssertEqual(failedCounts, [0, 0])
+        try assertEmpty(root)
+        failOnSecondSave = false
+        XCTAssertTrue(service.startExport())
+        await service.waitForCompletion()
+        XCTAssertEqual(service.state, .saved)
+        let exported = try LocalDataExport.decode(Data(contentsOf: target))
+        for buffer in buffers {
+            XCTAssertEqual(exported.learning.attempts.first { $0.id == buffer.attemptID }?.answerDraft, buffer.text)
+            XCTAssertFalse(try XCTUnwrap(graph.lessonDraftStore.buffers[buffer.attemptID]).isDirty)
+        }
+        try assertDeliveryClean(root)
+    }
+
+    @MainActor
+    func testServiceCancelRetainsPanelOwnershipAndFencesOldCallbacksAcrossExplicitRetry() async throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let spy = PanelSpy()
+        let begun = expectation(description: "First panel begun")
+        let dismissed = expectation(description: "Native cancel requested")
+        spy.onBegin = { begun.fulfill() }
+        spy.onCancel = { dismissed.fulfill() }
+        let repository = LifecycleRepository()
+        let writer = LifecycleWriter(root: root)
+        var flushes = 0
+        let service = ExportService(repository: repository, panel: ExportSavePanel(makePanel: { spy }),
+            writer: writer, appVersion: { "1.0" }, flushAnswers: { flushes += 1 })
+        XCTAssertTrue(service.startExport())
+        await fulfillment(of: [begun], timeout: 5)
+        let oldCallback = try XCTUnwrap(spy.completion)
+        service.cancel()
+        service.cancel()
+        await fulfillment(of: [dismissed], timeout: 5)
+        XCTAssertTrue(service.isBusy)
+        XCTAssertEqual(service.state, .selecting)
+        XCTAssertFalse(service.startExport())
+        oldCallback(true, root.appendingPathComponent("obsolete.json"))
+        await service.waitForCompletion()
+        XCTAssertEqual(service.state, .canceled)
+        XCTAssertFalse(service.isBusy)
+        let retryBegun = expectation(description: "Retry panel begun")
+        spy.onBegin = { retryBegun.fulfill() }
+        XCTAssertTrue(service.startExport())
+        await fulfillment(of: [retryBegun], timeout: 5)
+        oldCallback(true, root.appendingPathComponent("obsolete.json"))
+        oldCallback(false, nil)
+        XCTAssertEqual(service.state, .selecting)
+        XCTAssertTrue(service.isBusy)
+        spy.completion?(false, nil)
+        await service.waitForCompletion()
+        XCTAssertEqual(service.state, .canceled)
+        XCTAssertEqual(spy.begins, 2)
+        XCTAssertEqual(flushes, 0)
+        XCTAssertTrue(repository.calls.isEmpty)
+        let counts = await writer.counts()
+        XCTAssertEqual(counts, [0, 0])
+        try assertEmpty(root)
+    }
+
+    @MainActor
+    func testServiceCancellationBeforeStartAndRacingApprovalNeverFlushesOrCaptures() async throws {
+        for beforeStart in [true, false] {
+            let root = try root()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let spy = PanelSpy()
+            let begun = beforeStart ? nil : expectation(description: "Panel begun")
+            spy.onBegin = { begun?.fulfill() }
+            let repository = LifecycleRepository()
+            let writer = LifecycleWriter(root: root)
+            var flushes = 0
+            let service = ExportService(repository: repository, panel: ExportSavePanel(makePanel: { spy }),
+                writer: writer, appVersion: { "1.0" }, flushAnswers: { flushes += 1 })
+            XCTAssertTrue(service.startExport())
+            if !beforeStart {
+                await fulfillment(of: [try XCTUnwrap(begun)], timeout: 5)
+                spy.completion?(true, root.appendingPathComponent("destination.json"))
+            }
+            service.cancel()
+            await service.waitForCompletion()
+            XCTAssertEqual(service.state, .canceled)
+            XCTAssertEqual(spy.begins, beforeStart ? 0 : 1)
+            XCTAssertEqual(flushes, 0)
+            XCTAssertTrue(repository.calls.isEmpty)
+            let counts = await writer.counts()
+            XCTAssertEqual(counts, [0, 0])
+            try assertEmpty(root)
+        }
+    }
+
+    @MainActor
+    func testServiceCancellationDuringSynchronousBarriersStopsBeforeNextBoundary() async throws {
+        for boundary in ["selecting", "preparing", "flush", "capture"] {
+            let root = try root()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let spy = PanelSpy()
+            spy.onBegin = { [weak spy] in spy?.completion?(true, root.appendingPathComponent("destination.json")) }
+            let repository = LifecycleRepository()
+            let writer = LifecycleWriter(root: root)
+            weak var owner: ExportService?
+            var flushes = 0
+            let service = ExportService(repository: repository, panel: ExportSavePanel(makePanel: { spy }),
+                writer: writer, appVersion: { "1.0" }, flushAnswers: {
+                    flushes += 1
+                    if boundary == "flush" { owner?.cancel() }
+                })
+            owner = service
+            repository.onCapture = { if boundary == "capture" { owner?.cancel() } }
+            let subscription = service.$state.sink { state in
+                if (boundary == "selecting" && state == .selecting) ||
+                    (boundary == "preparing" && state == .preparing) { owner?.cancel() }
+            }
+            defer { subscription.cancel() }
+            XCTAssertTrue(service.startExport())
+            await service.waitForCompletion()
+            XCTAssertEqual(service.state, .canceled)
+            XCTAssertFalse(service.isBusy)
+            XCTAssertEqual(flushes, ["flush", "capture"].contains(boundary) ? 1 : 0)
+            XCTAssertEqual(repository.calls.count, boundary == "capture" ? 1 : 0)
+            let counts = await writer.counts()
+            XCTAssertEqual(counts, [0, 0])
+            try assertEmpty(root)
+        }
+    }
+
+    @MainActor
+    func testServiceCanceledNoncooperativePreparationRetainsOwnershipAndDiscardsLateArtifact() async throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let target = root.appendingPathComponent("destination.json")
+        let original = Data("preserve pending preparation bytes".utf8)
+        try original.write(to: target)
+        let spy = PanelSpy()
+        spy.onBegin = { [weak spy] in spy?.completion?(true, target) }
+        let repository = LifecycleRepository()
+        let writer = LifecycleWriter(root: root)
+        let prepared = expectation(description: "Private artifact prepared")
+        await writer.suspendAfterPreparation(prepared)
+        let service = ExportService(repository: repository, panel: ExportSavePanel(makePanel: { spy }),
+            writer: writer, appVersion: { "1.0" }, flushAnswers: {})
+        XCTAssertTrue(service.startExport())
+        await fulfillment(of: [prepared], timeout: 5)
+        service.cancel()
+        await Task.yield()
+        XCTAssertTrue(service.isBusy)
+        XCTAssertEqual(service.state, .preparing)
+        XCTAssertFalse(service.startExport())
+        XCTAssertEqual(spy.begins, 1)
+        await writer.resumePreparation()
+        await service.waitForCompletion()
+        XCTAssertEqual(service.state, .canceled)
+        XCTAssertFalse(service.isBusy)
+        let counts = await writer.counts()
+        XCTAssertEqual(counts, [1, 0])
+        XCTAssertEqual(try Data(contentsOf: target), original)
+        try assertDeliveryClean(root)
+    }
+
+    @MainActor
+    func testServiceCancellationAtEveryDeliveryStageKeepsOwnershipPreservesBytesOrReportsActualCommit() async throws {
+        for stoppingStage in ExportFileWriter.DeliveryStage.allCases {
+            let root = try root()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let target = root.appendingPathComponent("destination.json")
+            let original = Data("preserve until atomic commit".utf8)
+            try original.write(to: target)
+            let entered = expectation(description: "Delivery stage reached")
+            let release = DispatchSemaphore(value: 0)
+            defer { release.signal() }
+            let writer = ExportFileWriter(temporaryRoot: root, deliveryHooks: .init(checkpoint: { stage, _ in
+                if stage == stoppingStage {
+                    XCTAssertFalse(Thread.isMainThread)
+                    entered.fulfill()
+                    guard release.wait(timeout: .now() + 10) == .success else {
+                        XCTFail("Service did not release delivery worker")
+                        throw ExportFileWriterError.deliveryFailed
+                    }
+                }
+            }))
+            let spy = PanelSpy()
+            spy.onBegin = { [weak spy] in spy?.completion?(true, target) }
+            let repository = LifecycleRepository()
+            let service = ExportService(repository: repository, panel: ExportSavePanel(makePanel: { spy }),
+                writer: writer, appVersion: { "1.0" }, flushAnswers: {})
+            XCTAssertTrue(service.startExport())
+            await fulfillment(of: [entered], timeout: 5)
+            service.cancel()
+            await Task.yield()
+            XCTAssertTrue(service.isBusy)
+            XCTAssertEqual(service.state, .preparing)
+            XCTAssertFalse(service.startExport())
+            release.signal()
+            await service.waitForCompletion()
+            XCTAssertFalse(service.isBusy)
+            XCTAssertEqual(service.state, stoppingStage == .committed ? .saved : .canceled)
+            if stoppingStage == .committed {
+                _ = try LocalDataExport.decode(Data(contentsOf: target))
+            } else {
+                XCTAssertEqual(try Data(contentsOf: target), original)
+            }
+            try assertDeliveryClean(root)
+        }
     }
 
     private func root() throws -> URL {

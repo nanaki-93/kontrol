@@ -2031,3 +2031,125 @@ cleanup of only their owned non-store temporary directories. No original fixture
 frozen schema, external project, production store, or dependency was changed.
 Final ledger whitespace check initially exited **2** (extra blank line at EOF);
 removing that blank line restored `git diff --check` exit **0**.
+
+## F13 Step 3.4 — export lifecycle and pending-answer barrier (2026-09-30 UTC)
+
+First incomplete task confirmed as runner task 12/Step 3.4. The cumulative review
+checklist has no previous findings. Initial worktree/index were clean; repository
+and ancestor instruction checks found no applicable `AGENTS.md`. No submodule was
+listed. Changes are limited to new `Kontrol/Features/Settings/ExportService.swift`,
+`KontrolTests/ExportServiceTests.swift`, explicit app Sources membership in
+`Kontrol.xcodeproj/project.pbxproj`, and this required evidence ledger. Dependency
+graph wiring and Local Data UI remain the separate subsequent tasks, not part of
+this checkpoint.
+
+Base revision: `c00a14bdc26d364e0276bf3f5b206150e0e75678`. Implementation including
+untracked source is captured in `implementation.patch`, SHA-256
+`923e7e663913f480b8ff1b88f748f7cc607ef158c53ebae6746ea653022c3a50`;
+`source-sha256.txt` identifies each tested file. This ledger is the only subsequent
+source-tree edit. Evidence: **`/tmp/kontrol-f13-step3-4.e4SsUa/`**. Environment and
+project listing logs record macOS 27.0 (26A428), arm64 MacBook Pro, Xcode 27.0
+(27A266a), Swift 6.4, `/Applications/Xcode.app/Contents/Developer`, and unchanged
+Yams resolution. Project remains macOS 14/Swift 5; this is not baseline-runtime
+acceptance.
+
+The main-actor observable service injects repository, panel, writer, clock,
+version, and a synchronous answer-flush closure (supplied with the existing
+`LessonDraftStore.flushAll` in integration tests). It publishes
+idle/selecting/preparing/saved/canceled/category-only failed states. Approval and
+cancellation checks precede flush, which completes synchronously before persisted
+capture. Only detached values reach off-main preparation and delivery. An owned
+operation UUID fences publication; duplicate actions are rejected. Cancel retains
+ownership until real callback/worker/cleanup completion, with no timeout or
+automatic retry. A committed delivery receipt always reports saved, including
+post-commit cancellation. Late artifacts are explicitly discarded off-main and
+awaited. No URL, grant, raw error, or exported content is observable/logged by the
+service; construction only retains supplied boundaries.
+
+Nine new non-GUI methods cover:
+
+- Panel cancellation/selection failure with zero flush, version, capture, prepare,
+  or delivery calls; real canceled dirty buffers remain untouched.
+- Exact approval/flush/version/capture ordering, injected selection/capture dates,
+  captured app version, complete state sequence, duplicate rejection, and real
+  destination JSON/cleanup.
+- Flush/capture/preparation/delivery failure categories, unchanged existing bytes,
+  private artifact cleanup even for a failing non-cleaning writer double, and
+  explicit retry without automatic re-entry.
+- Three real pending answer buffers with a failure on the second ordered save:
+  the first save stays durable, failed/unvisited answers stay dirty with exact
+  text, capture/preparation/delivery never begin, and retry exports all answers.
+- Delayed panel cancellation, duplicate/obsolete callbacks during a later explicit
+  request, accepted-callback races, pre-start cancellation, and cancellation during
+  synchronous state publication, flush, and capture barriers.
+- Deliberately noncooperative preparation returning a late artifact; no overlap or
+  delivery occurs, and cleanup finishes before canceled publication.
+- Every real writer delivery checkpoint: cancellation retains service ownership,
+  pre-commit bytes survive, staging is cleaned, and post-commit reports saved.
+
+Exact final verification commands (repository root; each exit **0**):
+
+```sh
+set -o pipefail
+EVIDENCE=/tmp/kontrol-f13-step3-4.e4SsUa
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
+  -resultBundlePath "$EVIDENCE/lifecycle-final.xcresult" \
+  -only-testing:KontrolTests/ExportServiceTests \
+  -only-testing:KontrolTests/LocalDataExportTests \
+  -only-testing:KontrolTests/LessonExperienceStoreTests test
+make build DERIVED_DATA=/tmp/kontrol-f13-derived
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived CODE_SIGNING_ALLOWED=NO \
+  build-for-testing
+xcrun xcresulttool get test-results summary \
+  --path "$EVIDENCE/lifecycle-final.xcresult" --format json \
+  > "$EVIDENCE/summary-final.json"
+xcrun xcresulttool get test-results tests \
+  --path "$EVIDENCE/lifecycle-final.xcresult" --format json \
+  > "$EVIDENCE/test-tree-final.json"
+python3 "$EVIDENCE/audit.py"
+plutil -lint Kontrol.xcodeproj/project.pbxproj
+git diff --check
+```
+
+Fresh result: **131/131 Passed** — **42** ExportServiceTests, **59**
+LocalDataExportTests, **30** LessonExperienceStoreTests. Zero failures, skips,
+expected failures, or xcresult runtime warnings. Source-to-result audit confirms
+each selected method executed exactly once; `executed-identifiers.txt` records
+complete identifiers. Logs: `tests-final.log`, `build-final.log`,
+`compile-final.log`, `audit.log`, `plutil.log`, `diffcheck-final.log`. All hosted
+coverage compiled; no new UI selector is required for this state-machine task.
+Previously deferred native panel/geometry/keyboard/VoiceOver and A13/S13/B13/D13
+observations remain pending, not satisfied by these checks.
+
+Earlier failures are preserved: identical three-suite test command using
+`lifecycle.xcresult` exited **65**, 130 executed with one fixture failure in
+`testServiceCancellationBeforeStartAndRacingApprovalNeverFlushesOrCaptures`
+(`tests.log`, initial summary/test tree). The pre-start case created an unwaited
+"Panel begun" expectation although no panel should open. Creating that expectation
+only for the racing-approval case fixes the harness, without weakening the zero-call
+assertions. One additional synchronous-barrier regression was then added. Initial
+`git diff --check` exited **2** on two new project entries with space-before-tab
+indentation; matching tab indentation repaired it. Final full selection, build,
+compilation, plist lint, and whitespace check pass. Existing AppIntents extraction,
+linkd and multiple-destination diagnostics remain; no new export compiler warning
+or SQLite vnode-unlinked diagnostic occurred.
+
+Both test hosts exited (initial PID **549**, final PID **1046**; `ps` exit **1**
+with no rows). `store-integrity.log` records enumerated store/WAL/SHM inventories
+and read-only SQLite integrity **ok** for all retained capture fixture roots under
+`/var/folders/lz/20cqfx4x2k98r89q68w3q3ch0000gn/T/`:
+
+- Initial: `kontrol-export-capture-61151DD4-6C5B-4AAC-B02F-E0D35D8F5C90/`,
+  `kontrol-export-capture-CFD5709B-3D2E-4A8C-82A5-7D003B7F92D4/`.
+- Final: `kontrol-export-capture-5D7761BE-2F7C-46F8-9572-138262781D33/`,
+  `kontrol-export-capture-62ECC665-DCDD-41BD-ADB7-32D6B2CCAD89/`.
+
+No agent store cleanup occurred. New draft integration uses an in-memory container;
+writer/service tests clean only owned non-store destinations/artifacts. No original
+fixture, frozen schema, dependency pin, external project, production store, workflow
+file, or plan checkbox changed. **No remaining Step 3.4 blockers.**
