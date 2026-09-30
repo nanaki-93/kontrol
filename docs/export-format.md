@@ -1,12 +1,14 @@
 # Local data export — schema version 1
 
 `LocalDataExport` in `Kontrol/Domain/LocalDataExport.swift` defines a detached,
-plain JSON serialization contract. `Kontrol/Data/Export/DailyDataExportProjection.swift`
-now maps supplied persisted tasks, blocks, Focus sessions, and effective configuration.
-`Kontrol/Data/Export/LearningExportProjection.swift` maps stored Learning taxonomy
-and accepted definitions plus stored personal Learning evidence. Coherent capture,
-destination selection, and delivery remain separate implementation tasks. No import/restore is provided. This is **not an encrypted
-backup**; the JSON contains personal authored content and saved answers.
+plain JSON serialization contract. Daily/configuration and Learning projections,
+coherent persisted capture, native JSON selection, private preparation/validation,
+atomic delivery and shared Local Data Settings are implemented. Both Settings
+entry points use the same app-owned lifecycle. No import/restore is provided.
+This is **not an encrypted backup**; the JSON contains personal authored content
+and saved answers. Protect it before sharing. Implementation tests are recorded
+in [QA](qa.md); native picker/accessibility, signed sandbox, runtime matrix and
+distribution approval remain separate pending [release gates](release.md).
 
 ## Common rules
 
@@ -16,13 +18,17 @@ backup**; the JSON contains personal authored content and saved answers.
 - Strings retain exact UTF-8 authored content (including whitespace, newlines,
   decomposed Unicode, and secret-looking text). Nonblank validation does not trim
   or rewrite the value. Privacy is a structural allowlist, not string redaction.
-- **ID** means a nonblank string with no surrounding whitespace, already in NFC.
-  ID comparisons are case-sensitive. **UUID** means a UUID string; output uses
+- **ID** means a nonblank string checked against its trimmed/NFC form using
+  Swift String equality. Comparisons are case-sensitive but canonically equivalent
+  Unicode strings compare equal; the detached DTO's check alone does not enforce
+  NFC **bytes**. Persisted Learning projections additionally reject non-NFC bytes
+  (including embedded evidence), rather than normalizing them. **UUID** means a UUID string; output uses
   Foundation's uppercase, hyphenated canonical representation.
 - **Instant** means `YYYY-MM-DDTHH:mm:ss.SSSZ`, UTC, proleptic Gregorian years 0001–9999 (no pre-1582 Julian switch).
-  Capture rounds finite absolute `Date` values to the nearest millisecond (ties
+  Capture requires finite absolute `Date` values in Unix seconds
+  `[-62135596800, 253402300800)` and rounds to the nearest millisecond (ties
   away from zero relative to the Unix epoch). Values that round outside the range
-  fail. Decode requires exactly three fractional digits and `Z`, rejects invalid
+  also fail. Decode requires exactly three fractional digits and `Z`, rejects invalid
   calendar dates, leap seconds, offsets, missing fractions, and normalization.
   Subsequent encode/decode preserves the canonical string exactly. No local
   timezone is inferred for an absolute instant.
@@ -161,8 +167,8 @@ on the main actor. It accepts already-fetched rows plus an envelope, replaces on
 its three Daily collections, validates the resulting envelope, and returns
 canonicalized detached values. Other envelope content remains unchanged except
 for contract sorting. Fetching/coherent committed capture belongs to the caller
-(the export repository will be implemented separately); this mapper does not
-read unsaved editors or claim an arbitrary supplied context is committed.
+(`SwiftDataExportRepository`, described below); this mapper does not read
+unsaved editors or claim an arbitrary supplied context is committed.
 
 - Every task field maps directly, with stored `plannedDay` components and
   `plannedTimeZoneID` combined only when both exist. Titles and notes are not
@@ -243,9 +249,9 @@ coherent committed snapshot remains the repository's responsibility.
   unique UUIDs and normalized HTTPS endpoints. Persisted positive catalog versions
   are retained as storage validity information, not exported or interpreted as
   payload versions; no reconciliation to a newer catalog is performed.
-- Selections and feed mappings decode through `NewsRecordPayload.topics`, including
-  version 1, size/count/string limits and duplicate rejection. Corrupt, oversized,
-  or unsupported payloads fail. Topic IDs must belong to the supplied catalog;
+- Selections and feed mappings decode through `NewsRecordPayload.topics`: version
+  1, ≤4,096 payload bytes, ≤32 IDs, each nonempty and ≤128 UTF-8 bytes, no duplicate
+  IDs. Corrupt, oversized or unsupported payloads fail. Topic IDs must belong to the supplied catalog;
   each feed needs at least one topic. There may be at most 32 persisted feeds.
 - Feed names are nonempty, ≤256 UTF-8 bytes, and have no surrounding whitespace.
   Names, endpoints, mappings, IDs, and enabled flags map exactly, without applying
@@ -259,6 +265,18 @@ coherent committed snapshot remains the repository's responsibility.
 - No context save/insertion, News initialization/refresh, network, Keychain,
   credential resolution, feature-store loading, or editor-draft access occurs.
   Later row edits cannot change the detached result.
+
+### Current bundled News defaults
+
+When both News preference and feed rows are absent, the effective default source
+is [default-feeds.json](../Kontrol/Resources/default-feeds.json), catalog version 1.
+Selected topics are `ai`, `go`, `japan`, `java`, `security`,
+`software-engineering`, `system-design` (sorted export order); `gaming` and `anime`
+are not selected. All seven bundled feeds export enabled with their exact stable
+UUID/name/HTTPS endpoint/mappings from that resource: The Go Blog, Inside Java,
+Martin Fowler, InfoQ, Schneier on Security, Google AI and The Japan Times.
+Feeds sort by canonical UUID, not that display order. A persisted preference row
+never receives these defaults merely because its selection/feeds are empty.
 
 ## Learning
 
@@ -497,6 +515,69 @@ belongs to the caller; the mapper does not read another owner's unsaved answers.
   rotation, catalog initialization/reconciliation, generation, external access,
   or payload dumping occurs. Subsequent row edits cannot change returned values.
 
+## Coherent persisted capture
+
+`SwiftDataExportRepository.snapshot(exportedAt:appVersion:)` uses the existing
+app container and one fresh main-actor context with autosave disabled. It reads
+all included rows synchronously without suspension, composes the projections
+above, validates and returns canonical detached values. No context save, seeding,
+News initialization/refresh, catalog reconciliation, timer advancement, network,
+Keychain or project-folder access occurs. Project references and article records
+are not fetched. It loads only the bundled effective feed catalog locally.
+
+The snapshot is coherent under this app's single-process main-actor persistence
+ownership; it is not a cross-process database backup transaction. Other owners'
+unsaved context/editor changes are not captured, and later committed edits cannot
+change detached captured values. Missing General/AI defaults and absent News
+configuration follow the projection rules above without inserting rows; absent
+Learning rows remain empty, not freshly seeded. `appVersion` comes from
+`CFBundleShortVersionString` in the app bundle; missing/blank metadata fails
+validation rather than inventing a production version. `exportedAt` is the
+injected clock's capture time, after destination approval and answer flush, not
+the earlier filename-selection date.
+
+## Selection, answer barrier and file outcomes
+
+The shared `ExportService` publishes `idle → selecting → preparing → saved |
+canceled | failed`. One operation owns its panel/worker across Settings clients;
+duplicates are rejected until outstanding work finishes, even after requesting
+cancellation. Retries are explicit, with no automatic retry or panel timeout.
+
+1. Local Data explains inclusions/exclusions and lack of restore/encryption.
+2. `NSSavePanel` permits JSON only, shows the extension, allows creating directories,
+   and suggests `kontrol-export-YYYY-MM-DD.json` in UTC Gregorian time from the
+   selection clock. AppKit's native replacement confirmation is retained.
+3. Picker cancellation performs **zero** answer flush, snapshot, private preparation
+   or destination writes. Approval captures transient replacement identity, not a
+   stored bookmark/grant. Directories and symlink targets are rejected.
+4. After approval/cancellation checks, the existing `LessonDraftStore.flushAll()`
+   must succeed before synchronous capture. Failed saves retain dirty answers and
+   abort; individually completed saves need not roll back. Thus pending answers
+   are included **only after becoming persisted saved answers**. Other unsaved
+   editors are not flushed. Cancellation after a flush does not undo answer saves.
+5. Detached values encode off-main into an exclusively created 0700 private
+   directory with a 0600 file. Bytes read back must decode/validate and match the
+   input snapshot's canonical encoding before delivery.
+6. Delivery balances transient security scope, coordinates writing, revalidates
+   destination identity, stages a 0600 sibling on the destination volume, checks
+   cancellation immediately before atomic creation/replacement, and commits.
+
+Every pre-commit cancellation/failure preserves an existing destination's bytes;
+new-target exclusive creation will not overwrite a file that appeared meanwhile.
+Once atomic commit succeeds the result is **saved**, even if cancellation arrives
+later. Settings never reports success for failed/canceled work. Directory/symlink,
+changed identity, access, staging/disk and replacement failures stop safely.
+Coordination protects participating clients; identity rechecks are not a guarantee
+against every race with an uncoordinated editor.
+
+Owned private/sibling staging is cleaned on success/cancellation/failure. A cleanup
+failure is a distinct category: temporary personal-data removal could not be
+confirmed; it is not silently reported as cleaned. Published failures are only
+selection, answer-save, capture, preparation, delivery or cleanup categories;
+content, raw errors and sensitive paths are not exposed/logged. Destination grants
+are never persisted. Native panel/replacement and real sandbox observations remain
+pending S13, not established by injected-panel and filesystem tests.
+
 ## Privacy and limitations
 
 Only the fields above exist in the DTO graph. Excluded: Keychain values and
@@ -509,7 +590,27 @@ before sharing it; it is not guaranteed to be free of sensitive authored content
 
 No SwiftData object, `Data` blob, arbitrary dictionary, filesystem URL/grant,
 network operation, store reset, generation, restore, or external-project mutation
-belongs to this contract. Daily/configuration and Learning taxonomy/definition
-and personal evidence mapping are implemented; coherent capture and safe atomic
-delivery will be implemented and verified in later checkpoints before
-exposing export UI.
+belongs to the serialized contract. The implementation exposes export through
+Local Data Settings using the capture/delivery boundaries above. This file is a
+readable point-in-time projection, not a copy of the database or a complete backup:
+it omits excluded state, cannot restore the app, and does not continuously track
+later edits. Saved JSON may contain sensitive authored text or configured endpoint
+query strings even though credential fields and transport metadata are absent.
+
+### Contract-to-test cross-check
+
+`KontrolTests/LocalDataExportTests.swift` checks every DTO field in empty/rich round
+trips, every nullable key, all collection/set identities and deterministic ordering,
+malformed versions/dates/identities, exact authored UTF-8 and privacy allowlists.
+Daily complete-field/state tests cover all task/block/session timings and links;
+configuration tests cover every persisted/default combination, explicit empty News,
+orphaned feeds, payload/version corruption and excluded metadata. Learning
+complete-field tests cover stored seed/generated/retired definitions, original pins
+versus changed current content, partial legacy nulls, every terminal provenance and
+stored membership. Repository tests cover rich/empty disk reopen, unchanged
+inventories/excluded rows and detachment from later edits.
+`KontrolTests/ExportServiceTests.swift` covers the native-adapter seam, shared
+ownership, flush order/failure retention, private validation/permissions, atomic
+replacement/identity checks, cleanup and pre/post-commit cancellation. Exact fresh
+executed identifiers/counts and result paths are in QA Step 5.5; no full hosted or
+release acceptance is inferred from these selections.

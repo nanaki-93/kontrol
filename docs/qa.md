@@ -3180,3 +3180,135 @@ commands were **not executed**. They remain explicit blockers to their later gat
 not passes or reasons to skip independent documentation verification.
 No production store, test store, Keychain, external folder or native desktop was
 accessed; no fixture cleanup/reset occurred. Historical evidence is unchanged.
+
+## F13 Step 5.5 — Product and export documentation truth (2026-09-30, 18:57 UTC)
+
+First incomplete task matched runner **21/27, Step 5.5**. Read SPEC, ANALYSIS,
+PLAN and the complete cumulative task-21 checklist (no previous findings).
+Initial worktree/index were clean; no interrupted partial work was present.
+Repository/docs and direct-ancestor instruction checks found no applicable
+`AGENTS.md`; no submodule was listed. Changed only `README.md`, root `PLAN.md`,
+`docs/architecture.md`, `docs/export-format.md`,
+`docs/features/F13-settings-release.md` and this appended ledger. No workflow
+state or `.pi/PLAN.md`, implementation, test assertion, fixture, schema, dependency
+or permission was changed. Changes are uncommitted for runner review.
+
+Base revision **`bd04022cba9971a97323f15c5db2577e962fc221`**. Evidence directory
+**`/tmp/kontrol-f13-step5-5.XTVQtb/`** (`EVIDENCE` below).
+`documentation.patch` identifies the five behavior/status documentation deltas
+before this ledger addition, SHA-256
+**`576128754e74ac71133c0ca61640895b4f4c715a364991522f1fa58aa6332e3c`**.
+Tests ran against unchanged implementation at that revision; documentation does
+not change its binaries. `environment.log` records revision/worktree/index,
+submodules, Xcode selection/version, Swift, project listing and OS/hardware:
+Xcode **27.0 (27A266a)**, Apple Swift **6.4**, arm64 macOS **27.0 (26A428)**,
+`/Applications/Xcode.app/Contents/Developer`. Existing Swift 5/macOS 14 settings
+are not macOS 14 execution evidence.
+
+### Documentation and acceptance audit
+
+- README/root product plan now describe the executable app and implemented shared
+  Settings/General/AI/News/folders/Local Data capabilities, not the old planning
+  package or empty Settings placeholder. Dated F00–F12 ledgers retain their
+  historical meaning, failures, skips, counts and evidence paths. Current status
+  distinguishes implementation and unsigned preparation from pending integration
+  and mandatory A13/S13/B13/D13 approval; no F13/V1 release completion is claimed.
+- Architecture documents one container, separate feature/credential/answer owners
+  versus per-client navigation/drafts/revision/confirmation/focus, actual local
+  store and sidecars, General defaults/session isolation, offline boundaries and
+  local-only disconnect. Current V7–V10 configuration/reference fields replace
+  the earlier composite model sketch. Authoring links now resolve to
+  `docs/examples/.kontrol/` (relative from each document).
+- Export documentation cross-checked the entire **23-shape** DTO graph, every
+  field/type/null marker and identity, root encode/decode/canonical sorting,
+  timestamp and nested validators, both projections, repository, panel, writer,
+  service, bundle metadata wiring and field-complete tests. The audit retains
+  `serialized-fields.json` and prints every field/type. Name presence alone is
+  not semantic validation: the written rule/default/null/ordering descriptions
+  were also inspected against the corresponding implementation/tests.
+- Corrected stale future-capture/delivery descriptions. Documented raw Date input
+  bounds as well as rounded range, Swift canonical-equivalence versus persisted
+  Learning NFC-byte checks, explicit News payload limits and effective bundled
+  defaults versus detached empty arrays. All unordered identity collections/sets
+  sort; named sections and ordered/repeated self-checks retain author sequence.
+  Legacy nulls remain distinct from corrupt present content and never substitute
+  today's lesson. No opaque payload or SwiftData object enters the format.
+- Documented approval → pending-answer flush → synchronous capture → private
+  off-main validation → coordinated atomic delivery, duplicate ownership fencing,
+  category-safe failure/cleanup, pre/post-commit cancellation and balanced transient
+  authorization. No credential/grant/path/article-cache/diagnostic or unsaved-editor
+  fields are promised; sensitive authored strings are preserved, not redacted.
+  Plain JSON is neither encrypted backup nor import/restore. Disconnect/export
+  never promise external file deletion; coordination does not promise exclusion
+  of every uncoordinated editor race.
+- F13 feature documentation now separates implemented contracts/compiled fixtures
+  and release preparation from actual native accessibility, signed runtime,
+  mandatory macOS 14/current-runtime and final extracted distribution acceptance.
+  Step 5.1's explained F11 test-fixture snapshot closure is referenced without
+  erasing its original failure or claiming forensic access to missing artifacts.
+  Original QA bytes are preserved as one intact block; the audit compares against
+  HEAD and fails if that historical block changes.
+
+### Exact commands and fresh results
+
+Executed from repository root (test output redirected to `tests.log`):
+
+```bash
+EVIDENCE=/tmp/kontrol-f13-step5-5.XTVQtb
+set -o pipefail
+f13_test() {
+  local flags=() suite
+  for suite in "$@"; do flags+=("-only-testing:KontrolTests/$suite"); done
+  xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+    -configuration Debug -destination 'platform=macOS' \
+    -derivedDataPath /tmp/kontrol-f13-derived -parallel-testing-enabled NO \
+    CODE_SIGNING_ALLOWED=NO -resultBundlePath "$EVIDENCE/selected.xcresult" \
+    "${flags[@]}" test
+}
+f13_test LocalDataExportTests ExportServiceTests
+xcrun xcresulttool get test-results summary \
+  --path "$EVIDENCE/selected.xcresult" --format json > "$EVIDENCE/summary.json"
+xcrun xcresulttool get test-results tests \
+  --path "$EVIDENCE/selected.xcresult" --format json > "$EVIDENCE/test-tree.json"
+python3 "$EVIDENCE/audit.py" > "$EVIDENCE/audit.log" 2>&1
+python3 -m json.tool "$EVIDENCE/export-format-example-1.json" >/dev/null
+git diff --check
+```
+
+All commands exit **0**. Required test action: **TEST SUCCEEDED**, **102 passed,
+zero failed/skipped/expected failures**: LocalDataExport **59**, ExportService
+**43**. Fresh bundle: **`/tmp/kontrol-f13-step5-5.XTVQtb/selected.xcresult`**.
+`summary.json`/`test-tree.json` and the audit verify every source method selected
+in both suites executed **exactly once** and passed, with no empty selection;
+`executed-identifiers.txt` lists all 102 identifiers. Tests cover structural/field
+round trips, mapping/defaults/legacy/privacy, unchanged capture/reopen/detachment,
+shared lifecycle/flush retention and native-adapter seams, private validation,
+atomic destination safety, cleanup and cancellation races. They use isolated
+stores, injected panels/services and temporary destinations, not production data.
+
+The audit parses the **one** JSON fenced example via `python3 -m json.tool` and
+checks its required envelope/nine arrays/General and AI defaults. It resolves
+**all local Markdown links in all six files**, including authoring links and
+heading fragments (final counts in `audit.log`), not just additions. External
+URLs were not fetched. Final audit/whitespace checks rerun after this appendix;
+`documentation.patch` remains the five-file pre-ledger identity above, and
+`final-documentation.patch` records all six final documentation deltas.
+
+Non-failing multiple-destination and linkd/AppIntents connection diagnostics are
+retained in `tests.log`/`diagnostics.log`; summary runtimeWarnings/testFailures
+are empty. No SQLite vnode-unlinked or InvalidTransition diagnostic occurred.
+Capture tests printed retained roots
+`$TMPDIR/kontrol-export-capture-9D0881AD-595F-499C-9316-3FE18D879220` and
+`$TMPDIR/kontrol-export-capture-34798ECD-21B0-4058-9648-98275A8D948D`
+(full paths in diagnostics). No cleanup/unlink was performed; stores remain for
+post-host guarded inspection. No new source/presentation/protocol changed, so
+separate build/test-compilation commands were not required; the required test
+action built its host and bundle. No hosted GUI/full-suite/native observation,
+production store, Keychain or external project was accessed.
+
+**No Step 5.5 blocker remains.** Consolidated integration and A13 reserved-desktop/
+actual-host AX/rendering/keyboard/VoiceOver, S13 isolated signed sandbox/native
+picker/export/project/offline loops, B13 actual macOS 14/current-runtime journeys
+and D13 externally authorized signing/notary/final extracted-artifact approval
+remain pending, not passed by this documentation checkpoint. No later task was
+implemented and no plan checkbox was marked.

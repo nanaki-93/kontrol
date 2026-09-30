@@ -1,40 +1,113 @@
 # F13 — Settings, accessibility, and V1 release
 
-**Depends on:** all previous features.
+**Depends on:** all previous features. **Current status:** Settings/export and
+release preparation implemented; integrated/native/runtime/distribution approval
+pending. Dated results and historical failures/skips remain in [QA](../qa.md).
+This is an executable app, not just a specification package; implementation
+verification is not unconditional F13/V1 completion.
 
-**Build**
+## Implemented behavior
 
-- Settings: the fixed Black / Red Terminal theme, focus default duration, news topics/feeds, optional AI provider credential and generation opt-in, project folder management, and local data export.
-- Support VoiceOver labels, full keyboard navigation, visible focus, dynamic type where practical on macOS, reduced motion, and text plus color for status. Check text and focus contrast in the selected palette.
-- Add a simple export of user-owned app data (tasks, schedule, lesson progress, focus history, feed preferences) with a versioned format. Project files are already in their folders and are not included in that export.
-- Package/notarize the Mac app after validating entitlements and bookmarks in a sandboxed build; write installation and local `.kontrol` authoring instructions.
-
-**Done when:** a fresh install can complete the three core loops without a network connection; optional News/AI fail gracefully; a sandboxed packaged build can reopen and update a selected project.
+- Main-window and native Command-comma Settings use the same `AppDependencies`
+  container, existing feature stores and one transient export service. General,
+  AI/Keychain, News, Projects and Learning answers remain separate state owners;
+  navigation, editor drafts/revision baselines, confirmations and focus are
+  per-client presentation state. Shared publications do not overwrite drafts.
+- General preferences are typed/versioned: default 25 minutes, 15/25/50 presets
+  or positive whole custom minutes, system/large text and system/reduced motion.
+  Changes affect following ready Focus drafts, never existing sessions or frozen
+  submitted retries. Missing storage supplies defaults without insertion;
+  unreadable storage is not absence. Reduced motion combines system OR app;
+  Large respects larger system sizes and avoids duplicate scaling. Black / Red
+  Terminal is fixed, not a theme picker.
+- AI, News and folder management reuse existing owners and screens. Opening
+  Settings does not generate lessons or refresh feeds. Core saved daily/Learning
+  loops and authorized local projects work without network/account; cached News
+  stays available offline, while explicit refresh and optional AI need network.
+- Folder listing/review/removal reads local references only. Remove captures
+  name/ID/revision and disconnects durably before clearing that reference's
+  transient state; it never accesses/deletes/edits external `.kontrol`, source or
+  Git files. Stale/missing targets need explicit reload/review/reconfirmation;
+  busy operations reject removal. Add/Reconnect reuse native authorization.
+- Local Data exports [version-1 plain JSON](../export-format.md): tasks, blocks,
+  all persisted Focus states, stored Learning taxonomy/accepted definitions,
+  progress, exact saved answers/attempt milestones and available historical
+  content, slots, terminal evidence, catalog membership, effective News topics/
+  feeds and General/nonsecret AI configuration. Legacy absence is explicit null,
+  never substituted current content; included corruption aborts the whole export.
+- Credentials **and references**, project grants/paths/contents, cached articles,
+  transport/diagnostics and unsaved editor drafts are structurally excluded.
+  Authored sensitive-looking notes/answers remain exact. Protect the JSON: no
+  import/restore or encrypted backup is provided.
+- Native JSON approval/replacement confirmation precedes cancellation checks,
+  existing pending-answer flush and synchronous read-only capture. Picker cancel
+  performs no flush/capture/artifact/write; failed answer saves retain pending
+  answers and abort (earlier individual saves may remain). Private encoding and
+  validation run off-main; coordinated atomic delivery preserves existing bytes
+  on pre-commit failure/cancel and reports saved after commit despite late cancel.
+  Destination grants are transient; owned staging is cleaned, with cleanup failure
+  explicitly identified. Duplicate requests cannot overlap; retries are explicit.
+- Version/build **1.0/1**, Release hardening and narrow unchanged permissions,
+  packaged pinned-source [dependency notices](../third-party-notices.md), and
+  [installation/update/signing procedures](../release.md) are implemented.
+  Local store/sidecar preservation and separate Keychain/folder boundaries are
+  documented in [architecture](../architecture.md). Local project authoring
+  starts at [docs/examples/.kontrol](../examples/.kontrol/project.yaml).
 
 ## Function → mockup contract
 
 | Function / page | Dedicated visual | Expected behavior |
 | --- | --- | --- |
-| Edit settings and focus default | [M38 · Settings](../mockups/M38-settings.png) | Apply changes locally; current running focus session keeps its original duration. |
-| Export local data | [M40 · Local data](../mockups/M40-data-export.png) | Use a save dialog; versioned JSON excludes secrets and folder grants. |
-| Disconnect project folder | [M41 · Project folders](../mockups/M41-remove-project.png) | Remove the bookmark only; leave every project file on disk. |
+| Edit settings and Focus default | [M38 · Settings](../mockups/M38-settings.png) | Apply locally; existing sessions retain duration; independent drafts survive publication. |
+| Export local data | [M40 · Local data](../mockups/M40-data-export.png) | Native JSON approval, saved-answer barrier and actual commit outcome; no credential/grant fields. |
+| Disconnect project folder | [M41 · Project folders](../mockups/M41-remove-project.png) | Remove local reference only; leave every external project file unchanged. |
 | Accessibility and release verification | [M42 · Appearance](../mockups/M42-design-accessibility.png) | Verify all screens with keyboard, VoiceOver, text scaling and reduced motion. |
 
-## Implementation checklist
+[Supplemental decision/outcome/layout states](../../.mockups/flows/f13-settings-release/index.html)
+cover the shared hub, General drafts, folders and export lifecycle. Compiled
+geometry/focus fixtures do not establish native rendering or spoken observations.
 
-- [ ] Keep preferences typed and versioned; reuse feed/provider/project screens rather than duplicate business logic.
-- [ ] Export schemaVersion, exportedAt, appVersion, tasks, blocks, learning definitions/progress, sessions, feed preferences and general preferences.
-- [ ] Exclude Keychain data, bookmark blobs, diagnostics with sensitive paths, and external project contents.
-- [ ] Write export to a temp file, validate JSON and then save; canceled export creates no artifact. Import/restore is deferred and must not be advertised.
-- [ ] Reserve an active, uncontended GUI session and run the consolidated F00–F13 interactive GUI acceptance ledger in [qa.md](../qa.md): full/hosted suites, previously failed or skipped checks, keyboard and VoiceOver, enlarged text/reduced motion, live sandbox journeys/relaunch, and screenshot comparisons against all linked feature mockups. Fix failures rather than treating deferral as approval.
-- [ ] Run the remaining release matrix in qa.md on a real Mac; signed/notarized distribution is a release step, not evidence this planning package is an app.
+## Implementation evidence versus required release gates
 
-## Acceptance checks
+The independent checkpoints in QA cover preferences/Focus isolation, revision-safe
+local disconnect/callback fencing/external-byte preservation, export DTO/projections/
+capture/IO/lifecycle/ownership, Settings routing and compiled adaptive/focus fixtures.
+Step 5.1 explains and repairs the F11 mutable generated-store snapshot test boundary,
+with rich V9→V10/reopen/repeat evidence and unchanged original fixture inventories;
+the historical failed run remains recorded. Ten schemas/nine stages are preserved.
+Steps 5.2–5.4 record metadata, hardening, resource/notice and executable-runbook
+verification, not signed/native distribution approval. Step 5.5 records fresh
+export test/JSON/link checks. Consolidated implementation integration remains next.
 
-- [ ] JSON export parses and contains the required fields with no credentials/bookmarks.
-- [ ] Disconnecting a project changes no project files.
-- [ ] The packaged sandboxed build can reopen and complete a feature in a selected folder.
-- [ ] Every deferred F00–F12 GUI check has recorded results and evidence; full hosted test suites pass, including F02's outstanding AX visibility, sheet dismissal, and native alert keyboard confirmation; live keyboard/VoiceOver, reduced motion, text sizes, mockup comparisons, and macOS 14 runtime (if available) are independently recorded. Unavailable manual observations are labeled unavailable, never passed, and automatable failures remain release blockers.
+**F13/V1 release is done only when every mandatory gate has satisfactory evidence:**
+
+- **A13:** reserve an active uncontended desktop and authorize the actual rebuilt
+  test host; execute all deferred F00–F13 hosted tests and full serial suite,
+  repair historical F02 AX/sheet/native-delete failures/skips, F06 hosted failures
+  and F13 component prerequisite failures; compare native mockup captures at
+  520×340 Settings and 1000×700/1440×940 desktop sizes, standard/130%/larger text.
+  Independently observe keyboard-only journeys, visible/restored focus, spoken
+  VoiceOver, reduced motion, non-color status, ≥32-point targets, text contrast
+  ≥4.5:1 and essential focus/boundaries ≥3:1. Compilation/HTML is not acceptance.
+- **S13:** on authorized isolated signed sandbox data, perform offline daily and
+  Learning answer/history/relaunch loops, real picker/bookmark/project completion/
+  Undo/conflict/revoke/reconnect/disconnect and native export cancel/replacement/
+  failure/success. Inspect actual Release entitlements/resources; no debugging
+  entitlement or Debug recovery injection. Optional AI/News failures preserve
+  core data; no paid generation without separate authorization.
+- **B13:** execute applicable checks/journeys on actual **macOS 14 and current
+  supported runtime**. An unavailable baseline is a blocker, not an optional pass
+  or something established by the deployment minimum.
+- **D13:** external authorized Developer ID/team/notary inputs, accepted-only
+  notarization, staple/Gatekeeper, final ZIP/checksum/extraction and strict repeat
+  verification; fresh install/non-destructive update and selected-folder completion
+  using the final extracted artifact. Ad-hoc/unsigned packaging is not distribution
+  approval. See the exact guarded commands in the release runbook.
+
+Unavailable manual observations stay labeled unavailable; previously failed/skipped
+checks are not erased or converted into passes. Missing desktop authorization,
+required runtime access or signing credentials blocks its gate, not independent
+implementation checks. No F13/V1 completion claim is made before all gates pass.
 
 ## Visual references
 

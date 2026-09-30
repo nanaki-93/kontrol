@@ -1,19 +1,23 @@
 # Kontrol — V1 implementation plan
 
-Status: product and implementation plan · 27 September 2026
+Status: implemented app with pending V1 release gates · updated 30 September 2026
 
 ## Start here
 
-This package is the full V1 implementation plan, with 14 feature specifications and 43 linked desktop mockups. The PNGs are precise implementation references; the three earlier concept pictures are retained separately for visual direction. Every page and user-facing function has a mapping in the index. This is a specification package, not a built Swift app.
+This repository contains the executable macOS app, hosted tests, 14 feature specifications and linked desktop mockups. The PNGs and supplemental HTML states are implementation references, not production data. The feature checklists below retain the product contract; they are not release-completion receipts. Current behavior and dated implementation results are in [README](README.md) and [QA](docs/qa.md).
+
+F00–F12 functionality and F13 shared General/AI/News/folder/Local Data Settings, local-only disconnect and version-1 JSON export are implemented. Version/build 1.0/1, Release hardening, packaged notices and the [release runbook](docs/release.md) are in place. Consolidated integration and mandatory **A13 accessibility, S13 signed sandbox, B13 macOS 14/current runtime and D13 distribution** gates remain pending. Historical failures/skips stay in QA until explicitly closed with evidence; implementation verification is not V1 release approval.
 
 - [All functions and their mockups](docs/mockups/INDEX.md)
 - [Architecture, state and data contracts](docs/architecture.md)
 - [Initial 40-lesson curriculum](docs/learning-curriculum.md)
 - [QA and release gates](docs/qa.md)
-- [Example .kontrol project](examples/.kontrol/project.yaml)
+- [Example .kontrol project](docs/examples/.kontrol/project.yaml)
+- [Version-1 export contract](docs/export-format.md)
+- [Installation/update and release procedures](docs/release.md)
 - [Today concept](docs/reference/today-concept.png) · [Projects concept](docs/reference/projects-concept.png) · [Learning concept](docs/reference/learning-concept.png)
 
-For portable links, extract the ZIP before opening PLAN.md. The self-contained HTML guide can also be opened directly and includes all specification images.
+Open links from a checkout or extracted repository so relative paths resolve. The [original HTML specification guide](docs/Kontrol-Full-Guide.html) retains planning imagery; use README and QA for current implementation/release status.
 
 ### Feature index
 
@@ -381,12 +385,13 @@ Allowed feature states are `planned`, `ready`, `active`, `blocked`, `completed`;
 
 **Build**
 
-- Settings: the fixed Black / Red Terminal theme, focus default duration, news topics/feeds, optional AI provider credential and generation opt-in, project folder management, and local data export.
+- Implemented shared Settings: fixed Black / Red Terminal theme (no theme picker), Focus default duration, system/large text and reduced motion, News topics/feeds, optional AI configuration/Keychain controls, project folders and Local Data. Keep graph-owned stores separate from per-client navigation/drafts/confirmation/focus; preserve current sessions when defaults change.
+- Folder Remove disconnects only the revision-checked local reference; listing/review/removal does not access or alter external project files. Add/Reconnect retain native authorization.
 - Support VoiceOver labels, full keyboard navigation, visible focus, dynamic type where practical on macOS, reduced motion, and text plus color for status. Check text and focus contrast in the selected palette. Run and document all deferred F00–F12 hosted/interactive GUI tests and live acceptance (including outstanding failures), as specified in `docs/qa.md`.
-- Add a simple export of user-owned app data (tasks, schedule, lesson progress, focus history, feed preferences) with a versioned format. Project files are already in their folders and are not included in that export.
+- Implemented export follows the [complete version-1 contract](docs/export-format.md): tasks, blocks, all persisted Focus states, stored Learning taxonomy/accepted definitions/progress/attempts/slots/terminal evidence/catalog membership, feed configuration and General/nonsecret AI preferences. Approve the native JSON destination before flushing pending lesson answers and read-only capture; prepare/validate privately and deliver atomically. Exclude credentials/references, project grants/paths/contents, article cache, diagnostics and unsaved editor drafts. This is plain JSON, not encrypted backup or import/restore support.
 - Package/notarize the Mac app after validating entitlements and bookmarks in a sandboxed build; write installation and local `.kontrol` authoring instructions.
 
-**Done when:** a fresh install can complete the three core loops without a network connection; optional News/AI fail gracefully; a sandboxed packaged build can reopen and update a selected project.
+**Release done only when:** integrated checks and A13/S13/B13/D13 have satisfactory recorded evidence: a fresh install completes the core loops offline; optional News/AI fail gracefully; the final extracted, signed/notarized sandboxed build reopens and updates a selected project on required runtimes. Current implementation and unsigned packaging checks alone do not satisfy this gate.
 
 ## End-to-end release checks
 

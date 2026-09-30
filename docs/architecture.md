@@ -4,7 +4,7 @@
 
 ## Application boundaries
 
-One SwiftUI macOS app, one SwiftData store, one personal user, no app account or backend. The deployment baseline is macOS 14; verify availability before using newer APIs. Use the approved horizontal icon navigation. Learning and Projects can use split views inside their destination. Keep UI state on the main actor and parsing/networking off it.
+One SwiftUI macOS app, one SwiftData store, one personal user, no app account or backend. The deployment baseline is macOS 14; verify availability before using newer APIs. Use the approved horizontal icon navigation. Learning and Projects can use split views inside their destination. Keep UI and persistence ownership on the main actor and parsing/networking/encoding/file delivery off it; only detached values cross those boundaries. The current implementation has ten frozen schemas (V1–V10) and nine additive migration stages. Implementation checks and native/runtime/distribution release approval are separate; see [QA](qa.md) and the [release runbook](release.md).
 
 | Boundary | Responsibility | Failure surface |
 | --- | --- | --- |
@@ -16,16 +16,19 @@ One SwiftUI macOS app, one SwiftData store, one personal user, no app account or
 | ProjectFolderAccess / ManifestParser | User-selected folder and validated file snapshots | [M33](mockups/M33-project-validation-access.png) |
 | FeatureSelector / FeatureFileWriter | Local candidate ordering and one-file completion | [M32](mockups/M32-project-write-conflict.png) |
 | FeedService | Fetch, parse, merge, trim metadata cache | [M37](mockups/M37-news-offline.png) |
-| ExportService / CredentialStore | Versioned export and Keychain-backed provider credential | [M40](mockups/M40-data-export.png), [M39](mockups/M39-ai-settings.png) |
+| AppPreferencesStore | Typed/versioned General preferences and durable publications | [M38](mockups/M38-settings.png), [M42](mockups/M42-design-accessibility.png) |
+| AISettingsStore / CredentialStore | Nonsecret AI configuration / independent Keychain credential boundary | [M39](mockups/M39-ai-settings.png) |
+| ExportService / SwiftDataExportRepository / ExportFileWriter | Shared transient export lifecycle / read-only committed capture / detached private preparation and atomic delivery | [M40](mockups/M40-data-export.png) |
 
 Use protocols only at IO boundaries. Domain selectors and validators are plain Swift value types. No microservices, plugin framework, custom event bus or generic Candidate superclass is required. Learning and project state machines share small UI components, not one forced domain model.
 
 ## Source of truth
 
-- SwiftData: personal tasks, schedule, lesson definitions and progress, attempts, slots, focus sessions, feed preferences/cache and project bookmark references.
+- SwiftData: personal tasks, schedule, stored Learning taxonomy/definitions/progress, attempts, slots, terminal evidence/catalog membership, Focus sessions, General/AI/News configuration, feed cache and project bookmark references. The app owns one container.
 - `.kontrol`: project metadata, roadmap, feature descriptions, dependencies, priority and completion. Re-read files before mutations. A cache is disposable and never independently editable.
 - Keychain: provider credentials. Preferences contain a credential reference, never the secret.
-- App resources: versioned seed curriculum and default feed catalog. Validate default feed URLs during implementation; example URLs in mockups are placeholders, not production feeds.
+- App resources: versioned seed curriculum, generation objectives, default feed catalog and [third-party notices](third-party-notices.md). Mockup sample URLs are not production feeds.
+- Local storage: the signed app uses `~/Library/Containers/com.kontrol.app/Data/Library/Application Support/Kontrol/Kontrol.store` (user-domain sandbox Application Support). Keep SQLite WAL/SHM sidecars with the store. Startup recovery offers retry/quit without reset; updates must preserve data. Destination selection alone is in UserDefaults; credentials stay in Keychain and external `.kontrol` stays in its selected folder. Unsigned builds can resolve a different Application Support path and must not be used against production data.
 
 ## Local models
 
@@ -39,10 +42,11 @@ Use protocols only at IO boundaries. Domain selectors and validators are plain S
 | LessonProgress | unique lessonID; status; firstShownAt; startedAt; completedAt; dismissedAt; lastOpenedAt. Dismissal and completion remain distinct. |
 | LessonAttempt | id; lessonID; contentVersion; immutable content snapshot once completed; answer draft; solutionRevealedAt; selfCheckAcknowledgedAt; completedAt. Reading history does not create a new completion. |
 | LessonSlot | topicID; index 0...3; lessonID; assignedAt. Unique topic/index and one slot per lesson. |
-| ProjectReference | local UUID; project manifest id; bookmarkData; display order; lastSuccessfulReadAt; optional last-good cache digest. Filesystem URL is resolved through the bookmark. |
-| FeedSource | id; name; URL; topicIDs; enabled; etag; lastModified; lastAttemptAt; lastSuccessAt; lastError. |
-| ArticleMetadata | id; sourceIDs; canonicalURL; title; publishedAt optional; fetchedAt; plainTextSummary optional; topicIDs. |
-| AppPreferences | schemaVersion; focus default; reducedMotion; text scale; enabled news topics; AI enabled; provider/model; Keychain item reference. |
+| ProjectReference (V8) | id UUID; manifestID; bookmarkData; displayOrder; disposable displayNameHint; lastSuccessfulReadAt?; revision UUID. Inspections, locations and Undo are transient, not persisted content. |
+| NewsPreferencesRecord / NewsFeedRecord (V9) | Singleton topic selection/catalog version/revision/lastRefreshAt; separate feeds with UUID, name, endpoint, topic mappings, enabled flag, configuration revision, validators, attempt/success/error category and retry deadline. |
+| NewsArticleRecord (V9) | UUID; URL/canonicalURL; title; publishedAt?; immutable firstFetchedAt; summary?; versioned source contributions/GUID aliases. |
+| AppPreferencesRecord (V10) | Singleton key; payloadVersion 1; focusDefaultMinutes; textSize (`system`/`large`); reduceMotion (`system`/`reduce`); revision UUID. No News or AI configuration in this row. |
+| AISettingsRecord (V7) | Separate singleton enabled/provider/model configuration, payloadVersion, revision and opaque Keychain credential reference; never the secret. |
 
 Use migrations from the beginning. Do not delete user data when an automatic migration fails. Test upgrades against an earlier fixture store; use in-memory stores for isolated repository tests.
 
@@ -79,16 +83,30 @@ Requests contain the selected topic, concept/objective IDs, level and format plu
 
 ## Project file contract
 
-See the valid sample in [examples/.kontrol](../examples/.kontrol/project.yaml). Project id and feature ids must be stable; folder identity is maintained through the local bookmark. Use `schema_version: 1` at project/roadmap level. Feature file states: planned, ready, active, blocked, completed. The app only offers completion/undo; other states are edited in source files.
+See the valid sample in [docs/examples/.kontrol](examples/.kontrol/project.yaml). Project id and feature ids must be stable; folder identity is maintained through the local bookmark. Use `schema_version: 1` at project/roadmap level. Feature file states: planned, ready, active, blocked, completed. The app only offers completion/undo; other states are edited in source files.
 
 Eligible = ready + valid + every dependency completed. Sort current-focus area match first, then priority, effort and stable id. Unknown/missing dependency, duplicate id and dependency cycle prevent the affected item from being eligible. A invalid manifest blocks the project's cards. Valid records with invalid peer files can still be inspected, but excluded files must be indicated in counts.
 
 Completion writes only top-level `status` and `completed_at` in one feature file. Preserve comments, unknown fields, line endings and Markdown body. Parse with Yams, patch source ranges, validate new text, write a sibling temp, atomically replace, reread. Compare source digests within coordinated access. If an uncoordinated external writer still races with the operation, verification must flag a mismatch; coordination is not a promise to lock every third-party editor. Retain an undo payload only for the exact post-write revision. Undo must also check the digest. Never overwrite conflicting edits.
 
-Do not traverse symlinks outside the authorized root. Reconnect stale folder grants through a system picker. Removing a project disconnects its reference only. `history.yaml`, if present, is read-only in V1 and does not override feature status.
+Do not traverse symlinks outside the authorized root. Reconnect stale folder grants through a system picker. Settings folder listing/review uses local references only, separately from Projects inspection admission. Remove captures name/ID/revision and deletes durably before publication; stale/missing targets require explicit reload/review and separate reconfirmation. Busy completion/Undo/reconnect/reconciliation rejects removal rather than queueing it. Late callbacks cannot resurrect removed references. Successful removal clears only that reference and its transient inspection/location/detail/Undo/follow-ups, never external `.kontrol`, source or Git bytes. `history.yaml`, if present, is read-only in V1 and does not override feature status.
 
 ## News and export
 
 Feed item summaries are plain text and collapsed by default. Fetch limits: 2 MB/response, 15 second timeout, four concurrent feeds, 30-minute foreground refresh interval; manual refresh still respects server retry hints. Cache max 500 items / 30 days. Keep missing publication dates missing. Deduplicate by a reliable feed-scoped GUID then cross-feed canonical URL; do not strip arbitrary query parameters. Disable XML external-entity resolution. Permit only web links to source pages.
 
-The export is versioned JSON. Include personal data and cached accepted lesson definitions; exclude credentials, bookmark blobs and external project contents. Export is not an import/restore feature. A canceled or failed save produces no success confirmation. Cached article content can be omitted; include preferences so the user can reconnect feeds later.
+Core saved tasks/planning/Focus, seeded or locally accepted lessons/history/answers, and authorized local projects operate offline. News uses its retained metadata cache when refresh is unavailable; optional explicit AI calls need network and a configured Keychain credential but never gate the offline loops. Opening Settings does not generate lessons or refresh feeds.
+
+## Shared Settings and separate owners
+
+`AppDependencies` supplies both the main route and native Command-comma scene with one container and the existing Task, Schedule, Focus, Learning catalog/draft/generation, Projects, News, AI settings/credentials and General preference owners, plus one `ExportService`. Settings does not become a second business-logic owner. Each client owns its section navigation, General draft/revision baseline, folder confirmation/review and focus. Shared committed publications do not overwrite independent draft input.
+
+General defaults are 25 minutes/system text/system motion; absent storage returns defaults without inserting a row and corrupt storage is not absence. Preference changes update following ready Focus drafts only, preserving overridden/submitted retries and all existing sessions. Reduced motion is system OR app reduction; Large is at least 130%/`.xxLarge` without shrinking larger system sizes or double scaling. Both ready roots and inherited sheets reuse that resolver. Layout/focus fixtures are implemented; spoken/native geometry acceptance remains A13.
+
+## Export capture and delivery
+
+[Version-1 JSON](export-format.md) includes saved tasks/blocks, all persisted Focus sessions (even active/interrupted), all stored Learning taxonomy/accepted definitions and personal historical evidence, effective News topics/feeds and General/nonsecret AI preferences. It structurally excludes credentials **and their references**, project references/grants/paths/contents/Undo, cached News articles/transport/diagnostics and unsaved editor drafts. Authored strings, including sensitive-looking notes/answers, remain exact. Missing legacy studied content is explicit null, never today's definition. Included corruption aborts the whole export. It is neither encrypted backup nor import/restore.
+
+The graph-owned lifecycle is `idle → selecting → preparing → saved | canceled | failed`. Native JSON approval (including replacement confirmation) precedes cancellation checks, the existing `LessonDraftStore.flushAll()`, and synchronous `SwiftDataExportRepository.snapshot`. Picker cancellation performs no flush/capture/preparation/write. Failed flush retains pending answers; earlier individual saves need not roll back. One fresh non-autosaving context fetches included rows without suspension or save/reconciliation; this is coherent under the existing single-process main-actor ownership, not a cross-process backup transaction. No excluded project/article fetch, Keychain, network or folder access occurs.
+
+Only detached values go to background encoding/IO. `ExportFileWriter` uses private 0700 directory/0600 file storage, reads back/validates JSON, stages a private sibling on the destination volume, and commits by coordinated atomic rename. Directories/symlinks and changed replacement identities fail safely. Transient authorization is balanced, never persisted. Pre-commit failures/cancellation preserve existing bytes; post-commit cancellation reports saved. Coordination protects participating clients, not every uncoordinated editor race. Owned staging is cleaned on normal completion/abandonment/failure; a cleanup failure is reported explicitly, not promised away. Duplicate requests remain rejected until panel/worker ownership actually ends; retry is explicit and errors are category-safe.
