@@ -29,6 +29,13 @@ enum NewsEditorError: Error, Equatable {
 struct NewsBrowserFailure: Equatable {
     let articleID: UUID
     let code: NewsErrorCode
+    let sourceFeedID: UUID?
+
+    init(articleID: UUID, code: NewsErrorCode, sourceFeedID: UUID? = nil) {
+        self.articleID = articleID
+        self.code = code
+        self.sourceFeedID = sourceFeedID
+    }
 
     var message: String {
         switch code {
@@ -100,13 +107,13 @@ final class NewsStore: ObservableObject {
             destination = state.article.url
         }
         guard let safeURL = try? NewsURLPolicy.articleURL(destination) else {
-            browserOpenFailure = NewsBrowserFailure(articleID: id, code: .unsafeURL)
+            browserOpenFailure = NewsBrowserFailure(articleID: id, code: .unsafeURL, sourceFeedID: sourceFeedID)
             return
         }
         if browserOpener.open(safeURL) {
             browserOpenFailure = nil
         } else {
-            browserOpenFailure = NewsBrowserFailure(articleID: id, code: .openFailed)
+            browserOpenFailure = NewsBrowserFailure(articleID: id, code: .openFailed, sourceFeedID: sourceFeedID)
         }
     }
 
@@ -168,6 +175,12 @@ final class NewsStore: ObservableObject {
         scheduleGeneration += 1
         scheduled?.cancel()
         scheduled = nil
+    }
+
+    /// Manual Retry bypasses the interval, never an in-flight batch or a server deadline.
+    func canRetryRefresh(at now: Date) -> Bool {
+        guard localFailure != .read, !isRefreshing, inFlight == nil else { return false }
+        return !eligibleFeeds(.manual, at: now).isEmpty
     }
 
     private func eligibleFeeds(_ trigger: NewsRefreshTrigger, at now: Date) -> [FeedSourceSnapshot] {

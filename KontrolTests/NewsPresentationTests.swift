@@ -72,6 +72,45 @@ final class NewsPresentationTests: XCTestCase {
         XCTAssertTrue(NewsView.selectedTopics(in: noTopics).isEmpty)
     }
 
+    func testStatusProjectionDistinguishesLoadingReadFailureAndEmptyCauses() {
+        XCTAssertEqual(NewsView.contentState(snapshot: nil, isLoading: true, localFailure: nil, filter: nil), .loading)
+        XCTAssertEqual(NewsView.contentState(snapshot: nil, isLoading: false, localFailure: .read, filter: nil), .readFailure)
+        XCTAssertEqual(NewsView.contentState(snapshot: fixture(), isLoading: false, localFailure: .read, filter: nil), .readFailure)
+        XCTAssertEqual(NewsView.lastSuccessText(nil), "Refresh history unavailable",
+                       "A failed local read cannot establish whether a refresh ever succeeded")
+        XCTAssertEqual(NewsView.refreshingText(nil), "Refreshing selected feeds")
+        let base = fixture()
+        let never = NewsSnapshot(topics: base.topics, feeds: base.feeds, articleStates: [],
+            preferences: NewsPreferences(catalogVersion: 1, selectedTopicIDs: ["go"],
+                revision: UUID(), lastRefreshAt: nil))
+        XCTAssertEqual(NewsView.lastSuccessText(never), "Never refreshed")
+        XCTAssertEqual(NewsView.refreshingText(never),
+                       "Refreshing selected feeds · no saved headlines for selected topics yet")
+        XCTAssertEqual(NewsView.contentState(snapshot: never, isLoading: false, localFailure: nil, filter: nil), .emptyCache)
+        XCTAssertEqual(NewsView.contentState(snapshot: base, isLoading: false, localFailure: nil, filter: "go"), .headlines)
+        let noTopics = fixture(selected: [])
+        XCTAssertEqual(NewsView.contentState(snapshot: noTopics, isLoading: false, localFailure: nil, filter: nil), .noTopics)
+        let noFeeds = NewsSnapshot(topics: base.topics, feeds: [], articleStates: base.articleStates,
+                                   preferences: base.preferences)
+        XCTAssertEqual(NewsView.contentState(snapshot: noFeeds, isLoading: false, localFailure: nil, filter: nil), .noFeeds)
+        let onlyGo = fixture(selected: ["go", "gaming"])
+        XCTAssertEqual(NewsView.contentState(snapshot: onlyGo, isLoading: false, localFailure: nil,
+                                             filter: "gaming"), .filteredEmpty)
+        XCTAssertTrue(NewsView.sections(in: onlyGo, filter: "gaming").isEmpty)
+        XCTAssertFalse(NewsView.sections(in: onlyGo, filter: nil).isEmpty)
+        XCTAssertEqual(NewsView.refreshingText(onlyGo), "Refreshing · saved headlines remain available",
+                       "Filtering out cached rows must not claim the cache is empty while refreshing")
+        for code: NewsErrorCode in [.offline, .timeout, .rateLimited, .http, .unsafeURL,
+                                    .oversizedResponse, .malformedFeed, .invalidConfiguration] {
+            let empty = NewsView.failureText(code, in: never)
+            XCTAssertTrue(empty.contains("No saved headlines for selected topics yet."), "\(code)")
+            XCTAssertFalse(empty.contains("Saved headlines remain available."), "\(code)")
+            XCTAssertTrue(NewsView.failureText(code, in: onlyGo).contains("Saved headlines remain available."),
+                          "Other selected topics have cache even when the active filter is empty: \(code)")
+        }
+        XCTAssertTrue(NewsView.failureText(.rateLimited, in: never).contains("rate-limited"))
+    }
+
     private func compiledStoreFixture() throws -> NewsStore {
         // A static fixture compiles the native view without creating a window or a live service.
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)

@@ -330,8 +330,16 @@ final class NewsStoreTests: XCTestCase {
         let store = NewsStore(repository: repo, service: HeldNewsService(), catalog: catalog,
                               browserOpener: opener)
         store.loadIfNeeded()
+        opener.succeeds = false
         store.openArticle(id: shared.id, sourceFeedID: secondID)
         XCTAssertEqual(opener.urls, [alternate])
+        XCTAssertEqual(store.browserOpenFailure?.sourceFeedID, secondID)
+        opener.succeeds = true
+        if let failure = store.browserOpenFailure {
+            store.openArticle(id: failure.articleID, sourceFeedID: failure.sourceFeedID)
+        }
+        XCTAssertEqual(opener.urls, [alternate, alternate], "Retry must retain the chosen source link")
+        XCTAssertNil(store.browserOpenFailure)
         let disabled = FeedSourceSnapshot(id: base.feeds[1].id, name: base.feeds[1].name,
             url: base.feeds[1].url, topicIDs: base.feeds[1].topicIDs, isEnabled: false,
             configurationRevision: base.feeds[1].configurationRevision, etag: nil,
@@ -341,7 +349,7 @@ final class NewsStoreTests: XCTestCase {
             articleStates: [state], preferences: base.preferences)
         store.reload()
         store.openArticle(id: shared.id, sourceFeedID: secondID)
-        XCTAssertEqual(opener.urls, [alternate], "A stale filtered row cannot open a disabled source")
+        XCTAssertEqual(opener.urls, [alternate, alternate], "A stale filtered row cannot open a disabled source")
     }
 
     func testBrowserFailureCanRetryWithoutChangingCachedArticleOrRefreshMetadata() {
@@ -391,6 +399,7 @@ final class NewsStoreTests: XCTestCase {
         store.setAppActive(true)
         await waitFor(service, count: 2)
         XCTAssertTrue(store.isRefreshing)
+        XCTAssertFalse(store.canRetryRefresh(at: now), "A second manual submission cannot start in-flight work")
         await assertIDs(service, [firstID, secondID])
         let manual = Task { await store.refresh(.manual) }
         await Task.yield()
@@ -454,6 +463,9 @@ final class NewsStoreTests: XCTestCase {
         XCTAssertTrue(store.isPartialRefresh)
         XCTAssertEqual(store.refreshFailures[secondID], .rateLimited)
         XCTAssertEqual(store.snapshot?.preferences.lastRefreshAt, now)
+        XCTAssertTrue(store.canRetryRefresh(at: now), "Healthy feed may still be retried")
+        XCTAssertEqual(store.snapshot?.feeds.first { $0.id == secondID }?.retryNotBefore,
+                       now.addingTimeInterval(120))
         repo.failSave = true
         let old = store.snapshot
         let next = Task { await store.refresh(.manual) }
@@ -472,8 +484,90 @@ final class NewsStoreTests: XCTestCase {
         fresh.loadIfNeeded()
         XCTAssertNil(fresh.snapshot)
         XCTAssertEqual(fresh.localFailure, .read)
+        XCTAssertEqual(NewsView.contentState(snapshot: fresh.snapshot, isLoading: fresh.isLoading,
+                                             localFailure: fresh.localFailure, filter: nil), .readFailure)
+        XCTAssertEqual(NewsView.lastSuccessText(fresh.snapshot), "Refresh history unavailable")
+        XCTAssertFalse(fresh.canRetryRefresh(at: now))
         await fresh.refresh(.manual)
         await assertCount(service, 3)
+        repo.failRead = false
+        fresh.reload() // local recovery does not require a network request
+        XCTAssertNil(fresh.localFailure)
+        XCTAssertEqual(fresh.snapshot, old)
+        await assertCount(service, 3)
+    }
+
+    func testFilteredEmptyRefreshStillReportsCachedHeadlinesFromOtherSelectedTopics() {
+        let (_, cached) = fixture()
+        let source = NewsArticleSource(feedID: firstID, feedName: cached.feeds[0].name,
+                                       topicIDs: ["go"], guid: nil)
+        let original = cached.articleStates[0].article
+        let article = ArticleMetadata(id: original.id, url: original.url, canonicalURL: original.canonicalURL,
+                                      title: original.title, publishedAt: original.publishedAt,
+                                      firstFetchedAt: original.firstFetchedAt, summary: nil, sources: [source])
+        let snapshot = NewsSnapshot(topics: cached.topics, feeds: cached.feeds,
+            articleStates: [NewsSelection.State(article: article, aliases: [:])],
+            preferences: cached.preferences)
+        XCTAssertEqual(NewsView.contentState(snapshot: snapshot, isLoading: false,
+                                             localFailure: nil, filter: "ai"), .filteredEmpty)
+        XCTAssertTrue(NewsView.sections(in: snapshot, filter: "ai").isEmpty)
+        XCTAssertFalse(NewsView.sections(in: snapshot, filter: nil).isEmpty)
+        XCTAssertEqual(NewsView.refreshingText(snapshot), "Refreshing · saved headlines remain available")
+    }
+
+    func testFreshInstallFeedFailureHasNoSavedHeadlinesOrSuccessfulRefresh() async {
+        let (catalog, base) = fixture()
+        let empty = NewsSnapshot(topics: base.topics, feeds: base.feeds, articleStates: [],
+            preferences: base.preferences)
+        let repo = StubNewsRepository(empty)
+        let service = HeldNewsService()
+        let store = NewsStore(repository: repo, service: service, catalog: catalog, clock: { self.now })
+        store.loadIfNeeded()
+        XCTAssertEqual(NewsView.contentState(snapshot: store.snapshot, isLoading: store.isLoading,
+                                             localFailure: store.localFailure, filter: nil), .emptyCache)
+        XCTAssertEqual(NewsView.lastSuccessText(store.snapshot), "Never refreshed")
+        let pending = Task { await store.refresh(.manual) }
+        await waitFor(service, count: 2)
+        let failed = empty.feeds.map { feed in
+            FeedRefreshOutcome(feedID: feed.id, configurationRevision: feed.configurationRevision,
+                attemptedAt: now, result: .failed(.offline, retryNotBefore: nil))
+        }
+        await service.finish(failed)
+        await pending.value
+        XCTAssertFalse(store.isPartialRefresh)
+        XCTAssertNil(store.snapshot?.preferences.lastRefreshAt)
+        XCTAssertEqual(NewsView.lastSuccessText(store.snapshot), "Never refreshed")
+        XCTAssertEqual(NewsView.contentState(snapshot: store.snapshot, isLoading: store.isLoading,
+                                             localFailure: store.localFailure, filter: nil), .emptyCache)
+        XCTAssertTrue(store.snapshot!.articleStates.isEmpty)
+        for feed in store.snapshot!.feeds {
+            XCTAssertEqual(feed.lastError, .offline)
+            let copy = NewsView.failureText(feed.lastError!, in: store.snapshot!)
+            XCTAssertTrue(copy.contains("No saved headlines for selected topics yet."))
+            XCTAssertFalse(copy.contains("Saved headlines remain available."))
+        }
+        XCTAssertTrue(store.canRetryRefresh(at: now))
+    }
+
+    func testAllFeedsRateLimitedDisableRetryUntilEarliestDeadlineWithoutChangingSuccess() async {
+        let (catalog, cached) = fixture(retry: now.addingTimeInterval(120))
+        let repo = StubNewsRepository(cached)
+        let service = HeldNewsService()
+        let gated = cached.feeds.map { feed in
+            FeedSourceSnapshot(id: feed.id, name: feed.name, url: feed.url, topicIDs: feed.topicIDs,
+                isEnabled: true, configurationRevision: feed.configurationRevision,
+                etag: nil, lastModified: nil, lastAttemptAt: now, lastSuccessAt: nil,
+                lastError: .rateLimited, retryNotBefore: now.addingTimeInterval(120))
+        }
+        repo.value = NewsSnapshot(topics: cached.topics, feeds: gated, articleStates: cached.articleStates,
+                                   preferences: cached.preferences)
+        let store = NewsStore(repository: repo, service: service, catalog: catalog, clock: { self.now })
+        store.loadIfNeeded()
+        XCTAssertFalse(store.canRetryRefresh(at: now))
+        await store.refresh(.manual)
+        await assertCount(service, 0)
+        XCTAssertNil(store.snapshot?.preferences.lastRefreshAt)
+        XCTAssertTrue(store.canRetryRefresh(at: now.addingTimeInterval(120)))
     }
 
     func testScheduledCheckRunsWhenForegroundAndBecomesEligible() async {
