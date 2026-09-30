@@ -825,6 +825,239 @@ final class SettingsSceneTests: XCTestCase {
         print("F13 native geometry \(name): content=\(content.bounds.size), pixels=\(bitmap.pixelsWide)x\(bitmap.pixelsHigh), backingScale=\(window.backingScaleFactor)")
     }
 
+    private enum FolderGeometryState: String {
+        case populated, empty, unavailable, stale, removal
+    }
+
+    func testFolderPopulatedLongNamesAndActionsReflowAtAllSettingsSizes() async throws {
+        try await assertFolderGeometry(.populated)
+    }
+
+    func testFolderEmptyGuidanceAndActionsReflowAtAllSettingsSizes() async throws {
+        try await assertFolderGeometry(.empty)
+    }
+
+    func testFolderUnavailableRecoveryAndRetainedRowsReflowAtAllSettingsSizes() async throws {
+        try await assertFolderGeometry(.unavailable)
+    }
+
+    func testFolderStaleReviewAndDisabledRemovalReflowAtAllSettingsSizes() async throws {
+        try await assertFolderGeometry(.stale)
+    }
+
+    func testFolderRemovalConfirmationCancelAndSuccessReflowAtAllSettingsSizes() async throws {
+        try await assertFolderGeometry(.removal)
+    }
+
+    private func folderDialogButton(_ name: String) throws -> AXUIElement {
+        let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+        let deadline = Date().addingTimeInterval(2)
+        repeat {
+            if let button = axDescendants(app).first(where: {
+                axAttribute($0, kAXRoleAttribute) as? String == kAXButtonRole &&
+                axAttribute($0, kAXDescriptionAttribute) as? String == name
+            }) { return button }
+            settle()
+        } while Date() < deadline
+        return try XCTUnwrap(nil as AXUIElement?, "Missing native folder confirmation action: \(name)")
+    }
+
+    private func dismissFolderDialog(_ name: String) throws {
+        XCTAssertEqual(AXUIElementPerformAction(try folderDialogButton(name), kAXPressAction as CFString), .success)
+        settle()
+    }
+
+    /// Real scene roots and real local navigation, not a fixed-height rendering
+    /// surrogate. A13 executes these hosted fixtures on the reserved AX desktop.
+    private func assertFolderGeometry(_ state: FolderGeometryState) async throws {
+        try keyboardSession() // Fail before creating windows if the actual host lacks AX/activation.
+        let sizes = [CGSize(width: 520, height: 340), CGSize(width: 1000, height: 700), CGSize(width: 1440, height: 940)]
+        // 130% comes from a committed Large preference with a standard system
+        // size. A larger system size must win, not shrink or multiply by 1.3.
+        let scales: [(String, DynamicTypeSize, AppTextSize, CGFloat)] = [
+            ("100", .large, .system, 1), ("130", .large, .large, 1.3), ("160", .accessibility1, .large, 1.6)
+        ]
+        for inline in [false, true] {
+            for size in sizes where !inline || size.width >= 1000 {
+                var standardNameHeight: CGFloat?
+                for (percent, systemSize, preference, expectedScale) in scales {
+                    let long = folderReference(name: "Harbor — research notes and implementation experiments with a very long folder name")
+                    let unbroken = folderReference(name: String(repeating: "LongFolderName", count: 6), order: 1)
+                    let peer = folderReference(name: "Short peer", order: 2)
+                    let references = state == .empty ? [] : [long, unbroken, peer]
+                    let folders = SettingsFolderRepository(references)
+                    let inspector = SettingsFolderInspectorSpy()
+                    let preferences = SettingsPreferencesSpy()
+                    preferences.value = AppPreferencesSnapshot(preferences: try AppPreferences(focusDefaultMinutes: 25, textSize: preference), revision: UUID())
+                    let news = SettingsNewsSpy()
+                    let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+                    let graph = AppDependencies(container: container,
+                        catalogRepository: SwiftDataCatalogRepository(container: container),
+                        projectInspector: inspector, projectRepository: folders,
+                        appPreferencesRepository: preferences, newsService: news)
+                    let launch = LaunchCoordinator(open: { container }, makeDependencies: { _, _ in graph })
+                    await launch.start()
+                    XCTAssertEqual(launch.state, .ready)
+                    let navigation = NavigationStore()
+                    navigation.select(.settings)
+                    let root = Group {
+                        if inline { MainWindowContent(launch: launch, navigation: navigation) }
+                        else { SettingsSceneContent(launch: launch) }
+                    }.environment(\.dynamicTypeSize, systemSize)
+                    let window = show(root, size: size)
+                    defer {
+                        // A failing geometry assertion must not leave a native
+                        // modal blocking the next hosted fixture. Never confirm
+                        // during cleanup, and retain the hosting-window policy.
+                        if let sheet = window.attachedSheet {
+                            window.endSheet(sheet, returnCode: .cancel)
+                            sheet.orderOut(nil)
+                        }
+                        window.orderOut(nil)
+                    }
+                    let label = "folders-\(state.rawValue)-\(inline ? "inline" : "native")-\(Int(size.width))x\(Int(size.height))-\(percent)"
+                    XCTAssertEqual(window.contentView?.bounds.size, size, "Folder layout cannot enlarge the requested viewport")
+                    try press("settings-folders", in: window)
+                    let sharedActions = ["settings-back", "settings-folders-add", "settings-folders-reload"]
+                    try assertFolderTargets(sharedActions, in: window)
+                    try assertReachable(["settings-folders-guidance"], in: window)
+                    try assertNonoverlapping(["settings-folders-guidance", "settings-folders-add", "settings-folders-reload"], in: window)
+
+                    if state == .empty {
+                        try assertReachable(["settings-folders-empty"], in: window)
+                        XCTAssertTrue(graph.projectStore.rows.isEmpty)
+                        try capture(label, window: window)
+                    } else {
+                        var rowElements: [String] = []
+                        for reference in references {
+                            let name = "settings-folder-name-\(reference.id.uuidString)"
+                            let status = "settings-folder-status-\(reference.id.uuidString)"
+                            let actions = ["settings-folder-reconnect-\(reference.id.uuidString)", "settings-folder-remove-\(reference.id.uuidString)"]
+                            rowElements += [name, status] + actions
+                            try assertReachable([name, status], in: window)
+                            XCTAssertEqual(try value(name, in: window), reference.displayNameHint, "Full names, including unbroken names, remain available")
+                            try assertFolderTargets(actions, in: window)
+                            try assertNonoverlapping([name, status] + actions, in: window)
+                            if size.width == 520 && reference.id != peer.id {
+                                let lineHeight = NSFont.monospacedSystemFont(ofSize: AppTypography.Role.section.baseSize * expectedScale, weight: .regular)
+                                XCTAssertGreaterThan(try axFrame(node(name, in: window)).height,
+                                                     lineHeight.ascender - lineHeight.descender + 2,
+                                                     "Long names must visibly wrap, not just retain an offscreen AX value")
+                                try reveal(name, in: window)
+                                try capture("\(label)-\(reference.id == long.id ? "spaced" : "unbroken")-name", window: window)
+                            }
+                        }
+                        let peerHeight = try axFrame(node("settings-folder-name-\(peer.id.uuidString)", in: window)).height
+                        if expectedScale == 1 { standardNameHeight = peerHeight }
+                        else {
+                            XCTAssertEqual(peerHeight / (try XCTUnwrap(standardNameHeight)), expectedScale, accuracy: 0.15,
+                                           "Resolved preference/system text size must scale once and preserve larger system input")
+                        }
+                        try capture("\(label)-last-row", window: window)
+                        let removeID = "settings-folder-remove-\(long.id.uuidString)"
+                        switch state {
+                        case .unavailable:
+                            // Failed local reload must retain usable rows, not
+                            // manufacture an empty state or access any folder.
+                            folders.loadFailure = ProjectReferencePersistenceError.invalidReference
+                            try press("settings-folders-reload", in: window)
+                            try assertReachable(["settings-folders-unavailable", "settings-folders-result"] + rowElements, in: window)
+                            try assertNonoverlapping(["settings-folders-unavailable", "settings-folders-result"] + rowElements, in: window)
+                            try assertFolderTargets(sharedActions, in: window)
+                            XCTAssertEqual(graph.projectStore.rows.count, references.count)
+                            XCTAssertTrue(try folderOutcome(in: window).contains("could not be loaded"))
+                            try reveal("settings-folders-result", in: window)
+                            try capture("\(label)-recovery", window: window)
+                        case .stale:
+                            try press(removeID, in: window)
+                            folders.references[0] = folderReference(long.id, name: "Current reference", order: 0)
+                            try dismissFolderDialog("Remove from Kontrol")
+                            try assertReachable(["settings-folders-result"] + rowElements, in: window)
+                            try assertNonoverlapping(["settings-folders-result"] + rowElements, in: window)
+                            try assertFolderTargets(sharedActions, in: window)
+                            XCTAssertTrue(try folderOutcome(in: window).contains("Reload & review"))
+                            XCTAssertEqual((axAttribute(try node(removeID, in: window), kAXEnabledAttribute) as? NSNumber)?.boolValue, false)
+                            XCTAssertEqual(folders.removals.count, 1)
+                            try reveal("settings-folders-result", in: window)
+                            try capture("\(label)-review", window: window)
+                        case .removal:
+                            try press(removeID, in: window)
+                            // The existing native modal remains platform-owned;
+                            // its copy/actions must fit its naturally sized sheet,
+                            // without an extra Settings scroll host or scaling pass.
+                            try assertFolderConfirmationGeometry(long, window: window, label: label)
+                            try dismissFolderDialog("Cancel")
+                            XCTAssertTrue(folders.removals.isEmpty)
+                            try assertReachable(["settings-folders-result"] + rowElements, in: window)
+                            XCTAssertTrue(try folderOutcome(in: window).contains("canceled"))
+                            try reveal("settings-folders-result", in: window)
+                            try capture("\(label)-canceled", window: window)
+                            try press(removeID, in: window)
+                            try dismissFolderDialog("Remove from Kontrol")
+                            XCTAssertEqual(folders.removals.count, 1)
+                            XCTAssertEqual(graph.projectStore.rows.count, 2)
+                            try assertReachable(["settings-folders-result"] + rowElements.filter { !$0.hasSuffix(long.id.uuidString) }, in: window)
+                            try assertFolderTargets(sharedActions, in: window)
+                            XCTAssertTrue(try folderOutcome(in: window).contains("removed from Kontrol"))
+                            try reveal("settings-folders-result", in: window)
+                            try capture("\(label)-removed", window: window)
+                        default: break
+                        }
+                    }
+                    _ = try assertSingleDocument(in: window)
+                    XCTAssertEqual(window.contentView?.bounds.size, size)
+                    XCTAssertEqual(preferences.saves, 0, "Geometry must not persist preferences")
+                    let inspections = await inspector.calls
+                    let requests = await news.requests
+                    XCTAssertEqual(inspections, 0, "Geometry/removal/review must never inspect or authorize folders")
+                    XCTAssertEqual(requests, 0)
+                    print("F13 folder geometry PASS \(label): one document, wrapped copy, reachable actions, single text scale")
+                }
+            }
+        }
+    }
+
+    private func assertFolderTargets(_ identifiers: [String], in window: NSWindow) throws {
+        try assertReachable(identifiers, in: window)
+        for identifier in identifiers {
+            let frame = try axFrame(node(identifier, in: window))
+            XCTAssertGreaterThanOrEqual(frame.width, AppMetrics.minimumTarget, identifier)
+            XCTAssertGreaterThanOrEqual(frame.height, AppMetrics.minimumTarget, identifier)
+        }
+    }
+
+    private func assertFolderConfirmationGeometry(_ reference: ProjectReferenceSnapshot, window: NSWindow, label: String) throws {
+        let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+        let confirmation = ProjectFoldersSettingsState.Confirmation(reference)
+        for name in ["Cancel", "Remove from Kontrol"] { _ = try folderDialogButton(name) }
+        let sheet = try XCTUnwrap(window.attachedSheet, "Removal must use the existing native confirmation sheet")
+        let screenRect = sheet.convertToScreen(try XCTUnwrap(sheet.contentView).convert(try XCTUnwrap(sheet.contentView).bounds, to: nil))
+        let screenHeight = try XCTUnwrap(NSScreen.screens.first).frame.maxY
+        let bounds = CGRect(x: screenRect.minX, y: screenHeight - screenRect.maxY, width: screenRect.width, height: screenRect.height)
+        let texts = try [confirmation.title, confirmation.message].map { text in
+            try XCTUnwrap(axDescendants(app).first {
+                axAttribute($0, kAXRoleAttribute) as? String == kAXStaticTextRole &&
+                ((axAttribute($0, kAXValueAttribute) as? String) ?? (axAttribute($0, kAXDescriptionAttribute) as? String)) == text
+            }, "Native confirmation must expose complete captured copy: \(text)")
+        }
+        let buttons = try ["Cancel", "Remove from Kontrol"].map(folderDialogButton)
+        let frames = try (texts + buttons).map(axFrame)
+        for frame in frames {
+            XCTAssertFalse(frame.isEmpty)
+            XCTAssertTrue(bounds.insetBy(dx: -1, dy: -1).contains(frame), "Native confirmation content must not be clipped: \(frame)")
+        }
+        for button in buttons {
+            let frame = try axFrame(button)
+            XCTAssertGreaterThanOrEqual(frame.width, AppMetrics.minimumTarget)
+            XCTAssertGreaterThanOrEqual(frame.height, AppMetrics.minimumTarget)
+        }
+        for i in frames.indices {
+            for j in frames.indices where j > i { XCTAssertFalse(frames[i].intersects(frames[j]), "Confirmation copy/actions overlap") }
+        }
+        _ = try assertSingleDocument(in: window)
+        try capture("\(label)-native-confirmation", window: sheet)
+    }
+
     func testNativeAndInlineSettingsGeometryAtCompactDesktopAndAccessibilitySizes() async throws {
         let sizes = [CGSize(width: 520, height: 340), CGSize(width: 1000, height: 700), CGSize(width: 1440, height: 940)]
         let scales: [(String, DynamicTypeSize)] = [("100", .large), ("130", .xxLarge), ("160", .accessibility1)]

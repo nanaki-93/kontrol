@@ -902,3 +902,72 @@ Guarded post-host cleanup enumerated exactly six printed roots under `/var/folde
 Reference paths: `.mockups/flows/f13-settings-release/{01-settings-hub,12-project-unavailable,13-project-empty,14-removal-confirmation,15-removal-busy,16-removal-failed,17-removal-stale,18-removal-canceled,19-removal-success,22-project-read-failed}.html`, `docs/mockups/M41-remove-project.png`, and existing M28/M33 Add/access-recovery references linked from those HTML pages. Required native observations remain: both real Settings entry points, actual named native Cancel/confirm and unchanged files, stale review after Back/re-entry, busy/failure recovery, surviving Projects selection/detail, normal folder picker Add/Reconnect/re-add, compact/enlarged reachability, keyboard/Escape/focus, independent spoken VoiceOver, and capture/reference comparisons at specified sizes/scales. No capture, GUI authorization, human observation, or VoiceOver attestation was supplied or claimed here. Steps 2.6/2.7 retain their dedicated folder layout/focus fixtures and implementation scope.
 
 **No Step 2.5 implementation blocker remains.** A13 Accessibility/full-suite/native, S13 signed sandbox/picker lifecycles, B13 runtime matrix, and D13 distribution acceptance remain mandatory and pending. This checkpoint is not unconditional F13/release approval.
+
+## F13 folder adaptive layout — current Step 1.1 (2026-09-30, 13:12 UTC)
+
+**Implementation verification passed; native acceptance remains pending A13.** The current plan's first top-level incomplete item and runner task both identify folder reflow Step 1.1 (not the historical foundation Step 1.1 above). Read the full cumulative task-1 checklist; it contains no prior findings. Initial worktree/index were clean, with no interrupted changes to preserve. Repository/target searches (including ignored directories) and direct ancestor checks through `/` found no applicable `AGENTS.md`; `git submodule status` was empty. No plan checkbox, workflow state, staging, commit, schema, fixture, picker owner, removal state transition, or preference resolver was changed.
+
+### Implementation and compiled coverage
+
+- `ProjectFoldersSettingsView.swift`: long names, row status, guidance, reconnect feedback, and outcome labels take their full wrapped height at the proposed document width. Add/review and Reconnect/Remove action groups try their ideal horizontal widths, then fall back to vertical wrapping, following the existing header pattern. Shared `ActionButton` styling/minimum targets are unchanged. All actions remain in the original scene/shell scroll document, with no fixed bars, nested scroll host, or extra text-scale calculation.
+- The native `ConfirmationAffordance` remains platform-owned; captured name/identity/revision and Cancel/confirm semantics are unchanged. Re-add guidance is separated into a paragraph for native wrapping. No custom modal, fixed alert dimensions, or duplicate scaling was introduced.
+- `FoundationSettingsView.swift` was inspected but needed no change: it already provides the adaptive Back header, full-width document, single scene-owned scroll, and retained per-client review state.
+- `SettingsSceneTests.swift`: five dedicated hosted methods cover populated, empty, unavailable (failed reload with retained rows), stale, and removal states. Each uses real native/inline scene roots and navigation: native at **520×340, 1000×700, 1440×940**; inline at its supported **1000×700, 1440×940** minimums. Each combination covers standard text, committed Large at **130%**, and committed Large plus a larger system size at **160%**: **15 combinations per state, 75 total**.
+- Fixtures require exactly one scroll document/no horizontal overflow, unchanged viewport size, onscreen vertical-scroll reachability, nonoverlap, ≥32-point document action targets, full spaced/unbroken names, and actual multiline compact name bounds. A short peer name's rendered-height ratio checks single scaling and preservation of larger system text. Native removal coverage checks complete captured title/message, sheet content/action bounds and minimum targets, then Cancel and durable success with surviving rows. Failed assertions cancel any attached native sheet during cleanup, never confirm. Recovery and removal fixtures assert zero external inspection/feed requests and zero preference saves.
+- Existing state regressions continue to cover canceled, removed, stale/missing, busy, failed, and unavailable outcomes. They executed here; the new window/AX fixtures did **not** execute. Their geometry/target assertions are deferred, not credited as observed passes.
+
+References inspected: `docs/mockups/M41-remove-project.png` and `.mockups/flows/f13-settings-release/{12-project-unavailable,13-project-empty,14-removal-confirmation,17-removal-stale,20-compact-navigation,21-enlarged-text}.html`. Existing references cover this reflow; no uncovered state or redesign was introduced.
+
+### Exact commands and fresh evidence
+
+Discovery (all exit **0**): `git status --short`, `git diff --stat`, `git diff --cached --stat`, `git submodule status`, `xcode-select -p`, `xcodebuild -version`, `xcrun swift --version`, `xcodebuild -list -project Kontrol.xcodeproj`, `sw_vers`, `uname -m`. Repeated environment output is `/tmp/kontrol-f13-folder-layout1.1.EhACgw/preflight.log`: **Xcode 27.0 (27A266a), Swift 6.4 (swiftlang-6.4.0.34.1; driver 1.168.6), arm64 macOS 27.0 (26A428)**; developer directory `/Applications/Xcode.app/Contents/Developer`. Yams resolved to unchanged **5.4.0**. Source base: `87faaf8c70a965c10f66437b45bac11e56c6278b`; final two-source-file patch is `final-source.diff` in that evidence directory, SHA-256 **`8c970a90690cd2d5f732a085b470ad70e63b36d3a08eb3b08a920afb64a89ed6`**.
+
+Required commands ran initially and again after final fixture cleanup changes; final commands below all exited **0**:
+
+```sh
+set -o pipefail
+make build DERIVED_DATA=/tmp/kontrol-f13-derived
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  CODE_SIGNING_ALLOWED=NO build-for-testing
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
+  -only-testing:KontrolTests/DesignSystemTokenTests \
+  -only-testing:KontrolTests/ProjectDisconnectTests \
+  -only-testing:KontrolTests/SettingsSceneTests/testFolderConfirmationCapturesNameIdentityRevisionCancelAndDurableSuccessAcrossClients \
+  -only-testing:KontrolTests/SettingsSceneTests/testFolderStaleConfirmationRequiresSuccessfulExplicitReloadAndSeparateReconfirmation \
+  -only-testing:KontrolTests/SettingsSceneTests/testFolderUnavailableMissingBusyAndFailedOutcomesNeverAutomaticallyDelete test
+git diff --check
+```
+
+The test command is exactly the plan's `f13_test` selection expanded. **19/19 passed**: seven token methods, nine disconnect methods, three explicitly selected non-GUI Settings methods; **0 failures, skips, expected failures, or result-bundle runtime warnings**. Final logs: `/tmp/kontrol-f13-folder-layout1.1.EhACgw/{final-build,final-bft,final-tests,final-diffcheck,final-exit-codes}.log`. Final bundle: `/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_21-12-12-+0800.xcresult`; independently retained copy: `/tmp/kontrol-f13-folder-layout1.1.EhACgw/verified-final.xcresult`. Earlier passing selections: `Test-Kontrol-2026.09.30_21-05-26-+0800.xcresult` and `Test-Kontrol-2026.09.30_21-09-07-+0800.xcresult`, each 19/19. Intermediate audited bundle is also copied to the unique evidence directory as `final.xcresult`; it is not the final source's bundle.
+
+Final result audit commands (all exit **0**):
+
+```sh
+EVIDENCE=/tmp/kontrol-f13-folder-layout1.1.EhACgw
+RESULT_BUNDLE='/tmp/kontrol-f13-derived/Logs/Test/Test-Kontrol-2026.09.30_21-12-12-+0800.xcresult'
+xcrun xcresulttool get test-results summary --path "$RESULT_BUNDLE" --format json > "$EVIDENCE/final-summary.json"
+xcrun xcresulttool get test-results tests --path "$RESULT_BUNDLE" --format json > "$EVIDENCE/final-test-tree.json"
+python3 "$EVIDENCE/final-audit.py" > "$EVIDENCE/final-selector-audit.log"
+ditto "$RESULT_BUNDLE" "$EVIDENCE/verified-final.xcresult"
+```
+
+Audit enumerates every executed identifier, compares suite methods/exact selectors against source, and verifies exact-once/nonempty selection and counts. Raw logs contain no live-store unlink or `InvalidTransition` diagnostic; existing multiple-destination/AppIntents/linkd warnings remain recorded, not hidden. Six process-owned disk stores and sidecars remain intact under `/var/folders/lz/20cqfx4x2k98r89q68w3q3ch0000gn/T/KontrolProjectDisconnectTests-{32015,33116,33927}` (two stores per root). Their actual paths and exited host-PID checks are in `final-selector-audit.log`. No temporary-store cleanup was performed; no production/external folder was used.
+
+**Evidence retention incident:** the initial fresh command reused the historical foundation Step 1.1 `/tmp/kontrol-f13-step1.1-{tests.log,summary.json,test-tree.json}` names, inadvertently overwriting those raw exports. Fresh outputs were moved to the distinct `/tmp/kontrol-f13-folder-layout1.1-*` prefix and subsequent runs use the unique evidence directory above. Recovery from historical `Test-Kontrol-2026.09.30_16-01-30-+0800.xcresult` was attempted with `xcresulttool get test-results summary/tests` and `get log --type console/action`; each exited **64**, because that old bundle is no longer on disk. The empty failed-recovery outputs were removed, not represented as recovered evidence. Original raw exports cannot be restored here; the unchanged historical ledger and `/tmp/kontrol-f13-step1.1-selector-audit.log` still preserve all 22 failed identifiers/messages and 111-method counts, and the historical toolchain/diff-check artifacts remain. This is an artifact-retention limitation, **not** closure or conversion of the historical failed gate. Final fresh bundles were copied outside Xcode's result-retention directory to avoid further evidence loss.
+
+### A13 — exact newly deferred selectors and observations
+
+Compiled in final `build-for-testing`, **not executed or waived**:
+
+- `SettingsSceneTests/testFolderPopulatedLongNamesAndActionsReflowAtAllSettingsSizes`
+- `SettingsSceneTests/testFolderEmptyGuidanceAndActionsReflowAtAllSettingsSizes`
+- `SettingsSceneTests/testFolderUnavailableRecoveryAndRetainedRowsReflowAtAllSettingsSizes`
+- `SettingsSceneTests/testFolderStaleReviewAndDisabledRemovalReflowAtAllSettingsSizes`
+- `SettingsSceneTests/testFolderRemovalConfirmationCancelAndSuccessReflowAtAllSettingsSizes`
+
+Run these alongside the existing deferred ledgers with a human-reserved uncontended desktop and actual rebuilt host AX authorization. Fixtures attach captures with content-point/pixel dimensions and backing scale; **none was produced here**. Required independent observations remain: long names/recovery/confirmation wrapping, fully reachable actions at all sizes/scales, native alert target geometry, visible keyboard focus and Escape/Cancel, spoken VoiceOver, reduced motion, contrast/non-color status, and rendered comparisons against the listed references. No user attestation was supplied. Surviving-control focus implementation remains current Step 1.2, not implemented by this task. A13/S13/B13/D13 and historical evidence limitations remain release concerns; this is not unconditional F13 or V1 completion.

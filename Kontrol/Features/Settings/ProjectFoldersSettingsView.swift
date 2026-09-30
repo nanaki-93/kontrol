@@ -18,7 +18,7 @@ final class ProjectFoldersSettingsState: ObservableObject {
 
         var title: String { "Remove \(name)?" }
         var message: String {
-            "Disconnect \(name) from Kontrol. Project files remain on disk, including .kontrol and Git files. Only the local reference and its transient app state are removed. Re-adding requires selecting the folder again."
+            "Disconnect \(name) from Kontrol. Project files remain on disk, including .kontrol and Git files. Only the local reference and its transient app state are removed.\n\nRe-adding requires selecting the folder again."
         }
     }
 
@@ -130,22 +130,29 @@ struct ProjectFoldersSettingsView: View {
             SectionHeader("Project folders")
             Text("List and remove local references without opening project folders. Removing a reference does not delete or change project files. Add and Reconnect require choosing a folder.")
                 .appTypography(.body)
-            ActionButton("Add folder", symbol: "plus", variant: .primary) { showingAdd = true }
-                .accessibilityIdentifier("settings-folders-add")
-            ActionButton("Reload & review folders") { management.review() }
-                .accessibilityIdentifier("settings-folders-reload")
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("settings-folders-guidance")
+            adaptiveActions(
+                ActionButton("Add folder", symbol: "plus", variant: .primary) { showingAdd = true }
+                    .accessibilityIdentifier("settings-folders-add"),
+                ActionButton("Reload & review folders") { management.review() }
+                    .accessibilityIdentifier("settings-folders-reload")
+            )
             if store.loadFailed {
                 Label("Saved folder references unavailable · reload to retry", systemImage: "exclamationmark.triangle")
                     .appTypography(.body)
+                    .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("settings-folders-unavailable")
             }
             if let outcome = management.outcome {
                 Label(outcome.message, systemImage: outcomeSymbol(outcome))
                     .appTypography(.body)
+                    .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("settings-folders-result")
             }
             if let reconnectFeedback {
                 Text(reconnectFeedback).appTypography(.body)
+                    .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("settings-folders-reconnect-result")
             }
             if store.isLoaded && !store.loadFailed && store.rows.isEmpty {
@@ -155,19 +162,25 @@ struct ProjectFoldersSettingsView: View {
             ForEach(ProjectsView.ordered(store.rows), id: \.reference.id) { row in
                 VStack(alignment: .leading, spacing: AppMetrics.space2) {
                     Text(row.reference.displayNameHint).appTypography(.section)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("settings-folder-name-\(row.reference.id.uuidString)")
                     Text(Self.status(row)).appTypography(.metadata)
                         .foregroundStyle(AppColors.textSecondary)
-                    ActionButton("Reconnect folder") { chooseReconnectFolder(row.reference.id) }
-                        .disabled(reconnectPicker != nil || reconnectingID != nil)
-                        .accessibilityLabel("Reconnect folder \(row.reference.displayNameHint)")
-                        .accessibilityIdentifier("settings-folder-reconnect-\(row.reference.id.uuidString)")
-                    ActionButton("Remove…", variant: .destructive) {
-                        management.requestRemoval(row.reference.id)
-                        showingRemoval = management.confirmation != nil
-                    }
-                    .disabled(management.requiresReview || store.loadFailed)
-                    .accessibilityLabel("Remove \(row.reference.displayNameHint) from Kontrol")
-                    .accessibilityIdentifier("settings-folder-remove-\(row.reference.id.uuidString)")
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("settings-folder-status-\(row.reference.id.uuidString)")
+                    adaptiveActions(
+                        ActionButton("Reconnect folder") { chooseReconnectFolder(row.reference.id) }
+                            .disabled(reconnectPicker != nil || reconnectingID != nil)
+                            .accessibilityLabel("Reconnect folder \(row.reference.displayNameHint)")
+                            .accessibilityIdentifier("settings-folder-reconnect-\(row.reference.id.uuidString)"),
+                        ActionButton("Remove…", variant: .destructive) {
+                            management.requestRemoval(row.reference.id)
+                            showingRemoval = management.confirmation != nil
+                        }
+                        .disabled(management.requiresReview || store.loadFailed)
+                        .accessibilityLabel("Remove \(row.reference.displayNameHint) from Kontrol")
+                        .accessibilityIdentifier("settings-folder-remove-\(row.reference.id.uuidString)")
+                    )
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(AppMetrics.space4)
@@ -199,6 +212,22 @@ struct ProjectFoldersSettingsView: View {
             if let reconnectingID { store.cancelReconnect(reconnectingID) }
         }
         .accessibilityIdentifier("settings-folders-content")
+    }
+
+    /// Try the actions' ideal widths before falling back to a wrapping vertical
+    /// group. Both compositions stay in the caller's one scroll document; no
+    /// viewport-height frame or second text-scale resolution is introduced.
+    private func adaptiveActions<First: View, Second: View>(_ first: First, _ second: Second) -> some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .top, spacing: AppMetrics.space3) {
+                first.fixedSize(horizontal: true, vertical: false)
+                second.fixedSize(horizontal: true, vertical: false)
+            }
+            VStack(alignment: .leading, spacing: AppMetrics.space3) {
+                first
+                second
+            }
+        }
     }
 
     private func outcomeSymbol(_ outcome: ProjectFoldersSettingsState.Outcome) -> String {
