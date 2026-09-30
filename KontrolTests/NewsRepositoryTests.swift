@@ -586,6 +586,93 @@ final class NewsRepositoryTests: XCTestCase {
         XCTAssertEqual(try repo.loadOrInitialize(catalog()).articles.count, 500)
     }
 
+    func testGUIDMoveThenURLReissuePersistsDistinctRowsAcrossReopen() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let storeURL = directory.appendingPathComponent("Kontrol.store")
+        // Each invocation releases its repository/container before the next disk open.
+        func open(at date: Date, path: String? = nil, guid: String? = nil) throws -> NewsSnapshot {
+            let container = try ModelContainerFactory().makeContainer(mode: .persistent(storeURL))
+            let repo = SwiftDataNewsRepository(container: container, now: { date })
+            let cached = try repo.loadOrInitialize(catalog())
+            let snapshot: NewsSnapshot
+            if let path {
+                let feed = cached.feeds[0]
+                snapshot = try repo.applyRefresh([FeedRefreshOutcome(feedID: feed.id,
+                    configurationRevision: feed.configurationRevision, attemptedAt: date,
+                    result: .modified([NewsFeedEntry(title: path,
+                        url: URL(string: "https://news.example.com/\(path)")!, guid: guid,
+                        publishedAt: nil, summary: nil)], etag: nil, lastModified: nil))], at: date)
+            } else {
+                snapshot = cached
+            }
+            XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<NewsArticleRecord>()).count,
+                snapshot.articles.count, "No UUID upsert may overwrite a distinct row")
+            return snapshot
+        }
+        let original = try open(at: instant, path: "old", guid: "g1")
+        let originalID = try XCTUnwrap(original.articles.first?.id)
+        let moved = try open(at: instant.addingTimeInterval(60), path: "new", guid: "g1")
+        XCTAssertEqual(moved.articles.first?.id, originalID)
+        let separate = try open(at: instant.addingTimeInterval(120), path: "old", guid: "g2")
+        XCTAssertEqual(separate.articles.count, 2)
+        XCTAssertEqual(Set(separate.articles.map(\.id)).count, 2)
+        let reissued = try XCTUnwrap(separate.articleStates.first { $0.article.url.path == "/old" })
+        let existing = try XCTUnwrap(separate.articleStates.first { $0.article.url.path == "/new" })
+        XCTAssertEqual(existing.article.id, originalID)
+        XCTAssertEqual(existing.article.firstFetchedAt, instant)
+        XCTAssertEqual(existing.aliases[separate.feeds[0].id], ["g1"])
+        XCTAssertNotEqual(reissued.article.id, originalID)
+        XCTAssertEqual(reissued.article.firstFetchedAt, instant.addingTimeInterval(120))
+        XCTAssertEqual(reissued.aliases[separate.feeds[0].id], ["g2"])
+        XCTAssertEqual(try open(at: instant.addingTimeInterval(180)), separate)
+        let repeated = try open(at: instant.addingTimeInterval(240), path: "old", guid: "g2")
+        XCTAssertEqual(repeated.articleStates, separate.articleStates)
+        XCTAssertEqual(try open(at: instant.addingTimeInterval(300)), repeated)
+    }
+
+    func testFuturePublicationExpiresAtFirstFetchBoundaryAcrossReopenAnd304() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let storeURL = directory.appendingPathComponent("Kontrol.store")
+        let publication = instant.addingTimeInterval(20 * 86_400)
+        func open(at date: Date, result: FeedRefreshResult? = nil) throws -> NewsSnapshot {
+            let container = try ModelContainerFactory().makeContainer(mode: .persistent(storeURL))
+            let repo = SwiftDataNewsRepository(container: container, now: { date })
+            let cached = try repo.loadOrInitialize(catalog())
+            let snapshot: NewsSnapshot
+            if let result {
+                let feed = cached.feeds[0]
+                snapshot = try repo.applyRefresh([FeedRefreshOutcome(feedID: feed.id,
+                    configurationRevision: feed.configurationRevision, attemptedAt: date,
+                    result: result)], at: date)
+            } else {
+                snapshot = cached
+            }
+            XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<NewsArticleRecord>()).count,
+                snapshot.articles.count)
+            return snapshot
+        }
+        let entry = NewsFeedEntry(title: "Future", url: URL(string: "https://news.example.com/future")!,
+            guid: "future", publishedAt: publication, summary: nil)
+        let initial = try open(at: instant, result: .modified([entry], etag: "saved", lastModified: nil))
+        XCTAssertEqual(initial.articles.count, 1)
+        XCTAssertEqual(initial.articles[0].publishedAt, publication)
+        XCTAssertEqual(initial.articles[0].firstFetchedAt, instant)
+        let day21 = try open(at: instant.addingTimeInterval(21 * 86_400), result: .notModified)
+        XCTAssertEqual(day21.articleStates, initial.articleStates)
+        let boundary = instant.addingTimeInterval(NewsSelection.maximumAge)
+        let day30 = try open(at: boundary, result: .modified([entry], etag: "saved", lastModified: nil))
+        XCTAssertEqual(day30.articleStates, initial.articleStates, "Refresh must not reset the retention cap")
+        let expired = try open(at: boundary.addingTimeInterval(1))
+        XCTAssertTrue(expired.articleStates.isEmpty, "Load must trim even though publication is now past")
+        XCTAssertEqual(expired.preferences.lastRefreshAt, boundary)
+        let day31 = try open(at: instant.addingTimeInterval(31 * 86_400), result: .notModified)
+        XCTAssertTrue(day31.articleStates.isEmpty)
+        XCTAssertEqual(day31.feeds[0].etag, "saved")
+        XCTAssertEqual(try open(at: instant.addingTimeInterval(32 * 86_400)), day31)
+    }
+
     func testLoadTrimsExpiredArticlesAndFailureLeavesThemUntouched() throws {
         enum Failure: Error { case injected }
         let (container, directory) = try store()

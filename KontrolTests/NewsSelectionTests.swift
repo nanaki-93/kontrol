@@ -81,7 +81,7 @@ final class NewsSelectionTests: XCTestCase {
         XCTAssertEqual(NewsSelection.reconcile(surviving, outcomes: [], feeds: [feed(b, topics: ["security"])], at: now), surviving)
     }
 
-    func testRecentPublicationSurvivesOldFirstFetchAndFutureDateDoesNot() {
+    func testLaterPublicationCannotReviveExpiredFirstFetch() {
         let feeds = [feed(a)]
         let firstFetch = now.addingTimeInterval(-NewsSelection.maximumAge - 24 * 60 * 60)
         let original = NewsSelection.reconcile([], outcomes: [result(a, [
@@ -92,15 +92,68 @@ final class NewsSelectionTests: XCTestCase {
         let updated = NewsSelection.reconcile(original, outcomes: [result(a, [
             entry("https://example.com/old-fetch", "Published", "story", date: recent)
         ])], feeds: feeds, at: now)
-        XCTAssertEqual(updated.count, 1)
-        XCTAssertEqual(updated[0].article.firstFetchedAt, firstFetch)
-        XCTAssertEqual(updated[0].article.publishedAt, recent)
-        XCTAssertEqual(NewsSelection.reconcile(updated, outcomes: [], feeds: feeds, at: now), updated,
-            "Load-time trimming must use publication age, not first-fetch age")
+        XCTAssertTrue(updated.isEmpty, "A later publication cannot extend immutable first-fetch retention")
         let future = NewsSelection.reconcile(original, outcomes: [result(a, [
             entry("https://example.com/old-fetch", "Future", "story", date: now.addingTimeInterval(86_400))
         ])], feeds: feeds, at: now)
         XCTAssertTrue(future.isEmpty, "Future dates must not revive an expired first fetch")
+    }
+
+    func testReissuedURLAfterGUIDMovesAllocatesUniqueStableIDs() {
+        let feeds = [feed(a)]
+        let original = NewsSelection.reconcile([], outcomes: [result(a, [
+            entry("https://example.com/old", "Original", "g1")
+        ])], feeds: feeds, at: now)
+        let originalID = original[0].article.id
+        let moved = NewsSelection.reconcile(original, outcomes: [result(a, [
+            entry("https://example.com/new", "Moved", "g1")
+        ])], feeds: feeds, at: now.addingTimeInterval(60))
+        XCTAssertEqual(moved[0].article.id, originalID)
+        let reissued = entry("https://example.com/old", "Reissued", "g2")
+        let current = entry("https://example.com/new", "Moved", "g1")
+        let separate = NewsSelection.reconcile(moved, outcomes: [result(a, [reissued, current])],
+            feeds: feeds, at: now.addingTimeInterval(120))
+        XCTAssertEqual(separate.count, 2)
+        XCTAssertEqual(Set(separate.map(\.article.id)).count, 2)
+        XCTAssertEqual(separate.first { $0.article.url.path == "/new" }?.article.id, originalID)
+        let reissuedID = separate.first { $0.article.url.path == "/old" }?.article.id
+        XCTAssertNotEqual(reissuedID, originalID)
+        XCTAssertEqual(NewsSelection.reconcile(moved, outcomes: [result(a, [current, reissued])],
+            feeds: feeds, at: now.addingTimeInterval(120)), separate)
+        XCTAssertEqual(NewsSelection.reconcile(separate.reversed(), outcomes: [result(a, [current, reissued])],
+            feeds: feeds, at: now.addingTimeInterval(180)), separate)
+        // Repeating the move/reissue cycle exercises collision probing beyond the
+        // first alternate ID, without changing either existing article's identity.
+        let movedAgain = NewsSelection.reconcile(separate, outcomes: [result(a, [
+            entry("https://example.com/third", "Moved again", "g2")
+        ])], feeds: feeds, at: now.addingTimeInterval(180))
+        let third = NewsSelection.reconcile(movedAgain, outcomes: [result(a, [
+            entry("https://example.com/old", "Third identity", "g3")
+        ])], feeds: feeds, at: now.addingTimeInterval(240))
+        XCTAssertEqual(third.count, 3)
+        XCTAssertEqual(Set(third.map(\.article.id)).count, 3)
+        XCTAssertEqual(third.first { $0.article.url.path == "/third" }?.article.id, reissuedID)
+        XCTAssertEqual(third.first { $0.article.url.path == "/new" }?.article.id, originalID)
+    }
+
+    func testFuturePublicationRetentionDoesNotChangeWhenClockPassesPublication() {
+        let feeds = [feed(a)]
+        let publication = now.addingTimeInterval(20 * 86_400)
+        let entries = [entry("https://example.com/future", "Future", "future", date: publication)]
+        let initial = NewsSelection.reconcile([], outcomes: [result(a, entries)], feeds: feeds, at: now)
+        XCTAssertEqual(initial[0].article.publishedAt, publication, "Display keeps the supplied date")
+        let day21 = now.addingTimeInterval(21 * 86_400)
+        let pastPublication = NewsSelection.reconcile(initial, outcomes: [], feeds: feeds, at: day21)
+        XCTAssertEqual(pastPublication, initial)
+        let boundary = now.addingTimeInterval(NewsSelection.maximumAge)
+        XCTAssertEqual(NewsSelection.reconcile(pastPublication, outcomes: [], feeds: feeds, at: boundary), initial)
+        for outcomes in [[], [result(a, entries)], [FeedRefreshOutcome(feedID: a,
+            configurationRevision: a, attemptedAt: boundary, result: .notModified)]] {
+            XCTAssertTrue(NewsSelection.reconcile(pastPublication, outcomes: outcomes, feeds: feeds,
+                at: boundary.addingTimeInterval(1)).isEmpty)
+        }
+        XCTAssertTrue(NewsSelection.reconcile(initial, outcomes: [], feeds: feeds,
+            at: now.addingTimeInterval(31 * 86_400)).isEmpty)
     }
 
     func testContradictoryAndOversizedGUIDsFallBackToURL() {

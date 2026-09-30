@@ -602,3 +602,173 @@ Automated assertions cover minimal authorized one-feature writes, quoted UTC tim
 - In a reserved, active GUI session **execute** hosted `ProjectsPresentationTests`, affected shell (`AppShellTests`) and navigation/draft/close-guard checks, then full `make test DERIVED_DATA=/tmp/kontrol-f13-derived`. Record actual counts, skips, failures and result bundles. Revisit the intermittent ContainerFactory snapshot failure above and all inherited F09/F10 hosted checks and prior F02/F06 failures/skips; compilation does not close them.
 - Capture **actual native rendered** M31 completion/Undo, M32 conflict and [all six F11 supplemental states](.mockups/flows/f11-feature-completion/index.html) at **1000×700 and 1440×940 points**. Compare matching rendered images to references; record before/after paths, sizes, differences and unavailable captures without substituting static HTML or test fixtures. Check keyboard-only card/detail/Undo/dialog actions, focus after disappearing cards/selection switches, spoken VoiceOver labels and outcome announcements, enlarged text/scrolling and reduced motion.
 - With the **signed sandbox app offline on isolated project data**, use native folder picker/bookmarks to complete, conflict, Undo, revoke/reconnect and quit/relaunch. Inspect actual selected-feature before/after/undo byte diffs, permissions and unchanged peer `.kontrol`, source and Git-state files; verify completion derives from disk and session Undo does not survive relaunch. Exercise a real **macOS 14 runtime** and record results/availability. None of these interactive, signed, visual, accessibility or OS-baseline checks passed by this non-GUI gate.
+
+## F12 topic news: non-GUI implementation gate (2026-09-30)
+
+F12 replaces the News foundation route with editable RSS/Atom subscriptions, selected-topic filtering, bounded HTTPS refresh, source-aware deduplicated metadata and an offline cache. News and both Settings entry points observe one app-owned `NewsStore` and the existing container. Read revalidates the source contribution before using the default-browser boundary; summaries are inert plain text, initially collapsed. V9 adds News records without changing frozen V1–V8 schemas. Earlier descriptions of News as a placeholder are historical. [F12 contract](docs/features/F12-news.md) · [M35–M37](docs/mockups/INDEX.md) · [supplemental state references](.mockups/flows/f12-topic-news/index.html) · [open F13 ledger](docs/qa.md#f13-f12-news-release-ledger-open). This is **implementation/non-GUI evidence**, not hosted UI, live accessibility or release acceptance.
+
+### Commands, toolchain and executed counts
+
+Observed: `/Applications/Xcode.app/Contents/Developer`, Xcode **27.0 (27A266a)**, Apple Swift **6.4 (swiftlang-6.4.0.34.1)**, arm64 macOS **27.0 (26A428)**. App/test targets retain Swift **5.0** language mode and macOS **14.0** minimum; no macOS 14 runtime was exercised. F12 adds no dependency; the existing Yams **5.4.0** package resolved from the local checkout. The initial gate below passed before review exposed two untested lifecycle defects; the repair gate is recorded separately below. From the repository root, these commands all exited **0**:
+
+```sh
+xcode-select -p
+xcodebuild -version
+xcrun swift --version
+sw_vers
+uname -m
+make build DERIVED_DATA=/tmp/kontrol-f12-derived
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug \
+  -destination 'platform=macOS' -derivedDataPath /tmp/kontrol-f12-derived \
+  CODE_SIGNING_ALLOWED=NO build-for-testing
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug \
+  -destination 'platform=macOS' -derivedDataPath /tmp/kontrol-f12-derived \
+  -resultBundlePath /tmp/kontrol-f12-gate-selected.xcresult CODE_SIGNING_ALLOWED=NO \
+  -only-testing:KontrolTests/FeedParserTests \
+  -only-testing:KontrolTests/FeedFetcherTests \
+  -only-testing:KontrolTests/FeedServiceTests \
+  -only-testing:KontrolTests/NewsURLPolicyTests \
+  -only-testing:KontrolTests/NewsSelectionTests \
+  -only-testing:KontrolTests/NewsRepositoryTests \
+  -only-testing:KontrolTests/NewsMigrationTests \
+  -only-testing:KontrolTests/NewsStoreTests \
+  -only-testing:KontrolTests/NewsIntegrationTests \
+  -only-testing:KontrolTests/BundledFeedCatalogTests \
+  -only-testing:KontrolTests/SchemaTests \
+  -only-testing:KontrolTests/ContainerFactoryTests \
+  -only-testing:KontrolTests/V1FixtureTests \
+  -only-testing:KontrolTests/ProjectMigrationTests \
+  -only-testing:KontrolTests/LaunchCoordinatorTests \
+  -only-testing:KontrolTests/LaunchRecoveryTests \
+  -only-testing:KontrolTests/NavigationStoreTests \
+  -only-testing:KontrolTests/AppShellTests/testNavigationMetadataAndRouting \
+  -only-testing:KontrolTests/AppShellTests/testOneStorePerDependencyGraphAcrossRoutesAndWindows test
+xcrun xcresulttool get test-results summary --path /tmp/kontrol-f12-gate-selected.xcresult
+plutil -lint Kontrol.xcodeproj/project.pbxproj Kontrol/Kontrol.entitlements
+python3 -m json.tool Kontrol/Resources/default-feeds.json >/dev/null
+git diff --check
+# Additional noninteractive package/signature checks (not a signed app journey):
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug \
+  -destination 'platform=macOS' -derivedDataPath /tmp/kontrol-f12-gate-sandbox \
+  CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= build
+codesign --verify --deep --strict /tmp/kontrol-f12-gate-sandbox/Build/Products/Debug/Kontrol.app
+codesign --display --entitlements - /tmp/kontrol-f12-gate-sandbox/Build/Products/Debug/Kontrol.app
+```
+
+`BUILD SUCCEEDED`, `TEST BUILD SUCCEEDED`, `TEST SUCCEEDED`. All **19 selectors** actually executed: **136 passed, 0 failed, 0 skipped, 0 expected failures** (the twice-printed aggregate is not 272 executions). Counts, in command order: FeedParser **6**, FeedFetcher **7**, FeedService **7**, NewsURLPolicy **6**, NewsSelection **10**, NewsRepository **15**, NewsMigration **3**, NewsStore **22**, NewsIntegration **2**, BundledFeedCatalog **5**, Schema **10**, ContainerFactory **8**, V1Fixture **2**, ProjectMigration **3**, LaunchCoordinator **6**, LaunchRecovery **11**, NavigationStore **11**, and AppShell **2** (one execution per selected method). Method-start/pass audit: `/tmp/kontrol-f12-gate-selector-audit.log`; result summary: `/tmp/kontrol-f12-gate-summary.json`; retained bundle: **`/tmp/kontrol-f12-gate-selected.xcresult`**. Logs: `/tmp/kontrol-f12-gate-{toolchain,build,bft,tests,plutil,signed,verify,entitlements}.log`. Both plutil files report OK, JSON validation and final whitespace check return 0. `NewsPresentationTests`, `SettingsSceneTests` and hosted shell portions **compiled, not executed**; no full `make test` ran.
+
+The ad-hoc-signed bundle contains byte-identical `starter-catalog.json`, `generation-objectives.json` and `default-feeds.json` compared to their source resources, ID `com.kontrol.app`, minimum OS 14.0. Default-feed resource SHA-256: `4b0876a24b9cb1e0ff2da7d825e9f46e3282d8bbfca5fa7f5c1ec522893c4240`. Package inspection evidence: `/tmp/kontrol-f12-gate-package.log`. Strict signature verification passed; entitlements remain sandbox, network client, user-selected read/write and app-scoped bookmarks, plus Debug get-task-allow (all true). Frozen V1–V8 source schemas and entitlements have no diff from the pre-F12 revision (`a8a83f7^`). No distribution signature, notarization, production-store migration or signed online/offline app journey is inferred.
+
+Diagnostics: the destination matches arm64/x86_64 and selects arm64; AppIntents metadata extraction is skipped (no framework dependency). The fresh signed build reports the existing unreachable `default` warning at `AppShell.swift:61`; the incremental test build does not establish warning-free clean compilation. Tests log linkd connection messages and intentional corrupt-store CoreData errors in passing preservation tests. **Preserved F12 failure:** Step 5.1's first integration run failed **2/2** on the summary expectation `"Shared plain text."` versus the parser's inert `"Shared plain text ."` (`/tmp/kontrol-f12-step5.1-integration.log`, `/tmp/kontrol-f12-derived/Logs/Test/Test-Kontrol-2026.09.30_10-14-06-+0800.xcresult`). The fixture assertion was corrected before this task; its **2/2 passing** rerun is `/tmp/kontrol-f12-step5.1-integration-rerun.log`, result `/tmp/kontrol-f12-derived/Logs/Test/Test-Kontrol-2026.09.30_10-14-38-+0800.xcresult`. Both integration tests also passed in this final 136-test gate. During ledger editing, `git diff --check` returned 2 for a new blank line at EOF; that blank line was removed and the final rerun passed (`/tmp/kontrol-f12-gate-diffcheck-initial.log` preserves the diagnostic). No current selected-test or live-endpoint failure remains; inherited F02/F06 hosted failures/skips and F11's intermittent fixture snapshot concern remain open in QA.
+
+### Review repair and current implementation gate (2026-09-30)
+
+The initial **136/136** gate is retained above, but did **not** cover two review reproductions: `/old` g1 → `/new` g1 → `/old` g2 produced **two articles with one UUID**, causing a persistence upsert to overwrite one; a publication date **20 days after first fetch** still retained its article on **day 31** once the date became past. The repeated failure was incomplete lifecycle coverage, not a build failure. The earlier audit's stable-ID/future-date claims were too broad for those tests.
+
+`NewsSelection` now reserves all persisted IDs before allocating new URL groups, sorts allocation deterministically and probes alternate hashed IDs on collisions. GUID moves/bridges retain existing identities; reclaiming an old URL cannot steal them. Retention uses **`min(publication ?? firstFetch, firstFetch)`**, independent of the current clock; the supplied publication date remains unchanged for display. The former recent-publication test wrongly allowed revival beyond first-fetch retention and now asserts rejection. No schema or repository rewrite was needed, and existing unrelated changes/evidence were preserved.
+
+New regressions: `NewsSelectionTests/testReissuedURLAfterGUIDMovesAllocatesUniqueStableIDs` covers response/stored order, repeat refresh and a second move/reissue collision; `testFuturePublicationRetentionDoesNotChangeWhenClockPassesPublication` checks day 21, the exact 30-day boundary, boundary +1 second, day 31, modified and 304 outcomes. `NewsRepositoryTests/testGUIDMoveThenURLReissuePersistsDistinctRowsAcrossReopen` checks separate on-disk rows, original/reissued IDs, aliases, immutable fetch times and idempotence across released owners; `testFuturePublicationExpiresAtFirstFetchBoundaryAcrossReopenAnd304` preserves display dates, verifies refresh/304 do not reset age and confirms load-time deletion and another reopen after expiry.
+
+Toolchain rechecked unchanged (Xcode 27.0 / Swift 6.4, arm64 macOS 27.0, Swift 5 mode / macOS 14.0 minimum). Exact commands from the repository root, all exit **0**:
+
+```sh
+make build DERIVED_DATA=/tmp/kontrol-f12-derived
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug \
+  -destination 'platform=macOS' -derivedDataPath /tmp/kontrol-f12-derived \
+  CODE_SIGNING_ALLOWED=NO build-for-testing
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug \
+  -destination 'platform=macOS' -derivedDataPath /tmp/kontrol-f12-derived \
+  CODE_SIGNING_ALLOWED=NO -resultBundlePath /tmp/kontrol-f12-repair-focused.xcresult \
+  -only-testing:KontrolTests/NewsSelectionTests \
+  -only-testing:KontrolTests/NewsRepositoryTests test
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug \
+  -destination 'platform=macOS' -derivedDataPath /tmp/kontrol-f12-derived \
+  CODE_SIGNING_ALLOWED=NO -resultBundlePath /tmp/kontrol-f12-repair-selected.xcresult \
+  -only-testing:KontrolTests/FeedParserTests \
+  -only-testing:KontrolTests/FeedFetcherTests \
+  -only-testing:KontrolTests/FeedServiceTests \
+  -only-testing:KontrolTests/NewsURLPolicyTests \
+  -only-testing:KontrolTests/NewsSelectionTests \
+  -only-testing:KontrolTests/NewsRepositoryTests \
+  -only-testing:KontrolTests/NewsMigrationTests \
+  -only-testing:KontrolTests/NewsStoreTests \
+  -only-testing:KontrolTests/NewsIntegrationTests \
+  -only-testing:KontrolTests/BundledFeedCatalogTests \
+  -only-testing:KontrolTests/SchemaTests \
+  -only-testing:KontrolTests/ContainerFactoryTests \
+  -only-testing:KontrolTests/V1FixtureTests \
+  -only-testing:KontrolTests/ProjectMigrationTests \
+  -only-testing:KontrolTests/LaunchCoordinatorTests \
+  -only-testing:KontrolTests/LaunchRecoveryTests \
+  -only-testing:KontrolTests/NavigationStoreTests \
+  -only-testing:KontrolTests/AppShellTests/testOneStorePerDependencyGraphAcrossRoutesAndWindows \
+  -only-testing:KontrolTests/AppShellTests/testNavigationMetadataAndRouting test
+xcrun xcresulttool get test-results summary --path /tmp/kontrol-f12-repair-selected.xcresult
+plutil -lint Kontrol.xcodeproj/project.pbxproj Kontrol/Kontrol.entitlements
+python3 -m json.tool Kontrol/Resources/default-feeds.json >/dev/null
+git diff --check
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug \
+  -destination 'platform=macOS' -derivedDataPath /tmp/kontrol-f12-gate-sandbox \
+  CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= build
+codesign --verify --deep --strict /tmp/kontrol-f12-gate-sandbox/Build/Products/Debug/Kontrol.app
+codesign --display --entitlements - /tmp/kontrol-f12-gate-sandbox/Build/Products/Debug/Kontrol.app
+```
+
+The focused gate passed **29/29**; the complete **19-selector** gate passed **140/140, 0 failures, 0 skips, 0 expected failures**, with every selector's method starts/passes audited. Current suite counts equal the initial counts above except NewsSelection **12** and NewsRepository **17**. Results: `/tmp/kontrol-f12-repair-{focused,selected}.xcresult`; summary `/tmp/kontrol-f12-repair-summary.json`; selector audit `/tmp/kontrol-f12-repair-selector-audit.log`; command logs `/tmp/kontrol-f12-repair-{focused,build,bft,tests,plutil,signed,verify,entitlements,diffcheck}.log`. App build and test-bundle compilation passed; hosted News/Settings/shell fixtures still **compiled only**. Updated ad-hoc signature/entitlements passed and all three packaged resources remain byte-identical to source, with bundle ID/minimum OS unchanged (`/tmp/kontrol-f12-repair-package.log`). Destination/AppIntents and intentional corrupt-store/linkd diagnostics remain non-failing; no new compiler diagnostic was found in the repair logs.
+
+Capture directories/images were re-enumerated under `/private/tmp`, `/private/tmp/kontrol-f12-derived` and `/private/tmp/kontrol-f12-gate-sandbox`: no before/after directory or native News pair was present, only Yams artwork. There is no rendered pair to compare; all specified native, keyboard/VoiceOver, baseline-runtime and signed online/offline/browser journeys remain explicitly **open for F13**, not claimed by this repair. The seven actual live-endpoint observations below were inspected and retained, not rerun or presented as new observations.
+
+### Live bundled endpoints (final recheck, not unit-test dependencies)
+
+On **2026-09-30, 02:19:46–02:19:51 UTC**, a standalone native CLI compiled the **production** URL policy, catalog, fetcher and parser in Swift 5 mode. Each initial fetch required a body, enforced the production HTTPS/redirect/decoded-size/15-second bounds and successfully parsed supported XML. All returned **HTTP 200**, with the final URL **identical to the requested URL**; no unresolved verification failure remains from this recheck. This verifies the endpoints at that time, not future availability or signed-sandbox access. No downloaded article metadata became production cache or bundled sample content.
+
+| Feed / topic coverage | Requested and observed final URL | XML | Decoded bytes | Accepted HTTPS items |
+| --- | --- | --- | ---: | ---: |
+| The Go Blog / Go | `https://go.dev/blog/feed.atom` | Atom | 367,778 | 10 |
+| Inside Java / Java | `https://inside.java/feed.xml` | Atom | 8,638 | 10 |
+| Martin Fowler / Software Engineering, System Design | `https://martinfowler.com/feed.atom` | Atom | 174,751 | 30 |
+| InfoQ / System Design, Software Engineering | `https://feed.infoq.com/` | RSS | 23,850 | 15 |
+| Schneier / Security | `https://www.schneier.com/feed/atom/` | Atom | 35,126 | 10 |
+| Google AI / AI | `https://blog.google/innovation-and-ai/technology/ai/rss/` | RSS | 30,433 | 20 |
+| The Japan Times / Japan | `https://www.japantimes.co.jp/feed/` | RSS | 39,376 | 30 |
+
+Native probe source `/tmp/kontrol-f12-gate-endpoints.swift`, executable `/tmp/kontrol-f12-gate-endpoints`, timestamped results `/tmp/kontrol-f12-gate-endpoints.log`. Exact compile/run:
+
+```sh
+xcrun swiftc -swift-version 5 -parse-as-library \
+  Kontrol/Domain/NewsSnapshot.swift Kontrol/Domain/NewsURLPolicy.swift \
+  Kontrol/Domain/NewsSelection.swift Kontrol/Data/Feeds/BundledFeedCatalog.swift \
+  Kontrol/Data/Feeds/FeedFetcher.swift Kontrol/Data/Feeds/FeedParser.swift \
+  /tmp/kontrol-f12-gate-endpoints.swift -o /tmp/kontrol-f12-gate-endpoints
+/tmp/kontrol-f12-gate-endpoints
+```
+
+### Specification coverage audit
+
+Reviewed `.pi/SPEC.md` §§1–5 against implementation and test assertions; these are isolated automated contracts, not observed native UI behavior.
+
+| Requirement group | Evidence / boundary |
+| --- | --- |
+| Ownership, launch and compatibility | Detached News values; actor service; fresh non-autosaving main-actor repository; one store/container in dependencies, no launch requests; both focused AppShell methods, NewsStore cache-first tests and launch/navigation regressions pass. V9 is additive and Learning topics remain independent. |
+| Catalog / initial selection | BundledFeedCatalog's 5 tests load the compiled resource, enforce nine stable topics/seven selected, Gaming/Anime unselected, real HTTPS endpoints, unique IDs/mappings and seven-topic coverage; live results above. Initialization is local/idempotent. |
+| Durable topics / feed configuration | Repository/store tests cover preserved edits/removals/disabled/zero selection across reopen/catalog updates, independent revisions, current mappings, normalized-endpoint uniqueness, trimmed names, known nonempty topics, 32-feed limit, validated enabled drafts/recognized empty feeds, disabled offline drafts and network-free name/topic-only edits. |
+| Edit races / provenance | Matching draft validation receipts; Cancel/newer editor/concurrent Settings edit fences; endpoint validator/retry/error/contribution reset; disable hides but retains bounded metadata, removal retains other-source articles and restores their own link/title; repository atomic save-failure tests pass. Confirmation/focus/draft UI fixtures are compile-only. |
+| Transport | 2,097,152 decoded bytes including error bodies, 15-second total deadline over redirects/body, five HTTPS hops, unsafe authority rejection, no cookies/credentials/auth prompts/cache, conditional validators/304 versus initial body, HTML/status/cancellation/timeout and no automatic retry. Expanded gzip chunks are tested at the decoded delegate seam, **not a real compressed-wire server test**. |
+| Service / retry | Four shared permits across refresh/validation, fetch-once multi-topic feeds, independent revision-tagged modified/304/failed/canceled/deferred outcomes; Retry-After seconds/HTTP dates, queued/active cancellation, no retry within a refresh. |
+| Parser / inert text | RSS 2/RDF/Atom fixtures, namespace/CDATA/date variants, alternate HTML/relative/xml:base links, GUIDs not links, nil missing/invalid dates and no Atom-updated fabrication; DTD/custom entities/structural failure rejection, no entity/resource loading, 64-depth/1,000-entry bounds, 512-title/2,000-summary/4,096-URL/1,024-GUID limits and valid sibling preservation. |
+| Identity / ordering / retention | URL policy rejects unsafe stored links and preserves meaningful query order/path/slash distinctions while dropping only allowlisted tracking/fragment/default port. Selection's 12 tests cover GUID moves/contradiction/URL bridges, collision-safe allocation when old URLs are reissued (including repeated collisions), preserved existing IDs, cross-feed provenance, response-order-independent precedence, selected/enabled topic projection and dated/undated ordering. The immutable first-fetch cap remains effective after a future publication becomes past, through the exact 30-day boundary and refresh/304; repository regressions verify both repairs through released-owner disk reopen. Global 30-day/500-item retention and orphan-alias trimming remain covered. |
+| Atomic refresh / truthful state | Repository/store tests cover all-or-nothing cache/aliases/validators/attempt/success/errors/retry/trim writes, stale removed/disabled/edited result rejection, failed save/read with no fabricated empty/success, failure/304/empty-feed cache retention, partial success, and durable-only `lastRefreshAt`. |
+| Scheduling / browser | NewsStore's 22 tests cover 30-minute per-feed foreground eligibility, app-active versus key-window distinction, visible-window coalescing, hidden/inactive scheduled cancellation, manual interval override but not retry deadlines/in-flight requests, obsolete-work cancellation preserving other successes, and only safe current source URLs reaching the injected browser; failure leaves rows/cache unchanged. No actual browser was launched. |
+| Migration / end-to-end cache | NewsMigration's 3 tests upgrade a rich V8 disk store through V9 and reopen with tasks/schedule/focus/Learning progress and attempts/AI settings/bookmarks preserved; copied frozen V1 remains byte-identical; failed open never resets data. Both integration tests drive intercepted streaming transport → parser → service → disk repository → filtered store, prove dedup/aliases/provenance and full owner release, reopen offline, persisted topic edits, partial/malformed/offline failures and unchanged last-success time. |
+| Presentation / references | News/management/editor compose existing tokens/components and M35–M37; view-local filter/disclosure/draft; source-specific Read names; distinct loading/cache/empty/no-topics/no-feeds/filter-empty/partial/rate-limit/read/save/browser states; shared Settings access and removal confirmation. All eight supplemental HTML pages (including navigator/local-read-failure) have resolving links and both existing stylesheets; mockup index link exists. Presentation/focus/reflow/keyboard/AX fixtures **compiled only**, with native checks open below. |
+| Non-goals / regression boundary | No scraping, embedded HTML/browser, media fetching, recommendation/AI News, read history/bookmarks/notifications/OPML/sync/daemon/authenticated feeds or added dependency/entitlement. Existing Learning draft/navigation/close guards and Projects activation wiring remain; live regression execution belongs to F13. No export/release work or schema reset was introduced. |
+
+Existing evidence was enumerated before claiming captures missing: `/private/tmp/kontrol-f12-derived` has **no before/after capture directory or native News PNG/JPEG pair** (only unrelated Yams `yams.jpg`); no F12 capture/evidence tree was found in the `/private/tmp` search. Supplemental HTML and M35–M37 reference PNGs exist but are not native captures. Thus no matching rendered-image comparison is possible or claimed at this gate. No F12 human attestation was supplied.
+
+### F12 open F13 acceptance (not passed by this gate)
+
+- In a reserved active, uncontended GUI session **execute** all `NewsPresentationTests`, affected `SettingsSceneTests` and hosted `AppShellTests`/Learning navigation-draft-close and Projects activation regressions, then **`make test DERIVED_DATA=/tmp/kontrol-f13-derived`**. Record counts, failures/skips, commands and result bundles; keep all earlier feature failures/skips and F11's fixture-snapshot concern open until explicitly resolved.
+- Capture **native rendered** M35 headlines, M36 management/editor and M37 cached/offline, plus every [supplemental F12 state](.mockups/flows/f12-topic-news/index.html), at **1000×700 and 1440×940 points**. Capture scrollable compact native Settings at **520×340**, including enlarged text. Compare matching reference/native and before/after captures, recording paths, dimensions and visible differences; HTML/compile-only fixtures do not satisfy this check.
+- Check keyboard-only filters/Read/summary/Refresh, topic selection and enable/Add/Edit/Save/Cancel/removal confirmation; initial editor focus, duplicate-submit prevention, late-cancel/stale-edit recovery and focus return to a surviving control/heading; spoken **VoiceOver** names/roles/state/status, visible focus and target sizes, long endpoint/summary scrolling, **enlarged text and reduced motion** at both desktop sizes and compact Settings.
+- With isolated data in the **signed sandbox app**, perform **online refresh → disconnect → quit/offline relaunch → cached topic filtering → actual default-browser Read**. Test partial/offline/rate-limited failures, validation/save/read/open recovery and confirmed removal, both Settings entry points and multiple windows, truthful last success and unchanged unrelated records. Network CLI checks and injected browser/transport tests are not this journey.
+- Run these runtime/API/SF Symbol checks on **macOS 14** as well as the current host; deployment minimum and macOS 27 compilation do not establish baseline runtime behavior. Release packaging/notarization remains F13 work.

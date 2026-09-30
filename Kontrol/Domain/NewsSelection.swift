@@ -220,7 +220,16 @@ enum NewsSelection {
         var groups: [Int: [Int]] = [:]
         for i in nodes.indices { groups[root(i), default: []].append(i) }
         var result: [State] = []
-        for indices in groups.values {
+        // A GUID move keeps the original ID even after its URL changes. Reserve all
+        // persisted IDs before allocating new groups, so a reissued old URL cannot
+        // steal that identity. Sort groups to keep allocation response-order independent.
+        var reservedIDs = Set(stored.map { $0.article.id })
+        let orderedGroups = groups.values.sorted {
+            let left = $0.flatMap { nodes[$0].contributions.values.map(\.canonicalURL) }.min()!
+            let right = $1.flatMap { nodes[$0].contributions.values.map(\.canonicalURL) }.min()!
+            return left < right
+        }
+        for indices in orderedGroups {
             let members = indices.map { nodes[$0] }
             let existing = members.filter { $0.incomingFeed == nil }
             let firstFetched = members.map(\.article.firstFetchedAt).min()!
@@ -236,12 +245,26 @@ enum NewsSelection {
                     }
                 }
             }
-            let id = (guidOwners.isEmpty ? existing : guidOwners).sorted {
+            let existingID = (guidOwners.isEmpty ? existing : guidOwners).sorted {
                 if $0.article.firstFetchedAt != $1.article.firstFetchedAt {
                     return $0.article.firstFetchedAt < $1.article.firstFetchedAt
                 }
                 return $0.article.id.uuidString < $1.article.id.uuidString
-            }.first?.article.id ?? members.map(\.article.id).min(by: { $0.uuidString < $1.uuidString })!
+            }.first?.article.id
+            let id: UUID
+            if let existingID {
+                id = existingID
+            } else {
+                let canonical = members.flatMap { $0.contributions.values.map(\.canonicalURL) }.min()!
+                var candidate = stableID(canonical)
+                var collision = 0
+                while reservedIDs.contains(candidate) {
+                    collision += 1
+                    candidate = stableID("\(canonical)\u{0}collision:\(collision)")
+                }
+                id = candidate
+                reservedIDs.insert(id)
+            }
             let replaced = Set(members.compactMap(\.incomingFeed))
             // Replace only the refreshed feed's contribution. A shared article must
             // retain the other feeds' own metadata for subsequent removals/edits.
@@ -294,24 +317,23 @@ enum NewsSelection {
                 canonicalURL: chosen.canonicalURL, title: chosen.title,
                 publishedAt: chosen.publishedAt, firstFetchedAt: firstFetched,
                 summary: chosen.summary, sources: sources)
-            // Valid publication time governs age, even for articles first seen long ago.
-            // Only future publication times fall back to immutable first-fetch age.
-            let ageDate = retentionDate(metadata, now: now)
+            // A publication date cannot move retention beyond immutable first fetch,
+            // even once a previously future date becomes past as the clock advances.
+            let ageDate = retentionDate(metadata)
             if ageDate <= now, now.timeIntervalSince(ageDate) <= maximumAge {
                 result.append(State(article: metadata, aliases: aliases, contributions: contributions))
             }
         }
         return result.sorted {
-            let a = retentionDate($0.article, now: now)
-            let b = retentionDate($1.article, now: now)
+            let a = retentionDate($0.article)
+            let b = retentionDate($1.article)
             if a != b { return a > b }
             return $0.article.id.uuidString < $1.article.id.uuidString
         }.prefix(maximumArticles).map { $0 }
     }
 
-    private static func retentionDate(_ article: ArticleMetadata, now: Date) -> Date {
-        guard let published = article.publishedAt, published <= now else { return article.firstFetchedAt }
-        return published
+    private static func retentionDate(_ article: ArticleMetadata) -> Date {
+        min(article.publishedAt ?? article.firstFetchedAt, article.firstFetchedAt)
     }
 
     private static func reliableGUID(_ value: String?) -> String? {
