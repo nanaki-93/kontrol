@@ -3038,3 +3038,145 @@ store cleanup occurred. No dependency pin, checkout, entitlement, schema, fixtur
 external project, workflow state or plan checkbox changed. Changes remain
 uncommitted for review. A13/S13/B13/D13 remain separate mandatory gates, not
 satisfied by unsigned packaging verification. **No remaining Step 5.3 blockers.**
+
+## F13 Step 5.4 — Executable release and installation runbook (2026-09-30, 18:29 UTC)
+
+Confirmed the first top-level incomplete item is **Step 5.4**, matching runner
+**20/27**. Read SPEC, ANALYSIS, PLAN and the complete task-20 cumulative checklist;
+there were no prior findings. Initial worktree/index were clean. Repository/docs
+and direct ancestor searches found no applicable `AGENTS.md`; no submodule was
+listed. Changed only new [release runbook](release.md) and this appended ledger.
+No workflow/plan state, app source/configuration, dependency, fixture or external
+project changed. Changes are uncommitted for review; the runner owns approved-task
+commits.
+
+Base revision: **`f0f59a5610172bcbfa8eb54a0fe9b8c1e2aed0f6`**. Evidence root:
+**`/tmp/kontrol-f13-release-evidence.8fb8jz/`**. Environment: arm64 macOS **27.0
+(26A428)**, Xcode **27.0 (27A266a)**, Apple Swift **6.4**,
+`/Applications/Xcode.app/Contents/Developer`; project remains Swift 5/macOS 14.
+`launch.log` records the environment/project commands and complete execution;
+`source-revision.txt`, `worktree.txt` and `source.patch` record the starting source
+identity. New runbook is copied to `release.md`, SHA-256
+**`2227c9c0cfaa7502f17543e18c74c09b355cf87e986107e162fa80572953107c`**.
+The final documentation patch/file hashes are retained separately; no release
+artifact or native-runtime approval is inferred from this source identity.
+
+### Documented acceptance and command audit
+
+- Runbook covers unsigned development/static inspection, unsigned packaging smoke,
+  isolated account/data prerequisites, locally ad-hoc signed S13, actual signature/
+  entitlements/hardened-runtime inspection, Developer ID archive, accepted-only
+  notarization, staple/Gatekeeper, final ZIP/checksum/extraction and inspection,
+  fresh install and non-destructive update/recovery. It identifies actual local
+  storage, sidecars, Keychain/external-folder boundaries and export limitations.
+- All externally supplied signing variables and every line of the required D13
+  sequence match SPEC **verbatim and in order**. Extra bundle/identity inspections
+  and a saved checksum surround the original sequence. A fail-fast Bash subshell
+  stops on any command failure; the JSON guard precedes stapling and requires
+  exactly `Accepted`. No embedded identity/team/credential values or privacy/
+  Gatekeeper bypass is provided. Project inspection confirms unsigned defaults,
+  external signing overrides, Release hardening/base-entitlement injection NO and
+  the existing four narrow source permissions.
+- All **eight** Bash blocks pass `bash -n`; every embedded Python body compiles.
+  The unchanged notarization guard was executed against synthetic Accepted,
+  Invalid, In Progress, missing-status and malformed JSON: Accepted exits **0**;
+  all four unacceptable cases exit **1**, as required. Empty external prerequisites
+  exit **1** before artifact creation/signing. These expected negative results are
+  guard tests, **not real notarization submissions or distribution acceptance**.
+  Exact fixtures/output: `guard-*.json`, `guard-*.log`,
+  `missing-prerequisite-guard.log`. All new Markdown links resolve locally.
+
+### Exact executed commands and results
+
+The first four runbook Bash blocks were extracted verbatim, with only `set -x`
+and stdout/stderr logging added after evidence creation. They ran in one Bash
+process, so the documented variables/helpers have their required scope. The
+executed script and all eight extracted blocks are retained in evidence. Commands
+from repository root (all final checks exit **0**):
+
+```bash
+BOOTSTRAP=/tmp/kontrol-f13-step5-4-launch.uSQuDq
+EVIDENCE=/tmp/kontrol-f13-release-evidence.8fb8jz
+bash -n "$BOOTSTRAP/all-blocks.bash"
+bash "$BOOTSTRAP/unsigned-static.bash" > "$BOOTSTRAP/launch.log" 2>&1
+# The script executes the following documented build/static commands and the
+# complete verbatim Python configuration/bundle inspectors in docs/release.md:
+# make build DERIVED_DATA=/tmp/kontrol-f13-derived
+# make build CONFIGURATION=Release DERIVED_DATA=/tmp/kontrol-f13-release-build
+# xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+#   -configuration Debug -destination 'platform=macOS' \
+#   -derivedDataPath /tmp/kontrol-f13-derived CODE_SIGNING_ALLOWED=NO build-for-testing
+# xcodebuild -showBuildSettings -json -project Kontrol.xcodeproj \
+#   -scheme Kontrol -configuration Release > "$EVIDENCE/Release-settings.json"
+# plutil -lint Kontrol.xcodeproj/project.pbxproj Kontrol/Kontrol.entitlements
+# plutil -p /tmp/kontrol-f13-release-build/Build/Products/Release/Kontrol.app/Contents/Info.plist
+# python3 -m json.tool Kontrol/Resources/{starter-catalog,generation-objectives,default-feeds}.json
+#   (three separate calls, output discarded, as shown in the runbook loop)
+# python3 -m json.tool Kontrol.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+# inspect_bundle /tmp/kontrol-f13-derived/Build/Products/Debug/Kontrol.app Debug
+# inspect_bundle /tmp/kontrol-f13-release-build/Build/Products/Release/Kontrol.app Release
+python3 "$EVIDENCE/audit.py" > "$EVIDENCE/audit.log" 2>&1
+git diff --check
+```
+
+Debug and Release **BUILD SUCCEEDED**, hosted **TEST BUILD SUCCEEDED**. No XCTest
+selection was required or executed; no method count or xcresult is claimed.
+`unsigned-static.log` retains all expanded commands and results,
+`Release-settings.json` retains effective signing/metadata settings, and
+`audit.log` records sequence/guard/syntax/link assertions. Built metadata is
+**1.0/1**, bundle ID **com.kontrol.app**, minimum OS **14.0**. All four actual
+resources/notices in Debug, Release and the extracted unsigned app match source
+bytes and the JSON parses. Release binaries contain neither Debug recovery
+injection marker. The existing AppIntents metadata-extraction warning and multiple
+matching macOS destination messages are preserved in raw logs, not hidden.
+
+The runbook's unsigned packaging block also executed in that same script:
+
+```bash
+SMOKE_DIR=/tmp/kontrol-f13-unsigned-package.2mlRXx
+APP=/tmp/kontrol-f13-release-build/Build/Products/Release/Kontrol.app
+ditto -c -k --keepParent "$APP" "$SMOKE_DIR/Kontrol-unsigned.zip"
+shasum -a 256 "$SMOKE_DIR/Kontrol-unsigned.zip" > "$SMOKE_DIR/Kontrol-unsigned.zip.sha256"
+shasum -a 256 -c "$SMOKE_DIR/Kontrol-unsigned.zip.sha256"
+ditto -x -k "$SMOKE_DIR/Kontrol-unsigned.zip" "$SMOKE_DIR/extracted"
+inspect_bundle "$SMOKE_DIR/extracted/Kontrol.app" Release
+diff -qr "$APP" "$SMOKE_DIR/extracted/Kontrol.app"
+```
+
+All exit **0**. ZIP SHA-256:
+**`6a70927bee0d208ecc8b603357890728d38657e6e58cafd3235c6f5c154bffdd`**;
+checksum verification reports **OK**; complete extracted bundle comparison has
+**no differences**. Verified extracted notices path:
+`/tmp/kontrol-f13-unsigned-package.2mlRXx/extracted/Kontrol.app/Contents/Resources/ThirdPartyNotices.txt`,
+2693 bytes, SHA-256
+`52c4773d7710814fbf6b403fbb911b36daad3d0972a585d2664766c60e6b1d71`.
+The extracted Release executable hash remains
+`d5c9e15c885f30394f482d7fe2cc88a4bc8688eaaa328d4de019ce1500c9d944`.
+This is an **unsigned packaging smoke**, not a distributable or actual signature
+inspection. The unsigned archive/extraction is retained, not installed or launched.
+
+An initial auxiliary extraction command failed before builds: its regex counted
+only seven non-indented Bash fences instead of eight including the indented
+installation block (`AssertionError: 7`); the subsequent attempted `bash -n` on
+its absent output exited **127**. Fix: recognize indented fences and dedent them.
+The repaired extractor found all eight blocks; all syntax, builds and final audits
+passed without changing the documented commands to bypass a failure. Bootstrap
+scripts/logs remain at the exact path above. A later post-ledger audit exited **1**
+when its `git diff --check` subprocess exited **2** for an added blank EOF line in
+this ledger. Removing that extra blank line repaired the whitespace failure;
+`audit-post-ledger-failed.log` preserves it and the final audit/check reran.
+
+### Gate status and remaining prerequisites
+
+**No Step 5.4 implementation/verification blocker.** A13 still requires the
+reserved desktop, actual rebuilt-host Accessibility authorization and independent
+rendering/keyboard/VoiceOver observations. S13 and native install/update require
+an authorized isolated account/data and desktop. B13 requires actual macOS 14
+and current-runtime journeys; this newer-host static run is not either native
+journey. D13 requires external authorized Developer ID team/identity/notary profile
+and final extracted-artifact native evidence. None of those authorizations/inputs
+were supplied for this documentation task; signed/notary/Gatekeeper/native install
+commands were **not executed**. They remain explicit blockers to their later gates,
+not passes or reasons to skip independent documentation verification.
+No production store, test store, Keychain, external folder or native desktop was
+accessed; no fixture cleanup/reset occurred. Historical evidence is unchanged.
