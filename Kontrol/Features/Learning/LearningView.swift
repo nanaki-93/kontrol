@@ -10,6 +10,7 @@ struct LearningView: View {
     var aiSettings: AISettingsStore? = nil
     var generationRepository: (any CatalogRepository)? = nil
     @State private var selectedTopicID: String?
+    @State private var previewSelection = LearningPreviewSelection()
     @State private var entryError: LessonExperienceError?
     @State private var dismissal: DismissalConfirmation?
     @State private var showingDismissal = false
@@ -19,6 +20,41 @@ struct LearningView: View {
     @FocusState private var focusedDismissLessonID: String?
 
     private static let topicOrder = ["go", "java", "design", "perf", "security"]
+
+    /// The accepted topic and committed slots, not a row index, supply preview identity.
+    struct LearningPreviewSelection: Equatable {
+        var topicID: String? = nil
+        var lessonID: String? = nil
+
+        func resolved(for topicID: String, choices: [LessonDefinitionSnapshot]) -> Self {
+            let retained = self.topicID == topicID && choices.contains { $0.id == lessonID }
+            return Self(topicID: topicID, lessonID: retained ? lessonID : choices.first?.id)
+        }
+
+        func selecting(_ id: String, from projection: PreviewProjection) -> Self {
+            guard projection.choices.contains(where: { $0.id == id }),
+                  projection.selection.topicID == topicID else { return self }
+            return Self(topicID: topicID, lessonID: id)
+        }
+    }
+
+    struct PreviewProjection {
+        let selection: LearningPreviewSelection
+        let choices: [LessonDefinitionSnapshot]
+        let lesson: LessonDefinitionSnapshot?
+
+        var actionLessonID: String? { lesson?.id }
+    }
+
+    static func preview(for acceptedTopicID: String?, selection: LearningPreviewSelection,
+                        state: LearningCatalogReadState) -> PreviewProjection? {
+        guard state.isAuthoritative, let snapshot = state.snapshot,
+              let topic = topicProjection(for: acceptedTopicID, in: snapshot)?.selected else { return nil }
+        let choices = choices(for: topic.id, in: snapshot)
+        let resolved = selection.resolved(for: topic.id, choices: choices)
+        return PreviewProjection(selection: resolved, choices: choices,
+                                 lesson: choices.first { $0.id == resolved.lessonID })
+    }
 
     /// Keep the entire assignment captured when confirmation opens, including assignedAt.
     struct DismissalConfirmation {
@@ -125,11 +161,7 @@ struct LearningView: View {
                 } else {
                     // The shell owns vertical scrolling. ViewThatFits sees its finite width
                     // without requesting an unbounded-height GeometryReader inside it.
-                    ViewThatFits(in: .horizontal) {
-                        catalogContent(snapshot, compact: false)
-                            .frame(minWidth: 720)
-                        catalogContent(snapshot, compact: true)
-                    }
+                    catalogContent(snapshot)
                 }
             }
             Spacer(minLength: 0)
@@ -183,34 +215,62 @@ struct LearningView: View {
         }
     }
 
-    @ViewBuilder private func catalogContent(_ snapshot: LearningCatalogSnapshot, compact: Bool) -> some View {
+    @ViewBuilder private func catalogContent(_ snapshot: LearningCatalogSnapshot) -> some View {
         if let navigation {
+            // Observe the selection outside ViewThatFits so its candidates share
+            // the same selection for each layout pass.
             RoutedLearningCatalog(navigation: navigation) { selectedID in
-                catalog(snapshot, selectedID: selectedID, compact: compact)
+                responsiveCatalog(snapshot, selectedID: selectedID)
             }
         } else {
-            catalog(snapshot, selectedID: selectedTopicID, compact: compact)
+            responsiveCatalog(snapshot, selectedID: selectedTopicID)
+        }
+    }
+
+    private func responsiveCatalog(_ snapshot: LearningCatalogSnapshot, selectedID: String?) -> some View {
+        ViewThatFits(in: .horizontal) {
+            catalog(snapshot, selectedID: selectedID, compact: false)
+                .frame(minWidth: 720)
+            catalog(snapshot, selectedID: selectedID, compact: true)
+        }
+        // Recreate the selected layout when the topic changes rather than reusing a
+        // measured candidate with the prior topic's lesson rows.
+        .id(selectedID)
+        .onAppear {
+            if let resolved = Self.preview(for: selectedID, selection: previewSelection,
+                                           state: store.state)?.selection {
+                previewSelection = resolved
+            }
+        }
+        // Observe outside the topic-keyed layout: a reconstructed candidate cannot
+        // deliver its first onChange. Retain the last identity through failed reads.
+        .onChange(of: Self.preview(for: selectedID, selection: previewSelection,
+                                   state: store.state)?.selection) { _, resolved in
+            if let resolved { previewSelection = resolved }
         }
     }
 
     @ViewBuilder private func catalog(_ snapshot: LearningCatalogSnapshot, selectedID: String?, compact: Bool) -> some View {
-        if let projection = Self.topicProjection(for: selectedID, in: snapshot) {
-            catalog(projection.topics, selected: projection.selected, snapshot: snapshot, compact: compact)
+        if let projection = Self.topicProjection(for: selectedID, in: snapshot),
+           let preview = Self.preview(for: selectedID, selection: previewSelection, state: store.state) {
+            catalog(projection.topics, selected: projection.selected, snapshot: snapshot,
+                    preview: preview, compact: compact)
         }
     }
 
     @ViewBuilder private func catalog(_ topics: [LearningTopicSnapshot], selected: LearningTopicSnapshot,
-                                      snapshot: LearningCatalogSnapshot, compact: Bool) -> some View {
+                                      snapshot: LearningCatalogSnapshot, preview: PreviewProjection,
+                                      compact: Bool) -> some View {
         if compact {
             VStack(alignment: .leading, spacing: AppMetrics.space4) {
                 topicList(topics, selected: selected, compact: true)
-                lessonList(selected, snapshot: snapshot)
+                lessonList(selected, snapshot: snapshot, preview: preview)
             }
         } else {
             HStack(alignment: .top, spacing: AppMetrics.space6) {
                 topicList(topics, selected: selected, compact: false)
                     .frame(width: 190, alignment: .leading)
-                lessonList(selected, snapshot: snapshot)
+                lessonList(selected, snapshot: snapshot, preview: preview)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
@@ -262,8 +322,9 @@ struct LearningView: View {
         }
     }
 
-    private func lessonList(_ selected: LearningTopicSnapshot, snapshot: LearningCatalogSnapshot) -> some View {
-        let choices = Self.choices(for: selected.id, in: snapshot)
+    private func lessonList(_ selected: LearningTopicSnapshot, snapshot: LearningCatalogSnapshot,
+                            preview: PreviewProjection) -> some View {
+        let choices = preview.choices
         return VStack(alignment: .leading, spacing: AppMetrics.space4) {
                 SectionHeader(selected.name, metadata: "\(choices.count) available")
                 if choices.count < 4 {
@@ -390,13 +451,22 @@ struct LearningView: View {
     }
 }
 
-/// The catalog's routed selection must be observed at the point where it is rendered,
-/// even when the hosting parent does not observe NavigationStore.
+/// @Published emits in willSet: reading selectedTopicID while SwiftUI processes that
+/// publication can return the *previous* topic. Render the emitted value instead of
+/// re-reading the store, including when the parent does not observe NavigationStore.
 private struct RoutedLearningCatalog<Content: View>: View {
     @ObservedObject var navigation: NavigationStore
+    @State private var renderedTopicID: String?
     let content: (String?) -> Content
 
+    init(navigation: NavigationStore, content: @escaping (String?) -> Content) {
+        self.navigation = navigation
+        self.content = content
+        _renderedTopicID = State(initialValue: navigation.selectedTopicID)
+    }
+
     var body: some View {
-        content(navigation.selectedTopicID)
+        content(renderedTopicID)
+            .onReceive(navigation.$selectedTopicID) { renderedTopicID = $0 }
     }
 }
