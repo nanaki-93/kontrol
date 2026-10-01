@@ -150,6 +150,33 @@ struct ProjectsView: View {
                                  candidates: candidates)
     }
 
+    /// Admit a browse event only for the project that rendered its button and a
+    /// candidate still present in that project's current accepted inspection.
+    static func selectingPreview(_ captured: ProjectFeatureIdentity, selectedProjectID: UUID?,
+                                 selection: ProjectPreviewSelection, row: ProjectRowState?) -> ProjectPreviewSelection? {
+        guard selectedProjectID == captured.projectID,
+              let projection = preview(for: selectedProjectID, selection: selection, row: row),
+              projection.currentIdentity != nil,
+              projection.candidates.contains(where: { $0.id == captured.featureID }) else { return nil }
+        return projection.selection.selecting(captured.featureID, from: projection)
+    }
+
+    /// The candidate and its body both come from the same accepted inspection.
+    /// Browsing this projection does not inspect files, enter detail, or mutate the store.
+    static func previewFeature(in projection: PreviewProjection, row: ProjectRowState) -> ProjectFeature? {
+        guard projection.currentIdentity?.projectID == row.reference.id,
+              !row.isRefreshing, row.refreshFailure == nil, !row.isRetainedInspection,
+              let inspection = row.inspection, let id = projection.currentIdentity?.featureID,
+              recommendations(row).contains(where: { $0.id == id }) else { return nil }
+        return inspection.features.first { $0.id == id }
+    }
+
+    static func previewExcerpt(_ body: String) -> String? {
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return trimmed.count <= 600 ? trimmed : String(trimmed.prefix(599)) + "…"
+    }
+
     private var previewProjection: PreviewProjection? {
         Self.preview(for: store.selectedID, selection: previewSelection, row: selectedRow)
     }
@@ -578,6 +605,10 @@ struct ProjectsView: View {
             .focused($navigationFocus, equals: .projectHeading(row.reference.id))
             .accessibilityAddTraits(.isHeader)
             .accessibilityIdentifier("projects-selected")
+            Text(Self.status(row))
+                .appTypography(.metadata)
+                .foregroundStyle(AppColors.textSecondary)
+                .accessibilityIdentifier("projects-selected-status")
             if row.isRefreshing {
                 Text("Refreshing project · showing last inspected information until the read completes")
                     .appTypography(.body)
@@ -608,35 +639,26 @@ struct ProjectsView: View {
                 case .unavailable:
                     unavailableState(row, guidance: Self.unavailableGuidance(inspection))
                 case .candidatesAvailable:
-                    SectionHeader("Next features")
-                    ForEach(selection.candidates, id: \.id) { candidate in
-                        if let feature = inspection.features.first(where: { $0.id == candidate.id }) {
-                            NextActionCard(feature.title,
-                                           metadata: Self.cardMetadata(feature, reason: candidate.reason),
-                                           status: StatusPill(feature.status.rawValue.capitalized, kind: .success)) {
-                                ActionButton("View feature", variant: .primary) {
-                                    // Recheck freshness at activation, not just when the card was built.
-                                    guard let current = store.rows.first(where: { $0.reference.id == row.reference.id }),
-                                          !current.isRetainedInspection else { return }
-                                    featureOrigin = .card(row.reference.id, candidate.id)
-                                    store.selectFeature(candidate.id, in: row.reference.id)
+                    if let projection = Self.preview(for: row.reference.id, selection: previewSelection, row: row) {
+                        SectionHeader("Next features")
+                        ViewThatFits(in: .horizontal) {
+                            HStack(alignment: .top, spacing: AppMetrics.space6) {
+                                candidateList(projection, inspection: inspection, projectID: row.reference.id)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                if let feature = Self.previewFeature(in: projection, row: row),
+                                   let candidate = projection.candidates.first(where: { $0.id == feature.id }) {
+                                    candidatePreview(feature, candidate: candidate, row: row)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
                                 }
-                                .focused($navigationFocus, equals: .card(row.reference.id, candidate.id))
-                                .accessibilityLabel(Self.cardLabel(feature))
-                                .accessibilityIdentifier("project-feature-open-\(candidate.id)")
-                                ActionButton(ProjectFeatureDetailView.completionTitle(for: candidate.id,
-                                                                                       state: row.completion),
-                                             isEnabled: Self.completionEnabled(candidate.id, row: row,
-                                                 store: store, isReconnecting: reconnectingID == row.reference.id)) {
-                                    complete(candidate.id, in: row.reference.id,
-                                             origin: .cardCompletion(row.reference.id, candidate.id))
-                                }
-                                .focused($navigationFocus, equals: .cardCompletion(row.reference.id, candidate.id))
-                                .accessibilityLabel(ProjectFeatureDetailView.completionLabel(for: feature,
-                                                                                             state: row.completion))
-                                .accessibilityIdentifier("project-feature-complete-\(candidate.id)")
                             }
-                            .accessibilityIdentifier("project-feature-card-\(candidate.id)")
+                            .frame(minWidth: 820)
+                            VStack(alignment: .leading, spacing: AppMetrics.space4) {
+                                candidateList(projection, inspection: inspection, projectID: row.reference.id)
+                                if let feature = Self.previewFeature(in: projection, row: row),
+                                   let candidate = projection.candidates.first(where: { $0.id == feature.id }) {
+                                    candidatePreview(feature, candidate: candidate, row: row)
+                                }
+                            }
                         }
                     }
                 case .validationExclusions:
@@ -662,6 +684,95 @@ struct ProjectsView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityIdentifier("projects-workspace")
+    }
+
+    private func candidateList(_ projection: PreviewProjection, inspection: ProjectInspection,
+                               projectID: UUID) -> some View {
+        VStack(alignment: .leading, spacing: AppMetrics.space2) {
+            ForEach(projection.candidates, id: \.id) { candidate in
+                if let feature = inspection.features.first(where: { $0.id == candidate.id }) {
+                    let selected = projection.selection.featureID == candidate.id
+                    let captured = ProjectFeatureIdentity(projectID: projectID, featureID: candidate.id)
+                    Button {
+                        // Pure browse selection; never routes, reads a file, or writes progress.
+                        guard let next = Self.selectingPreview(captured, selectedProjectID: store.selectedID,
+                                                               selection: previewSelection, row: selectedRow) else { return }
+                        previewSelection = next
+                    } label: {
+                        VStack(alignment: .leading, spacing: AppMetrics.space1) {
+                            Text(feature.title).appTypography(.body)
+                            Text("\(feature.priority.rawValue) priority · \(feature.effort.rawValue) effort · \(feature.status.rawValue)")
+                                .appTypography(.metadata)
+                                .foregroundStyle(AppColors.textSecondary)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: AppMetrics.preferredTarget, alignment: .leading)
+                        .padding(AppMetrics.space3)
+                        .background(selected ? AppColors.raisedSurface : AppColors.surface)
+                        .clipShape(RoundedRectangle(cornerRadius: AppMetrics.smallRadius))
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Preview feature \(feature.title)")
+                    .accessibilityValue("\(selected ? "Selected" : "Not selected") · \(Self.cardMetadata(feature, reason: candidate.reason)) · \(feature.status.rawValue)")
+                    .accessibilityAddTraits(selected ? .isSelected : [])
+                    .accessibilityIdentifier("project-feature-choice-\(candidate.id)")
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func candidatePreview(_ feature: ProjectFeature, candidate: FeatureCandidate,
+                                  row: ProjectRowState) -> some View {
+        let id = row.reference.id
+        return VStack(alignment: .leading, spacing: AppMetrics.space3) {
+            SectionHeader("Preview")
+            Text(feature.title).appTypography(.section)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("\(feature.status.rawValue.capitalized) · \(Self.cardMetadata(feature, reason: candidate.reason))")
+                .appTypography(.metadata)
+                .foregroundStyle(AppColors.textSecondary)
+            if let excerpt = Self.previewExcerpt(feature.body) {
+                Text(verbatim: excerpt).appTypography(.body)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("project-feature-excerpt")
+            }
+            // Existing guarded commands remain available until exact command admission
+            // and placement are updated in Step 1.2.
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: AppMetrics.space2) { previewActions(feature, row: row, projectID: id) }
+                VStack(alignment: .leading, spacing: AppMetrics.space2) {
+                    previewActions(feature, row: row, projectID: id)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(AppMetrics.space4)
+        .background(AppColors.surface)
+        .clipShape(RoundedRectangle(cornerRadius: AppMetrics.smallRadius))
+        .accessibilityIdentifier("project-feature-preview-\(feature.id)")
+    }
+
+    private func previewActions(_ feature: ProjectFeature, row: ProjectRowState, projectID: UUID) -> some View {
+        Group {
+            ActionButton("View feature", variant: .primary) {
+                guard let current = store.rows.first(where: { $0.reference.id == projectID }),
+                      !current.isRetainedInspection else { return }
+                featureOrigin = .card(projectID, feature.id)
+                store.selectFeature(feature.id, in: projectID)
+            }
+            .focused($navigationFocus, equals: .card(projectID, feature.id))
+            .accessibilityLabel(Self.cardLabel(feature))
+            .accessibilityIdentifier("project-feature-open-\(feature.id)")
+            ActionButton(ProjectFeatureDetailView.completionTitle(for: feature.id, state: row.completion),
+                         isEnabled: Self.completionEnabled(feature.id, row: row, store: store,
+                             isReconnecting: reconnectingID == projectID)) {
+                complete(feature.id, in: projectID, origin: .cardCompletion(projectID, feature.id))
+            }
+            .focused($navigationFocus, equals: .cardCompletion(projectID, feature.id))
+            .accessibilityLabel(ProjectFeatureDetailView.completionLabel(for: feature, state: row.completion))
+            .accessibilityIdentifier("project-feature-complete-\(feature.id)")
+        }
     }
 
     private func noReadyState(_ selection: FeatureSelection, inspection: ProjectInspection) -> some View {

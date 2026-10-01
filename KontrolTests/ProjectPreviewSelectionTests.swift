@@ -8,10 +8,11 @@ final class ProjectPreviewSelectionTests: XCTestCase {
     private typealias Projection = ProjectsView.PreviewProjection
 
     private func feature(_ id: String, status: ProjectFeatureStatus = .ready,
-                         priority: ProjectFeaturePriority = .medium) -> ProjectFeature {
+                         priority: ProjectFeaturePriority = .medium,
+                         body: String? = nil) -> ProjectFeature {
         ProjectFeature(id: id, title: "Feature \(id)", status: status, priority: priority,
                        effort: .small, dependsOn: [], areas: [], completedAt: nil,
-                       body: "Body \(id)", sourcePath: ".kontrol/features/\(id).md")
+                       body: body ?? "Body \(id)", sourcePath: ".kontrol/features/\(id).md")
     }
 
     private func row(_ id: UUID, _ features: [ProjectFeature], excluded: [String] = []) -> ProjectRowState {
@@ -57,6 +58,29 @@ final class ProjectPreviewSelectionTests: XCTestCase {
         XCTAssertNotEqual(duplicate.currentIdentity, next.currentIdentity)
     }
 
+    func testStaleCandidateEventCannotSelectSameFeatureIDInAnotherProject() {
+        let a = UUID(), b = UUID()
+        let oldRow = row(a, [feature("shared"), feature("other")])
+        let newRow = row(b, [feature("first", priority: .high), feature("shared")])
+        let old = preview(a, .init(), oldRow)
+        let captured = ProjectFeatureIdentity(projectID: a, featureID: "shared")
+        let current = preview(b, old.selection, newRow)
+        XCTAssertEqual(current.currentIdentity?.featureID, "first")
+        XCTAssertNil(ProjectsView.selectingPreview(captured, selectedProjectID: b,
+                                                  selection: current.selection, row: newRow),
+                     "An event from the old button must not select the duplicate ID in the new project")
+        XCTAssertNil(ProjectsView.selectingPreview(captured, selectedProjectID: b,
+                                                  selection: old.selection, row: newRow),
+                     "Also reject the event before the project-switch selection observer runs")
+        XCTAssertEqual(preview(b, current.selection, newRow).currentIdentity?.featureID, "first")
+        let newCaptured = ProjectFeatureIdentity(projectID: b, featureID: "shared")
+        let selected = ProjectsView.selectingPreview(newCaptured, selectedProjectID: b,
+                                                    selection: current.selection, row: newRow)
+        XCTAssertEqual(selected?.featureID, "shared", "A current-project browse event still works")
+        XCTAssertNil(ProjectsView.selectingPreview(newCaptured, selectedProjectID: b,
+                                                  selection: current.selection, row: refreshing(newRow)))
+    }
+
     func testCandidateRemovalFallsBackThenAuthoritativeEmptyClearsIdentity() {
         let id = UUID()
         let initial = preview(id, .init(), row(id, [feature("a"), feature("b")]))
@@ -87,6 +111,49 @@ final class ProjectPreviewSelectionTests: XCTestCase {
             XCTAssertEqual(chosen.selecting("a", from: result), chosen)
         }
         XCTAssertEqual(preview(id, chosen, current).currentIdentity?.featureID, "b")
+    }
+
+    func testExcerptBoundariesWhitespaceAndGraphemeClusters() {
+        XCTAssertNil(ProjectsView.previewExcerpt(" \t\n  "))
+        for count in [599, 600] {
+            let body = String(repeating: "a", count: count)
+            XCTAssertEqual(ProjectsView.previewExcerpt("\n \(body) \t"), body)
+        }
+        let long = String(repeating: "a", count: 601)
+        let excerpt = ProjectsView.previewExcerpt(long)
+        XCTAssertEqual(excerpt?.count, 600)
+        XCTAssertEqual(excerpt, String(repeating: "a", count: 599) + "…")
+        let grapheme = "👩🏽‍💻"
+        let unicode = String(repeating: grapheme, count: 599) + "e\u{301}" + "x"
+        XCTAssertEqual(unicode.count, 601)
+        XCTAssertEqual(ProjectsView.previewExcerpt(unicode), String(repeating: grapheme, count: 599) + "…")
+        XCTAssertEqual(ProjectsView.previewExcerpt(String(repeating: grapheme, count: 600))?.count, 600)
+    }
+
+    func testSelectedPreviewUsesCandidateOrderAndLiteralAcceptedBodyWithoutChangingRoute() throws {
+        let id = UUID()
+        let markup = "**bold** [link](https://example.invalid) <script>alert(1)</script>"
+        let accepted = row(id, [feature("low", priority: .low),
+                                feature("high", priority: .high, body: markup), feature("mid")],
+                           excluded: [".kontrol/features/invalid.md"])
+        let first = preview(id, .init(), accepted)
+        XCTAssertEqual(first.candidates.map(\.id), ["high", "mid", "low"])
+        XCTAssertEqual(first.currentIdentity?.featureID, "high")
+        let shown = try XCTUnwrap(ProjectsView.previewFeature(in: first, row: accepted))
+        XCTAssertEqual(shown.title, "Feature high")
+        XCTAssertEqual(shown.priority, .high)
+        XCTAssertEqual(shown.effort, .small)
+        XCTAssertEqual(shown.status, .ready)
+        XCTAssertEqual(ProjectsView.previewExcerpt(shown.body), markup,
+                       "Markup remains literal text; preview does not parse or follow links")
+        XCTAssertEqual(accepted.inspection?.featureCount, .partial(completed: 0, total: 3, excludedFiles: 1))
+        let browsed = preview(id, first.selection.selecting("mid", from: first), accepted)
+        XCTAssertEqual(ProjectsView.previewFeature(in: browsed, row: accepted)?.body, "Body mid")
+        XCTAssertEqual(first.currentIdentity?.featureID, "high", "Browsing does not change the source projection")
+        XCTAssertEqual(accepted.inspection?.features.map(\.id), ["low", "high", "mid"])
+        var refreshing = accepted
+        refreshing.isRefreshing = true
+        XCTAssertNil(ProjectsView.previewFeature(in: first, row: refreshing))
     }
 
     private func rowWithoutInspection(_ row: ProjectRowState) -> ProjectRowState {

@@ -504,7 +504,9 @@ final class ProjectsPresentationTests: XCTestCase {
         let rows = ids.compactMap { id in store.rows.first { $0.reference.id == id } }
         XCTAssertEqual(rows.count, 4)
         XCTAssertEqual(rows.map { ProjectsView.recommendations($0).count }, [1, 3, 1, 1])
-        XCTAssertEqual(ProjectsView.recommendations(rows[1]).map(\.id), ["a", "m", "z"])
+        let projection = try XCTUnwrap(ProjectsView.preview(for: ids[1], selection: .init(), row: rows[1]))
+        XCTAssertEqual(projection.candidates.map(\.id), ["a", "m", "z"])
+        XCTAssertEqual(ProjectsView.previewFeature(in: projection, row: rows[1])?.title, "Disk title a")
         XCTAssertEqual(ProjectsView.cardMetadata(three.features[2], reason: .dependenciesComplete),
                        "medium priority · small effort · Ready · dependency complete")
         XCTAssertEqual(ProjectDetailsView.progress(partial),
@@ -528,6 +530,8 @@ final class ProjectsPresentationTests: XCTestCase {
         let stale = try XCTUnwrap(store.rows.first { $0.reference.id == ids[3] })
         XCTAssertEqual(stale.refreshFailure, .inspection(.inconsistentRead))
         XCTAssertTrue(stale.isRetainedInspection)
+        XCTAssertNil(ProjectsView.previewFeature(in: projection, row: stale),
+                     "A retained inspection cannot supply a current preview")
         XCTAssertTrue(ProjectsView.recommendations(stale).isEmpty,
                       "Retained suggestions cannot be opened as current")
         store.select(ids[3])
