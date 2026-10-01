@@ -44,6 +44,15 @@ struct LearningView: View {
         }
     }
 
+    /// A read-only projection of ordered topics and the current (or fallback) topic.
+    /// An empty catalog has no selection; resolving never persists a fallback ID.
+    static func topicProjection(for selectedID: String?, in snapshot: LearningCatalogSnapshot)
+        -> (topics: [LearningTopicSnapshot], selected: LearningTopicSnapshot)? {
+        let topics = orderedTopics(in: snapshot)
+        guard let selected = topics.first(where: { $0.id == selectedID }) ?? topics.first else { return nil }
+        return (topics, selected)
+    }
+
     static func choices(for topicID: String, in snapshot: LearningCatalogSnapshot) -> [LessonDefinitionSnapshot] {
         let definitions = Dictionary(uniqueKeysWithValues: snapshot.definitions.map { ($0.id, $0) })
         return snapshot.slots.filter { $0.topicID == topicID }
@@ -117,9 +126,9 @@ struct LearningView: View {
                     // The shell owns vertical scrolling. ViewThatFits sees its finite width
                     // without requesting an unbounded-height GeometryReader inside it.
                     ViewThatFits(in: .horizontal) {
-                        catalog(snapshot, compact: false)
+                        catalogContent(snapshot, compact: false)
                             .frame(minWidth: 720)
-                        catalog(snapshot, compact: true)
+                        catalogContent(snapshot, compact: true)
                     }
                 }
             }
@@ -174,9 +183,24 @@ struct LearningView: View {
         }
     }
 
-    @ViewBuilder private func catalog(_ snapshot: LearningCatalogSnapshot, compact: Bool) -> some View {
-        let topics = Self.orderedTopics(in: snapshot)
-        let selected = topics.first { $0.id == (navigation?.selectedTopicID ?? selectedTopicID) } ?? topics[0]
+    @ViewBuilder private func catalogContent(_ snapshot: LearningCatalogSnapshot, compact: Bool) -> some View {
+        if let navigation {
+            RoutedLearningCatalog(navigation: navigation) { selectedID in
+                catalog(snapshot, selectedID: selectedID, compact: compact)
+            }
+        } else {
+            catalog(snapshot, selectedID: selectedTopicID, compact: compact)
+        }
+    }
+
+    @ViewBuilder private func catalog(_ snapshot: LearningCatalogSnapshot, selectedID: String?, compact: Bool) -> some View {
+        if let projection = Self.topicProjection(for: selectedID, in: snapshot) {
+            catalog(projection.topics, selected: projection.selected, snapshot: snapshot, compact: compact)
+        }
+    }
+
+    @ViewBuilder private func catalog(_ topics: [LearningTopicSnapshot], selected: LearningTopicSnapshot,
+                                      snapshot: LearningCatalogSnapshot, compact: Bool) -> some View {
         if compact {
             VStack(alignment: .leading, spacing: AppMetrics.space4) {
                 topicList(topics, selected: selected, compact: true)
@@ -361,5 +385,16 @@ struct LearningView: View {
         } catch {
             entryError = (error as? LessonExperienceError) ?? .persistenceFailure
         }
+    }
+}
+
+/// The catalog's routed selection must be observed at the point where it is rendered,
+/// even when the hosting parent does not observe NavigationStore.
+private struct RoutedLearningCatalog<Content: View>: View {
+    @ObservedObject var navigation: NavigationStore
+    let content: (String?) -> Content
+
+    var body: some View {
+        content(navigation.selectedTopicID)
     }
 }

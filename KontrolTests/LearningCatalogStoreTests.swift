@@ -468,6 +468,56 @@ final class LearningCatalogStoreTests: XCTestCase {
         XCTAssertEqual(repository.writes, 0)
     }
 
+    func testCurrentTopicProjectionUsesCurrentIDAndScopesSlotOrderedChoicesWithoutWrites() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let committedRepository = SwiftDataCatalogRepository(container: container)
+        _ = try committedRepository.importIfNeeded(BundledCatalogLoader.load())
+        let committed = try committedRepository.loadSnapshot()
+        let goSlots = Array(committed.slots.filter { $0.topicID == "go" }
+            .sorted { $0.slotIndex < $1.slotIndex }.prefix(2))
+        let javaSlots = Array(committed.slots.filter { $0.topicID == "java" }
+            .sorted { $0.slotIndex < $1.slotIndex }.prefix(1))
+        XCTAssertEqual(goSlots.count, 2)
+        XCTAssertEqual(javaSlots.count, 1)
+        // Present slots out of order, leave design vacant, and reverse topic input order.
+        let fixture = LearningCatalogSnapshot(topics: Array(committed.topics.reversed()),
+            subtopics: committed.subtopics, concepts: committed.concepts,
+            definitions: committed.definitions, progress: committed.progress,
+            slots: Array(goSlots.reversed()) + javaSlots)
+        let repository = ReadingCatalogRepository(fixture)
+        let store = LearningCatalogStore(repository: repository)
+        store.loadIfNeeded()
+        let snapshot = try XCTUnwrap(store.state.snapshot)
+        let selections: [(String?, String, [String])] = [
+            (nil, "go", goSlots.map(\.lessonID)),
+            ("missing", "go", goSlots.map(\.lessonID)),
+            ("java", "java", javaSlots.map(\.lessonID)),
+            ("design", "design", []),
+            ("go", "go", goSlots.map(\.lessonID)),
+            ("java", "java", javaSlots.map(\.lessonID))
+        ]
+        for (requested, expected, lessonIDs) in selections {
+            let projection = try XCTUnwrap(LearningView.topicProjection(for: requested, in: snapshot))
+            XCTAssertEqual(projection.topics.map(\.id), ["go", "java", "design", "perf", "security"])
+            XCTAssertEqual(projection.selected.id, expected)
+            XCTAssertEqual(LearningView.choices(for: projection.selected.id, in: snapshot).map(\.id), lessonIDs)
+        }
+        XCTAssertEqual(repository.reads, 1)
+        XCTAssertEqual(repository.writes, 0)
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonProgress>()).isEmpty)
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).isEmpty)
+    }
+
+    func testEmptyTopicProjectionHasNoFallbackAndDoesNotReadOrWrite() {
+        let empty = LearningCatalogSnapshot(topics: [], subtopics: [], concepts: [],
+                                            definitions: [], progress: [], slots: [])
+        let repository = ReadingCatalogRepository(empty)
+        XCTAssertNil(LearningView.topicProjection(for: nil, in: empty))
+        XCTAssertNil(LearningView.topicProjection(for: "missing", in: empty))
+        XCTAssertEqual(repository.reads, 0)
+        XCTAssertEqual(repository.writes, 0)
+    }
+
     func testInspectingCommittedSectionsIsReadOnlyAndScopedToSelectedSlot() throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         let repository = SwiftDataCatalogRepository(container: container)
