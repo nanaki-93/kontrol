@@ -37,7 +37,39 @@ final class LessonExperiencePresentationTests: XCTestCase {
             }
         } while target == nil && Date() < deadline
         let root = try XCTUnwrap(target)
-        try check(descendants(root), { self.descendants(root) })
+        // AX registers the NSWindow before SwiftUI publishes its scroll document.
+        // A title-only tree is not a ready fixture, even when rendering has begun.
+        let registrationDeadline = Date().addingTimeInterval(2)
+        while !descendants(root).contains(where: {
+            attribute($0, kAXRoleAttribute) as? String == kAXScrollAreaRole && !descendants($0).isEmpty
+        }) && Date() < registrationDeadline {
+            host.layoutSubtreeIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        }
+        XCTAssertTrue(descendants(root).contains {
+            attribute($0, kAXRoleAttribute) as? String == kAXScrollAreaRole && !descendants($0).isEmpty
+        }, "Hosted scroll document must register before checking content")
+        // Retain the actual AX tree and rendering, including failing fixtures.
+        // Missing identifiers must not be explained away as host permission errors.
+        host.layoutSubtreeIfNeeded()
+        let nodes = descendants(root)
+        let tree = nodes.map { element in
+            [kAXRoleAttribute, kAXIdentifierAttribute, kAXValueAttribute, kAXDescriptionAttribute]
+                .map { "\($0)=\(String(describing: attribute(element, $0)))" }.joined(separator: " | ")
+        }.joined(separator: "\n")
+        let diagnostic = XCTAttachment(string: tree)
+        diagnostic.name = "practice-ax-tree"
+        diagnostic.lifetime = .keepAlways
+        add(diagnostic)
+        let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+        host.cacheDisplay(in: host.bounds, to: bitmap)
+        let capture = XCTAttachment(data: try XCTUnwrap(bitmap.representation(using: .png, properties: [:])),
+                                    uniformTypeIdentifier: "public.png")
+        capture.name = "practice-render"
+        capture.lifetime = .keepAlways
+        add(capture)
+        print("A13 Practice geometry: content=\(host.bounds.size), pixels=\(bitmap.pixelsWide)x\(bitmap.pixelsHigh), backingScale=\(window.backingScaleFactor)")
+        try check(nodes, { self.descendants(root) })
     }
 
     func testCoverageEntryOverviewAndSubtopicSelectionAreReadOnly() throws {

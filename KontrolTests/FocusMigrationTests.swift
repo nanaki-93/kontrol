@@ -53,28 +53,126 @@ final class FocusMigrationTests: XCTestCase {
     /// SwiftData can retain the seed writer's WAL descriptors after its owners are
     /// released. SQLite's backup API makes an atomic, standalone closed snapshot
     /// instead of racing a bytewise copy against a pending WAL checkpoint.
-    private func snapshotSeed(at writer: URL, to source: URL) throws {
+    private struct BackupFailure: Error, CustomStringConvertible {
+        let stage: String
+        let status: Int32
+        let message: String
+        var description: String { "SQLite backup \(stage): status=\(status), \(message)" }
+    }
+
+    // Shared by the schedule migration fixture: both writers can retain WAL
+    // ownership after their explicit SwiftData scopes end.
+    static func snapshotSeed(at writer: URL, to source: URL,
+                             retryLimit: TimeInterval = 2,
+                             observeStep: (Int32) -> Void = { _ in }) throws {
         try FileManager.default.createDirectory(at: source, withIntermediateDirectories: false)
         var input: OpaquePointer?
         var output: OpaquePointer?
         let path = writer.appendingPathComponent("Kontrol.store").path
         let destination = source.appendingPathComponent("Kontrol.store").path
-        guard sqlite3_open_v2(path, &input, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
-            defer { if let input { sqlite3_close(input) } }
-            throw FocusError.persistenceFailure
+        let openedInput = sqlite3_open_v2(path, &input, SQLITE_OPEN_READONLY, nil)
+        guard openedInput == SQLITE_OK else {
+            let message = String(cString: sqlite3_errmsg(input))
+            if let input { sqlite3_close(input) }
+            throw BackupFailure(stage: "open source", status: openedInput, message: message)
         }
         defer { sqlite3_close(input) }
-        guard sqlite3_open_v2(destination, &output, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil) == SQLITE_OK else {
-            defer { if let output { sqlite3_close(output) } }
-            throw FocusError.persistenceFailure
+        let openedOutput = sqlite3_open_v2(destination, &output, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil)
+        guard openedOutput == SQLITE_OK else {
+            let message = String(cString: sqlite3_errmsg(output))
+            if let output { sqlite3_close(output) }
+            throw BackupFailure(stage: "open destination", status: openedOutput, message: message)
         }
         defer { sqlite3_close(output) }
         guard let backup = sqlite3_backup_init(output, "main", input, "main") else {
-            throw FocusError.persistenceFailure
+            throw BackupFailure(stage: "initialize", status: sqlite3_errcode(output),
+                                message: String(cString: sqlite3_errmsg(output)))
         }
-        let result = sqlite3_backup_step(backup, -1)
+        // The last SwiftData WAL checkpoint can still own a lock after seed's
+        // autoreleasepool exits. SQLite explicitly allows retrying BUSY/LOCKED
+        // on the SAME backup; no reset, raw file copy, or data repair is safe here.
+        let deadline = ProcessInfo.processInfo.systemUptime + retryLimit
+        var result: Int32
+        repeat {
+            result = sqlite3_backup_step(backup, -1)
+            observeStep(result)
+            if result == SQLITE_BUSY || result == SQLITE_LOCKED {
+                print("Focus migration backup contention: status=\(result)")
+                if ProcessInfo.processInfo.systemUptime < deadline { Thread.sleep(forTimeInterval: 0.01) }
+            }
+        } while (result == SQLITE_BUSY || result == SQLITE_LOCKED) && ProcessInfo.processInfo.systemUptime < deadline
+        let message = String(cString: sqlite3_errmsg(output))
         let finished = sqlite3_backup_finish(backup)
-        guard result == SQLITE_DONE, finished == SQLITE_OK else { throw FocusError.persistenceFailure }
+        guard result == SQLITE_DONE else {
+            throw BackupFailure(stage: "step (finish=\(finished))", status: result, message: message)
+        }
+        guard finished == SQLITE_OK else {
+            throw BackupFailure(stage: "finish", status: finished, message: String(cString: sqlite3_errmsg(output)))
+        }
+    }
+
+    func testSeedBackupRetriesRealSQLiteContentionAndPreservesSourceBytes() throws {
+        let writer = directory("locked-writer")
+        let source = directory("locked-snapshot")
+        try FileManager.default.createDirectory(at: writer, withIntermediateDirectories: false)
+        let path = writer.appendingPathComponent("Kontrol.store").path
+        var lock: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(path, &lock), SQLITE_OK)
+        let connection = try XCTUnwrap(lock)
+        defer { sqlite3_close(connection) }
+        XCTAssertEqual(sqlite3_exec(connection, "CREATE TABLE evidence(value TEXT); INSERT INTO evidence VALUES('exact answer');", nil, nil, nil), SQLITE_OK)
+        let original = try bytes(writer)
+        XCTAssertEqual(sqlite3_exec(connection, "BEGIN EXCLUSIVE", nil, nil, nil), SQLITE_OK)
+        // Release only after backup_step reports a real lock, not on a timer.
+        var statuses: [Int32] = []
+        try Self.snapshotSeed(at: writer, to: source, observeStep: { status in
+            statuses.append(status)
+            if status == SQLITE_BUSY && statuses.count == 1 {
+                XCTAssertEqual(sqlite3_exec(connection, "COMMIT", nil, nil, nil), SQLITE_OK)
+            }
+        })
+        XCTAssertEqual(statuses, [SQLITE_BUSY, SQLITE_DONE])
+        assertSameFiles(try bytes(writer), original)
+        var snapshot: OpaquePointer?
+        XCTAssertEqual(sqlite3_open_v2(source.appendingPathComponent("Kontrol.store").path, &snapshot, SQLITE_OPEN_READONLY, nil), SQLITE_OK)
+        defer { sqlite3_close(snapshot) }
+        var statement: OpaquePointer?
+        XCTAssertEqual(sqlite3_prepare_v2(snapshot, "SELECT value FROM evidence", -1, &statement, nil), SQLITE_OK)
+        defer { sqlite3_finalize(statement) }
+        XCTAssertEqual(sqlite3_step(statement), SQLITE_ROW)
+        XCTAssertEqual(String(cString: sqlite3_column_text(statement, 0)), "exact answer")
+    }
+
+    func testSeedBackupReportsPersistentContentionAndCorruptionWithoutRetryingCorruption() throws {
+        let writer = directory("failed-backup-writer")
+        try FileManager.default.createDirectory(at: writer, withIntermediateDirectories: false)
+        let url = writer.appendingPathComponent("Kontrol.store")
+        var lock: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(url.path, &lock), SQLITE_OK)
+        let connection = try XCTUnwrap(lock)
+        XCTAssertEqual(sqlite3_exec(connection, "CREATE TABLE evidence(value TEXT); BEGIN EXCLUSIVE;", nil, nil, nil), SQLITE_OK)
+        var lockedSteps: [Int32] = []
+        XCTAssertThrowsError(try Self.snapshotSeed(at: writer, to: directory("locked-failure"), retryLimit: 0.03,
+                                             observeStep: { lockedSteps.append($0) })) {
+            XCTAssertEqual(($0 as? BackupFailure)?.status, SQLITE_BUSY)
+            XCTAssertTrue(($0 as? BackupFailure)?.stage.hasPrefix("step") == true)
+        }
+        XCTAssertGreaterThanOrEqual(lockedSteps.count, 2)
+        XCTAssertTrue(lockedSteps.allSatisfy { $0 == SQLITE_BUSY })
+        XCTAssertEqual(sqlite3_exec(connection, "ROLLBACK", nil, nil, nil), SQLITE_OK)
+        XCTAssertEqual(sqlite3_close(connection), SQLITE_OK)
+        let corrupt = directory("corrupt-backup-writer")
+        try FileManager.default.createDirectory(at: corrupt, withIntermediateDirectories: false)
+        let sentinel = Data("not a SQLite database".utf8)
+        try sentinel.write(to: corrupt.appendingPathComponent("Kontrol.store"))
+        var corruptSteps: [Int32] = []
+        XCTAssertThrowsError(try Self.snapshotSeed(at: corrupt, to: directory("corrupt-failure"),
+                                             observeStep: { corruptSteps.append($0) })) {
+            XCTAssertEqual(($0 as? BackupFailure)?.status, SQLITE_NOTADB)
+        }
+        XCTAssertEqual(corruptSteps, [SQLITE_NOTADB], "Permanent failures must never be retried")
+        XCTAssertEqual(try Data(contentsOf: corrupt.appendingPathComponent("Kontrol.store")), sentinel)
+        // Retain all opened stores until host exit, including failed destinations.
     }
 
     private func bundled(_ version: String) throws -> URL {
@@ -297,7 +395,7 @@ final class FocusMigrationTests: XCTestCase {
             try seed(version, at: writer.appendingPathComponent("Kontrol.store"))
             // Preserve a transactionally closed historical source. A raw copy of
             // the still-owned writer can race SwiftData's WAL checkpoint.
-            try snapshotSeed(at: writer, to: source)
+            try Self.snapshotSeed(at: writer, to: source)
             let original = try copyClosed(source, to: copy)
             let url = copy.appendingPathComponent("Kontrol.store")
             try autoreleasepool {

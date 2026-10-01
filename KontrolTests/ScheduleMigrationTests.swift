@@ -156,9 +156,10 @@ final class ScheduleMigrationTests: XCTestCase {
     }
 
     func testRichV1StoreMigratesEveryEntityAndReopensAfterV2Write() throws {
-        let source = uniqueDirectory("v1-source")
+        let writer = uniqueDirectory("v1-writer")
+        let source = uniqueDirectory("v1-closed-source")
         let copy = uniqueDirectory("v1-copy")
-        let sourceURL = source.appendingPathComponent("Kontrol.store")
+        let sourceURL = writer.appendingPathComponent("Kontrol.store")
         let stamp = Date(timeIntervalSince1970: 1_704_000_000)
         let later = Date(timeIntervalSince1970: 1_704_003_600)
         let taskID = UUID(uuidString: "0E67C839-A6F6-4D30-9C97-68105604D6A0")!
@@ -202,8 +203,10 @@ final class ScheduleMigrationTests: XCTestCase {
                                         plannedTimeZoneID: "America/New_York", completedAt: later))
             try context.save()
         }
-        // Copy the closed complete file set before any V2 open, leaving the genuine
-        // V1 source untouched for a before/after byte comparison.
+        // Releasing the explicit owners does not close SwiftData's internal WAL
+        // descriptors. Snapshot transactionally before the byte-copy/immutability
+        // boundary, using the same lock-tested helper as Focus migration.
+        try FocusMigrationTests.snapshotSeed(at: writer, to: source)
         let original = try copyClosedStore(from: source, to: copy)
         let url = copy.appendingPathComponent("Kontrol.store")
         func assertV1Values(_ container: ModelContainer) throws {

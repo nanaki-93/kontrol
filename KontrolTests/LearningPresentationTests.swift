@@ -265,6 +265,16 @@ final class LearningPresentationTests: XCTestCase {
                 let shellScroll = try XCTUnwrap(scrolls.first)
                 let viewport = shellScroll.contentView
                 let document = try XCTUnwrap(shellScroll.documentView)
+                // Keep the real rendering when a geometry assertion fails; this
+                // distinguishes a fixture/coordinate error from an actual reflow defect.
+                let bitmap = try XCTUnwrap(root.bitmapImageRepForCachingDisplay(in: root.bounds))
+                root.cacheDisplay(in: root.bounds, to: bitmap)
+                let capture = XCTAttachment(data: try XCTUnwrap(bitmap.representation(using: .png, properties: [:])),
+                                            uniformTypeIdentifier: "public.png")
+                capture.name = "learning-route-\(Int(width))x700-130pct"
+                capture.lifetime = .keepAlways
+                add(capture)
+                print("A13 Learning geometry: content=\(root.bounds.size), pixels=\(bitmap.pixelsWide)x\(bitmap.pixelsHigh), backingScale=\(window.backingScaleFactor)")
                 XCTAssertGreaterThan(viewport.bounds.height, 350, "Catalog must not collapse into a tiny viewport")
                 XCTAssertGreaterThan(document.frame.height, viewport.bounds.height,
                                      "Long choices must be scrollable in the shell")
@@ -284,11 +294,13 @@ final class LearningPresentationTests: XCTestCase {
                 let lessonFrame = try rect(of: first)
                 XCTAssertGreaterThanOrEqual(topicFrame.height, AppMetrics.preferredTarget)
                 if width < 720 {
-                    XCTAssertLessThan(lessonFrame.minY, topicFrame.minY,
-                                      "Compact choices must follow the topics vertically")
+                    // AX screen coordinates have a top-left origin, unlike
+                    // AppKit's bottom-left window coordinates. Below means larger Y.
+                    XCTAssertGreaterThanOrEqual(lessonFrame.minY, topicFrame.maxY,
+                                                "Compact choices must follow the topics without overlap: lesson=\(lessonFrame), topic=\(topicFrame)")
                 } else {
                     XCTAssertGreaterThan(lessonFrame.minX, topicFrame.maxX,
-                                         "Wide choices must sit beside the topic rail")
+                                         "Wide choices must sit beside the topic rail: lesson=\(lessonFrame), topic=\(topicFrame)")
                 }
             }
         }

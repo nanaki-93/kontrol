@@ -190,7 +190,7 @@ final class TaskPresentationTests: XCTestCase {
         try inspectToday(repository, at: instant) { window in
             let text = visibleText(in: window)
             XCTAssertTrue(text.contains("Today"))
-            XCTAssertTrue(text.contains(instant.formatted(.dateTime.weekday(.wide).day().month(.wide))))
+            XCTAssertTrue(text.contains(instant.formatted(.dateTime.weekday(.wide).day().month(.wide).year())))
             XCTAssertTrue(text.contains("Tasks"))
             XCTAssertTrue(text.contains("No tasks planned or due on this day."))
             XCTAssertTrue(text.contains("Schedule"))
@@ -231,7 +231,7 @@ final class TaskPresentationTests: XCTestCase {
                                                         from: "2025-01-02T00:00:00Z"))))
         let initialSaves = saves
         func header(_ date: Date, in zone: TimeZone) -> String {
-            var style = Date.FormatStyle.dateTime.weekday(.wide).day().month(.wide)
+            var style = Date.FormatStyle.dateTime.weekday(.wide).day().month(.wide).year()
             style.calendar = calendar
             style.timeZone = zone
             return date.formatted(style)
@@ -248,6 +248,11 @@ final class TaskPresentationTests: XCTestCase {
         settle()
         let plannedRow = "task-row-\(planned.id.uuidString)"
         let dueRow = "task-row-\(due.id.uuidString)"
+        // Window registration precedes SwiftUI's first committed layout. Wait for
+        // the rendered row, not merely a fixed delay, before counting its peers.
+        waitUntil("Initial planned row is rendered") {
+            elements(in: window, identifier: plannedRow).count == 1
+        }
         XCTAssertEqual(elements(in: window, identifier: plannedRow).count, 1)
         XCTAssertTrue(elements(in: window, identifier: dueRow).isEmpty)
         XCTAssertTrue(visibleText(in: window).contains(firstHeader))

@@ -3607,3 +3607,636 @@ remain separate mandatory gates. Historical F02/F06/AX findings remain open ther
 **Step 6.1 implementation integration is ready for review; no remaining checkpoint
 blocker. F13/V1 is not release-approved.** No later task was executed or checkbox
 marked; all changes are left uncommitted.
+
+## F13 Step 6.2 — A13 prerequisite and existing-evidence audit (2026-09-30)
+
+**BLOCKED: A13 is not approved.** First incomplete task matches runner **23/27,
+Step 6.2**. Read SPEC, ANALYSIS, PLAN and the complete cumulative task-23 checklist
+(no previous findings). Initial worktree/index were clean; no partial work existed.
+Repository/target and ancestor checks found no applicable `AGENTS.md`; no submodule
+was listed. Changed only this ledger and README's current gate status. No test,
+assertion, source, permission, fixture, workflow state or plan checkbox changed.
+No later gate was executed. Changes remain uncommitted for the runner's review.
+
+Base revision **`98779210be3caad84b08f5c3a15f762be5958dbd`**; tested implementation
+is unchanged at that revision. Evidence root **`/tmp/kontrol-f13-step6-2.jqRCRV/`**
+(`EVIDENCE` below). `environment.log` records revision/clean worktree/index,
+submodules, Xcode selection/version, Swift, project listing, OS/hardware and console
+session. Host is arm64 MacBook Pro, macOS **27.0 (26A428)**, Xcode **27.0
+(27A266a)**, Apple Swift **6.4**, `/Applications/Xcode.app/Contents/Developer`.
+Swift 5/macOS 14 deployment settings are not baseline-runtime evidence.
+
+### External prerequisites and checks that did not run
+
+No human reserved an active uncontended desktop or supplied authorization for the
+actual rebuilt test host in this task. An on-console session exists, but that is
+not evidence of reservation or host trust. After compilation, actual host identity
+inspection (`host-identity.log`) reports:
+
+- `/private/tmp/kontrol-f13-derived/Build/Products/Debug/Kontrol.app`
+- linker ad-hoc signature, Identifier **Kontrol**, CDHash
+  **`cac9216d981961310b3acfa0717bfd6f668d40fa`**, no TeamIdentifier/internal
+  requirements. This is not a stable distribution signature or AX authorization.
+
+The only on-disk attestation found is
+`.pi/workflows/2026-09-30T02-41-29-672Z-I9oXGk/manual-attestation-task-10.json`,
+for an earlier HEAD; its statement is **“accessibility access and tests will be deferred”**.
+It attests to no passing observation and grants no current reservation/authorization. Historical F00/F01
+user-verified observations remain credited only in their original ledgers, not as
+F13 observations. No fresh actual-host AX trust, activation or registered-window
+result is claimed; historical `trusted=false, active=false` diagnostics above are
+not relabeled as a fresh probe. No TCC change, approval prompt, UI takeover, or
+production-data launch was attempted.
+
+Therefore the **required seven-suite selection**, **serial full suite**, **all
+deferred hosted selectors**, and **independent native/keyboard/VoiceOver checks**
+were **not run** in this attempt. Do not substitute the supplemental run below.
+Once a human reserves the desktop and authorizes this rebuilt host, recheck actual
+host trust/activation/AX registration, then run the unchanged plan commands:
+
+```bash
+f13_test AppPreferencesRepositoryTests AppPreferencesStoreTests \
+  FocusPreferencesTests FocusTimingTests FocusServiceTests \
+  DesignSystemComponentTests DesignSystemTokenTests
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived \
+  -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO test
+```
+
+`inventory.py` checked all **625 exact outstanding Step 6.1 identifiers** against
+current source; all still exist and none is closed here. The retained list is
+`step6-1-outstanding-identifiers.txt`. `ledger-method-references.json` records
+README/QA method references and locations; the historical ContainerFactory
+`testV5DiskMigratesAdditivelyAndV6EvidenceSurvivesReopen` now has the explicit
+`...SurvivesV10Reopen` name in source (already covered in Step 6.1). This is not a
+missing/empty selector pass. All 22 component methods, F02 missing-AX/editor-sheet
+failures and skipped native delete confirmation, F06 hosted failures, all 32
+remaining Settings methods including new folder/export states/focus/geometry,
+and remaining Projects/shell/Today/Focus/Learning/News methods stay open.
+
+Independent observations remain required at **520×340 native Settings** and
+**1000×700/1440×940 desktop** content points, **standard/130%/larger text**:
+keyboard-only journeys, visible and restored surviving focus, Escape/Cancel,
+spoken VoiceOver names/roles/status, reduced motion/no countdown announcement
+noise, non-color status, actual ≥32-point targets, ≥4.5:1 text and ≥3:1 essential
+focus/boundaries. Token tests are not observations of these rendered states.
+Native process/interaction smoke was also blocked by the unreserved desktop;
+no app launch/offline/relaunch observation is credited.
+
+### Existing captures: enumeration, actual comparison and limitations
+
+Before claiming missing evidence, enumerated surviving capture trees and all
+files/dimensions/hashes into `capture-inventory.json`. These contain **no named
+before/after subdirectories**:
+
+| Existing directory under `/private/tmp/` | PNG files |
+| --- | ---: |
+| `kontrol-f01-evidence/` | 4 Today fixtures |
+| `kontrol-shell-captures/` | 2 Today captures |
+| `kontrol-f13-step2.4-geometry-r1-captures/` | 180 |
+| `kontrol-f13-step2.4-diagnostic-r2-captures/` | 5 |
+| `kontrol-f13-step2.4-final-captures/` | 228 |
+
+The unrelated `f20-native-evidence` tree belongs to another project and is not
+credited. Existing Settings captures are historical General/AI/News/hub/read
+failure states, **not current folder/Local Data captures**. Their 114 named final
+captures' `dimensions-audit.json` was checked against actual PNG headers: points
+520×340 / 1000×700 / 1440×940; pixels 1040×680 / 2000×1400 / 2880×1880; backing
+scale **2**, with 100/130/160% text labels. Inline captures cover desktop sizes.
+The two shell captures are 1000×700 and 1440×940 pixels; their historical offscreen
+1:1 content dimensions are not evidence of a current live backing scale.
+
+Executed **90 matching named historical state comparisons** between geometry-r1
+and final directories. All 90 PNG pairs are **byte-identical**, and all have zero
+differing samples on an 8-content-point RGB grid (tolerance 2/255 after sRGB
+conversion and nearest-neighbor normalization to nominal content dimensions).
+This is duplicate-image evidence, **not proof of independent before/after
+re-rendering, changed behavior or current native acceptance**. For example:
+`native-520x340-130-hub-bottom.png`: **0/2795**; and
+`native-1440x940-100-hub-bottom.png`: **0/21240**. Both original paths, pixel sizes,
+comparison dimensions and counts for every pair are in `image-comparisons.json`.
+
+Also actually compared and visually inspected historical captures against
+available references, not just enumerated fixture generation:
+
+- `docs/mockups/M38-settings.png` (1440×940 reference) versus
+  `/private/tmp/kontrol-f13-step2.4-final-captures/native-1440x940-100-hub-bottom.png`
+  (2880×1880): **3019/21240** differing normalized samples. The capture is a
+  stacked native Settings document without shell chrome; the reference is a
+  two-column shell layout with illustrative Local export/project entries. The
+  capture predates those implemented entries and cannot validate their presence.
+  Compact `native-520x340-130-hub-bottom.png` is scrolled to Connections with
+  readable wrapped News copy; its top is intentionally outside the viewport.
+  A static scrolled capture does not prove keyboard/scroll reachability.
+- `docs/mockups/M00-app-shell.png` versus
+  `/private/tmp/kontrol-shell-captures/today-1440x940.png` (both 1440×940):
+  **2733/21240** differing samples. Actual empty Today has day-browsing actions,
+  Learning/Schedule/Tasks empty guidance and seven labeled navigation destinations;
+  the reference contains sample schedule/lesson content and imitation chrome.
+
+These are visual-reference differences, not pixel-equality failures or release
+passes. `reference-inventory.txt` lists available mockup PNGs. No newly rendered
+capture was created. Current F00–F13 and supplemental-state comparisons, including
+M40 export/M41 removal/M42 accessibility and new folder/export fixtures, remain
+unperformed until the authorized session; old captures cannot replace them.
+
+### Automatable supplemental checks actually executed
+
+From repository root, `bash "$EVIDENCE/run.sh"` executed the following (exact
+expansions retained in `run.sh`/`commands.log`; all exit **0**):
+
+```bash
+EVIDENCE=/tmp/kontrol-f13-step6-2.jqRCRV
+# Supplemental six-suite selection, NOT the required seven-suite A13 gate:
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived -parallel-testing-enabled NO \
+  CODE_SIGNING_ALLOWED=NO -resultBundlePath "$EVIDENCE/non-gui.xcresult" \
+  -only-testing:KontrolTests/AppPreferencesRepositoryTests \
+  -only-testing:KontrolTests/AppPreferencesStoreTests \
+  -only-testing:KontrolTests/FocusPreferencesTests \
+  -only-testing:KontrolTests/FocusTimingTests \
+  -only-testing:KontrolTests/FocusServiceTests \
+  -only-testing:KontrolTests/DesignSystemTokenTests test
+xcrun xcresulttool get test-results summary --path "$EVIDENCE/non-gui.xcresult" --format json
+xcrun xcresulttool get test-results tests --path "$EVIDENCE/non-gui.xcresult" --format json
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived CODE_SIGNING_ALLOWED=NO build-for-testing
+codesign -dv --verbose=4 /private/tmp/kontrol-f13-derived/Build/Products/Debug/Kontrol.app
+make build CONFIGURATION=Release DERIVED_DATA=/tmp/kontrol-f13-release-build
+APP=/tmp/kontrol-f13-release-build/Build/Products/Release/Kontrol.app
+ditto -c -k --keepParent "$APP" "$EVIDENCE/Kontrol-unsigned.zip"
+shasum -a 256 "$EVIDENCE/Kontrol-unsigned.zip"
+ditto -x -k "$EVIDENCE/Kontrol-unsigned.zip" "$EVIDENCE/extracted"
+diff -qr "$APP" "$EVIDENCE/extracted/Kontrol.app"
+python3 "$EVIDENCE/inventory.py"
+xcrun swiftc "$EVIDENCE/compare.swift" -o "$EVIDENCE/compare"
+"$EVIDENCE/compare"
+git diff --check
+```
+
+Fresh supplemental bundle **`/tmp/kontrol-f13-step6-2.jqRCRV/non-gui.xcresult`**:
+**90/90 passed**, no failures/skips/expected failures. Counts: repository **17**,
+store **13**, Focus preferences **8**, timing **16**, service **29**, tokens **7**.
+`summary.log`/`test-tree.log` and source-method audit account for every selected
+method exactly once; `executed-identifiers.txt` enumerates them. Test compilation
+**SUCCEEDED**, Release build **SUCCEEDED**, extraction is byte-identical; actual
+extracted version/build **1.0/1** and all four resources/notices match source.
+ZIP SHA-256 **`6a70927bee0d208ecc8b603357890728d38657e6e58cafd3235c6f5c154bffdd`**.
+This unsigned smoke is not S13/D13 or an approved distribution artifact.
+
+`exit-codes.log`, `non-gui.log`, `test-compilation.log`, `release-build.log`,
+`host-identity.log`, `package.log`, `checksum.log`, `extract.log`,
+`extracted-comparison.log`, `inventory.log` and `image-comparison.log` retain
+results. Existing destination/linkd/AppIntents diagnostics remain in raw logs;
+no live-store unlink/InvalidTransition diagnostic occurred. Host PID **66942**
+exited; the **15** precisely logged preference stores under
+`$TMPDIR/KontrolPreferencesTests-66942/` all returned read-only SQLite integrity
+**ok** and remain intact. No cleanup/unlink, production-store/Keychain/external
+project access, paid generation or test bypass occurred. Historical ledgers remain
+unchanged. Final documentation patch/whitespace evidence is retained separately.
+
+**Continue the SAME Step 6.2 after human desktop reservation and rebuilt-host AX
+authorization.** Supplemental passes and historical comparisons do not satisfy
+its required full-suite/deferred/native acceptance. No current A13 approval,
+F13/V1 completion or approval of later S13/B13/D13 gates is claimed.
+
+## F13 Step 6.2 — attested manual checks and executed A13 gates (2026-10-01)
+
+**REPAIR / FAILED: A13 automated acceptance did not pass.** This continuation
+supersedes the preceding attempt's current-prerequisite/no-attestation statements,
+not its historical results. First incomplete task remains Step 6.2, runner 23/27.
+Read the complete cumulative task-23 checklist (no previous review findings).
+Preserved the existing README/QA partial work; only those two target documents
+changed. No source, test assertion, fixture, permission, plan or workflow state
+changed. Repository/target and direct ancestor checks found no applicable
+`AGENTS.md`; no submodule was listed. Changes remain uncommitted.
+
+### User-verified manual acceptance versus automated results
+
+The supplied **task-23/HEAD-specific** attestation is
+`.pi/workflows/2026-09-30T12-39-35-387Z-CeCuEh/manual-attestation-task-23.json`,
+recorded at **2026-09-30T23:00:41.380Z**, HEAD
+**`98779210be3caad84b08f5c3a15f762be5958dbd`**, statement
+**“confirm the manual check”**. Per the runner, task-23 manual observations are
+credited **as user-verified**, not performed by this agent. This includes the
+supplied task's manual keyboard/focus, spoken VoiceOver, text-size, motion,
+contrast/target and non-color observations. No user screenshot or measurement
+file was supplied; none is invented. No repeat of these manual observations is
+requested. This attestation does **not** turn automated failures or unperformed
+rendered-state comparisons into passes, nor approve S13/B13/D13.
+
+Implementation remains unchanged at that HEAD. Fresh evidence root:
+**`/tmp/kontrol-f13-step6-2-attested.gTpNEO/`** (`E` below). Environment/identity
+logs retain macOS **27.0 (26A428)**, arm64 MacBook Pro, Xcode **27.0 (27A266a)**,
+Swift **6.4**, selected `/Applications/Xcode.app/Contents/Developer`, worktree/index,
+revision and submodule inspection. Actual rebuilt Debug host is
+`/private/tmp/kontrol-f13-derived/Build/Products/Debug/Kontrol.app`, ad-hoc
+CDHash **`cac9216d981961310b3acfa0717bfd6f668d40fa`**, no TeamIdentifier.
+Fresh component errors report **`trusted=false, active=false`** from inside this
+host. Successful activation/AX-window registration is not established by the
+attestation or shell identity inspection. No TCC mutation or assertion bypass
+was attempted.
+
+### Required commands actually executed and audited
+
+From repository root, `bash "$E/run-tests.sh"` ran these exact plan-equivalent
+commands serially (only fresh result-bundle destinations added):
+
+```bash
+E=/tmp/kontrol-f13-step6-2-attested.gTpNEO
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived -parallel-testing-enabled NO \
+  CODE_SIGNING_ALLOWED=NO -resultBundlePath "$E/seven-suite.xcresult" \
+  -only-testing:KontrolTests/AppPreferencesRepositoryTests \
+  -only-testing:KontrolTests/AppPreferencesStoreTests \
+  -only-testing:KontrolTests/FocusPreferencesTests \
+  -only-testing:KontrolTests/FocusTimingTests \
+  -only-testing:KontrolTests/FocusServiceTests \
+  -only-testing:KontrolTests/DesignSystemComponentTests \
+  -only-testing:KontrolTests/DesignSystemTokenTests test
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/kontrol-f13-derived -parallel-testing-enabled NO \
+  CODE_SIGNING_ALLOWED=NO -resultBundlePath "$E/full-suite.xcresult" test
+for bundle in seven-suite full-suite; do
+  xcrun xcresulttool get test-results summary \
+    --path "$E/$bundle.xcresult" --format json
+  xcrun xcresulttool get test-results tests \
+    --path "$E/$bundle.xcresult" --format json
+done
+xcrun xcresulttool export attachments --path "$E/full-suite.xcresult" \
+  --output-path "$E/attachments"
+python3 "$E/audit.py"
+```
+
+Both **test commands exited 65**; summary/tree queries and attachment export
+exited **0**. Seven suites: **112 executed, 90 passed, 22 failed**. All 22
+component methods failed the explicit host Accessibility prerequisite, error
+`DesignSystemAXPrerequisite Code=-25211`. The other six suites passed their
+original **90** methods; token contrast tests passed, not a substitute for live
+rendered contrast acceptance.
+
+Serial full suite: **1127 executed, 1055 passed, 72 failed**, **0 skips / expected
+failures**. Result audit accounts for every actual XCTest method exactly once,
+including all **625** previously outstanding Step 6.1 identifiers: **553 passed,
+72 failed**. `full-suite-identifiers.json`, `full-suite-suite-counts.json`,
+`deferred-625-results.json`, and `unresolved-identifiers.txt` retain exact names
+and results; raw logs and bundle failures retain every concrete assertion.
+
+| Non-passing suite | Passed | Failed | Findings still requiring closure |
+| --- | ---: | ---: | --- |
+| DesignSystemComponentTests | 0 | 22 | Actual host trust/activation prerequisite |
+| LearningPresentationTests | 4 | 3 | Compact/wide topic/choice geometry; topic selection and resulting lesson identity |
+| LessonExperiencePresentationTests | 2 | 19 | Missing studied/history/coverage controls/content; reveal and completion interactions |
+| SettingsSceneTests | 12 | 24 | AX prerequisite for folder/export geometry/keyboard; route/state interactions; native scene lifecycle |
+| TaskPresentationTests | 23 | 4 | Today rows/date updates, editor commit/dismissal, native delete confirmation |
+
+Examples are not silently assigned to the AX prerequisite: Learning geometry
+reports **620 not <360** at compact width and **304 not >469** at wide width;
+Settings route tests report `InvalidTransition` errors; the native Tasks editor
+still reports **“New task commits and editor closes”** false. Historical F02
+`testQuickCapturePublishesAcrossTodayAndTasksWithoutPostSaveRead` passed in this
+full run, but `testNativeTasksEditorCreatesEditsAndCancelsWithoutWriting` failed,
+and `testNativeDeleteAlertKeyboardNavigationAndConfirmation` **failed**, not
+skipped: missing **Delete task**, while visible row actions include **Delete
+Keyboard deletion**. Historical F06 failures have fresh failed evidence, not
+explained closure. These need focused diagnosis/repairs and successful reruns
+on the SAME Step 6.2. No test was weakened to make the gate pass.
+
+The evidence audit initially miscounted three non-XCTest service-double
+`testConnection()` functions as tests (exit 1). The corrected evidence parser
+restricts enumeration to XCTestCase classes: **1127** actual methods, audited
+exit **0**. This parser correction does not change or conceal any test failure.
+
+### Actual rendered capture comparisons
+
+Enumerated existing capture trees **before** claiming missing evidence:
+`/private/tmp/kontrol-f01-evidence/`, `kontrol-shell-captures/`,
+`kontrol-f13-step2.4-{geometry-r1,diagnostic-r2,final}-captures/`.
+`capture-inventory.json` records files/dimensions/hashes and confirms no surviving
+named before/after subdirectories in those trees. Fresh bundle attachment export
+then produced **114 PNGs**, indexed in `fresh-capture-inventory.json` and
+`attachments/manifest.json`. Host-printed geometry in `fresh-geometry.json` was
+checked against PNG headers: **520×340 / 1000×700 / 1440×940 content points**,
+**1040×680 / 2000×1400 / 2880×1880 pixels**, backing scale **2**, at
+**100/130/160%** text; inline captures cover the desktop sizes.
+
+Executed `xcrun swiftc "$E/compare.swift" -o "$E/compare"` and `"$E/compare"`,
+exit **0**, comparing **210** historical/fresh/reference pairs. Exact inputs,
+dimensions and sampled differences are in `image-pairs.json` and
+`image-comparisons.json`: sRGB conversion, nearest-neighbor normalization to
+content points, 8-point RGB grid, tolerance **2/255**. The **90** old matching
+pairs remain byte-identical. For **114 historical versus freshly rendered
+matching states**, **36** are byte-identical and **78** differ; differing samples
+range **0–1684**. Unlike the old duplicate pairs, these fresh attachments are
+actual current-source renderings. Differences are not automatically failures
+or passes: General preference captures can remain identical, while the current
+hub now includes actual folder and Local Data actions absent from the old hub.
+
+Representative current captures were also visually inspected and actually
+compared to references (all paths below are under `$E/attachments/`):
+
+| State / reference | Actual PNG | Differing 8-point samples |
+| --- | --- | ---: |
+| Native 1440×940 standard hub / `docs/mockups/M38-settings.png` | `34D317AA-002F-4EBC-8FB6-D17F9301B1D2.png` | 3239/21240 |
+| AI summary / `docs/mockups/M39-ai-settings.png` | `1CFB9B6A-3693-4AB6-821B-1F4D387E7C06.png` | 11026/21240 |
+| AI editor / `docs/mockups/M39-ai-settings.png` | `3C8F2C82-9F44-4E9D-B439-6AA5BA869493.png` | 11952/21240 |
+| Scrolled last News feeds / `docs/mockups/M36-news-topics-feeds.png` | `DA7A8362-7C7A-4036-86F2-DDDB00CC39A2.png` | 17409/21240 |
+
+Observed differences: native Settings is a stacked document without imitation
+shell chrome, not M38's illustrative two-column dashboard; it shows **0 saved
+references**, fixed theme, and **Ready to export** with Manage actions. AI editor
+is inline rather than the reference's dimmed modal, with real model picker,
+blank replacement-key field, Save/Cancel and explicit optional/offline guidance.
+The scrolled News image displays real bundled endpoints and Disable/Edit/Remove;
+it is **not** the reference's edit-feed modal and does not satisfy that modal's
+comparison. Compact 130% validation capture
+`A3CC5D13-20E2-433D-AA66-81834A933FA9.png` (1040×680 pixels) shows wrapped
+validation/recovery text, warning shape plus text and fully visible Cancel/Save;
+its top is intentionally scrolled out of view. These observations are about
+these actual images, not complete keyboard/VoiceOver acceptance.
+
+Folder/Local Data geometry/keyboard methods failed before producing their new
+captures. Thus fresh M40/M41 and supplemental folder/export comparisons, and
+all other unrepresented applicable F00–F13 states, remain **unverified**.
+User-verified manual observations are retained; the missing automated/rendered
+comparisons and failing assertions are not waived by them.
+
+### Packaging/process checks and preservation
+
+`bash "$E/supplemental.sh"` executed Release build and unsigned packaging smoke,
+not the later S13/D13 gates. These commands all exited **0**:
+
+```bash
+make build CONFIGURATION=Release DERIVED_DATA=/tmp/kontrol-f13-release-build
+APP=/tmp/kontrol-f13-release-build/Build/Products/Release/Kontrol.app
+ditto -c -k --keepParent "$APP" "$E/Kontrol-unsigned.zip"
+shasum -a 256 "$E/Kontrol-unsigned.zip"
+ditto -x -k "$E/Kontrol-unsigned.zip" "$E/extracted"
+diff -qr "$APP" "$E/extracted/Kontrol.app"
+codesign -dv --verbose=4 /private/tmp/kontrol-f13-derived/Build/Products/Debug/Kontrol.app
+git diff --check
+```
+
+Extracted bundle matches built bytes, version/build **1.0/1**, and all four
+resources/notices match current source. ZIP SHA-256:
+**`6a70927bee0d208ecc8b603357890728d38657e6e58cafd3235c6f5c154bffdd`**.
+After both test hosts exited, ran the available isolated Debug process smoke:
+`env KONTROL_F00_RECOVERY_TEST=1 /private/tmp/kontrol-f13-derived/Build/Products/Debug/Kontrol.app/Contents/MacOS/Kontrol`.
+PID **84306** remained alive after five seconds (`ps` exit **0**), then only that
+process was terminated with SIGTERM (wait **143**, intentional). The opt-in Debug
+path fails before production-store IO; no Retry/production-data interaction was
+performed. This proves process startup only, not AX registration or a native
+journey, signed-sandbox acceptance, or distribution approval.
+
+Hosts **81218/81274** exited. Retained-store inventory covers **9 precisely logged
+roots / 91 stores** with file/sidecar hashes; no cleanup/unlink was performed.
+Initial broad integrity probes failed on intentional non-SQLite sentinels and
+on two ContainerTests `source`/`snapshot` copies (`unable to open database file`);
+those unsuccessful probes are retained, not presented as passes. Final read-only
+inventory records **87 integrity-ok**, **2 exact intentional invalid-store
+sentinels**, and **2 unverified read-only opens** (paths in
+`retained-store-inventory.json`); original fixture files/sidecars are byte-equal
+to HEAD. No fixture rewrite, production-data/credential/external-project access,
+paid generation or broader permission was introduced. Historical failures and
+all raw diagnostics remain intact.
+
+Final documentation link/scope and whitespace checks are retained separately.
+A diagnostic script initially tried `git show HEAD:.pi/PLAN.md` (exit 128: the
+workflow inputs are untracked), then assumed the attestation's plan hash still
+matched (assertion failure). Current plan SHA-256 is
+`2d92284b2ee22d260d8bc9fa91e2b1098dc475c0e8c361e78cf8d3432dd24c43`,
+not the attestation's `b8c59a921466ff8e07589091a56f8646965a7b6317040f38ca31357c610798f5`;
+SPEC matches its attested hash. The builder made no workflow-input writes; the
+runner-supplied task/HEAD manual acceptance credit is retained as instructed.
+These failed diagnostic assumptions are not test passes or grounds to silently
+alter the plan. Current-document link/file-scope validation is independent of
+those assumptions.
+
+**Remaining acceptance:** actual-host AX authorization/activation, diagnosis and
+closure of every fresh hosted failure, then repeat the unchanged seven-suite
+and serial full suite; finish missing rendered-state comparisons. Manual checks
+remain user-verified and need not be repeated. Continue the SAME Step 6.2;
+**not READY**, no checkbox marked, no F13/V1 or later-gate approval claimed.
+
+## F13 Step 6.2 — escalation fixture repairs and remaining A13 failures (2026-10-01)
+
+**REPAIR / FAILED; same task, not ready for review.** Confirmed first top-level
+incomplete task is Step 6.2 (23/27). Read SPEC/ANALYSIS/PLAN, both previous
+execution reports, latest skipped-review feedback, cumulative checklist and the
+supplied task-23 attestation. Compared those findings to the actual working tree.
+Preserved the inherited README change and all 415 appended QA lines, including
+failed/unrun evidence. Repository/target and direct ancestor searches found no
+applicable `AGENTS.md`; no submodule was listed. Changed only
+`KontrolTests/LearningPresentationTests.swift`,
+`KontrolTests/TaskPresentationTests.swift`, README and this ledger. No production
+source, schema, fixture, permission, workflow state or plan checkbox changed.
+Nothing was staged or committed; no later task was implemented.
+
+Base HEAD remains **`98779210be3caad84b08f5c3a15f762be5958dbd`**. Evidence root:
+**`/tmp/kontrol-f13-step6-2-escalation.UKhhdM/`** (`E` below). `inherited.patch`
+preserves the entering worktree; `test-repair.patch` SHA-256
+**`aec49b3461b9e1556f873707e151f1bd4e2637348a8934842bbbfc2a704463e7`**
+identifies the tested delta. Environment remains arm64 macOS 27.0/26A428,
+Xcode 27.0/27A266a, Swift 6.4, selected full Xcode. `environment.log`,
+`project-list.log`, `commands.log`, `run.sh` and `exit-codes.log` retain details.
+
+### Recurring cause, concrete repairs and findings still open
+
+Earlier attempts did not repair tests: the first deferred the GUI gates, and
+its continuation ran them but only recorded failures. There are distinct causes,
+not one AX explanation for every assertion:
+
+- **Actual-host permission:** all 22 component methods still fail
+  `DesignSystemAXPrerequisite/-25211`, explicitly **trusted=false, active=false**.
+  Twenty Settings methods still fail their host-trust guard. Actual rebuilt host
+  is `/private/tmp/kontrol-f13-derived/Build/Products/Debug/Kontrol.app`, ad-hoc
+  CDHash `cac9216d981961310b3acfa0717bfd6f668d40fa`, no team. Shell trust and a
+  self-AX window tree are not this authorization. No TCC manipulation, removed
+  prerequisite, added skip or expected failure was used. External host approval
+  remains unavailable to code; the supplied manual observations remain credited
+  **as user-verified**, not agent-performed, and are not requested again.
+- **Confirmed stale Today oracles:** production's local-date header includes
+  `.year()`, whereas two hosted tests expected a date without it. Updated only
+  those date expectations, retaining all exact task/date/travel/write assertions.
+  Added a bounded condition wait for the initial rendered row, retaining the exact
+  count assertion: prior full-suite evidence raced the first committed layout.
+  Both methods pass focused, full-suite and five same-host repetitions.
+- **Confirmed compact coordinate error:** AX screen Y increases downward. The
+  Learning test incorrectly asserted that a following row has a smaller Y.
+  It now requires `lesson.minY >= topic.maxY`, also checking non-overlap, rather
+  than removing the geometric assertion. Both compact widths pass. The unchanged
+  wide assertion **still fails**: lesson `(304,516,904,151)` versus topic
+  `(288,360,181,44)` at 1000×700/130%. New real captures confirm the compact
+  branch at that width, not a permission-only failure. Captures and full frame
+  diagnostics are retained even when the method fails; no wide assertion weakened.
+- **Other historical findings:** Learning topic/choice updates, F06 studied,
+  history, coverage and reveal/completion assertions, folder identifiers/dialog
+  actions, Local Data transitions and Settings scene `InvalidTransition` still
+  fail. The native Tasks delete alert still lacks `Delete task`. The native Tasks
+  editor now passes the full run and five repetitions **without an editor repair**;
+  this variability is not an explained closure of its previous failure.
+- **New full-suite failure:**
+  `FocusMigrationTests/testRichV1AndV2StoresPreserveEveryEntityOnUpgradeAndReopen`
+  throws `persistenceFailure` at `snapshotSeed`, before any migration/reopen.
+  On-disk enumeration (`focus-migration-copy-inventory.log`) identifies writer
+  `KontrolFocusMigration-rich-V1-writer-988D4319-7FCF-4ACD-8DB7-0C9E13B25DC0`
+  (143360-byte store, zero-byte WAL) and closed-source
+  `KontrolFocusMigration-rich-V1-closed-source-EF21F3F8-D678-479E-9D70-16BC3010F52B`
+  (**zero-byte backup destination**) under the logged TMPDIR. This narrows the
+  failure to the test's SQLite backup boundary; its generic error does not retain
+  the precise SQLite status, so BUSY/LOCKED is **not yet established**. Five passing
+  isolated repetitions do not close it. Retained artifacts were not deleted,
+  repaired, migrated or mistaken for damaged production data. Next repair must
+  obtain the backup stage/status and regression-test the demonstrated cause.
+
+`failure-transitions.json` checks **every** previously failing identifier against
+fresh results, including new regressions. `unresolved-identifiers.txt` lists all
+70 current failures. The task-specific manual attestation remains credited exactly
+as in the preceding entry; it cannot satisfy these failures or absent comparisons.
+
+### Exact verification and fresh results
+
+From repository root, `bash "$E/run.sh"` executed the unchanged required gates
+with fresh result paths, then all available source/build/packaging checks:
+
+```bash
+E=/tmp/kontrol-f13-step6-2-escalation.UKhhdM
+f13_test() {
+  local name="$1"; shift
+  local flags=() suite
+  for suite in "$@"; do flags+=("-only-testing:KontrolTests/$suite"); done
+  xcodebuild -project Kontrol.xcodeproj -scheme Kontrol \
+    -configuration Debug -destination 'platform=macOS' \
+    -derivedDataPath /tmp/kontrol-f13-derived -parallel-testing-enabled NO \
+    CODE_SIGNING_ALLOWED=NO -resultBundlePath "$E/$name.xcresult" "${flags[@]}" test
+}
+f13_test seven-suite AppPreferencesRepositoryTests AppPreferencesStoreTests \
+  FocusPreferencesTests FocusTimingTests FocusServiceTests \
+  DesignSystemComponentTests DesignSystemTokenTests
+f13_test full-suite
+for label in baseline focused seven-suite full-suite; do
+  xcrun xcresulttool get test-results summary --path "$E/$label.xcresult" --format json
+  xcrun xcresulttool get test-results tests --path "$E/$label.xcresult" --format json
+done
+xcrun xcresulttool export attachments --path "$E/full-suite.xcresult" --output-path "$E/attachments"
+make build DERIVED_DATA=/tmp/kontrol-f13-derived
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug \
+  -destination 'platform=macOS' -derivedDataPath /tmp/kontrol-f13-derived \
+  CODE_SIGNING_ALLOWED=NO build-for-testing
+make build CONFIGURATION=Release DERIVED_DATA=/tmp/kontrol-f13-release-build
+codesign -dv --verbose=4 /private/tmp/kontrol-f13-derived/Build/Products/Debug/Kontrol.app
+APP=/tmp/kontrol-f13-release-build/Build/Products/Release/Kontrol.app
+ditto -c -k --keepParent "$APP" "$E/Kontrol-unsigned.zip"
+shasum -a 256 "$E/Kontrol-unsigned.zip"
+ditto -x -k "$E/Kontrol-unsigned.zip" "$E/extracted"
+diff -qr "$APP" "$E/extracted/Kontrol.app"
+python3 "$E/audit.py"
+xcrun swiftc "$E/compare.swift" -o "$E/compare"
+"$E/compare"
+git diff --check
+```
+
+Both required test commands exit **65**: seven suites **90 passed / 22 failed**;
+serial full suite **1057 passed / 70 failed**, **1127** methods, zero skips or
+expected failures. Audited every method exactly once against source. All **625**
+deferred identifiers executed: **555 passed / 70 failed**. Summary/tree outputs,
+raw logs, suite counts and result bundles are retained in `E`, not substituted
+with earlier passes. Failing suites: components **22**, Learning **3**, lesson
+experience **19**, Settings **24**, Tasks **1**, Focus migration **1**.
+
+Before editing, `baseline.xcresult` reproduced **3/3 failing** methods (Learning
+geometry and the two Today methods). Same selectors after repair in
+`focused.xcresult`: **2 passed / 1 failed**, exit **65**. Both use the same
+`f13_test` arguments above and those three exact method identifiers.
+
+Additional command (exit **0**), with summary/tree audited down to repetition
+children, ran **four methods × five executions = 20 passed**, not merely four:
+
+```bash
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug \
+  -destination 'platform=macOS' -derivedDataPath /tmp/kontrol-f13-derived \
+  -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
+  -resultBundlePath "$E/repetitions.xcresult" -test-iterations 5 \
+  -test-repetition-relaunch-enabled NO \
+  -only-testing:KontrolTests/TaskPresentationTests/testTodayUsesRealDateSharedSectionsAndHonestEmptyStateWithoutWriting \
+  -only-testing:KontrolTests/TaskPresentationTests/testHostedTodayRecomputesRowsAndLocalDateAtMidnightAndAfterTravelWithoutSaving \
+  -only-testing:KontrolTests/TaskPresentationTests/testNativeTasksEditorCreatesEditsAndCancelsWithoutWriting \
+  -only-testing:KontrolTests/FocusMigrationTests/testRichV1AndV2StoresPreserveEveryEntityOnUpgradeAndReopen test
+xcrun xcresulttool get test-results summary --path "$E/repetitions.xcresult" --format json
+xcrun xcresulttool get test-results tests --path "$E/repetitions.xcresult" --format json
+```
+
+Build, test compilation, Release build, attachment export, result audits, image
+comparison, unsigned packaging/extraction, source/resource byte comparison and
+whitespace checks all exit **0**. Extracted version/build is **1.0/1**; all four
+resources/notices match source. This is not signed/distribution acceptance.
+The prior linkd/AppIntents diagnostics and QuickCapture QoS runtime warning remain
+in the logs; no SQLite unlink diagnostic was observed. Hosts
+**89392/89774/90525/90674/92904** exited; all opened test stores remain retained.
+All **12** original V1–V4 fixture files and sidecars remain byte-equal to HEAD.
+
+### Independent capture comparison and available smoke evidence
+
+Enumerated historical trees, previous-attempt attachments (before), focused
+captures, and full-run attachments (after) in `capture-inventory.json` before
+assessing absence. Current full bundle exports **117** PNGs: **114** Settings
+states plus **three** new Learning route states. Actual Settings content is
+520×340 / 1000×700 / 1440×940 points at 100/130/160% text, backing scale **2**;
+Learning is 420×700 / 620×700 / 1000×700 points at 130%, respectively
+840×1400 / 1240×1400 / 2000×1400 pixels, backing scale **2**. Exact files,
+points/pixels/scales/hashes are in `fresh-capture-inventory.json` and host logs.
+
+Actually compared **120** pairs (`image-pairs.json`, `image-comparisons.json`):
+**114** matching previous/current Settings states (**59 byte-identical**, **55**
+differ; 0–213 different sampled points), **three** focused/full Learning captures
+(all byte-identical, zero different samples), and **three** Learning versus
+`docs/mockups/M15-learning-choices.png` comparisons. Method: sRGB, nearest-neighbor
+normalization to content points, 8-point RGB grid, tolerance 2/255. Sampling is
+comparison evidence, not a full-pixel or acceptance pass.
+
+The 1000×700 Learning capture
+`$E/attachments/A72F45C9-1945-4780-8761-2735027938FA.png` differs from M15 on
+**5653/11000** sampled points (620: **3527/6864**; 420: **2592/4664**).
+Visually inspected the focused matching capture and M15: current rendering has a
+horizontal topic strip, vertically stacked lesson cards with exact objectives,
+concept labels and full named Open/Show another actions; M15 has a topic rail and
+a two-column illustrative card grid. Compact stacking is supported; the required
+wide-rail assertion remains failed. This is an actual rendering difference, not
+merely a report that fixture images were generated. Also visually inspected the
+current native standard hub
+`$E/attachments/24A2C242-5957-4266-932E-64911E9DA097.png`: it retains actual folder
+and Local Data actions in the single stacked document, consistent with the earlier
+M38 comparison's documented departure. No visual acceptance inferred from that.
+
+M40/M41 and supplemental folder/export captures still were not produced because
+their methods fail host trust; other unrepresented applicable F00–F13 states
+remain unverified. Neither the attestation nor 117 renders closes those omissions.
+
+Available isolated native **process-startup only** smoke:
+`env KONTROL_F00_RECOVERY_TEST=1 /private/tmp/kontrol-f13-derived/Build/Products/Debug/Kontrol.app/Contents/MacOS/Kontrol`.
+PID **93012** stayed alive for five seconds (`ps` exit 0); terminated only that
+process with SIGTERM (intentional wait **143**). This Debug seam fails before
+production-store IO; no Retry, real-store or native journey was performed.
+`native-process-smoke.log` retains the results.
+
+The preceding attempt's **two unverified closed-copy integrity opens** were also
+checked independently with `python3 "$E/closed-copy-integrity.py"` (exit 0): host
+81274 exited, owned descendants are not symlinks, no WAL/SHM exists; standalone
+closed copies use read-only `immutable=1`, never stores with WAL. Both return
+`integrity_check=ok`, with full directory byte inventories unchanged. Exact
+canonical source/snapshot paths and hashes are in
+`prior-closed-copy-integrity-final.log`. Initial guard attempt exited **1** because
+it rejected macOS's system `/var → /private/var` alias; corrected only that known
+ancestor handling while retaining descendant checks. The failed probe log remains.
+No cleanup, original fixture open, permission broadening or paid generation occurred.
+
+**Continue Step 6.2:** fix the remaining wide-layout/topic/AX-content/native-action
+and scene failures, diagnose the newly exposed SQLite backup failure, establish
+actual rebuilt-host authorization, and complete absent reference comparisons.
+Rerun both required gates after repairs. Manual observations remain user-verified;
+full-suite failures and missing evidence remain explicit, not release approval.
