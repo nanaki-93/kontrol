@@ -7,6 +7,7 @@ struct ProjectsView: View {
     @ObservedObject var store: ProjectStore
     @State private var showingAdd = false
     @State private var detailID: UUID?
+    @State private var previewSelection = ProjectPreviewSelection()
     @FocusState private var addFocused: Bool
     @FocusState private var navigationFocus: NavigationFocus?
     @State private var featureOrigin: NavigationFocus?
@@ -103,6 +104,54 @@ struct ProjectsView: View {
 
     private var selectedRow: ProjectRowState? {
         store.rows.first { $0.reference.id == store.selectedID }
+    }
+
+    /// A window-local browse identity; never aliases the store's full-detail route.
+    struct ProjectPreviewSelection: Equatable {
+        var projectID: UUID? = nil
+        var featureID: String? = nil
+
+        func resolved(for projectID: UUID, candidates: [FeatureCandidate]) -> Self {
+            let retained = self.projectID == projectID && candidates.contains { $0.id == featureID }
+            return Self(projectID: projectID, featureID: retained ? featureID : candidates.first?.id)
+        }
+
+        func selecting(_ id: String, from projection: PreviewProjection) -> Self {
+            guard projectID == projection.selection.projectID,
+                  projection.candidates.contains(where: { $0.id == id }) else { return self }
+            return Self(projectID: projectID, featureID: id)
+        }
+    }
+
+    struct PreviewProjection {
+        let selection: ProjectPreviewSelection
+        let candidates: [FeatureCandidate]
+        /// Nil for a retained/failed or in-flight inspection, even if recovery identity exists.
+        var currentIdentity: ProjectFeatureIdentity? {
+            guard let id = selection.projectID, let featureID = selection.featureID,
+                  candidates.contains(where: { $0.id == featureID }) else { return nil }
+            return ProjectFeatureIdentity(projectID: id, featureID: featureID)
+        }
+    }
+
+    static func preview(for projectID: UUID?, selection: ProjectPreviewSelection,
+                        row: ProjectRowState?) -> PreviewProjection? {
+        guard let projectID else { return nil }
+        // A failed read is not an authoritative empty candidate list. Do not reconcile
+        // away an eligible ID until a new inspection has actually been accepted.
+        guard let row, row.reference.id == projectID, !row.isRefreshing,
+              row.refreshFailure == nil, !row.isRetainedInspection,
+              row.inspection != nil else {
+            return PreviewProjection(selection: selection.projectID == projectID ? selection :
+                ProjectPreviewSelection(projectID: projectID), candidates: [])
+        }
+        let candidates = recommendations(row)
+        return PreviewProjection(selection: selection.resolved(for: projectID, candidates: candidates),
+                                 candidates: candidates)
+    }
+
+    private var previewProjection: PreviewProjection? {
+        Self.preview(for: store.selectedID, selection: previewSelection, row: selectedRow)
     }
 
     private var selectedConflict: ProjectFeatureIdentity? {
@@ -324,12 +373,18 @@ struct ProjectsView: View {
         .onChange(of: selectedConflict) { _, conflict in
             if let conflict { presentedConflict = conflict }
         }
-        .onChange(of: store.selectedID) { _, _ in
+        .onChange(of: store.selectedID) { _, newID in
+            // Reset synchronously with the accepted folder switch, including when two
+            // projects happen to use the same feature ID.
+            previewSelection = Self.preview(for: newID, selection: .init(), row: selectedRow)?.selection ?? .init()
             presentedConflict = selectedConflict
             pendingCompletionFocus = nil
             pendingReturnFocus = nil
             // A selection switch must not return focus to the previous project.
             featureOrigin = nil
+        }
+        .onChange(of: previewProjection?.selection) { _, resolved in
+            if let resolved { previewSelection = resolved }
         }
         .onChange(of: presentedConflict) { _, conflict in
             if conflict == nil, let pending = pendingCompletionFocus {
@@ -361,6 +416,7 @@ struct ProjectsView: View {
         }
         .onAppear {
             enter()
+            if let resolved = previewProjection?.selection { previewSelection = resolved }
             if let conflict = selectedConflict { presentedConflict = conflict }
         }
         .onChange(of: store.selectedFeature) { old, new in
