@@ -86,28 +86,39 @@ final class NavigationStoreTests: XCTestCase {
         let catalogSubscription = graph.learningCatalogStore.$projection.dropFirst().sink { _ in catalogPublications += 1 }
         defer { topicSubscription.cancel(); catalogSubscription.cancel() }
 
+        // Derive expectations from the imported fixture's slots, not the production choices resolver.
+        // Stored @Published properties are inspected only after selectTopic returns; its sink
+        // receives the new value before the backing property has changed.
+        func assertCurrentTopic(_ id: String, on navigation: NavigationStore) throws {
+            XCTAssertEqual(navigation.selectedTopicID, id)
+            XCTAssertEqual(navigation.learningRoute, .choices)
+            let projection = try XCTUnwrap(LearningView.topicProjection(for: navigation.selectedTopicID, in: catalog))
+            XCTAssertEqual(projection.selected.id, id)
+            let expectedIDs = catalog.slots.filter { $0.topicID == id }
+                .sorted { $0.slotIndex < $1.slotIndex }.map(\.lessonID)
+            XCTAssertEqual(LearningView.choices(for: projection.selected.id, in: catalog).map(\.id), expectedIDs)
+        }
+
         XCTAssertNil(first.selectedTopicID)
-        first.selectTopic("go")
-        XCTAssertEqual(first.selectedTopicID, "go", "First request must not need another activation")
-        first.selectTopic("java")
-        XCTAssertEqual(first.selectedTopicID, "java")
-        first.selectTopic("design")
-        XCTAssertEqual(first.selectedTopicID, "design")
-        XCTAssertEqual(publishedIDs, ["go", "java", "design"])
-        first.selectTopic("design") // same topic on choices is a no-op
-        XCTAssertEqual(publishedIDs, ["go", "java", "design"])
+        for id in ["java", "security", "design", "java"] {
+            first.selectTopic(id)
+            try assertCurrentTopic(id, on: first)
+        }
+        XCTAssertEqual(publishedIDs, ["java", "security", "design", "java"])
+        first.selectTopic("java") // same topic on choices is a no-op
+        try assertCurrentTopic("java", on: first)
+        XCTAssertEqual(publishedIDs, ["java", "security", "design", "java"])
         XCTAssertNil(first.pendingTransition)
         first.showHistory()
         XCTAssertEqual(first.learningRoute, .history)
         first.selectTopic("perf")
-        XCTAssertEqual(first.selectedTopicID, "perf")
-        XCTAssertEqual(first.learningRoute, .choices)
-        XCTAssertEqual(publishedIDs, ["go", "java", "design", "perf"])
+        try assertCurrentTopic("perf", on: first)
+        XCTAssertEqual(publishedIDs, ["java", "security", "design", "java", "perf"])
         XCTAssertNil(second.selectedTopicID)
         XCTAssertEqual(second.learningRoute, .choices)
         second.selectTopic("security")
-        XCTAssertEqual(second.selectedTopicID, "security")
-        XCTAssertEqual(first.selectedTopicID, "perf")
+        try assertCurrentTopic("security", on: second)
+        try assertCurrentTopic("perf", on: first)
         XCTAssertEqual(otherPreferences.writes, 0)
         XCTAssertNil(defaults.object(forKey: UserDefaultsDestinationPreferences.key))
         XCTAssertEqual(catalogPublications, 0)
