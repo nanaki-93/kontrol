@@ -47,6 +47,38 @@ git diff --check
 
 `RESULTS` was `/tmp/kontrol-topic-selection-results.EgtioX`; result bundle: **`/tmp/kontrol-topic-selection-results.EgtioX/selected.xcresult`** (also recorded in `/tmp/kontrol-topic-selection-step3-result-path.txt`). Build: `BUILD SUCCEEDED`; compilation of all test bundles: `TEST BUILD SUCCEEDED`; selected run: `TEST EXECUTE SUCCEEDED`; analyzer: `ANALYZE SUCCEEDED`; whitespace: clean. `xcrun xcresulttool get test-results summary --path /tmp/kontrol-topic-selection-results.EgtioX/selected.xcresult --format json > /tmp/kontrol-topic-selection-step3-summary.json` exited 0 and confirms **30 executed, 30 passed, 0 failed, 0 skipped, 0 expected failures, no runtime warnings**: 13 `NavigationStoreTests`, 17 `LearningCatalogStoreTests`. These inspected suites contain isolated state, repository, draft, and preference tests, not hosted window/AX interactions. First/current topic IDs, no catalog refresh or browsing writes, owner isolation, failed-save draft/pending ID retention, cancel/retry, nil/unknown/empty fallback, and partial/zero-choice projection have focused assertions. The raw test log includes non-failing `com.apple.linkd.autoShortcut` connection diagnostics; xcodebuild also warns of multiple matching macOS architectures. No GUI, AX, keyboard/focus, screenshot, or live-app checks were run or credited. No remaining non-GUI integration failure was found.
 
+## Learning topic selection — Step 2.1 fresh integration (2026-10-01)
+
+**Non-interactive integration passed; no production correction was needed.** The first incomplete `.pi/PLAN.md` task matched runner Step 2.1; the cumulative task-2 review checklist lists no previous findings. Root `AGENTS.md` applies; the scan found no nested instructions or submodules. The pre-existing changes to `KontrolTests/LearningPresentationTests.swift` and unrelated documentation were preserved; only this QA entry was edited for this step.
+
+Source review: `AppShell` supplies its observed window `NavigationStore` and shared catalog to Learning choices, attaches shared drafts on appearance, calls `retryTransition()` for a pending request (otherwise `flushForLifecycle()`) from Retry save, and calls `cancelTransition()` from Stay here. Both wide and compact `ViewThatFits` branches pass through `RoutedLearningCatalog`, which observes the injected owner; the single `topicProjection` resolves the ID for selected styling, heading/count, slot-ordered cards, saved work, and Generate lesson target. Standalone `LearningView(store:)` retains its local selection. The topic action calls `selectTopic(topic.id)` once without a preliminary flush; `entryError` clears only after accepted choices with no pending/error state. `NavigationStore` applies a single draft-save barrier before publishing selected ID and choices route, while failures retain the old selection/route and requested pending ID for retry/cancel. Loading/read failures do not render stale choices; empty catalogs have no selected topic. Inspected the existing hosted `LearningPresentationTests` assertions (mounted first/subsequent selection, programmatic selection, standalone browsing and layout): **compiled, not executed**. This review plus unit tests is not evidence of live rendering.
+
+Toolchain: Xcode **27.0 (27A266a)**, Apple Swift **6.4** (`swiftlang-6.4.0.34.1`), macOS **27.0 arm64** from the result bundle. The build uses existing Swift 5/macOS 14 project settings; no macOS 14 runtime check was performed. From the repository root, these commands ran in order; all exited **0**:
+
+```sh
+set -e
+DERIVED_DATA="$(mktemp -d /tmp/kontrol-topic-selection-derived.XXXXXX)" # /tmp/kontrol-topic-selection-derived.WCrbZ8
+RESULTS="$(mktemp -d /tmp/kontrol-topic-selection-results.XXXXXX)"   # /tmp/kontrol-topic-selection-results.gBjPUv
+make build DERIVED_DATA="$DERIVED_DATA"
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug \
+  -destination 'platform=macOS' -derivedDataPath "$DERIVED_DATA" \
+  CODE_SIGNING_ALLOWED=NO build-for-testing
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug \
+  -destination 'platform=macOS' -derivedDataPath "$DERIVED_DATA" \
+  -resultBundlePath "$RESULTS/selected.xcresult" -parallel-testing-enabled NO \
+  -only-testing:KontrolTests/NavigationStoreTests \
+  -only-testing:KontrolTests/LearningCatalogStoreTests \
+  CODE_SIGNING_ALLOWED=NO test-without-building
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug \
+  -destination 'platform=macOS' -derivedDataPath "$DERIVED_DATA" \
+  CODE_SIGNING_ALLOWED=NO analyze
+git diff --check
+xcrun xcresulttool get test-results summary --path "$RESULTS/selected.xcresult" --format json
+xcrun xcresulttool get test-results tests --path "$RESULTS/selected.xcresult" --format json
+```
+
+Evidence: `/tmp/kontrol-topic-step2-paths.txt`, `/tmp/kontrol-topic-step2-{build,bft,tests,analyze}.log`, `/tmp/kontrol-topic-step2-{summary,tree}.json`; result bundle **`/tmp/kontrol-topic-selection-results.gBjPUv/selected.xcresult`**. `BUILD SUCCEEDED`, `TEST BUILD SUCCEEDED` (all test bundles compiled), `TEST EXECUTE SUCCEEDED`, `ANALYZE SUCCEEDED`, whitespace clean. Bundle summary and test tree: **30 executed / 30 passed / 0 failed / 0 skipped / 0 expected failures** (13 `NavigationStoreTests`, 17 `LearningCatalogStoreTests`), no runtime warnings. The first non-default `java` selection, successive current IDs and slot-ordered projection, no catalog publications/browsing writes, owner isolation, failed-save exact draft/pending ID retention and cancel/retry, nil/unknown/empty fallback and partial/zero-choice behavior have executed regressions. The log contains non-fatal AppIntents/linkd connection diagnostics and pre-existing test-compilation warnings (including a deprecation in the already-modified hosted test); they did not fail build or selected tests. No hosted presentation, AX/VoiceOver, keyboard/focus, screenshot, or live-app validation was run or credited, and none is a required gate under the current policy.
+
 ## Historical execution records — not current requirements
 
 All sections below retain prior observations, commands, failure counts and evidence paths for audit. Their old A13/S13/B13 GUI gates, deferred-check lists, desktop/permission prerequisites and mandatory live-action instructions are withdrawn. Do not execute historical command blocks as a current validation checklist; use the non-interactive policy above and the current feature plan. Historical failures are not converted to passes, and non-GUI defects still require investigation.
