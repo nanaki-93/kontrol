@@ -31,10 +31,12 @@
 - [ ] Sort open items by overdue, due date, then createdAt and UUID; no-due tasks use creation order.
 - [ ] Cascade no historical data on deletion. Optional references become nil; historical title snapshots remain.
 
-## Acceptance checks
+## Non-interactive acceptance checks
+
+Follow [AGENTS.md](../../AGENTS.md). Exercise contracts through store/repository calls, injected failures and isolated reopen tests. Review UI wiring in source; no app launch, accessibility, keyboard or button interaction is required.
 
 - [ ] Whitespace-only titles cannot save.
-- [ ] Complete/reopen survives relaunch and updates both Today and Tasks.
+- [ ] Completion/reopening survives repository reopen and publishes to shared Today/Tasks state.
 - [ ] Cancel editing preserves old values; delete only affects the selected task.
 
 ## Visual references

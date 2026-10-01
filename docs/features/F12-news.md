@@ -29,11 +29,13 @@
 - [ ] Refresh manually or after 30 minutes stale while foregrounded; use ETag/Last-Modified, at most 4 concurrent fetches, no background daemon.
 - [ ] Retain 30 days or 500 articles, whichever is smaller. Render summaries as plain text and keep them collapsed by default.
 
-## Acceptance checks
+## Non-interactive acceptance checks
+
+Follow [AGENTS.md](../../AGENTS.md). Use parser/store tests with injected transports, browser adapters and isolated cache reopen. No real browser, app launch, accessibility, keyboard or hosted UI validation is required.
 
 - [ ] One malformed feed does not discard another feed's results.
 - [ ] Repeated refresh does not duplicate articles; missing dates are labeled, not fabricated.
-- [ ] Offline launch shows cached content and safe links remain available.
+- [ ] Cache reopen with unavailable injected transport retains content and safe source URLs.
 
 ## Visual references
 

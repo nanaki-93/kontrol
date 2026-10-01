@@ -26,17 +26,23 @@ final class LearningPresentationTests: XCTestCase {
         window.contentView = host
         window.center()
         window.makeKeyAndOrderFront(nil)
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        _ = NSRunningApplication.current.activate(options: [.activateIgnoringOtherApps])
+        window.orderFrontRegardless()
         defer { window.orderOut(nil) }
         host.layoutSubtreeIfNeeded()
         let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
         var learningWindow: AXUIElement?
-        let deadline = Date().addingTimeInterval(2)
+        var availableTitles: [String] = []
+        let deadline = Date().addingTimeInterval(5)
         repeat {
             RunLoop.main.run(until: Date().addingTimeInterval(0.05))
             let windows = attribute(app, kAXWindowsAttribute) as? [AXUIElement] ?? []
+            availableTitles = windows.compactMap { attribute($0, kAXTitleAttribute) as? String }
             learningWindow = windows.first { attribute($0, kAXTitleAttribute) as? String == window.title }
         } while learningWindow == nil && Date() < deadline
-        try check(window, descendants(of: try XCTUnwrap(learningWindow)))
+        try check(window, descendants(of: try XCTUnwrap(learningWindow,
+            "AX could not find \(window.title); visible titles: \(availableTitles); active: \(NSApplication.shared.isActive); ordered: \(window.isVisible); trusted: \(AXIsProcessTrusted()); policy: \(NSApplication.shared.activationPolicy().rawValue); pid: \(ProcessInfo.processInfo.processIdentifier)")))
     }
 
     private func text(_ elements: [AXUIElement]) -> [String] {
@@ -48,15 +54,57 @@ final class LearningPresentationTests: XCTestCase {
         elements.compactMap { attribute($0, kAXIdentifierAttribute) as? String }
     }
 
+    /// Always inspect the live window rather than retaining AX elements across renders.
+    private func liveElements(in window: NSWindow) throws -> [AXUIElement] {
+        let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+        let windows = attribute(app, kAXWindowsAttribute) as? [AXUIElement] ?? []
+        let current = try XCTUnwrap(windows.first {
+            attribute($0, kAXTitleAttribute) as? String == window.title
+        }, "Learning test host window is unavailable to Accessibility")
+        return descendants(of: current)
+    }
+
+    private func topicPresentation(_ id: String, snapshot: LearningCatalogSnapshot,
+                                   in elements: [AXUIElement]) -> Bool {
+        guard let topic = snapshot.topics.first(where: { $0.id == id }),
+              let selected = elements.first(where: {
+                  attribute($0, kAXIdentifierAttribute) as? String == "learning-topic-\(id)"
+              }), attribute(selected, kAXValueAttribute) as? String == "Selected" else { return false }
+        let choices = LearningView.choices(for: id, in: snapshot)
+        let ids = identifiers(elements)
+        let headings = elements.filter { attribute($0, kAXRoleAttribute) as? String == kAXHeadingRole }
+        return headings.contains { (attribute($0, kAXValueAttribute) as? String) == topic.name ||
+            (attribute($0, kAXDescriptionAttribute) as? String) == topic.name } &&
+            text(elements).contains("\(choices.count) available") &&
+            ids.filter { $0.hasPrefix("learning-lesson-") } == choices.map { "learning-lesson-\($0.id)" } &&
+            ids.filter { $0.hasPrefix("learning-open-") } == choices.prefix(1).map { "learning-open-\($0.id)" } &&
+            ids.filter { $0.hasPrefix("learning-preview-") } == choices.prefix(1).map { "learning-preview-\($0.id)" }
+    }
+
+    private func assertTopic(_ id: String, snapshot: LearningCatalogSnapshot, in window: NSWindow,
+                             file: StaticString = #filePath, line: UInt = #line) throws {
+        let deadline = Date().addingTimeInterval(2)
+        var elements: [AXUIElement] = []
+        repeat {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            elements = try liveElements(in: window)
+            if topicPresentation(id, snapshot: snapshot, in: elements) { return }
+        } while Date() < deadline
+        XCTFail("Topic \(id) did not render on the mounted host: ids=\(identifiers(elements)), text=\(text(elements))",
+                file: file, line: line)
+    }
+
     private func pressSpace(in window: NSWindow) throws {
         let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero,
             modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
             windowNumber: window.windowNumber, context: nil, characters: " ",
             charactersIgnoringModifiers: " ", isARepeat: false, keyCode: 49))
-        if !window.performKeyEquivalent(with: event) {
-            if window.isKeyWindow { window.sendEvent(event) }
-            else { window.firstResponder?.keyDown(with: event) }
-        }
+        if !window.performKeyEquivalent(with: event) { window.sendEvent(event) }
+        let release = try XCTUnwrap(NSEvent.keyEvent(with: .keyUp, location: .zero,
+            modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber, context: nil, characters: " ",
+            charactersIgnoringModifiers: " ", isARepeat: false, keyCode: 49))
+        window.sendEvent(release)
         RunLoop.main.run(until: Date().addingTimeInterval(0.05))
     }
 
@@ -110,15 +158,13 @@ final class LearningPresentationTests: XCTestCase {
             let row = try XCTUnwrap(elements.first { attribute($0, kAXIdentifierAttribute) as? String == "learning-lesson-\(lesson.id)" })
             let name = (attribute(row, kAXDescriptionAttribute) as? String ?? "") +
                 (attribute(row, kAXValueAttribute) as? String ?? "")
-            let conceptNames = lesson.conceptIDs.compactMap { id in snapshot.concepts.first { $0.id == id }?.name }
-            for field in [lesson.title, lesson.displayObjective, lesson.format.capitalized,
-                          lesson.difficulty.capitalized, "\(lesson.estimatedMinutes) min"] + conceptNames {
-                XCTAssertTrue(name.contains(field), "Missing \(field) from \(name)")
-            }
+            XCTAssertTrue(name.contains(lesson.title))
+            XCTAssertFalse(name.contains(lesson.displayObjective))
         }
-        XCTAssertEqual(ids.filter { $0.hasPrefix("learning-open-") },
-                       go.map { "learning-open-\($0.id)" })
         let inspected = try XCTUnwrap(go.first)
+        XCTAssertTrue(ids.contains("learning-preview-\(inspected.id)"))
+        XCTAssertTrue(text(elements).joined(separator: " ").contains(inspected.displayObjective))
+        XCTAssertEqual(ids.filter { $0.hasPrefix("learning-open-") }, ["learning-open-\(inspected.id)"])
         XCTAssertFalse(text(elements).joined(separator: "\n").contains(inspected.referenceAnswer))
         XCTAssertFalse(ids.contains { $0.hasPrefix("learning-inspect-") || $0.hasPrefix("learning-answer-") })
         XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonProgress>()).isEmpty)
@@ -131,7 +177,7 @@ final class LearningPresentationTests: XCTestCase {
         XCTAssertEqual(javaIDs.filter { $0.hasPrefix("learning-lesson-") },
                        LearningView.choices(for: "java", in: snapshot).map { "learning-lesson-\($0.id)" })
         XCTAssertEqual(javaIDs.filter { $0.hasPrefix("learning-open-") },
-                       LearningView.choices(for: "java", in: snapshot).map { "learning-open-\($0.id)" })
+                       LearningView.choices(for: "java", in: snapshot).prefix(1).map { "learning-open-\($0.id)" })
         XCTAssertFalse(text(descendants(of: try XCTUnwrap(learningWindow))).contains(inspected.referenceAnswer),
                        "Changing topics must not reveal a reference answer")
         let captureDirectory = URL(fileURLWithPath: "/tmp/kontrol-f01-evidence/fixtures", isDirectory: true)
@@ -156,6 +202,102 @@ final class LearningPresentationTests: XCTestCase {
         XCTAssertEqual(dependencies.learningCatalogStore.state.snapshot?.slots, snapshot.slots)
         XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonProgress>()).isEmpty)
         XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).isEmpty)
+    }
+
+    func testMountedLearningRouteTracksEverySingleTopicActivation() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataCatalogRepository(container: container)
+        _ = try repository.importIfNeeded(BundledCatalogLoader.load(from: Bundle.main))
+        let snapshot = try repository.loadSnapshot()
+        let dependencies = AppDependencies(container: container, catalogRepository: repository)
+        let suite = "LearningTopicRoute.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let navigation = NavigationStore(preferences: UserDefaultsDestinationPreferences(defaults: defaults))
+        navigation.select(.learning)
+        try inspect(AppShell(navigation: navigation, dependencies: dependencies)) { window, _ in
+            try assertTopic("go", snapshot: snapshot, in: window)
+            for id in ["java", "design", "perf", "security", "go"] {
+                let button = try XCTUnwrap(liveElements(in: window).first {
+                    attribute($0, kAXIdentifierAttribute) as? String == "learning-topic-\(id)"
+                })
+                XCTAssertEqual(AXUIElementPerformAction(button, kAXPressAction as CFString), .success)
+                XCTAssertEqual(navigation.selectedTopicID, id)
+                try assertTopic(id, snapshot: snapshot, in: window)
+                XCTAssertEqual(navigation.learningRoute, .choices)
+            }
+        }
+        XCTAssertEqual(dependencies.learningCatalogStore.state.snapshot?.slots, snapshot.slots)
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonProgress>()).isEmpty)
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).isEmpty)
+    }
+
+    func testMountedLearningViewObservesProgrammaticTopicChangesWithoutParent() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataCatalogRepository(container: container)
+        _ = try repository.importIfNeeded(BundledCatalogLoader.load(from: Bundle.main))
+        let snapshot = try repository.loadSnapshot()
+        let store = LearningCatalogStore(repository: repository)
+        let suite = "LearningTopicDirect.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let navigation = NavigationStore(preferences: UserDefaultsDestinationPreferences(defaults: defaults))
+        try inspect(LearningView(store: store, navigation: navigation)) { window, _ in
+            try assertTopic("go", snapshot: snapshot, in: window)
+            for id in ["java", "security", "design"] {
+                navigation.selectTopic(id)
+                try assertTopic(id, snapshot: snapshot, in: window)
+            }
+        }
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonProgress>()).isEmpty)
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).isEmpty)
+    }
+
+    func testStandaloneLearningViewStillBrowsesTopics() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataCatalogRepository(container: container)
+        _ = try repository.importIfNeeded(BundledCatalogLoader.load(from: Bundle.main))
+        let snapshot = try repository.loadSnapshot()
+        let store = LearningCatalogStore(repository: repository)
+        try inspect(LearningView(store: store)) { window, _ in
+            let deadline = Date().addingTimeInterval(2)
+            var current: [AXUIElement] = []
+            repeat {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+                current = try liveElements(in: window)
+                if let go = current.first(where: {
+                    attribute($0, kAXIdentifierAttribute) as? String == "learning-topic-go"
+                }), attribute(go, kAXValueAttribute) as? String == "Selected" { break }
+            } while Date() < deadline
+            let button = try XCTUnwrap(current.first {
+                attribute($0, kAXIdentifierAttribute) as? String == "learning-topic-java"
+            })
+            XCTAssertEqual(AXUIElementPerformAction(button, kAXPressAction as CFString), .success)
+            let choices = LearningView.choices(for: "java", in: snapshot)
+            let updatedDeadline = Date().addingTimeInterval(2)
+            var updated: [AXUIElement] = []
+            repeat {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+                updated = try liveElements(in: window)
+                if let java = updated.first(where: {
+                    attribute($0, kAXIdentifierAttribute) as? String == "learning-topic-java"
+                }), attribute(java, kAXValueAttribute) as? String == "Selected" &&
+                    identifiers(updated).filter({ $0.hasPrefix("learning-lesson-") }) ==
+                        choices.map({ "learning-lesson-\($0.id)" }) { break }
+            } while Date() < updatedDeadline
+            let selectedJava = try XCTUnwrap(updated.first {
+                attribute($0, kAXIdentifierAttribute) as? String == "learning-topic-java"
+            })
+            XCTAssertEqual(attribute(selectedJava, kAXValueAttribute) as? String, "Selected")
+            XCTAssertEqual(identifiers(updated).filter { $0.hasPrefix("learning-lesson-") },
+                           choices.map { "learning-lesson-\($0.id)" })
+            XCTAssertTrue(text(updated).contains("4 available"))
+            XCTAssertTrue(updated.contains { attribute($0, kAXRoleAttribute) as? String == kAXHeadingRole &&
+                (attribute($0, kAXValueAttribute) as? String == "Java" ||
+                 attribute($0, kAXDescriptionAttribute) as? String == "Java") })
+        }
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).isEmpty)
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonProgress>()).isEmpty)
     }
 
     func testChoicesReadCurrentDefinitionsRatherThanBundledCopy() throws {
@@ -217,7 +359,7 @@ final class LearningPresentationTests: XCTestCase {
         try inspect(LearningView(store: store)) { _, elements in
             XCTAssertTrue(text(elements).contains { $0.contains("2 available") })
             XCTAssertEqual(identifiers(elements).filter { $0.hasPrefix("learning-lesson-") }.count, 2)
-            XCTAssertTrue(identifiers(elements).contains("learning-generate"))
+            XCTAssertTrue(identifiers(elements).contains("learning-more-lessons"))
         }
         reader.value = LearningCatalogSnapshot(topics: snapshot.topics, subtopics: snapshot.subtopics,
             concepts: snapshot.concepts, definitions: snapshot.definitions, progress: snapshot.progress, slots: [])
@@ -226,11 +368,11 @@ final class LearningPresentationTests: XCTestCase {
             XCTAssertTrue(text(elements).contains { $0.contains("0 available") })
             XCTAssertTrue(text(elements).contains { $0.contains("No choices available in Go.") })
             XCTAssertFalse(identifiers(elements).contains { $0.hasPrefix("learning-lesson-") })
-            XCTAssertTrue(identifiers(elements).contains("learning-generate"))
+            XCTAssertTrue(identifiers(elements).contains("learning-more-lessons"))
         }
     }
 
-    // Hosted route check: F13 executes this with accessibility permission. The shell,
+    // Historical hosted route fixture, compiled but not run by non-interactive validation. The shell,
     // not LearningView, must own the one full-height vertical scroll viewport.
     func testLearningRouteUsesShellScrollAtCompactAndWideWidths() throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
@@ -256,7 +398,7 @@ final class LearningPresentationTests: XCTestCase {
             XCTAssertTrue(AXValueGetValue(size, .cgSize, &dimensions))
             return CGRect(origin: origin, size: dimensions)
         }
-        for width: CGFloat in [420, 620, 1000] {
+        for width: CGFloat in [420, 620, 1000, 2000] {
             try inspect(AppShell(navigation: navigation, dependencies: dependencies),
                         width: width, scale: 1.3) { window, elements in
                 let root = try XCTUnwrap(window.contentView)
@@ -293,20 +435,15 @@ final class LearningPresentationTests: XCTestCase {
                 let topicFrame = try rect(of: topic)
                 let lessonFrame = try rect(of: first)
                 XCTAssertGreaterThanOrEqual(topicFrame.height, AppMetrics.preferredTarget)
-                if width < 720 {
-                    // AX screen coordinates have a top-left origin, unlike
-                    // AppKit's bottom-left window coordinates. Below means larger Y.
-                    XCTAssertGreaterThanOrEqual(lessonFrame.minY, topicFrame.maxY,
-                                                "Compact choices must follow the topics without overlap: lesson=\(lessonFrame), topic=\(topicFrame)")
-                } else {
-                    XCTAssertGreaterThan(lessonFrame.minX, topicFrame.maxX,
-                                         "Wide choices must sit beside the topic rail: lesson=\(lessonFrame), topic=\(topicFrame)")
-                }
+                // Topics are a distinct row at every width; only list and preview
+                // become adjacent when the available width and text scale permit it.
+                XCTAssertGreaterThanOrEqual(lessonFrame.minY, topicFrame.maxY,
+                                            "Choices must follow topics: lesson=\(lessonFrame), topic=\(topicFrame)")
             }
         }
     }
 
-    // Hosted GUI assertions compile here; F13 runs them with accessibility permission.
+    // Historical hosted GUI assertions compile but are not validation gates.
     func testNarrowEnlargedTopicsAndOpenActionsRemainReachable() throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         let repository = SwiftDataCatalogRepository(container: container)
@@ -337,21 +474,24 @@ final class LearningPresentationTests: XCTestCase {
                 }
                 let updated = descendants(of: AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier))
                 XCTAssertFalse(identifiers(updated).contains { $0.hasPrefix("learning-answer-") })
-                let java = try XCTUnwrap(topics.first {
+                let java = try XCTUnwrap(liveElements(in: window).first {
                     attribute($0, kAXIdentifierAttribute) as? String == "learning-topic-java"
                 })
+                window.makeKeyAndOrderFront(nil)
                 XCTAssertEqual(AXUIElementSetAttributeValue(java, kAXFocusedAttribute as CFString, kCFBooleanTrue), .success)
+                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+                let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+                let focused = try XCTUnwrap(attribute(app, kAXFocusedUIElementAttribute))
+                XCTAssertEqual(attribute(unsafeBitCast(focused, to: AXUIElement.self), kAXIdentifierAttribute) as? String,
+                               "learning-topic-java")
                 try pressSpace(in: window)
-                XCTAssertEqual(attribute(java, kAXValueAttribute) as? String, "Selected")
-                let go = try XCTUnwrap(topics.first {
+                try assertTopic("java", snapshot: snapshot, in: window)
+                let go = try XCTUnwrap(liveElements(in: window).first {
                     attribute($0, kAXIdentifierAttribute) as? String == "learning-topic-go"
                 })
                 XCTAssertEqual(AXUIElementPerformAction(go, kAXPressAction as CFString), .success)
-                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
-                let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
-                let windows = attribute(app, kAXWindowsAttribute) as? [AXUIElement] ?? []
-                let active = try XCTUnwrap(windows.first { attribute($0, kAXTitleAttribute) as? String == window.title })
-                let current = descendants(of: active)
+                try assertTopic("go", snapshot: snapshot, in: window)
+                let current = try liveElements(in: window)
                 let selectedGo = try XCTUnwrap(current.first {
                     attribute($0, kAXIdentifierAttribute) as? String == "learning-topic-go"
                 })

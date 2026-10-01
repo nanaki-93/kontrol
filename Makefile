@@ -16,8 +16,11 @@ test:
 		-destination 'platform=macOS' -derivedDataPath $(DERIVED_DATA) \
 		CODE_SIGNING_ALLOWED=NO test
 
+# Build first; only restart after a successful build. A cancelled/failed graceful
+# quit stops the recipe rather than discarding drafts or opening a second instance.
 run: build
-	open "$(APP)"
+	osascript scripts/quit-app.applescript "$(abspath $(APP))"
+	open -n "$(APP)"
 
 clean:
 	xcodebuild -project $(PROJECT) -scheme $(SCHEME) -configuration $(CONFIGURATION) \

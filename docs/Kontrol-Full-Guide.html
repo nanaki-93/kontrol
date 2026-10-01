@@ -1,6 +1,6 @@
 <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Kontrol — Full V1 plan and mockups</title><style>
  :root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#0b0b0d;color:#e1dcdb;font:16px/1.65 system-ui,sans-serif}header,main{max-width:1100px;margin:auto;padding:28px}header{border-bottom:1px solid #3a2b2d}h1{font-size:30px;line-height:1.2;letter-spacing:-.03em}h2{font-size:23px}h3{font-size:19px}a{color:#e28b8e;text-underline-offset:3px}nav{display:flex;flex-wrap:wrap;gap:16px}p{max-width:88ch}details{background:#151214;border:1px solid #3a2b2d;border-radius:7px;margin:16px 0;scroll-margin-top:18px}summary{padding:17px 20px;cursor:pointer;font-weight:600}summary span{float:right;color:#aaa0a0}.prose{padding:4px 24px 24px;overflow-wrap:anywhere}.prose>h1{display:none}table{display:block;max-width:100%;overflow-x:auto;border-collapse:collapse;font-size:14px;margin:18px 0}th,td{padding:10px 12px;text-align:left;border-bottom:1px solid #3a2b2d;min-width:100px;vertical-align:top}th{color:#d6676b}pre{overflow:auto;background:#0b0b0d;padding:18px;font:13px/1.6 ui-monospace,monospace}code{font-size:.9em}img{display:block;width:100%;height:auto;border-top:1px solid #3a2b2d}.screen{background:#0b0b0d}.label{font:12px ui-monospace,monospace;color:#d6676b;letter-spacing:.1em}@media(max-width:600px){header,main{padding:18px}.prose{padding:0 15px 18px}summary{padding:15px;font-size:15px}h1{font-size:26px}table{font-size:13px}}
- </style></head><body><header><span class="label">KONTROL / V1 SPECIFICATION</span><h1>Full plan, features and mockups</h1><p>14 feature specifications · 43 visual states · Black / Red Terminal</p><nav><a href="#document-0">Plan</a><a href="#document-1">Features</a><a href="#mockups">Mockups</a><a href="#document-17">QA</a><a href="#file-list">Sample files</a></nav></header><main><details class="document" id="document-0" open><summary>Kontrol — V1 implementation plan</summary><div class="prose"><h1>Kontrol — V1 implementation plan</h1>
+ </style></head><body><header><span class="label">KONTROL / V1 SPECIFICATION</span><h1>Full plan, features and mockups</h1><p><strong>Validation policy:</strong> Follow <a href="../AGENTS.md">AGENTS.md</a> and <a href="qa.md">current QA</a>. This is an archived design guide, not a current execution checklist. Accessibility, native keyboard, hosted UI, screenshots and running-app/manual-action checks are removed, not deferred. Validate with source review, builds, static checks and explicitly selected non-GUI tests only; retain static distribution checks. Product behavior and historical outcomes are unchanged.</p><p>14 feature specifications · 43 visual states · Black / Red Terminal</p><nav><a href="#document-0">Plan</a><a href="#document-1">Features</a><a href="#mockups">Mockups</a><a href="#document-17">QA</a><a href="#file-list">Sample files</a></nav></header><main><details class="document" id="document-0" open><summary>Kontrol — V1 implementation plan</summary><div class="prose"><h1>Kontrol — V1 implementation plan</h1>
 <p>Status: product and implementation plan · 27 September 2026</p>
 <h2>Start here</h2>
 <p>This package is the full V1 implementation plan, with 14 feature specifications and 43 linked desktop mockups. The PNGs are precise implementation references; the three earlier concept pictures are retained separately for visual direction. Every page and user-facing function has a mapping in the index. This is a specification package, not a built Swift app.</p>
@@ -403,14 +403,8 @@ Acceptance:
 <li>Package/notarize the Mac app after validating entitlements and bookmarks in a sandboxed build; write installation and local <code>.kontrol</code> authoring instructions.</li>
 </ul>
 <p><strong>Done when:</strong> a fresh install can complete the three core loops without a network connection; optional News/AI fail gracefully; a sandboxed packaged build can reopen and update a selected project.</p>
-<h2>End-to-end release checks</h2>
-<ol>
-<li><strong>Today:</strong> capture a task, add a time block, start a linked focus session, close and reopen the app; all state is correct.</li>
-<li><strong>Learning:</strong> select a Go lesson, enter an answer, view solution, complete it; one new eligible lesson appears, and the completed item is findable in history.</li>
-<li><strong>Project:</strong> add a folder containing the schema above, mark a ready feature complete, inspect the changed Markdown, verify a dependent card becomes eligible; relaunch and confirm the state persists from disk.</li>
-<li><strong>Offline:</strong> disconnect the network; tasks, Today, focus, project files, seed lessons, history, and cached news remain accessible. AI and news refresh show clear unavailable states.</li>
-<li><strong>Failure paths:</strong> malformed feature frontmatter, missing folder, stale bookmark, duplicate lesson ID, repeated article, AI duplicate output, and external project edit never corrupt existing state.</li>
-</ol>
+<h2>Non-interactive release checks</h2>
+<p>Use isolated repository/service tests for persistence, Learning rotation, project byte safety and offline/failure paths. Build, analyze and inspect distribution artifacts without launching or interacting with the app. See <a href="release.md">the current runbook</a>.</p>
 <h2>Selected UI direction — Black / Red Terminal</h2>
 <p>Selected on 27 September 2026. Use fewer framed cards, mostly unframed lists, and a single strong next action per screen.</p>
 <table>
@@ -550,13 +544,11 @@ Acceptance:
 <li><input disabled="" type="checkbox"> Use SF Symbols with house, book, folder, timer, checkmark.square, newspaper and gearshape roles; check symbol availability at the deployment target.</li>
 <li><input disabled="" type="checkbox"> Use 4–8 point corner radii, mostly unframed rows, and minimal copy; no slogans or data-storage explanations in normal pages.</li>
 <li><input disabled="" type="checkbox"> Keep touch-sized targets where practical and at least 32-point desktop click targets; label standalone icon controls for VoiceOver.</li>
-<li><input disabled="" type="checkbox"> Test 1000×700 minimum desktop window and 1440×940 reference layout; reflow content before clipping.</li>
+<li><input disabled="" type="checkbox"> Preserve adaptive layout and compile without opening windows.</li>
 </ul>
 <h2>Acceptance checks</h2>
 <ul>
-<li><input disabled="" type="checkbox"> Keyboard reaches each navigation item and primary action.</li>
-<li><input disabled="" type="checkbox"> VoiceOver announces name, role and selected state.</li>
-<li><input disabled="" type="checkbox"> Large text and reduced motion preserve all actions without clipping.</li>
+<li><input disabled="" type="checkbox"> Shared components compile and use existing tokens and state ownership.</li>
 </ul>
 <h2>Visual references</h2>
 <p><a href="#M42">M42 · Appearance</a></p>
@@ -1298,7 +1290,7 @@ Acceptance:
 <tr>
 <td>Accessibility and release verification</td>
 <td><a href="#M42">M42 · Appearance</a></td>
-<td>Verify all screens with keyboard, VoiceOver, text scaling and reduced motion.</td>
+<td>Preserve appearance preferences; no accessibility or live-app validation required.</td>
 </tr>
 </tbody></table>
 <h2>Implementation checklist</h2>
@@ -1307,13 +1299,13 @@ Acceptance:
 <li><input disabled="" type="checkbox"> Export schemaVersion, exportedAt, appVersion, tasks, blocks, learning definitions/progress, sessions, feed preferences and general preferences.</li>
 <li><input disabled="" type="checkbox"> Exclude Keychain data, bookmark blobs, diagnostics with sensitive paths, and external project contents.</li>
 <li><input disabled="" type="checkbox"> Write export to a temp file, validate JSON and then save; canceled export creates no artifact. Import/restore is deferred and must not be advertised.</li>
-<li><input disabled="" type="checkbox"> Run the release matrix in qa.md on a real Mac; signed/notarized distribution is a release step, not evidence this planning package is an app.</li>
+<li><input disabled="" type="checkbox"> Follow current non-interactive QA and static signing/notarization checks.</li>
 </ul>
 <h2>Acceptance checks</h2>
 <ul>
 <li><input disabled="" type="checkbox"> JSON export parses and contains the required fields with no credentials/bookmarks.</li>
 <li><input disabled="" type="checkbox"> Disconnecting a project changes no project files.</li>
-<li><input disabled="" type="checkbox"> The packaged sandboxed build can reopen and complete a feature in a selected folder.</li>
+<li><input disabled="" type="checkbox"> Static package/signature inspection and isolated project-service tests pass.</li>
 </ul>
 <h2>Visual references</h2>
 <p><a href="#M38">M38 · Settings</a></p>
@@ -1732,7 +1724,7 @@ Acceptance:
 <p><a href="#document-0">Plan</a> · <a href="#document-18">Function → mockup index</a></p>
 <p>The deliverable is a plan and visual specification; none of the tests below are claimed to have passed in a native app yet.</p>
 <h2>Feature gate</h2>
-<p>For each F00–F13: implement its checklist, run its own acceptance checks, compare the implemented state against every linked mockup, and record evidence in the PR/task. Sample copy in images is not production data. Validate empty, loading, error and offline outcomes where the feature uses IO. Tests should prove behavior or protect data, not mirror view implementation.</p>
+<p>For each F00–F13: implement its checklist, compile, review source and run explicitly selected non-GUI domain/persistence/integration tests. Use injected failures and isolated fixtures. No running-app interaction, accessibility, keyboard or rendered comparison is required.</p>
 <table>
 <thead>
 <tr>
@@ -1796,27 +1788,13 @@ Acceptance:
 <td>Export parses; no key/bookmark; canceled save; disconnected folder left intact</td>
 <td><a href="#M38">M38</a>–<a href="#M41">M41</a></td>
 </tr>
-<tr>
-<td>Accessibility</td>
-<td>Keyboard-only, VoiceOver, focus order, increased text, reduced motion</td>
-<td><a href="#M42">M42</a></td>
-</tr>
 </tbody></table>
-<h2>End-to-end user journeys</h2>
-<ol>
-<li>Capture a task → plan a block → run/pause/end focus → reopen app → verify persisted state and unchanged task completion.</li>
-<li>Open each lesson format → type response → navigate away/back → reveal solution → complete → verify one replacement and one history entry.</li>
-<li>Add the included sample project → open reader feature → mark complete → verify dependent history feature becomes eligible → undo → inspect the minimal disk diff.</li>
-<li>Make an external edit while a feature is open → attempt completion → verify conflict prompt and no lost edit.</li>
-<li>Select a news topic → refresh → disconnect network → relaunch → inspect cached headlines and last-refresh time.</li>
-<li>Export data → validate schema → verify no credentials, folder grants or external project files were included.</li>
-</ol>
+<h2>Non-interactive integration</h2>
+<p>Test task/block/Focus state, Learning completion/history, project patching/Undo/conflicts, cached News and export contracts through domain/store/repository APIs using isolated fixtures and injected dependencies. Do not operate the app for validation.</p>
 <h2>Release checklist</h2>
 <ul>
-<li><input disabled="" type="checkbox"> Run supported macOS baseline and current target OS on a real Mac.</li>
-<li><input disabled="" type="checkbox"> Validate sandbox entitlements, selected folder write access and bookmark reuse in the packaged build, not only Xcode.</li>
-<li><input disabled="" type="checkbox"> Test the minimum 1000×700 desktop window and a 1440×940 reference window with text scaling.</li>
-<li><input disabled="" type="checkbox"> Check all seven destinations and each linked modal/error state visually.</li>
+<li><input disabled="" type="checkbox"> Build, compile tests, analyze source and execute selected non-GUI tests.</li>
+<li><input disabled="" type="checkbox"> Inspect packaged metadata, entitlements and signatures without launching the app.</li>
 <li><input disabled="" type="checkbox"> Confirm requests occur only for allowed news refreshes and explicitly enabled generation.</li>
 <li><input disabled="" type="checkbox"> Record tested toolchain, dependency versions, known limitations and installation steps.</li>
 <li><input disabled="" type="checkbox"> Sign and notarize if distributing outside the development machine.</li>

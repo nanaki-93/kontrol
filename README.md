@@ -12,9 +12,9 @@ Project folders list local references without inspecting folders. Confirmed **Re
 
 Core saved tasks, planning, Focus, seeded/accepted Learning and authorized local project files do not require an account or network. Cached News remains usable offline; refresh and optional explicit AI requests require a network, and AI requires user-supplied Keychain credentials. Export uses only local persisted data and bundled configuration, not network, Keychain or project-folder access.
 
-**F13 implementation is available; V1 release approval is pending.** Folder/export layout and focus fixtures are implemented, but required automated accessibility acceptance has not passed. Version/build 1.0/1, Release hardening, packaged dependency notices and executable release procedures are implemented and independently verified as documented in [QA](docs/qa.md). Consolidated non-GUI integration passed (QA Step 6.1). Task-23 manual checks are user-verified; A13 automated acceptance remains failed: after narrow fixture repairs the seven-suite gate passed 90/112 and the serial full suite passed 1057/1127. Rebuilt-host Accessibility trust, hosted behavior/rendering failures and a newly exposed migration-test backup failure remain open. See the [current Step 6.2 evidence](docs/qa.md#f13-step-62--escalation-fixture-repairs-and-remaining-a13-failures-2026-10-01); manual attestation and passing isolated retries do not replace failed acceptance. S13 signed sandbox/offline journeys, B13 macOS 14/current-runtime execution, and D13 Developer ID/notarized extracted-artifact acceptance remain mandatory. The F11 snapshot concern has an explained test-fixture lifecycle repair and repeat evidence in QA Step 5.1; its original failure below is preserved. No distribution artifact is approved by these implementation checkpoints.
+**F13 implementation is available; distribution approval is not claimed.** Validation now follows [AGENTS.md](AGENTS.md): builds, static checks and explicitly selected non-GUI tests only. Accessibility, native keyboard, hosted UI, screenshots and live-app journeys are removed from task/review/release gates, not deferred. Historical failures and executed counts remain in [QA](docs/qa.md), but obsolete GUI prerequisites are not blockers. Non-GUI defects, including the recorded migration-test backup failure, still require investigation. Signing, entitlement, packaging and notarization checks remain required for distribution.
 
-For installation/update, signing and release prerequisites see the [release runbook](docs/release.md); for local project authoring start with [docs/examples/.kontrol](docs/examples/.kontrol/project.yaml) and the [project contract](PLAN.md#kontrol-v1-contract). The dated ledgers below describe their original checkpoints, not current missing features or fresh release approval.
+For installation/update, signing and release prerequisites see the [release runbook](docs/release.md); for local project authoring start with [docs/examples/.kontrol](docs/examples/.kontrol/project.yaml) and the [project contract](PLAN.md#kontrol-v1-contract). The dated ledgers below describe historical checkpoints, not current requirements or fresh release approval. Their GUI deferrals, mandatory live-action lists and permission prerequisites are withdrawn by `AGENTS.md`; preserve observations without executing obsolete instructions.
 
 ## Requirements and build
 
@@ -32,14 +32,20 @@ xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug \
   CODE_SIGNING_ALLOWED=NO build
 xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug \
   -destination 'platform=macOS' -derivedDataPath /tmp/kontrol-f00-derived \
-  CODE_SIGNING_ALLOWED=NO test
+  CODE_SIGNING_ALLOWED=NO build-for-testing
+# Execute only inspected non-GUI suites; this is a focused example, not all coverage.
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug \
+  -destination 'platform=macOS' -derivedDataPath /tmp/kontrol-f00-derived \
+  CODE_SIGNING_ALLOWED=NO \
+  -only-testing:KontrolTests/NavigationStoreTests \
+  -only-testing:KontrolTests/LearningCatalogStoreTests test
 xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug \
   -destination 'platform=macOS' -derivedDataPath /tmp/kontrol-f00-derived \
   CODE_SIGNING_ALLOWED=NO analyze
 git diff --check
 ```
 
-Open `Kontrol.xcodeproj`, choose the shared **Kontrol** scheme and run the app in Xcode for local interaction. For a locally ad-hoc-signed sandboxed build (not a distribution signature), run:
+For a locally ad-hoc-signed sandboxed build and static entitlement inspection (not a distribution signature), run:
 
 ```sh
 xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug \
@@ -48,10 +54,9 @@ xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug \
   DEVELOPMENT_TEAM= build
 codesign --display --entitlements :- \
   /tmp/kontrol-f00-sandbox/Build/Products/Debug/Kontrol.app
-open /tmp/kontrol-f00-sandbox/Build/Products/Debug/Kontrol.app
 ```
 
-The `CODE_SIGNING_ALLOWED=NO` commands build/test without an app signature; use the signed build to check real sandbox behavior. Signing, GUI/VoiceOver checks, and visual comparisons are separate integration checks, **not** established by a successful `xcodebuild -list`.
+The `CODE_SIGNING_ALLOWED=NO` commands build/test without an app signature. Static signature and entitlement inspection do not prove live sandbox behavior; no live-app check is required. Do not run unfiltered test commands because the existing suite includes GUI interaction.
 
 ## Local data and catalog
 
@@ -79,6 +84,10 @@ ls -la "$base/V1"                 # inspect complete file set before any manual 
 ```
 
 There is no V0 fixture or claimed V0 migration. F03 added a separate frozen V2 fixture and V1→V2 migration tests; see [fixture documentation](KontrolTests/Fixtures/README.md). Future schemas require separate versioned fixtures and migration tests.
+
+## Historical implementation ledgers
+
+The following dated records preserve original outcomes and evidence only. All old interactive validation instructions and F13 GUI deferrals are retired, not current checklists. Follow `AGENTS.md` and the current non-interactive [QA policy](docs/qa.md#feature-gate).
 
 ## F00 boundaries and verification status
 

@@ -6,7 +6,7 @@ Status: implemented app with pending V1 release gates · updated 30 September 20
 
 This repository contains the executable macOS app, hosted tests, 14 feature specifications and linked desktop mockups. The PNGs and supplemental HTML states are implementation references, not production data. The feature checklists below retain the product contract; they are not release-completion receipts. Current behavior and dated implementation results are in [README](README.md) and [QA](docs/qa.md).
 
-F00–F12 functionality and F13 shared General/AI/News/folder/Local Data Settings, local-only disconnect and version-1 JSON export are implemented. Version/build 1.0/1, Release hardening, packaged notices and the [release runbook](docs/release.md) are in place. Consolidated integration and mandatory **A13 accessibility, S13 signed sandbox, B13 macOS 14/current runtime and D13 distribution** gates remain pending. Historical failures/skips stay in QA until explicitly closed with evidence; implementation verification is not V1 release approval.
+F00–F12 functionality and F13 shared General/AI/News/folder/Local Data Settings, local-only disconnect and version-1 JSON export are implemented. Version/build 1.0/1, Release hardening, packaged notices and the [release runbook](docs/release.md) are in place. Validation follows [AGENTS.md](AGENTS.md): builds, static checks and explicitly selected non-GUI tests only. Accessibility, native keyboard, hosted UI, screenshots and live-app journeys are removed from task/review/release gates, not deferred. Non-interactive distribution signing, entitlement, packaging and notarization checks remain required. Historical failures/skips stay in QA as historical evidence, not obsolete GUI blockers.
 
 - [All functions and their mockups](docs/mockups/INDEX.md)
 - [Architecture, state and data contracts](docs/architecture.md)
@@ -87,7 +87,7 @@ Kontrol/
 | M3 — Project loop | F09, F10, F11 | Open a local project, choose among next features, mark one complete |
 | M4 — Companion + release | F12, F13 | Topic news, resilient offline behavior, packaged V1 |
 
-Implement one vertical slice at a time. Each feature below has observable acceptance checks. For F00–F12, compile and run non-GUI checks per feature; defer hosted/interactive GUI acceptance, mockup screenshot comparison, keyboard/VoiceOver and live accessibility checks to the final F13 release gate in `docs/qa.md`. This is not a pass or a waiver of previously failed GUI tests. Keep a per-feature deferred-check ledger and reserve an uncontended GUI session for F13. The release gate also covers interactions between features.
+Implement one vertical slice at a time. Validate the product contracts below through source review, compilation, static analysis and isolated non-GUI tests. Persistence/relaunch contracts use repository reopen tests; UI-only wiring is source-reviewed, not exercised in a running app. No desktop reservation, accessibility permission, manual action, screenshot or hosted UI evidence is required. Record actual results without claiming excluded checks passed.
 
 ---
 
@@ -105,7 +105,7 @@ Implement one vertical slice at a time. Each feature below has observable accept
 - Add a persistent store, model migration strategy, local error reporting, and launch checks. Do not make normal launch depend on a feed or AI request.
 - Seed representative, explicitly labeled sample data only in previews. The real first launch starts with useful empty states and a starter lesson catalog.
 
-**Done when:** the app launches, navigation works, persisted sample user actions survive a relaunch, and offline launch succeeds.
+**Done when:** non-GUI startup/navigation and repository-reopen tests pass, with no network dependency for startup.
 
 ## F01 — Design system and interaction patterns
 
@@ -122,7 +122,7 @@ Implement one vertical slice at a time. Each feature below has observable accept
 - Reusable components: page header, section header, next-action card, list row, status pill, empty state, confirmation/undo affordance, and loading/error states.
 - Set top navigation in the approved order: Today, Learning, Projects, Focus, Tasks, News, Settings. Keep topic navigation inside Learning and folder navigation inside Projects.
 
-**Done when:** every destination has a realistic empty or seeded state, usable keyboard focus, and layouts that work in a reasonably narrow Mac window.
+**Done when:** all destinations compile with shared components and appropriate empty/seeded states; source review confirms the intended layout and control wiring.
 
 ## F02 — Tasks and quick capture
 
@@ -197,7 +197,7 @@ LessonProgress: lessonID, status(available|started|completed|dismissed),
 
 **Build**
 
-- Seed a versioned catalog for Go, Java, System Design, Performance, and Security. Give each topic enough authored lessons to fill four slots and replace completed/dismissed lessons in an initial smoke test; avoid placeholder titles with no exercise.
+- Seed a versioned catalog for Go, Java, System Design, Performance, and Security. Give each topic enough authored lessons to fill four slots and replace completed/dismissed lessons in isolated selection tests; avoid placeholder titles with no exercise.
 - Create stable concept IDs and explicit learning objectives. Keep catalog content separate from personal progress so a seed update cannot reset completion history.
 - Validate prerequisite references, unique IDs, allowed types, and expected sections at build/seed import time.
 
@@ -387,19 +387,19 @@ Allowed feature states are `planned`, `ready`, `active`, `blocked`, `completed`;
 
 - Implemented shared Settings: fixed Black / Red Terminal theme (no theme picker), Focus default duration, system/large text and reduced motion, News topics/feeds, optional AI configuration/Keychain controls, project folders and Local Data. Keep graph-owned stores separate from per-client navigation/drafts/confirmation/focus; preserve current sessions when defaults change.
 - Folder Remove disconnects only the revision-checked local reference; listing/review/removal does not access or alter external project files. Add/Reconnect retain native authorization.
-- Support VoiceOver labels, full keyboard navigation, visible focus, dynamic type where practical on macOS, reduced motion, and text plus color for status. Check text and focus contrast in the selected palette. Run and document all deferred F00–F12 hosted/interactive GUI tests and live acceptance (including outstanding failures), as specified in `docs/qa.md`.
+- Preserve VoiceOver labels, full keyboard navigation, visible focus, dynamic type where practical on macOS, reduced motion, and text plus color for status as product behavior. No accessibility or live-app validation is required.
 - Implemented export follows the [complete version-1 contract](docs/export-format.md): tasks, blocks, all persisted Focus states, stored Learning taxonomy/accepted definitions/progress/attempts/slots/terminal evidence/catalog membership, feed configuration and General/nonsecret AI preferences. Approve the native JSON destination before flushing pending lesson answers and read-only capture; prepare/validate privately and deliver atomically. Exclude credentials/references, project grants/paths/contents, article cache, diagnostics and unsaved editor drafts. This is plain JSON, not encrypted backup or import/restore support.
-- Package/notarize the Mac app after validating entitlements and bookmarks in a sandboxed build; write installation and local `.kontrol` authoring instructions.
+- Package/notarize the Mac app with static signature, entitlement, resource and archive checks; write installation and local `.kontrol` authoring instructions. Validate bookmark handling with injected non-GUI tests, not a live picker journey.
 
-**Release done only when:** integrated checks and A13/S13/B13/D13 have satisfactory recorded evidence: a fresh install completes the core loops offline; optional News/AI fail gracefully; the final extracted, signed/notarized sandboxed build reopens and updates a selected project on required runtimes. Current implementation and unsigned packaging checks alone do not satisfy this gate.
+**Release done only when:** selected non-GUI integration, build/static checks and applicable signing/notarization/package verification have satisfactory recorded evidence. No live-app, accessibility, keyboard or manual runtime journey is a release prerequisite. Unsigned packaging alone is not distribution approval.
 
-## End-to-end release checks
+## Non-interactive integration checks
 
-1. **Today:** capture a task, add a time block, start a linked focus session, close and reopen the app; all state is correct.
-2. **Learning:** select a Go lesson, enter an answer, view solution, complete it; one new eligible lesson appears, and the completed item is findable in history.
-3. **Project:** add a folder containing the schema above, mark a ready feature complete, inspect the changed Markdown, verify a dependent card becomes eligible; relaunch and confirm the state persists from disk.
-4. **Offline:** disconnect the network; tasks, Today, focus, project files, seed lessons, history, and cached news remain accessible. AI and news refresh show clear unavailable states.
-5. **Failure paths:** malformed feature frontmatter, missing folder, stale bookmark, duplicate lesson ID, repeated article, AI duplicate output, and external project edit never corrupt existing state.
+1. **Today:** test task/block/linked Focus operations through stores and services, then reopen isolated persistence.
+2. **Learning:** test saved answers, completion, one-slot replacement and history through domain/repository APIs.
+3. **Project:** test minimal completion diffs, dependent eligibility and conflicts against disposable fixture folders with injected grants.
+4. **Offline:** use failed/disabled transport stubs to verify local data and cached content remain available.
+5. **Failure paths:** test malformed files, missing folders, stale grants, duplicates and external edits without corrupting existing state.
 
 ## Selected UI direction — Black / Red Terminal
 
@@ -436,6 +436,6 @@ Use familiar icons: house for Today, book for Learning, folder for Projects, tim
 
 ## Required implementation handoff
 
-For each feature, read its linked specification, inspect every linked mockup, implement the checklist, and run non-GUI acceptance checks. Record the implementation gate separately from **deferred** interactive GUI acceptance; do not claim visual/keyboard/VoiceOver checks passed before F13. The final F13 task must run all deferred hosted tests and live GUI checks against every feature's mockups, resolve outstanding failures, and record evidence before release approval. Reuse shared components; do not hard-code sample dates, counts, article headlines or lesson content from the pictures. When a behavior needs a new visible state, add its mockup and update the function index in the same change.
+For each feature, read its linked specification, inspect linked static references, implement the checklist, and run non-GUI acceptance checks under `AGENTS.md`. Record actual results and scope. Interactive GUI, accessibility, native keyboard and live-app checks are removed, not deferred to F13; do not claim they passed. Reuse shared components; do not hard-code sample dates, counts, article headlines or lesson content from the pictures. When a behavior needs a new visible state, add its mockup and update the function index in the same change.
 
 Keep changes in one feature at a time. F03 can be delivered with tasks and blocks before F06; integrate lesson links after F06. F04 can initially link tasks only. F08 stays optional at runtime but is included in the full V1 build. No deadline estimates are promises; assess each vertical slice after its acceptance checks pass.

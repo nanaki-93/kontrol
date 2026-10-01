@@ -10,7 +10,7 @@
 - Reusable components: page header, section header, next-action card, list row, status pill, empty state, confirmation/undo affordance, and loading/error states.
 - Set top navigation in the approved order: Today, Learning, Projects, Focus, Tasks, News, Settings. Keep topic navigation inside Learning and folder navigation inside Projects.
 
-**Done when:** every destination has a realistic empty or seeded state, usable keyboard focus, and layouts that work in a reasonably narrow Mac window.
+**Done when:** destinations compile with shared components and appropriate empty/seeded states; source review confirms layout and control wiring.
 
 ## Function → mockup contract
 
@@ -25,13 +25,15 @@
 - [ ] Use SF Symbols with house, book, folder, timer, checkmark.square, newspaper and gearshape roles; check symbol availability at the deployment target.
 - [ ] Use 4–8 point corner radii, mostly unframed rows, and minimal copy; no slogans or data-storage explanations in normal pages.
 - [ ] Keep touch-sized targets where practical and at least 32-point desktop click targets; label standalone icon controls for VoiceOver.
-- [ ] Test 1000×700 minimum desktop window and 1440×940 reference layout; reflow content before clipping.
+- [ ] Preserve adaptive layout and reflow implementation; compile it without opening windows.
 
-## Acceptance checks
+## Non-interactive acceptance checks
 
-- [ ] Keyboard reaches each navigation item and primary action.
-- [ ] VoiceOver announces name, role and selected state.
-- [ ] Large text and reduced motion preserve all actions without clipping.
+Follow [AGENTS.md](../../AGENTS.md). Accessibility, keyboard/focus, live layout and hosted UI checks are removed, not deferred; preserve their product implementations.
+
+- [ ] Shared components and destination views compile.
+- [ ] Source uses shared tokens and existing control/state ownership.
+- [ ] Build and static analysis pass.
 
 ## Visual references
 

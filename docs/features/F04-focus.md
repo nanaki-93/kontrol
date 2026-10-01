@@ -30,10 +30,12 @@
 - [ ] When sleeping or quitting while running, let the planned deadline continue; never record more than the planned duration. Paused sessions stay paused.
 - [ ] Handle repeated end actions idempotently. History groups by local finish date and records ended-early versus completed.
 
-## Acceptance checks
+## Non-interactive acceptance checks
+
+Follow [AGENTS.md](../../AGENTS.md). Use service calls, injected clocks and repository reopen for lifecycle contracts, not a running app, sleep/wake actions or key/button presses.
 
 - [ ] Pause for 5 minutes does not add 5 focused minutes.
-- [ ] Relaunch does not restart the countdown or duplicate a session.
+- [ ] Service recovery from reopened persisted state does not restart the countdown or duplicate a session.
 - [ ] A linked task remains open after timer completion.
 
 ## Visual references

@@ -15,7 +15,7 @@ LessonProgress: lessonID, status(available|started|completed|dismissed),
 
 **Build**
 
-- Seed a versioned catalog for Go, Java, System Design, Performance, and Security. Give each topic enough authored lessons to fill four slots and replace completed/dismissed lessons in an initial smoke test; avoid placeholder titles with no exercise.
+- Seed a versioned catalog for Go, Java, System Design, Performance, and Security. Give each topic enough authored lessons to fill four slots and replace completed/dismissed lessons in an isolated selection test; avoid placeholder titles with no exercise.
 - Create stable concept IDs and explicit learning objectives. Keep catalog content separate from personal progress so a seed update cannot reset completion history.
 - Validate prerequisite references, unique IDs, allowed types, and expected sections at build/seed import time.
 
@@ -35,9 +35,11 @@ LessonProgress: lessonID, status(available|started|completed|dismissed),
 - [ ] Make a catalog upgrader that inserts/updates definitions but never resets completion, answers, timestamps or dismissals.
 - [ ] Make slot assignments persistent per topic with a unique (topicID, slotIndex) constraint.
 
-## Acceptance checks
+## Non-interactive acceptance checks
 
-- [ ] All five topics display four authored choices on first launch offline.
+Follow [AGENTS.md](../../AGENTS.md). Use catalog/selection/repository tests and source review, not hosted UI, accessibility, keyboard or live-app checks.
+
+- [ ] An isolated initial import provides four authored choices for each of five topics without network access.
 - [ ] An updated catalog preserves completed and started progress.
 - [ ] Malformed catalog fixtures are rejected before partial import.
 

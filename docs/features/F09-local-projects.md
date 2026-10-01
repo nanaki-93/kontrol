@@ -86,9 +86,11 @@ Allowed feature states are `planned`, `ready`, `active`, `blocked`, `completed`;
 - [ ] Reject duplicate ids, dependency cycles, missing dependency ids and unsupported schema versions; show file names and reasons.
 - [ ] Keep metadata snapshots in memory; persist bookmarks and optional last-good display cache only. Disk remains authoritative.
 
-## Acceptance checks
+## Non-interactive acceptance checks
 
-- [ ] A selected folder opens after a sandboxed app relaunch.
+Follow [AGENTS.md](../../AGENTS.md). Use disposable folders, injected grants and repository/store tests. Review picker wiring in source; no real picker, app relaunch, accessibility, keyboard or hosted UI check is required.
+
+- [ ] Reopened references resolve through the injected folder-access adapter.
 - [ ] Two folders with different project ids remain independently accessible.
 - [ ] Stale access can reconnect without duplicating the project; malformed files produce M33.
 

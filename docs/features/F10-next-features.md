@@ -23,7 +23,7 @@
 
 [Open the F10 state map](../../.mockups/flows/f10-next-features/index.html). Its peer pages cover [all complete](../../.mockups/flows/f10-next-features/01-all-complete.html), [successful zero-feature enumeration](../../.mockups/flows/f10-next-features/02-zero-features.html), [current partial-valid suggestions](../../.mockups/flows/f10-next-features/03-partial-valid.html), [unavailable enumeration](../../.mockups/flows/f10-next-features/04-unavailable.html), [failed refresh with retained stale detail](../../.mockups/flows/f10-next-features/05-retained-stale.html), [removed versus excluded selected feature](../../.mockups/flows/f10-next-features/06-selection-notices.html), and [full read-only detail and Back](../../.mockups/flows/f10-next-features/07-feature-detail.html), including its [retained last-known variant](../../.mockups/flows/f10-next-features/07-feature-detail.html#stale). These supplement M27/M30/M34, not replace them. Only current validated ready records are candidates; current partial results can offer valid peers, while stale suggestions are not actionable. View feature opens a read-only view; F11's Mark complete and Undo are not F10 controls. Folder navigation and project recovery remain available.
 
-The HTML uses illustrative fixtures and links between reference states, not real Refresh, Reconnect, Add, completion or project-file updates. Created unattended as static references, **not interactive sign-off**. Rendered comparisons, native keyboard/VoiceOver, enlarged-text and sandbox acceptance remain for F13.
+The HTML uses illustrative fixtures and links between reference states, not real Refresh, Reconnect, Add, completion or project-file updates. Created unattended as static references, **not interactive sign-off**. Rendered, keyboard/VoiceOver and live sandbox validation are not required or deferred to F13.
 
 ## Implementation checklist
 
@@ -33,9 +33,11 @@ The HTML uses illustrative fixtures and links between reference states, not real
 - [ ] Preserve selected project and feature id across refresh; close missing detail views with a clear message.
 - [ ] Keep planned, blocked and active work visible in the read-only roadmap/detail list without making it eligible.
 
-## Acceptance checks
+## Non-interactive acceptance checks
 
-- [ ] The same source files yield the same three cards across relaunch.
+Follow [AGENTS.md](../../AGENTS.md). Test selectors, stores and disposable file fixtures; review view wiring in source. No hosted or live-app validation is required.
+
+- [ ] Repeated reads of the same fixture files yield the same three candidates.
 - [ ] Completing a dependency makes a ready downstream feature eligible.
 - [ ] All-complete and all-blocked states have different labels.
 

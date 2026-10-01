@@ -8,11 +8,11 @@ values. Do not put passwords, tokens or private keys in commands or evidence.
 
 This is a procedure, **not release approval**. See [QA evidence](qa.md) for actual
 results and unresolved historical observations. Implementation/static verification
-is separate from mandatory **A13** (hosted/native accessibility), **S13** (signed
-sandbox/offline), **B13** (macOS 14/current runtime), and **D13** (distribution).
-Missing reserved desktop/host Accessibility permission, isolated account/data,
-macOS 14 access, Developer ID identity/team or notary profile blocks the affected
-gate. Unsigned builds and **ad-hoc signatures do not approve distribution**.
+follows root [AGENTS.md](../AGENTS.md): only non-interactive checks are required.
+Accessibility, native keyboard, hosted UI and live-app journeys are removed, not
+deferred. No desktop/Accessibility authorization or manual runtime matrix is a
+gate. Developer ID identity/team and notary profile remain distribution inputs.
+Unsigned builds and **ad-hoc signatures do not approve distribution**.
 
 ## 1. Guardrails and evidence
 
@@ -25,8 +25,8 @@ reset a store, or bypass tests to obtain approval.
 
 Use fresh evidence and artifact directories. Keep command stdout/stderr, exit
 codes, source revision/diff and file hashes, Xcode/Swift/OS/hardware versions,
-xcresults and audited executed identifiers. Record native observations separately
-with captures, point/pixel sizes, backing scale, reference paths and differences.
+xcresults and audited executed non-GUI identifiers. No native observations or
+captures are required.
 Never record export contents, credentials or personal folder paths in public logs.
 Retain store fixtures until their owning processes exit; follow only the guarded
 cleanup procedure in [QA](qa.md). Do not validate with production user data.
@@ -52,7 +52,7 @@ The [Makefile](../Makefile) deliberately builds with `CODE_SIGNING_ALLOWED=NO`.
 Keep this path for development; it does not establish sandbox or Gatekeeper
 acceptance. These commands build and inspect only; they do not launch the app or
 open a production store. All hosted tests can be compiled without claiming native
-observations. The full serial suite and deferred selectors remain A13 in QA.
+observations. Execute only inspected non-GUI selectors; no full UI suite or deferred A13 gate is required.
 
 ```bash
 set -euo pipefail
@@ -213,13 +213,11 @@ PY
 }
 ```
 
-## 3. S13 — isolated locally signed sandbox verification
+## 3. Static locally signed sandbox inspection
 
-Prerequisite: an authorized **separate macOS test account** with no production
-Kontrol data, an active reserved desktop and copied disposable project trees.
-A fresh derived-data path does **not** isolate the app's persistent container.
-Do not launch this build under the developer's production account. Do not use
-`KONTROL_F00_RECOVERY_TEST` as a Release isolation mechanism; it is Debug-only.
+Build and inspect only; do not launch the app. No desktop or separate GUI account
+is needed. A derived-data path does not isolate production persistence, so tests
+must use isolated fixtures. `KONTROL_F00_RECOVERY_TEST` remains Debug-only.
 
 Define both inspection helpers above. Build the specification's ad-hoc Release
 artifact (no Developer ID credentials required):
@@ -238,58 +236,18 @@ codesign --display --entitlements - "$APP"
 inspect_signed_bundle "$APP" "$EVIDENCE/sandbox-signature" '' '-'
 ```
 
-Only after account/data isolation is confirmed, launch with `open "$APP"` in
-that account. Confirm the running path and quit/relaunch the same signed artifact,
-not a previously running Debug copy. Inspect actual sandbox permissions as above.
-No broad filesystem, inbound networking, Keychain or debugging entitlement is
-permitted. Ad-hoc verification is **local sandbox evidence only**, not D13.
+Inspect actual signed permissions as above. No broad filesystem, inbound
+networking, Keychain or debugging entitlement is permitted. This is static
+signature/entitlement evidence, not proof of runtime sandbox behavior.
 
-Record each journey and failure with the artifact/source identity:
+## 4. Non-GUI integration
 
-- **Offline Today:** disconnect network; create task, schedule block and linked
-  Focus session; pause/end as applicable; quit/relaunch and verify persisted links,
-  timings and state. Preference changes must not rewrite existing sessions.
-- **Offline Learning:** exact saved answer, reveal, complete, one-slot replacement,
-  history, quit/relaunch and exact answer/historical-content preservation.
-- **Projects:** use the real picker to Add a copied folder, quit/relaunch to reopen
-  its real bookmark, complete a feature with the minimal authorized frontmatter
-  change, verify dependent eligibility and Undo/conflict. Exercise revoked access,
-  Reconnect and disconnect. Keep before/after byte inventories including `.kontrol`,
-  source and Git files: disconnect/export must leave external bytes unchanged.
-- **News/AI:** establish authorized cached News, then verify offline cached use;
-  optional provider/feed failures must preserve core state. Do not initiate paid
-  generation without separate authorization. Opening Settings must not generate
-  lessons or refresh feeds.
-- **Native export:** exercise Cancel/Escape, replacement approval and cancellation,
-  failed save and explicit retry, success and pre/post-commit cancellation. Compare
-  existing destination hashes before/after every pre-commit failure/cancel. Parse
-  successful JSON with `python3 -m json.tool "$EXPORT_FILE" >/dev/null` using an
-  explicitly selected isolated destination. Verify version-1 required collections,
-  exact saved answers, field exclusions and owned staging cleanup without logging
-  personal content. See [export contract](export-format.md). No import/restore or
-  encrypted-backup claim is made.
-
-## 4. A13 / B13 — desktop accessibility and runtime matrix
-
-A human must reserve the desktop and authorize Accessibility for the **actual
-rebuilt host**, then confirm activation/AX window registration. Shell trust and
-compilation do not satisfy A13. Execute the full serial suite, original seven-suite
-gate and every exact deferred selector in [QA](qa.md); retain fresh xcresults,
-audit executed identifiers/counts and fix failures, never skip them for approval.
-Compare actual captures against all applicable [mockup references](mockups/INDEX.md)
-and supplemental states. Observe keyboard-only journeys, visible/restored focus,
-Escape/Cancel, spoken VoiceOver, non-color status and reduced motion at 520×340
-Settings and 1000×700/1440×940 desktop sizes, standard/130%/larger accessibility
-text. Verify targets ≥32 points, text contrast ≥4.5:1 and essential focus/boundaries
-≥3:1. Record dimensions/backing scale and differences, not just fixture rendering.
-
-B13 requires actual execution on **macOS 14** and the **current supported macOS
-runtime**. Record OS build, Xcode/SDK/Swift, architecture/hardware and artifact
-identity for each. Run applicable core/Settings/export regressions plus the A13
-and S13 journeys on both; note API/symbol/layout/persistence differences. The
-14.0 deployment setting or a newer-host build is not macOS 14 evidence. Unavailable
-baseline hardware/VM or native observations explicitly block B13, not an inferred
-pass. See QA for integration commands and still-outstanding gates.
+Use isolated repository/store/service tests for task/block/Focus persistence,
+Learning answers/history, project completion/Undo/conflicts, offline transport
+failures and export cancellation/atomicity. Inject picker/grant/network outcomes;
+do not open dialogs, disconnect the network, or drive the application.
+Record the actual OS/toolchain used without claiming untested runtime behavior.
+Accessibility, keyboard, screenshots and live runtime journeys are not gates.
 
 ## 5. D13 — Developer ID archive through final extracted artifact
 
@@ -378,17 +336,15 @@ re-signing, quarantine removal or recursive permission workaround is allowed.
 Record certificate authority/team, actual entitlements, notary JSON/ID, staple and
 Gatekeeper outputs, final ZIP SHA-256 and extracted resource/notices hashes. Preserve
 the final checksum with the release; verify a downloaded ZIP's checksum before
-extraction. Link this evidence to the exact source/diff and A13/S13/B13 results.
+extraction. Link this evidence to the exact source/diff and non-GUI validation results.
 If source/resources/configuration change, rebuild and repeat affected gates; an
 old accepted upload is not evidence for a changed artifact.
 
-## 6. Fresh installation, update and local storage
+## 6. Installation, update and local storage guidance
 
-Perform both journeys using **the final D13 extracted app**, not an unsigned
-build or only the archive. Use an authorized isolated test account and disposable
-project folders. A local `ditto` extraction need not carry download quarantine;
-also test a normally downloaded final ZIP on a clean account so the real
-Gatekeeper launch path is observed. Do not remove quarantine to make it open.
+These are user installation instructions, not validation tasks. No app launch,
+click-through or fresh-account journey is required. Use the final verified
+extracted app; do not remove quarantine or bypass Gatekeeper.
 
 ### Fresh install
 
@@ -411,24 +367,16 @@ Gatekeeper launch path is observed. Do not remove quarantine to make it open.
    codesign --verify --deep --strict --verbose=2 "$INSTALL_ROOT/Kontrol.app"
    xcrun stapler validate "$INSTALL_ROOT/Kontrol.app"
    spctl --assess --type execute --verbose=4 "$INSTALL_ROOT/Kontrol.app"
-   open "$INSTALL_ROOT/Kontrol.app"
    )
    ```
 
-3. Confirm the installed/running path and version 1.0/build 1. Complete offline
-   Today/Learning persistence loops, open both Settings entry points and export.
-   Add a copied folder with the native picker; quit/relaunch, reopen its bookmark
-   and complete a feature with only the intended minimal write. Record external
-   inventories and actual outcomes. Successful shell assessment alone does not
-   establish these native acceptance observations.
+3. Inspect the installed bundle's metadata/resources with `inspect_bundle`.
+   No launch, picker, export or feature-completion journey is required.
 
 ### Non-destructive update
 
-1. In the isolated account, populate a previously accepted version with tasks,
-   blocks, Focus sessions, exact Learning answers/history, settings and a real
-   bookmarked copied project. Record semantic inventories and artifact version.
-   Quit normally; if answer saving fails, Retry Save or Cancel Quit—do not force
-   quit and call lost answers an update result. Confirm all owners have exited.
+1. Before a user-initiated update, close the application normally and ensure no
+   process owns its store. Do not create test data in a running production app.
 2. Make a separate closed-store safety copy including `Kontrol.store`, its
    `-wal`/`-shm` sidecars when present, and any adjacent store support files.
    Preserve originals and hashes. Never copy just a live SQLite main file or use
@@ -438,13 +386,10 @@ Gatekeeper launch path is observed. Do not remove quarantine to make it open.
    Finder after the old app exits. Leave its container, Application Support,
    Keychain and external folders untouched; do not delete user data to uninstall
    the old binary. Repeat signature/staple/Gatekeeper inspection at the installed
-   path, then launch that path (not the old copy).
-4. Verify version/build, migration and repeated reopen preserve every recorded
-   value, exact answer/history and preference; reopen the selected folder through
-   its existing bookmark and complete a feature. Compare external bytes, allowing
-   only the expressly authorized completion patch. Verify export JSON and all S13
-   offline loops again. Preserve old artifact/safety copy; do not launch an older
-   schema binary against an already migrated store as a rollback test.
+   path without launching the app as a validation step.
+4. Validate migration and repeated reopen using isolated repository fixtures, not
+   interactive update journeys. Preserve the old artifact/safety copy; do not
+   launch an older schema binary against an already migrated store.
 
 ### Storage and recovery boundaries
 
@@ -466,6 +411,7 @@ backup, encrypted archive or restore mechanism; it excludes credentials,
 bookmarks/project paths, article cache and unrelated unsaved drafts. See the
 [format and limitations](export-format.md).
 
-Publish F13/V1 completion only after implementation verification **and all four
-mandatory gates** have satisfactory traceable evidence. This documentation task
-itself does not execute or approve native, baseline-runtime or distribution gates.
+Publish F13/V1 completion only after required non-GUI validation and applicable
+static distribution checks have traceable evidence. Removed interactive checks
+are not pending gates and must not be reported as passes. Documentation edits
+alone do not approve a distribution artifact.

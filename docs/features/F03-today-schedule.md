@@ -29,7 +29,9 @@
 - [ ] Compute overlap with startA < endB and startB < endA. Touching boundaries do not overlap.
 - [ ] After F06, Add to Today pre-fills title and estimated duration; saving schedules it without completing it.
 
-## Acceptance checks
+## Non-interactive acceptance checks
+
+Follow [AGENTS.md](../../AGENTS.md). Test stores/repositories with injected clocks and isolated reopen; inspect UI wiring in source. No live-app, accessibility, native keyboard or hosted presentation checks are required.
 
 - [ ] Cross-midnight and daylight-saving boundary fixtures group correctly.
 - [ ] Overlap warning leaves both originals intact until explicit save.

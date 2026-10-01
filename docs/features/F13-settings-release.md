@@ -1,8 +1,8 @@
 # F13 — Settings, accessibility, and V1 release
 
 **Depends on:** all previous features. **Current status:** Settings/export and
-release preparation implemented; integrated/native/runtime/distribution approval
-pending. Dated results and historical failures/skips remain in [QA](../qa.md).
+release preparation implemented; non-GUI integration and distribution verification
+follow root `AGENTS.md` and [QA](../qa.md). Dated results and historical failures/skips remain in [QA](../qa.md).
 This is an executable app, not just a specification package; implementation
 verification is not unconditional F13/V1 completion.
 
@@ -61,7 +61,7 @@ verification is not unconditional F13/V1 completion.
 | Edit settings and Focus default | [M38 · Settings](../mockups/M38-settings.png) | Apply locally; existing sessions retain duration; independent drafts survive publication. |
 | Export local data | [M40 · Local data](../mockups/M40-data-export.png) | Native JSON approval, saved-answer barrier and actual commit outcome; no credential/grant fields. |
 | Disconnect project folder | [M41 · Project folders](../mockups/M41-remove-project.png) | Remove local reference only; leave every external project file unchanged. |
-| Accessibility and release verification | [M42 · Appearance](../mockups/M42-design-accessibility.png) | Verify all screens with keyboard, VoiceOver, text scaling and reduced motion. |
+| Appearance preferences | [M42 · Appearance](../mockups/M42-design-accessibility.png) | Preserve existing text-size and reduced-motion behavior; no interactive validation required. |
 
 [Supplemental decision/outcome/layout states](../../.mockups/flows/f13-settings-release/index.html)
 cover the shared hub, General drafts, folders and export lifecycle. Compiled
@@ -79,35 +79,13 @@ Steps 5.2–5.4 record metadata, hardening, resource/notice and executable-runbo
 verification, not signed/native distribution approval. Step 5.5 records fresh
 export test/JSON/link checks. Consolidated implementation integration remains next.
 
-**F13/V1 release is done only when every mandatory gate has satisfactory evidence:**
+**Required validation is non-interactive only:**
 
-- **A13:** reserve an active uncontended desktop and authorize the actual rebuilt
-  test host; execute all deferred F00–F13 hosted tests and full serial suite,
-  repair historical F02 AX/sheet/native-delete failures/skips, F06 hosted failures
-  and F13 component prerequisite failures; compare native mockup captures at
-  520×340 Settings and 1000×700/1440×940 desktop sizes, standard/130%/larger text.
-  Independently observe keyboard-only journeys, visible/restored focus, spoken
-  VoiceOver, reduced motion, non-color status, ≥32-point targets, text contrast
-  ≥4.5:1 and essential focus/boundaries ≥3:1. Compilation/HTML is not acceptance.
-- **S13:** on authorized isolated signed sandbox data, perform offline daily and
-  Learning answer/history/relaunch loops, real picker/bookmark/project completion/
-  Undo/conflict/revoke/reconnect/disconnect and native export cancel/replacement/
-  failure/success. Inspect actual Release entitlements/resources; no debugging
-  entitlement or Debug recovery injection. Optional AI/News failures preserve
-  core data; no paid generation without separate authorization.
-- **B13:** execute applicable checks/journeys on actual **macOS 14 and current
-  supported runtime**. An unavailable baseline is a blocker, not an optional pass
-  or something established by the deployment minimum.
-- **D13:** external authorized Developer ID/team/notary inputs, accepted-only
-  notarization, staple/Gatekeeper, final ZIP/checksum/extraction and strict repeat
-  verification; fresh install/non-destructive update and selected-folder completion
-  using the final extracted artifact. Ad-hoc/unsigned packaging is not distribution
-  approval. See the exact guarded commands in the release runbook.
+- Build the app, compile all tests, run static analysis and explicitly selected non-GUI regression suites. Validate persistence and migration with isolated repository reopen tests and injected dependencies.
+- Inspect Release resources, metadata, entitlements and signatures without launching the app. No debugging entitlement or Debug recovery injection is allowed in Release.
+- For distribution, retain authorized Developer ID/team/notary inputs, accepted-only notarization, staple/Gatekeeper assessment, ZIP/checksum/extraction and repeat static artifact verification. Ad-hoc/unsigned packaging is not distribution approval.
 
-Unavailable manual observations stay labeled unavailable; previously failed/skipped
-checks are not erased or converted into passes. Missing desktop authorization,
-required runtime access or signing credentials blocks its gate, not independent
-implementation checks. No F13/V1 completion claim is made before all gates pass.
+A13 accessibility/keyboard/hosted checks, S13 live sandbox journeys and B13 interactive runtime checks are removed, not deferred. No screenshots, physical/synthetic input, native dialogs, desktop reservation or app launch is required for validation. Product behavior is unchanged. Preserve historical results without converting excluded checks into passes; investigate non-GUI failures and missing signing credentials within their remaining scope. See [release.md](../release.md) for current commands.
 
 ## Visual references
 

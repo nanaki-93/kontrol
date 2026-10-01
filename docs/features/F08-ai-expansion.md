@@ -27,7 +27,9 @@
 - [ ] Maximum one request per user action; at most one automatic repair retry for invalid structure, then an actionable error.
 - [ ] Persist accepted lesson definitions and provenance locally. Send only relevant concept/objective metadata, not task/project contents or lesson answers.
 
-## Acceptance checks
+## Non-interactive acceptance checks
+
+Follow [AGENTS.md](../../AGENTS.md). Use injected generator/network/credential adapters and isolated repository tests. Do not drive Settings or submit live paid generation for validation; no accessibility, keyboard or hosted UI gate is required.
 
 - [ ] No-key and offline states never disable seeded learning.
 - [ ] A duplicate or malformed result produces M26 and leaves slots unchanged.

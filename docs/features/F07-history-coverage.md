@@ -28,7 +28,9 @@
 - [ ] History details use the attempt snapshot so later content edits do not rewrite what was studied.
 - [ ] Keep all completed history indefinitely in V1; dismissal can be restored but completion is not silently erased.
 
-## Acceptance checks
+## Non-interactive acceptance checks
+
+Follow [AGENTS.md](../../AGENTS.md). Test domain projections and persistence with isolated fixtures; review UI wiring in source. No accessibility, native keyboard, hosted UI or live-app checks are required.
 
 - [ ] Title-only renaming with the same objective is rejected.
 - [ ] Different objectives on the same concept can be eligible if not an exact duplicate.

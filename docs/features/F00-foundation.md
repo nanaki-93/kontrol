@@ -9,7 +9,7 @@
 - Add a persistent store, model migration strategy, local error reporting, and launch checks. Do not make normal launch depend on a feed or AI request.
 - Seed representative, explicitly labeled sample data only in previews. The real first launch starts with useful empty states and a starter lesson catalog.
 
-**Done when:** the app launches, navigation works, persisted sample user actions survive a relaunch, and offline launch succeeds.
+**Done when:** non-GUI startup/navigation and isolated repository-reopen tests pass without a startup network dependency.
 
 ## Function → mockup contract
 
@@ -26,10 +26,12 @@
 - [ ] Load bundled catalog once by catalog version; upsert definitions without changing progress.
 - [ ] Route store-open failures to M01; no delete-and-recreate fallback. Log scrubbed errors and retain failed store files.
 
-## Acceptance checks
+## Non-interactive acceptance checks
 
-- [ ] A fresh sandboxed launch displays M00 without a network request.
-- [ ] Relaunch preserves tasks and selected destination.
+Follow [AGENTS.md](../../AGENTS.md). Use isolated stores/services and source review; no accessibility, keyboard, hosted UI or live-app validation.
+
+- [ ] Isolated startup dependencies initialize without network requests; shell wiring compiles.
+- [ ] Repository reopen preserves tasks; destination preference restoration passes non-GUI tests.
 - [ ] An injected store failure displays M01 and leaves the store bytes unchanged.
 
 ## Visual references

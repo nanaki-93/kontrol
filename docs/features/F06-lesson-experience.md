@@ -32,7 +32,9 @@
 - [ ] Prevent double completion; use unique lessonID progress and a transaction for completion plus slot assignment.
 - [ ] If no eligible candidate exists, show fewer slots and an explicit Generate option; never repeat a completed lesson as a filler.
 
-## Acceptance checks
+## Non-interactive acceptance checks
+
+Follow [AGENTS.md](../../AGENTS.md). Exercise lesson operations through store/repository APIs with isolated reopen and injected failures; review view wiring in source. No app launch, physical/synthetic actions or hosted UI validation is required.
 
 - [ ] Every format opens and resumes offline.
 - [ ] Completion changes one slot and creates one history record even on repeated clicks.
