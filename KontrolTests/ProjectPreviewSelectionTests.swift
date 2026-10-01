@@ -156,6 +156,113 @@ final class ProjectPreviewSelectionTests: XCTestCase {
         XCTAssertNil(ProjectsView.previewFeature(in: first, row: refreshing))
     }
 
+    private func admitted(_ captured: ProjectFeatureIdentity, selected: UUID?,
+                          selection: Selection, row: ProjectRowState?, reconnecting: Bool = false)
+        -> ProjectFeatureIdentity? {
+        ProjectsView.previewCommandTarget(captured: captured, selectedProjectID: selected,
+            selection: selection, row: row, isReconnecting: reconnecting)
+    }
+
+    func testExactCommandsRejectOldSelectionFallbackAndOtherProjects() {
+        let a = UUID(), b = UUID()
+        let original = row(a, [feature("first", priority: .high), feature("second")])
+        let first = preview(a, .init(), original)
+        let captured = ProjectFeatureIdentity(projectID: a, featureID: "first")
+        XCTAssertEqual(admitted(captured, selected: a, selection: first.selection, row: original), captured)
+        let chosen = first.selection.selecting("second", from: first)
+        XCTAssertNil(admitted(captured, selected: a, selection: chosen, row: original),
+                     "A stale View or Complete callback cannot act on the previous preview")
+        let second = ProjectFeatureIdentity(projectID: a, featureID: "second")
+        XCTAssertEqual(admitted(second, selected: a, selection: chosen, row: original), second)
+        let removed = row(a, [feature("first", priority: .high), feature("second", status: .completed)])
+        XCTAssertEqual(preview(a, chosen, removed).currentIdentity, captured)
+        XCTAssertNil(admitted(second, selected: a, selection: chosen, row: removed),
+                     "A fallback must never turn an old command into a command for the fallback")
+        XCTAssertEqual(admitted(captured, selected: a, selection: chosen, row: removed), captured)
+        let other = row(b, [feature("first", priority: .high), feature("second")])
+        XCTAssertNil(admitted(captured, selected: b, selection: chosen, row: other))
+        XCTAssertNil(admitted(captured, selected: b, selection: first.selection, row: other),
+                     "Reject even before the project-switch observer resets local selection")
+        XCTAssertNil(admitted(captured, selected: a, selection: first.selection, row: other))
+    }
+
+    func testCommandsRejectExcludedNonCandidatesAndEveryUnavailableOrBusyState() {
+        let id = UUID()
+        let current = row(id, [feature("first", priority: .high), feature("second"),
+                               feature("third", priority: .low), feature("fourth", priority: .low),
+                               feature("planned", status: .planned)],
+                          excluded: [".kontrol/features/excluded.md"])
+        let selection = preview(id, .init(), current).selection
+        let captured = ProjectFeatureIdentity(projectID: id, featureID: "first")
+        XCTAssertEqual(admitted(captured, selected: id, selection: selection, row: current), captured)
+        for nonCandidate in ["fourth", "planned", "excluded", "missing"] {
+            XCTAssertNil(admitted(.init(projectID: id, featureID: nonCandidate),
+                                  selected: id, selection: selection, row: current))
+        }
+        XCTAssertNil(admitted(captured, selected: id, selection: selection, row: nil))
+        XCTAssertNil(admitted(captured, selected: id, selection: selection, row: current, reconnecting: true))
+        var failed = current
+        failed.refreshFailure = .inspection(.inconsistentRead)
+        var retained = current
+        retained.isRetainedInspection = true
+        var noInspection = current
+        noInspection.inspection = nil
+        var wrongManifest = current
+        wrongManifest.reference = ProjectReferenceSnapshot(id: id, manifestID: "different",
+            bookmarkData: Data([1]), displayOrder: 0, displayNameHint: "Fixture",
+            lastSuccessfulReadAt: nil, revision: UUID())
+        for unavailable in [failed, retained, refreshing(current), noInspection, wrongManifest] {
+            XCTAssertNil(admitted(captured, selected: id, selection: selection, row: unavailable))
+        }
+        for state in [ProjectCompletionState.writing("first"), .undoing("second"), .refreshing("first")] {
+            var busy = current
+            busy.completion = state
+            XCTAssertNil(admitted(captured, selected: id, selection: selection, row: busy))
+        }
+    }
+
+    func testPartialRefreshAndUndoReconcileWithoutReplayingOldCommandOrStealingSelection() {
+        let a = UUID(), b = UUID()
+        var partial = row(a, [feature("done", status: .completed), feature("next")],
+                          excluded: [".kontrol/features/bad.md"])
+        partial.isStale = true // Accepted partial inspection, not retained data.
+        let chosen = preview(a, .init(), partial).selection
+        let captured = ProjectFeatureIdentity(projectID: a, featureID: "next")
+        XCTAssertEqual(admitted(captured, selected: a, selection: chosen, row: partial), captured)
+        let completed = row(a, [feature("next", status: .completed), feature("later")])
+        let afterCompletion = preview(a, chosen, completed)
+        XCTAssertEqual(afterCompletion.currentIdentity?.featureID, "later")
+        XCTAssertNil(admitted(captured, selected: a, selection: chosen, row: completed))
+        let restored = row(a, [feature("next"), feature("later")])
+        let afterUndo = preview(a, afterCompletion.selection, restored)
+        XCTAssertEqual(afterUndo.currentIdentity?.featureID, "later",
+                       "Undo restores eligibility but does not automatically repeat selection or action")
+        XCTAssertNil(admitted(captured, selected: a, selection: afterUndo.selection, row: restored))
+        let switched = preview(b, afterCompletion.selection, row(b, [feature("next"), feature("peer")]))
+        XCTAssertEqual(switched.currentIdentity?.projectID, b)
+        XCTAssertNil(admitted(captured, selected: b, selection: switched.selection, row: restored),
+                     "Late completion/Undo publication for A cannot activate B's preview")
+        XCTAssertEqual(preview(b, switched.selection, row(b, [feature("next")])).selection,
+                       switched.selection, "Other-project results do not change the active preview")
+    }
+
+    func testReturnFocusOnlyUsesCurrentPreviewAndFallsBackAfterRemoval() {
+        let id = UUID()
+        let current = row(id, [feature("a"), feature("b")])
+        let initial = preview(id, .init(), current)
+        let origin = ProjectsView.NavigationFocus.card(id, "a")
+        XCTAssertEqual(ProjectsView.returnFocus(origin: origin, row: current, roadmap: false,
+                                                 selection: initial.selection), origin)
+        let browsed = initial.selection.selecting("b", from: initial)
+        XCTAssertEqual(ProjectsView.returnFocus(origin: origin, row: current, roadmap: false,
+                                                 selection: browsed), .projectHeading(id))
+        let removed = row(id, [feature("a", status: .completed), feature("b")])
+        XCTAssertEqual(ProjectsView.returnFocus(origin: origin, row: removed, roadmap: false,
+                                                 selection: initial.selection), .projectHeading(id))
+        XCTAssertEqual(ProjectsView.returnFocus(origin: origin, row: refreshing(current), roadmap: false,
+                                                 selection: initial.selection), .projectHeading(id))
+    }
+
     private func rowWithoutInspection(_ row: ProjectRowState) -> ProjectRowState {
         var result = row
         result.inspection = nil

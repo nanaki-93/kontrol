@@ -177,6 +177,33 @@ struct ProjectsView: View {
         return trimmed.count <= 600 ? trimmed : String(trimmed.prefix(599)) + "…"
     }
 
+    /// The captured control may outlive its row or a fallback selection. Use the current
+    /// accepted inspection and selector on every activation; never substitute its fallback.
+    static func previewCommandTarget(captured: ProjectFeatureIdentity, selectedProjectID: UUID?,
+                                     selection: ProjectPreviewSelection, row: ProjectRowState?,
+                                     isReconnecting: Bool = false) -> ProjectFeatureIdentity? {
+        guard selectedProjectID == captured.projectID, !isReconnecting,
+              let row, row.reference.id == captured.projectID,
+              !row.isRefreshing, row.refreshFailure == nil, !row.isRetainedInspection,
+              let inspection = row.inspection, inspection.manifest?.schemaVersion == 1,
+              inspection.manifest?.id == row.reference.manifestID,
+              inspection.featureEnumeration == .complete else { return nil }
+        switch row.completion {
+        case .writing, .undoing, .refreshing: return nil
+        default: break
+        }
+        guard let projection = preview(for: selectedProjectID, selection: selection, row: row),
+              projection.currentIdentity == captured,
+              previewFeature(in: projection, row: row)?.id == captured.featureID else { return nil }
+        return captured
+    }
+
+    private func admittedPreview(_ captured: ProjectFeatureIdentity) -> ProjectFeatureIdentity? {
+        Self.previewCommandTarget(captured: captured, selectedProjectID: store.selectedID,
+                                  selection: previewSelection, row: selectedRow,
+                                  isReconnecting: reconnectingID != nil)
+    }
+
     private var previewProjection: PreviewProjection? {
         Self.preview(for: store.selectedID, selection: previewSelection, row: selectedRow)
     }
@@ -198,13 +225,16 @@ struct ProjectsView: View {
 
     /// An origin may disappear after refresh. Never focus a stale recommendation or an
     /// excluded roadmap record; the selected project's heading is the stable fallback.
-    static func returnFocus(origin: NavigationFocus?, row: ProjectRowState?, roadmap: Bool) -> NavigationFocus? {
+    static func returnFocus(origin: NavigationFocus?, row: ProjectRowState?, roadmap: Bool,
+                            selection: ProjectPreviewSelection = .init()) -> NavigationFocus? {
         guard let row else { return nil }
         let heading: NavigationFocus = .projectHeading(row.reference.id)
         guard let origin, let inspection = row.inspection else { return heading }
         switch origin {
         case let .card(id, featureID) where !roadmap && id == row.reference.id:
-            return recommendations(row).contains(where: { $0.id == featureID }) ? origin : heading
+            return previewCommandTarget(captured: .init(projectID: id, featureID: featureID),
+                                        selectedProjectID: id, selection: selection, row: row) != nil
+                ? origin : heading
         case let .roadmap(id, featureID) where roadmap && id == row.reference.id:
             return inspection.featureEnumeration == .complete &&
                 inspection.features.contains(where: { $0.id == featureID }) ? origin : heading
@@ -221,7 +251,8 @@ struct ProjectsView: View {
         let id = row.reference.id
         switch origin {
         case let .cardCompletion(projectID, featureID) where projectID == id:
-            return !detailVisible && canComplete && recommendations(row).contains(where: { $0.id == featureID })
+            return !detailVisible && canComplete && !row.isRefreshing && row.refreshFailure == nil &&
+                !row.isRetainedInspection && recommendations(row).contains(where: { $0.id == featureID })
                 ? origin : .projectHeading(id)
         case let .detailCompletion(projectID, _) where projectID == id:
             return detailVisible ? (canComplete ? origin : .featureHeading) : .projectHeading(id)
@@ -737,8 +768,6 @@ struct ProjectsView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("project-feature-excerpt")
             }
-            // Existing guarded commands remain available until exact command admission
-            // and placement are updated in Step 1.2.
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: AppMetrics.space2) { previewActions(feature, row: row, projectID: id) }
                 VStack(alignment: .leading, spacing: AppMetrics.space2) {
@@ -754,20 +783,29 @@ struct ProjectsView: View {
     }
 
     private func previewActions(_ feature: ProjectFeature, row: ProjectRowState, projectID: UUID) -> some View {
-        Group {
-            ActionButton("View feature", variant: .primary) {
-                guard let current = store.rows.first(where: { $0.reference.id == projectID }),
-                      !current.isRetainedInspection else { return }
-                featureOrigin = .card(projectID, feature.id)
-                store.selectFeature(feature.id, in: projectID)
+        let captured = ProjectFeatureIdentity(projectID: projectID, featureID: feature.id)
+        return Group {
+            ActionButton("View feature", variant: .primary,
+                         isEnabled: Self.previewCommandTarget(captured: captured, selectedProjectID: store.selectedID,
+                             selection: previewSelection, row: selectedRow,
+                             isReconnecting: reconnectingID != nil) != nil) {
+                guard admittedPreview(captured) != nil else { return }
+                store.selectFeature(captured.featureID, in: captured.projectID)
+                if store.selectedFeature == captured { featureOrigin = .card(projectID, feature.id) }
             }
             .focused($navigationFocus, equals: .card(projectID, feature.id))
             .accessibilityLabel(Self.cardLabel(feature))
             .accessibilityIdentifier("project-feature-open-\(feature.id)")
             ActionButton(ProjectFeatureDetailView.completionTitle(for: feature.id, state: row.completion),
-                         isEnabled: Self.completionEnabled(feature.id, row: row, store: store,
-                             isReconnecting: reconnectingID == projectID)) {
-                complete(feature.id, in: projectID, origin: .cardCompletion(projectID, feature.id))
+                         variant: .secondary,
+                         isEnabled: Self.previewCommandTarget(captured: captured, selectedProjectID: store.selectedID,
+                             selection: previewSelection, row: selectedRow,
+                             isReconnecting: reconnectingID != nil) != nil &&
+                             Self.completionEnabled(feature.id, row: row, store: store,
+                                 isReconnecting: reconnectingID != nil)) {
+                guard admittedPreview(captured) != nil else { return }
+                complete(feature.id, in: projectID, origin: .cardCompletion(projectID, feature.id),
+                         previewCaptured: captured)
             }
             .focused($navigationFocus, equals: .cardCompletion(projectID, feature.id))
             .accessibilityLabel(ProjectFeatureDetailView.completionLabel(for: feature, state: row.completion))
@@ -843,8 +881,15 @@ struct ProjectsView: View {
         }
     }
 
-    private func complete(_ featureID: String, in projectID: UUID, origin: NavigationFocus) {
-        Task {
+    private func complete(_ featureID: String, in projectID: UUID, origin: NavigationFocus,
+                          previewCaptured: ProjectFeatureIdentity? = nil) {
+        Task { @MainActor in
+            if let previewCaptured {
+                guard admittedPreview(previewCaptured) == previewCaptured,
+                      let row = selectedRow,
+                      Self.completionEnabled(previewCaptured.featureID, row: row, store: store,
+                                             isReconnecting: reconnectingID != nil) else { return }
+            }
             await store.markComplete(featureID, in: projectID)
             guard store.selectedID == projectID,
                   let row = store.rows.first(where: { $0.reference.id == projectID }) else { return }
@@ -875,6 +920,13 @@ struct ProjectsView: View {
         Task { @MainActor in
             await Task.yield()
             guard store.selectedID == projectID, presentedConflict == nil else { return }
+            if case .projectHeading = target, detailID != nil || store.selectedFeature != nil { return }
+            if case let .cardCompletion(id, featureID) = target {
+                guard admittedPreview(ProjectFeatureIdentity(projectID: id, featureID: featureID)) != nil,
+                      let row = selectedRow,
+                      Self.completionEnabled(featureID, row: row, store: store,
+                                             isReconnecting: reconnectingID != nil) else { return }
+            }
             // Refresh can remove the detail between dismissal and this deferred focus.
             // Never focus a heading that has disappeared from the active branch.
             if target == .featureHeading {
@@ -893,7 +945,8 @@ struct ProjectsView: View {
 
     private func restoreFocus(in projectID: UUID, roadmap: Bool) {
         let row = store.rows.first { $0.reference.id == projectID }
-        pendingReturnFocus = Self.returnFocus(origin: featureOrigin, row: row, roadmap: roadmap)
+        pendingReturnFocus = Self.returnFocus(origin: featureOrigin, row: row, roadmap: roadmap,
+                                             selection: previewSelection)
         featureOrigin = nil
         // Refresh publication can remove detail before the destination's onAppear runs.
         // Also retry when that branch has already appeared in the same update cycle.
@@ -909,6 +962,16 @@ struct ProjectsView: View {
         // Focus only after the destination branch has appeared.
         Task { @MainActor in
             await Task.yield()
+            switch target {
+            case let .card(id, featureID):
+                guard detailID == nil, store.selectedFeature == nil,
+                      admittedPreview(.init(projectID: id, featureID: featureID)) != nil else { return }
+            case let .roadmap(id, _):
+                guard detailID == id, store.selectedID == id else { return }
+            case let .projectHeading(id):
+                guard store.selectedID == id, detailID == nil, store.selectedFeature == nil else { return }
+            default: return
+            }
             navigationFocus = target
         }
     }
