@@ -66,6 +66,122 @@ final class NavigationStoreTests: XCTestCase {
         XCTAssertEqual(preferences.savedDestination, AppDestination.focus.rawValue)
     }
 
+    func testTopicRequestsPublishCurrentIDsWithoutCatalogRefreshOrBrowsingWrites() throws {
+        let (defaults, suite) = isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataCatalogRepository(container: container)
+        _ = try repository.importIfNeeded(BundledCatalogLoader.load())
+        let graph = AppDependencies(container: container, catalogRepository: repository)
+        graph.learningCatalogStore.loadIfNeeded()
+        let catalog = try XCTUnwrap(graph.learningCatalogStore.state.snapshot)
+        let first = NavigationStore(preferences: UserDefaultsDestinationPreferences(defaults: defaults))
+        let otherPreferences = CountingPreferences()
+        let second = NavigationStore(preferences: otherPreferences)
+        first.attachDrafts(graph.lessonDraftStore)
+        second.attachDrafts(graph.lessonDraftStore)
+        var publishedIDs: [String?] = []
+        var catalogPublications = 0
+        let topicSubscription = first.$selectedTopicID.dropFirst().sink { publishedIDs.append($0) }
+        let catalogSubscription = graph.learningCatalogStore.$projection.dropFirst().sink { _ in catalogPublications += 1 }
+        defer { topicSubscription.cancel(); catalogSubscription.cancel() }
+
+        XCTAssertNil(first.selectedTopicID)
+        first.selectTopic("go")
+        XCTAssertEqual(first.selectedTopicID, "go", "First request must not need another activation")
+        first.selectTopic("java")
+        XCTAssertEqual(first.selectedTopicID, "java")
+        first.selectTopic("design")
+        XCTAssertEqual(first.selectedTopicID, "design")
+        XCTAssertEqual(publishedIDs, ["go", "java", "design"])
+        first.selectTopic("design") // same topic on choices is a no-op
+        XCTAssertEqual(publishedIDs, ["go", "java", "design"])
+        XCTAssertNil(first.pendingTransition)
+        first.showHistory()
+        XCTAssertEqual(first.learningRoute, .history)
+        first.selectTopic("perf")
+        XCTAssertEqual(first.selectedTopicID, "perf")
+        XCTAssertEqual(first.learningRoute, .choices)
+        XCTAssertEqual(publishedIDs, ["go", "java", "design", "perf"])
+        XCTAssertNil(second.selectedTopicID)
+        XCTAssertEqual(second.learningRoute, .choices)
+        second.selectTopic("security")
+        XCTAssertEqual(second.selectedTopicID, "security")
+        XCTAssertEqual(first.selectedTopicID, "perf")
+        XCTAssertEqual(otherPreferences.writes, 0)
+        XCTAssertNil(defaults.object(forKey: UserDefaultsDestinationPreferences.key))
+        XCTAssertEqual(catalogPublications, 0)
+        XCTAssertEqual(graph.learningCatalogStore.state.snapshot, catalog)
+        XCTAssertEqual(try repository.loadSnapshot(), catalog)
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).isEmpty)
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<LessonProgress>()).isEmpty)
+    }
+
+    func testFailedTopicRequestRetainsDraftAndLatestPendingIDThroughCancelAndRetry() throws {
+        enum Injected: Error { case save }
+        var fail = false
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let repository = SwiftDataCatalogRepository(container: container, beforeSave: {
+            if fail { throw Injected.save }
+        })
+        _ = try repository.importIfNeeded(BundledCatalogLoader.load())
+        let graph = AppDependencies(container: container, catalogRepository: repository)
+        graph.learningCatalogStore.loadIfNeeded()
+        let lessonID = try XCTUnwrap(graph.learningCatalogStore.state.snapshot?.slots.first?.lessonID)
+        let opened = try graph.learningCatalogStore.openLesson(lessonID: lessonID)
+        let attemptID = try XCTUnwrap(opened.detail.attempt?.id)
+        // Never run the debounce callback: every save in this test is the synchronous route barrier.
+        let drafts = LessonDraftStore(learning: graph.learningCatalogStore, schedule: { _, _ in { } })
+        drafts.observe(opened.detail)
+        let preferences = CountingPreferences()
+        let navigation = NavigationStore(preferences: preferences)
+        navigation.attachDrafts(drafts)
+        navigation.selectTopic("go")
+        navigation.showHistory()
+        let route = navigation.learningRoute
+        let slots = try XCTUnwrap(graph.learningCatalogStore.state.snapshot?.slots)
+        let progressCount = try ModelContext(container).fetch(FetchDescriptor<LessonProgress>()).count
+        let text = "  unsaved topic 🧪\n"
+        drafts.edit(text, attemptID: attemptID)
+        fail = true
+        navigation.selectTopic("java")
+        XCTAssertEqual(navigation.selectedTopicID, "go")
+        XCTAssertEqual(navigation.learningRoute, route)
+        XCTAssertEqual(navigation.pendingTransition, .topic("java"))
+        XCTAssertEqual(navigation.saveError, .persistenceFailure)
+        XCTAssertEqual(drafts.buffers[attemptID]?.text, text)
+        XCTAssertTrue(try XCTUnwrap(drafts.buffers[attemptID]).isDirty)
+        XCTAssertEqual(drafts.buffers[attemptID]?.status, .notSaved(.persistenceFailure))
+        navigation.selectTopic("security")
+        XCTAssertEqual(navigation.pendingTransition, .topic("security"), "A newer failed request replaces the prior pending ID")
+        XCTAssertEqual(navigation.selectedTopicID, "go")
+        XCTAssertEqual(navigation.learningRoute, route)
+        navigation.cancelTransition()
+        XCTAssertNil(navigation.pendingTransition)
+        XCTAssertEqual(navigation.saveError, .persistenceFailure)
+        XCTAssertEqual(navigation.selectedTopicID, "go")
+        XCTAssertEqual(navigation.learningRoute, route)
+        XCTAssertEqual(drafts.buffers[attemptID]?.text, text)
+        XCTAssertTrue(try XCTUnwrap(drafts.buffers[attemptID]).isDirty)
+        navigation.selectTopic("design")
+        XCTAssertEqual(navigation.pendingTransition, .topic("design"), "Later failure replaces the requested ID")
+        XCTAssertEqual(navigation.selectedTopicID, "go")
+        XCTAssertEqual(navigation.learningRoute, route)
+        fail = false
+        navigation.retryTransition()
+        XCTAssertEqual(navigation.selectedTopicID, "design")
+        XCTAssertEqual(navigation.learningRoute, .choices)
+        XCTAssertNil(navigation.pendingTransition)
+        XCTAssertNil(navigation.saveError)
+        XCTAssertEqual(drafts.buffers[attemptID]?.status, .saved)
+        XCTAssertFalse(try XCTUnwrap(drafts.buffers[attemptID]).isDirty)
+        XCTAssertEqual(try repository.loadLesson(lessonID: lessonID).attempt?.answerDraft, text)
+        XCTAssertEqual(try repository.loadSnapshot().slots, slots)
+        XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<LessonProgress>()).count, progressCount)
+        XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<LessonAttempt>()).count, 1)
+        XCTAssertEqual(preferences.writes, 0, "Topic browsing never changes destination preferences")
+    }
+
     func testStableLessonRouteAndFailureRetainsRoutePreferenceAndDraftForRetry() throws {
         enum Injected: Error { case save }
         var fail = false

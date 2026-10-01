@@ -226,9 +226,11 @@ struct LearningView: View {
                     let isSelected = selected.id == topic.id
                     Button {
                         if let navigation {
-                            guard navigation.flushForLifecycle() else { return }
                             navigation.selectTopic(topic.id)
-                            guard navigation.selectedTopicID == topic.id else { return }
+                            guard navigation.selectedTopicID == topic.id,
+                                  navigation.learningRoute == .choices,
+                                  navigation.pendingTransition == nil,
+                                  navigation.saveError == nil else { return }
                         } else {
                             selectedTopicID = topic.id
                         }
