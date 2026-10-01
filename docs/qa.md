@@ -30,7 +30,7 @@ The table below describes non-GUI contracts, using repository reopen, injected s
 
 ## Learning topic selection — Step 3.1 integration (2026-10-01)
 
-**Non-GUI integration verified.** First incomplete `.pi/PLAN.md` task matched runner Step 3.1; cumulative task-3 checklist listed no earlier review findings. Only this ledger was updated; the pre-existing worktree edits (including this page's policy changes) were preserved. Root `AGENTS.md` applies, with no nested instructions or submodules. Xcode 27.0 (27A266a), Apple Swift 6.4, Yams 5.4.0; this run is not macOS 14 runtime or live UI evidence.
+**Non-GUI integration verified.** First incomplete `../PLAN-UI.md` task matched runner Step 3.1; cumulative task-3 checklist listed no earlier review findings. Only this ledger was updated; the pre-existing worktree edits (including this page's policy changes) were preserved. Root `AGENTS.md` applies, with no nested instructions or submodules. Xcode 27.0 (27A266a), Apple Swift 6.4, Yams 5.4.0; this run is not macOS 14 runtime or live UI evidence.
 
 Source review: `AppShell` injects the same window `NavigationStore` and shared `LearningCatalogStore` into Learning choices, attaches the shared drafts on appearance, and routes shell Retry save to `retryTransition()` when a request is pending, otherwise to `flushForLifecycle()`; Stay here invokes `cancelTransition()`. Both `ViewThatFits` branches of `LearningView` use `RoutedLearningCatalog`'s direct observation of the injected navigation and the same `topicProjection`, with one resolved topic driving selected indicator, heading/count, slot-ordered cards, saved work, and Generate target. Standalone `LearningView(store:)` uses `@State` selection. The topic button calls `selectTopic(topic.id)` without a preliminary flush and clears `entryError` only after an accepted choice. The empty-catalog guard precedes the fallback; loading and failed reads do not present stale choices. `NavigationStore` saves drafts before publishing the requested ID/choices route; a failed save retains route/selection and pending topic for Retry or cancellation. Existing `LearningPresentationTests` assertions for mounted first and successive activations, programmatic selection, standalone selection, counts and layout remain in source and compiled, **not executed**. These observations are source and unit evidence, not a live-rendering claim.
 
@@ -49,7 +49,7 @@ git diff --check
 
 ## Learning topic selection — Step 2.1 fresh integration (2026-10-01)
 
-**Non-interactive integration passed; no production correction was needed.** The first incomplete `.pi/PLAN.md` task matched runner Step 2.1; the cumulative task-2 review checklist lists no previous findings. Root `AGENTS.md` applies; the scan found no nested instructions or submodules. The pre-existing changes to `KontrolTests/LearningPresentationTests.swift` and unrelated documentation were preserved; only this QA entry was edited for this step.
+**Non-interactive integration passed; no production correction was needed.** The first incomplete `../PLAN-UI.md` task matched runner Step 2.1; the cumulative task-2 review checklist lists no previous findings. Root `AGENTS.md` applies; the scan found no nested instructions or submodules. The pre-existing changes to `KontrolTests/LearningPresentationTests.swift` and unrelated documentation were preserved; only this QA entry was edited for this step.
 
 Source review: `AppShell` supplies its observed window `NavigationStore` and shared catalog to Learning choices, attaches shared drafts on appearance, calls `retryTransition()` for a pending request (otherwise `flushForLifecycle()`) from Retry save, and calls `cancelTransition()` from Stay here. Both wide and compact `ViewThatFits` branches pass through `RoutedLearningCatalog`, which observes the injected owner; the single `topicProjection` resolves the ID for selected styling, heading/count, slot-ordered cards, saved work, and Generate lesson target. Standalone `LearningView(store:)` retains its local selection. The topic action calls `selectTopic(topic.id)` once without a preliminary flush; `entryError` clears only after accepted choices with no pending/error state. `NavigationStore` applies a single draft-save barrier before publishing selected ID and choices route, while failures retain the old selection/route and requested pending ID for retry/cancel. Loading/read failures do not render stale choices; empty catalogs have no selected topic. Inspected the existing hosted `LearningPresentationTests` assertions (mounted first/subsequent selection, programmatic selection, standalone browsing and layout): **compiled, not executed**. This review plus unit tests is not evidence of live rendering.
 
@@ -308,7 +308,7 @@ The continuation request explicitly splits the old Step 1.1 into **independently
 
 ### Prerequisites and preserved work
 
-Confirmed the first top-level incomplete task in `.pi/PLAN.md` matches runner task **Step 1.1a**. Read `.pi/SPEC.md`, `.pi/ANALYSIS.md`, the plan, and the entire cumulative task-1 review checklist (no previous findings listed). Inspected `git status --short`, all existing diffs, and the index: at takeover only the three repaired test files and this ledger were modified, with nothing staged. Repository-wide `find . -name AGENTS.md -print`, target scans under `Kontrol/`, `KontrolTests/`, and `docs/`, and ancestor checks through `/` found no applicable instructions. `.gitmodules` is absent; `git submodule status` returned 0 with no entries. No commit-rule conflict was found. This attempt changes **only `docs/qa.md`**; all existing repairs, assertions, fixtures, sources, and workflow state remain untouched.
+Confirmed the first top-level incomplete task in `../PLAN-UI.md` matches runner task **Step 1.1a**. Read `.pi/SPEC.md`, `.pi/ANALYSIS.md`, the plan, and the entire cumulative task-1 review checklist (no previous findings listed). Inspected `git status --short`, all existing diffs, and the index: at takeover only the three repaired test files and this ledger were modified, with nothing staged. Repository-wide `find . -name AGENTS.md -print`, target scans under `Kontrol/`, `KontrolTests/`, and `docs/`, and ancestor checks through `/` found no applicable instructions. `.gitmodules` is absent; `git submodule status` returned 0 with no entries. No commit-rule conflict was found. This attempt changes **only `docs/qa.md`**; all existing repairs, assertions, fixtures, sources, and workflow state remain untouched.
 
 Toolchain/project discovery commands, each exit **0** (output `/tmp/kontrol-f13-resume-toolchain.log`):
 
@@ -1229,7 +1229,7 @@ implementation remain separate mandatory checkpoints.
 
 ## F13 Step 2.2 — Read-only Daily export projection (2026-09-30)
 
-Confirmed the first top-level incomplete task in `.pi/PLAN.md` matches runner
+Confirmed the first top-level incomplete task in `../PLAN-UI.md` matches runner
 Step 2.2. The cumulative task-4 review checklist had no previous findings.
 Initial worktree/index were clean; no applicable ancestor or target `AGENTS.md`
 or submodule was found. No workflow state, frozen schema, fixture, dependency pin,
@@ -1987,7 +1987,7 @@ previous findings. Initial worktree/index were clean; repository/target and dire
 ancestor checks found no applicable `AGENTS.md`; no submodule was listed. Only the
 panel boundary, its tests/project membership, and this required ledger changed.
 No lifecycle service, dependency ownership, Local Data routing, or later task was
-implemented; workflow state and `.pi/PLAN.md` were not modified.
+implemented; workflow state and `../PLAN-UI.md` were not modified.
 
 Source base: `bcdfbea0c1e6c93acca4e2b7fc708c4b381f2b59`. Evidence root:
 **`/tmp/kontrol-f13-step3-3/`**. Tested implementation/test/membership patch
@@ -2447,7 +2447,7 @@ pid=,stat=,command=` returned **1** with no rows (`initial-host-exit.log`,
 `final-host-exit.log`). No production data, historical stores/fixtures/schemas,
 external projects, permissions or dependency pins were changed. No store cleanup,
 staging or commits occurred during this Builder step; approved-task commits remain
-runner-owned. `.pi/PLAN.md` and workflow state were not modified.
+runner-owned. `../PLAN-UI.md` and workflow state were not modified.
 
 ### Deferred native observations (A13, not Step 4.1 implementation blockers)
 
@@ -2566,7 +2566,7 @@ Test host PID 17664 exited (`ps -p 17664 -o pid=,stat=,command=` returned **1**,
 no rows; `host-exit.log`). Executed export tests use in-memory persistence and
 owned non-store destinations; no agent store cleanup was performed. Original
 fixtures, frozen schemas, external projects, production data, dependency pins,
-permissions, workflow files and `.pi/PLAN.md` were not changed. Changes remain
+permissions, workflow files and `../PLAN-UI.md` were not changed. Changes remain
 uncommitted for review; approved-task commits remain runner-owned.
 
 ### Exact new hosted selectors deferred to A13
@@ -2695,7 +2695,7 @@ remain recorded, not silently repaired. No new production compiler warning or
 SQLite vnode-unlinked diagnostic occurred. Test host PID 23208 exited (final
 process scan returned **1**, no rows, `host-exit.log`). No agent store cleanup
 was performed. Frozen schemas, fixtures, external projects, production data,
-workflow files and `.pi/PLAN.md` were not changed. Changes remain uncommitted for
+workflow files and `../PLAN-UI.md` were not changed. Changes remain uncommitted for
 review; approved-task commits remain runner-owned.
 
 ### A13 hosted selectors and spoken-observation ledger
@@ -3245,10 +3245,10 @@ First incomplete task matched runner **21/27, Step 5.5**. Read SPEC, ANALYSIS,
 PLAN and the complete cumulative task-21 checklist (no previous findings).
 Initial worktree/index were clean; no interrupted partial work was present.
 Repository/docs and direct-ancestor instruction checks found no applicable
-`AGENTS.md`; no submodule was listed. Changed only `README.md`, root `PLAN.md`,
+`AGENTS.md`; no submodule was listed. Changed only `README.md`, root `PLAN-UI.md`,
 `docs/architecture.md`, `docs/export-format.md`,
 `docs/features/F13-settings-release.md` and this appended ledger. No workflow
-state or `.pi/PLAN.md`, implementation, test assertion, fixture, schema, dependency
+state or `../PLAN-UI.md`, implementation, test assertion, fixture, schema, dependency
 or permission was changed. Changes are uncommitted for runner review.
 
 Base revision **`bd04022cba9971a97323f15c5db2577e962fc221`**. Evidence directory
@@ -3379,7 +3379,7 @@ Initial worktree/index were clean; no interrupted partial work existed. Direct
 ancestor and repository/target instruction searches found no applicable `AGENTS.md`
 or submodule. Changed only `KontrolTests/NewsRepositoryTests.swift`,
 `KontrolTests/NewsStoreTests.swift` and this appended ledger. No production source,
-workflow state, `.pi/PLAN.md`, schema, original fixture, dependency, permission or
+workflow state, `../PLAN-UI.md`, schema, original fixture, dependency, permission or
 later release task changed. Changes remain uncommitted for runner review.
 
 Base revision **`2aff12e952ea4c32278a7927c8460a6c8bdff36a`**. Evidence root
