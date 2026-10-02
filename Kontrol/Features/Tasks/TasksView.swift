@@ -333,16 +333,14 @@ struct TasksView: View {
             if store.readState == .loaded && selected.isEmpty {
                 EmptyState(emptyGuidance.0, guidance: emptyGuidance.1)
             } else if !selected.isEmpty {
-                ScrollView {
-                    TaskRows(rows: selected, temporalContext: store.temporalContext, onEdit: { row in
-                        lastEditorTriggerID = row.id
-                        edit(row)
-                    }, onSetCompleted: setCompleted, onDelete: { row in
-                        pendingDeletion = TaskDeletionConfirmation(id: row.id, title: row.title)
-                        lastDeletionTriggerID = row.id
-                        isDeletePresented = true
-                    }, editFocus: $editFocusedID)
-                }
+                TaskRows(rows: selected, temporalContext: store.temporalContext, onEdit: { row in
+                    lastEditorTriggerID = row.id
+                    edit(row)
+                }, onSetCompleted: setCompleted, onDelete: { row in
+                    pendingDeletion = TaskDeletionConfirmation(id: row.id, title: row.title)
+                    lastDeletionTriggerID = row.id
+                    isDeletePresented = true
+                }, editFocus: $editFocusedID)
             }
             Spacer(minLength: 0)
         }
