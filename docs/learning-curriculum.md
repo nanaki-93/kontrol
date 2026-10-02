@@ -1,8 +1,8 @@
 # Initial learning curriculum
 
-[Plan](../PLAN.md) · [Choices mockup](mockups/M15-learning-choices.png) · [Lesson formats](features/F06-lesson-experience.md)
+[Bundled catalog](../web/resources/starter-catalog.json) · [Learning guide](web-app.md#dashboard-and-modules)
 
-F05 packages 8 complete lessons per topic, 40 total, in catalog version 2. The table is the canonical authoring brief; all five topics are authored and reviewed. Every lesson needs stable id/objectiveKey, canonical concept IDs, difficulty, time estimate, explanation, worked example, exercise, reference answer and self-check criteria. Begin at intermediate level with optional basics; do not infer mastery from the user's experience.
+The bundled catalog contains 8 complete lessons per topic, 40 total, in catalog version 2. The table is the canonical authoring brief; all five topics are authored and reviewed. Every lesson needs stable id/objectiveKey, canonical concept IDs, difficulty, time estimate, explanation, worked example, exercise, reference answer and self-check criteria. Begin at intermediate level with optional basics; do not infer mastery from the user's experience.
 
 | Topic | Lesson brief | Format | Objective / concept |
 | --- | --- | --- | --- |

@@ -1,2 +1,8 @@
 /.pi/
 /.idea/
+/web/node_modules/
+/web/dist/
+/web/.data/
+/web/coverage/
+/web/.env
+.DS_Store

@@ -1,8 +1,8 @@
 schema_version: 1
 id: kontrol-example
 name: Kontrol
-stack: [Swift, SwiftUI, SwiftData]
-description: Personal macOS dashboard
+stack: [TypeScript, React, Node.js, SQLite]
+description: Personal local web dashboard
 goals:
   - Plan the day
   - Learn continuously
