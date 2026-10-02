@@ -28,6 +28,59 @@ The table below describes non-GUI contracts, using repository reopen, injected s
 | News | RSS/Atom variants, malformed feed, entities, duplicates, missing date, offline cache | [M35](mockups/M35-news.png)–[M37](mockups/M37-news-offline.png) |
 | Settings | Export parses; no key/bookmark; canceled save; disconnected folder left intact | [M38](mockups/M38-settings.png)–[M41](mockups/M41-remove-project.png) |
 
+## UI-refining — Step 4.1 integration (2026-10-02)
+
+**Non-interactive integration passed.** The first top-level incomplete task in `.pi/PLAN.md` was Step 4.1, matching runner task 12/12; the cumulative task-12 checklist had no earlier findings. `git status --short`, `git diff --stat`, `git diff`, `git diff --cached`, and `git submodule status` showed no pre-existing changes/submodules; repository scan found only root `AGENTS.md`. No app or test sources needed correction. The approved B references are `.mockups/flows/ui-hierarchy/b-{learning,projects,today,tasks,focus,news,settings}.html` and their offline-large counterparts. This entry records source/projection/build evidence, **not** rendered geometry or interactive behavior.
+
+Source review against `.pi/SPEC.md` and the selected B compositions accounted for all ten remaining `PLAN-UI.md` steps:
+
+| Steps | Source and executed non-GUI evidence |
+| --- | --- |
+| 2.3–2.4 | `ProjectsView` uses one accepted inspection/selector for ordered candidate list, literal 600-character preview and exact captured View/Complete admission; partial counts, unavailable states, busy/reconnect exclusion, verification feedback and Undo remain separate. Preview and completion-store regressions cover identity, removal, stale/partial reads, Unicode and late reconciliation. Detail route still permits validated non-candidates. Return-focus guards reject another project or removed/disabled preview controls. |
+| 3.1 | `TodayView` places Practice and navigation-only Project work before Schedule/Tasks; Open/Resume and Schedule… retain exact lesson action paths, actual-local-Today cue and two started-first suggestions. Navigation and Today integration tests exercise failed draft flush, Cancel/Retry, and no Project IO. |
+| 3.2–3.3 | `TaskRows` projects due instant, planned civil day (including past), completion and unscheduled meaning independently of disclosed saved calendar/zone; disclosure is UUID-keyed and Today provides no Delete. Confirmation captures UUID. `TasksView` has no inner vertical scroll: `AppShell` alone scrolls the main document, with no fixed row viewport. Source paths restore focus to a surviving disclosure or Add task. Selection/date/deletion tests passed. |
+| 3.4–3.5 | `FocusReadyDraft` uses transient None/Task/Lesson, keeps stale IDs and duration/retry state; ready view shows timer, link summary, Start, visible validation, duration controls, optional activity disclosure and Reset. Session actions stay in `FocusService`; selection does not write Learning/sessions. Tests cover type transitions, unreadable inventory, unlinked Start configuration and unslotted lessons. |
+| 3.6 | `NewsView` shows cached headlines and filters ahead of secondary Refresh/Topics & feeds and disclosed per-feed diagnostics. Read/save/partial/refresh/deadline messages stay visible; Refresh enablement comes only from `NewsStore.canRetryRefresh(at:)`, including subset-blocked explanations. Source/disclosure projections and selected News tests passed. `NewsRouteView` retains foreground-refresh ownership. |
+| 3.7 | Both main and native Settings use `FoundationSettingsView(dependencies:)` and the same `AppDependencies` owners. Five compact sections have owner-derived summaries and item-specific action labels; failed preference reads distinguish retained/unverified values from readable saved values and keep retry outside sections. Entry only loads local summaries/references, not project inspections, feeds, generation or export. Pure owner-spy tests passed. |
+
+`AppShell`/`NavigationStore` preserve Today → Learning → Projects → Focus → Tasks → News → Settings and Black / Red Terminal tokens; selected navigation traits and stable identifiers remain. Source review found contextual accessibility labels, focus return guards, natural vertical flow, responsive `ViewThatFits` stacking and text wrapping; no native focus, keyboard, AX, compact-window rendering or enlarged-text rendering was executed. Learning's committed topic/slot selection, captured Open/Resume and dismissal timestamp, independent Saved work and non-generating More lessons disclosure remain intact. Affected presentation test bundles compiled but hosted methods were **not run**.
+
+Toolchain (exit 0): `xcodebuild -version` = **Xcode 27.0 (27A266a)**; `swift --version` = **Apple Swift 6.4 (swiftlang-6.4.0.34.1), arm64-apple-macosx27.0.0**; `python3 --version` = **3.11.16**; `node --version` = **v25.8.2**. The selected result reports macOS **27.0.1 (26A434), arm64**; the project still targets macOS 14, but no macOS 14 runtime was checked. From repository root, the build, test-bundle compilation and selected tests ran in that order; result inspection and static checks followed (some ran concurrently). Every command below exited **0**:
+
+```sh
+make build DERIVED_DATA=/tmp/kontrol-ui-refining-derived
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug -destination 'platform=macOS' -derivedDataPath /tmp/kontrol-ui-refining-derived CODE_SIGNING_ALLOWED=NO build-for-testing
+RESULTS="$(mktemp -d /tmp/kontrol-ui-refining-results.XXXXXX)" # /tmp/kontrol-ui-refining-results.bvo1vO
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug -destination 'platform=macOS' -derivedDataPath /tmp/kontrol-ui-refining-derived -resultBundlePath "$RESULTS/selected.xcresult" -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
+  -only-testing:KontrolTests/LearningPreviewSelectionTests -only-testing:KontrolTests/ProjectPreviewSelectionTests \
+  -only-testing:KontrolTests/FocusActivitySelectionTests -only-testing:KontrolTests/UIHierarchySupportingStateTests \
+  -only-testing:KontrolTests/TaskSelectionTests -only-testing:KontrolTests/FeatureSelectorTests \
+  -only-testing:KontrolTests/FocusPreferencesTests -only-testing:KontrolTests/AppPreferencesStoreTests \
+  -only-testing:KontrolTests/NavigationStoreTests/testTopicRequestsPublishCurrentIDsWithoutCatalogRefreshOrBrowsingWrites \
+  -only-testing:KontrolTests/NavigationStoreTests/testFailedTopicRequestRetainsDraftAndLatestPendingIDThroughCancelAndRetry \
+  -only-testing:KontrolTests/NavigationStoreTests/testGuardedOpenNeverRoutesOnStaleIDOrFailedDraftFlush \
+  -only-testing:KontrolTests/NavigationStoreTests/testCrossDestinationEntryFailsWithoutPartialRouteThenCancelAndRetryByStableID \
+  -only-testing:KontrolTests/LearningCatalogStoreTests/testCurrentTopicProjectionUsesCurrentIDAndScopesSlotOrderedChoicesWithoutWrites \
+  -only-testing:KontrolTests/LearningCatalogStoreTests/testEmptyTopicProjectionHasNoFallbackAndDoesNotReadOrWrite \
+  -only-testing:KontrolTests/TodayLessonIntegrationTests/testSelectionOrdersStartedThenTopicSlotAndStableIDAndIgnoresDay \
+  -only-testing:KontrolTests/TodayLessonIntegrationTests/testAddToTodayUsesActualLocalDayAndOnlyExplicitSaveLinksBlock \
+  -only-testing:KontrolTests/ProjectCompletionStoreTests/testCompletionRetainsOpenDetailByIDAfterCandidateDisappears \
+  -only-testing:KontrolTests/ProjectCompletionStoreTests/testVerifiedSaveWithFailedInspectionOrReceiptNeverPublishesOldProgress \
+  -only-testing:KontrolTests/ProjectCompletionStoreTests/testUndoTokenSurvivesSelectionAndReadRevisionThenRestoresInspection \
+  -only-testing:KontrolTests/FocusLessonLinkTests/testReadyChoicesAreReadOnlyAndStaleSelectionRequiresExplicitCorrection \
+  -only-testing:KontrolTests/FocusLessonLinkTests/testAvailableUnslottedLessonCanBeSelectedAndStartedWithoutLearningWrites \
+  -only-testing:KontrolTests/NewsPresentationTests/testTemporaryFilterDoesNotChangePreferencesAndFallsBackToSelectedAll \
+  -only-testing:KontrolTests/NewsPresentationTests/testStatusProjectionDistinguishesLoadingReadFailureAndEmptyCauses \
+  -only-testing:KontrolTests/NewsSelectionTests/testCrossFeedURLsAndMetadataIndependentOfResponseOrder test
+xcrun xcresulttool get test-results summary --path "$RESULTS/selected.xcresult" --format json
+xcrun xcresulttool get test-results tests --path "$RESULTS/selected.xcresult" --format json
+xcodebuild -project Kontrol.xcodeproj -scheme Kontrol -configuration Debug -destination 'platform=macOS' -derivedDataPath /tmp/kontrol-ui-refining-derived CODE_SIGNING_ALLOWED=NO analyze
+python3 .mockups/flows/ui-hierarchy/check_previews.py
+git diff --check
+```
+
+Before running, inspected every selected suite/method and fixtures: pure state, in-memory SwiftData, isolated defaults and actor spies; no selected hosted window/AX/presentation methods. Build **BUILD SUCCEEDED**, complete test bundle **TEST BUILD SUCCEEDED**, selected invocation **TEST SUCCEEDED**, static **ANALYZE SUCCEEDED**, preview checker **PASS** (21 HTML files; local references/IDs/tokens; 20 inline scripts parsed by `node --check`), diff check clean. Evidence logs: `/tmp/kontrol-ui-step12-{build,bft,tests,analyze}.log`; result bundle **`/tmp/kontrol-ui-refining-results.bvo1vO/selected.xcresult`** (path also at `/tmp/kontrol-ui-step12-result-path.txt`); audited JSON `/tmp/kontrol-ui-step12-{summary,tree}.json`. Both xcresulttool calls exited 0. Summary and test tree agree: **88 executed, 88 passed, 0 failed, 0 skipped, 0 expected failures**, across 24 requested selectors (9 Learning preview, 12 Project preview, 5 Focus activity, 9 supporting state, 7 Task selection, 9 Feature selector, 8 Focus preferences, 13 App preferences, and 16 individually selected methods); selector audit found **no missing or extra tests**. No required non-GUI failure remains. Non-fatal AppIntents metadata-extraction warning and linkd autoShortcut connection diagnostics appear in logs, not test failures. No GUI, AX/VoiceOver, native keyboard/focus, screenshot, manual/live-app, or rendered mock comparison was performed or credited; these are excluded by the current policy, not deferred gates. No signing/notarization/distribution run was part of this integration task.
+
 ## Learning topic selection — Step 3.1 integration (2026-10-01)
 
 **Non-GUI integration verified.** First incomplete `../PLAN-UI.md` task matched runner Step 3.1; cumulative task-3 checklist listed no earlier review findings. Only this ledger was updated; the pre-existing worktree edits (including this page's policy changes) were preserved. Root `AGENTS.md` applies, with no nested instructions or submodules. Xcode 27.0 (27A266a), Apple Swift 6.4, Yams 5.4.0; this run is not macOS 14 runtime or live UI evidence.
