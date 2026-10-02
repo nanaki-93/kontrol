@@ -4,7 +4,9 @@ import SwiftUI
 /// changed; neither selecting a lesson nor validating the draft opens an attempt.
 struct FocusReadyDraft {
     enum DurationSource: Equatable { case followingDefault, userOverride, submitted }
+    enum ActivityType: Equatable { case none, task, lesson }
 
+    private(set) var activityType: ActivityType = .none
     private(set) var duration: FocusDuration = .default
     private(set) var durationSource: DurationSource = .followingDefault
     private(set) var usesFallback = false
@@ -35,14 +37,35 @@ struct FocusReadyDraft {
         usesFallback ? "Using a 25-minute fallback because preferences could not be read. Retry preferences in Settings." : nil
     }
 
+    /// Only the user's choice changes the link. Inventory updates must not erase a stale ID:
+    /// configuration validation will require an explicit correction before Start.
+    mutating func selectActivityType(_ type: ActivityType) {
+        activityType = type
+        switch type {
+        case .none:
+            linkedTaskID = nil
+            linkedLessonID = nil
+        case .task:
+            linkedLessonID = nil
+        case .lesson:
+            linkedTaskID = nil
+        }
+    }
+
     mutating func selectTask(_ id: UUID?) {
         linkedTaskID = id
-        linkedLessonID = nil
+        if id != nil {
+            activityType = .task
+            linkedLessonID = nil
+        }
     }
 
     mutating func selectLesson(_ id: String?) {
         linkedLessonID = id
-        linkedTaskID = nil
+        if id != nil {
+            activityType = .lesson
+            linkedTaskID = nil
+        }
     }
 
     /// Use the authoritative catalog inventory, not the four Learning choice slots.
