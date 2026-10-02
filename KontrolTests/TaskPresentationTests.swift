@@ -300,6 +300,15 @@ final class TaskPresentationTests: XCTestCase {
     }
 
     private func waitForElement(_ identifier: String, in window: NSWindow) throws -> AXUIElement {
+        // Edit/Delete live under the per-UUID disclosure. Expand only when an
+        // interaction below explicitly asks for one of those controls.
+        if (identifier.hasPrefix("task-edit-") || identifier.hasPrefix("task-delete-")),
+           elements(in: window, identifier: identifier).isEmpty {
+            let prefix = identifier.hasPrefix("task-edit-") ? "task-edit-" : "task-delete-"
+            let id = String(identifier.dropFirst(prefix.count))
+            let details = try waitForElement("task-details-\(id)", in: window)
+            XCTAssertEqual(AXUIElementPerformAction(details, kAXPressAction as CFString), .success)
+        }
         let deadline = Date().addingTimeInterval(4)
         repeat {
             if let found = elements(in: window, identifier: identifier).first { return found }
@@ -360,6 +369,9 @@ final class TaskPresentationTests: XCTestCase {
         for window in windows {
             let row = try waitForElement(rowID, in: window)
             let complete = try waitForElement(completeID, in: window)
+            XCTAssertTrue(elements(in: window, identifier: "task-edit-\(saved.id.uuidString)").isEmpty)
+            XCTAssertTrue(elements(in: window, identifier: "task-delete-\(saved.id.uuidString)").isEmpty,
+                          "Today has no Delete callback; Tasks must start collapsed")
             let edit = try waitForElement("task-edit-\(saved.id.uuidString)", in: window)
             XCTAssertEqual(attribute(complete, kAXRoleAttribute) as? String, kAXButtonRole)
             XCTAssertEqual(attribute(complete, kAXDescriptionAttribute) as? String, "Complete Shared action")
@@ -566,7 +578,7 @@ final class TaskPresentationTests: XCTestCase {
         }, "confirmation must name the selected task")
         XCTAssertEqual(saves, before, "opening confirmation must not write")
         try pressAlert("Cancel")
-        XCTAssertEqual(focusedIdentifier(), deleteID)
+        XCTAssertEqual(focusedIdentifier(), "task-details-\(first.id.uuidString)")
         XCTAssertEqual(saves, before)
         XCTAssertEqual(Set(try repository.fetchAll().map(\.id)), Set([first.id, other.id]))
         XCTAssertEqual(AXUIElementPerformAction(try waitForElement(deleteID, in: window), kAXPressAction as CFString), .success)
@@ -582,7 +594,7 @@ final class TaskPresentationTests: XCTestCase {
         XCTAssertEqual(try repository.fetchAll().map(\.id), [other.id])
         XCTAssertTrue(elements(in: window, identifier: rowID).isEmpty)
         XCTAssertEqual(elements(in: window, identifier: otherID).count, 1)
-        XCTAssertEqual(focusedIdentifier(), otherID, "deleted control must hand focus to a surviving row")
+        XCTAssertEqual(focusedIdentifier(), "task-details-\(other.id.uuidString)", "deleted control must hand focus to a surviving disclosure")
         XCTAssertEqual(AXUIElementPerformAction(try waitForElement(otherID, in: window), kAXPressAction as CFString), .success)
         _ = try alertButton("Cancel")
         if let sheet = window.attachedSheet {
@@ -954,6 +966,8 @@ final class TaskPresentationTests: XCTestCase {
                                                  kAXPressAction as CFString), .success)
         settle()
         let metadata = try rowText(past.id)
+        XCTAssertFalse(metadata.contains(savedZone.identifier), "Provenance is disclosed, not compact metadata")
+        XCTAssertTrue(elements(in: window, identifier: "task-details-\(past.id.uuidString)").count == 1)
         XCTAssertTrue(metadata.contains("Planned (past)"), metadata)
         XCTAssertTrue(metadata.contains("Unscheduled"), metadata)
         XCTAssertTrue(elements(in: window, identifier: "task-row-\(today.id.uuidString)").isEmpty)
@@ -1037,7 +1051,7 @@ final class TaskPresentationTests: XCTestCase {
                     defer { window.orderOut(nil) }
                     settle()
                     let rowID = "task-row-\(saved.id.uuidString)"
-                    let actions = ["task-complete-", "task-edit-", "task-delete-"].map { $0 + saved.id.uuidString }
+                    let actions = ["task-complete-", "task-details-", "task-edit-", "task-delete-"].map { $0 + saved.id.uuidString }
                     let row = try waitForElement(rowID, in: window)
                     XCTAssertFalse(descendants(of: row).contains {
                         attribute($0, kAXRoleAttribute) as? String == kAXButtonRole
@@ -1057,11 +1071,11 @@ final class TaskPresentationTests: XCTestCase {
                     try assertTarget("tasks-add-task", in: window)
                     // AppKit's Tab traversal works even when XCTest cannot make
                     // its hosted window key for synthetic NSEvent delivery.
-                    XCTAssertEqual(AXUIElementSetAttributeValue(try waitForElement(actions[1], in: window),
+                    XCTAssertEqual(AXUIElementSetAttributeValue(try waitForElement(actions[2], in: window),
                                                                 kAXFocusedAttribute as CFString, kCFBooleanTrue), .success)
                     window.selectNextKeyView(nil)
-                    XCTAssertEqual(focusedIdentifier(), actions[2], "Delete follows Edit in keyboard focus order")
-                    XCTAssertEqual(AXUIElementPerformAction(try waitForElement(actions[1], in: window),
+                    XCTAssertEqual(focusedIdentifier(), actions[3], "Delete follows Edit in keyboard focus order")
+                    XCTAssertEqual(AXUIElementPerformAction(try waitForElement(actions[2], in: window),
                                                              kAXPressAction as CFString), .success)
                     _ = try waitForElement("task-editor-title", in: window)
                     XCTAssertEqual(focusedIdentifier(), "task-editor-title")
@@ -1072,7 +1086,7 @@ final class TaskPresentationTests: XCTestCase {
                                                              kAXPressAction as CFString), .success)
                     settle()
                     XCTAssertNil(window.attachedSheet)
-                    XCTAssertEqual(focusedIdentifier(), actions[1])
+                    XCTAssertEqual(focusedIdentifier(), "task-details-\(saved.id.uuidString)")
                     XCTAssertEqual(try repository.fetchAll().map(\.id), [saved.id])
             }
         }
@@ -1114,7 +1128,7 @@ final class TaskPresentationTests: XCTestCase {
                 XCTAssertEqual(AXUIElementPerformAction(try waitForElement("task-editor-cancel", in: window),
                                                          kAXPressAction as CFString), .success)
                 settle()
-                XCTAssertEqual(focusedIdentifier(), "task-edit-\(task.id.uuidString)")
+                XCTAssertEqual(focusedIdentifier(), "task-details-\(task.id.uuidString)")
                 XCTAssertEqual(try repository.fetchAll().map(\.id), [task.id])
             }
         }

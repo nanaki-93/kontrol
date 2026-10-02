@@ -60,6 +60,104 @@ private final class ProjectWorkWriter: FeatureFileWriting {
 final class UIHierarchySupportingStateTests: XCTestCase {
     private enum Injected: Error { case save }
 
+    func testCompactTaskMetadataKeepsCivilPlansDueInstantsAndProvenanceSeparate() throws {
+        let zone = try XCTUnwrap(TimeZone(identifier: "Pacific/Auckland"))
+        let savedZone = try XCTUnwrap(TimeZone(identifier: "America/Los_Angeles"))
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-06-05T13:00:00Z"))
+        let context = TaskTemporalContext(now: now, calendar: Calendar(identifier: .gregorian), timeZone: zone)
+        func snapshot(_ n: Int, plan: KontrolSchemaV1.PlannedDayComponents? = nil,
+                      due: Date? = nil, completed: Date? = nil) throws -> TaskSnapshot {
+            TaskSnapshot(try TaskItem(id: UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", n))!,
+                                      title: "Row \(n)", createdAt: now, dueAt: due, plannedDay: plan,
+                                      plannedTimeZoneID: plan == nil ? nil : savedZone.identifier,
+                                      completedAt: completed))
+        }
+        let yesterday = KontrolSchemaV1.PlannedDayComponents(calendarIdentifier: "gregorian", year: 2026, month: 6, day: 5)
+        let past = try snapshot(1, plan: yesterday)
+        let pastMetadata = TaskRowMetadata(past, in: context)
+        XCTAssertEqual(pastMetadata.planPosition, .past)
+        XCTAssertTrue(pastMetadata.isUnscheduled)
+        XCTAssertTrue(pastMetadata.compact(in: context).contains("Planned (past) 2026-06-05 · Unscheduled"))
+        XCTAssertFalse(pastMetadata.compact(in: context).contains(savedZone.identifier))
+        XCTAssertEqual(pastMetadata.provenance, "Saved plan: gregorian calendar · \(savedZone.identifier)")
+
+        // The device calendar differs from the saved calendar; today's Buddhist
+        // civil day must not be mistaken for Gregorian 2026-06-05.
+        let buddhistContext = TaskTemporalContext(now: now, calendar: Calendar(identifier: .buddhist), timeZone: zone)
+        let today = try snapshot(2, plan: .init(calendarIdentifier: "gregorian", year: 2026, month: 6, day: 6))
+        XCTAssertEqual(TaskRowMetadata(today, in: buddhistContext).planPosition, .today)
+        XCTAssertEqual(TaskRowMetadata(today, in: buddhistContext).compact(in: buddhistContext), "Planned Today")
+        let buddhistPlan = try snapshot(3, plan: .init(calendarIdentifier: "buddhist", year: 2569, month: 6, day: 6))
+        XCTAssertEqual(TaskRowMetadata(buddhistPlan, in: context).planPosition, .today)
+        let future = try snapshot(4, plan: .init(calendarIdentifier: "gregorian", year: 2026, month: 6, day: 7))
+        XCTAssertEqual(TaskRowMetadata(future, in: context).planPosition, .future)
+        XCTAssertFalse(TaskRowMetadata(future, in: context).isUnscheduled)
+
+        let overdue = try snapshot(5, plan: yesterday, due: now.addingTimeInterval(-1))
+        let dueMetadata = TaskRowMetadata(overdue, in: context)
+        XCTAssertTrue(dueMetadata.isOverdue)
+        XCTAssertFalse(dueMetadata.isUnscheduled)
+        XCTAssertTrue(dueMetadata.compact(in: context).contains("Overdue · Due"))
+        XCTAssertTrue(dueMetadata.compact(in: context).contains("Planned (past)"))
+        let exact = TaskRowMetadata(try snapshot(6, due: now), in: context)
+        XCTAssertFalse(exact.isOverdue)
+        XCTAssertTrue(exact.compact(in: context).hasPrefix("Due "))
+        XCTAssertNil(exact.plannedDay)
+        let complete = TaskRowMetadata(try snapshot(7, plan: yesterday, due: now.addingTimeInterval(-1), completed: now), in: context)
+        XCTAssertFalse(complete.isOverdue)
+        XCTAssertFalse(complete.isUnscheduled)
+        XCTAssertTrue(complete.compact(in: context).contains("Completed"))
+        XCTAssertTrue(complete.compact(in: context).contains("Planned (past)"))
+        XCTAssertTrue(complete.compact(in: context).contains("Due"))
+        XCTAssertTrue(TaskSelection.select([past, overdue, today, future], filter: .upcoming,
+                                            selectedDate: now, now: now, calendar: context.calendar,
+                                            timeZone: zone).map(\.id).contains(past.id))
+    }
+
+    func testTaskDisclosureAndCapturedDeletionRemainReadOnlyUntilExplicitConfirmation() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        var writes = 0
+        let repository = SwiftDataTaskRepository(container: container, save: { context in
+            writes += 1
+            try context.save()
+        })
+        let store = TaskStore(repository: repository)
+        let first = try store.create(input: TaskInput(title: "First", plannedFor: .today(at: .now)))
+        let second = try store.create(input: TaskInput(title: "Second", plannedFor: .today(at: .now)))
+        let baseline = writes
+        var disclosures = TaskRowDisclosureState()
+        disclosures.toggle(first.id)
+        XCTAssertTrue(disclosures.contains(first.id))
+        XCTAssertFalse(disclosures.contains(second.id))
+        _ = TaskRowMetadata(first, in: store.temporalContext).compact(in: store.temporalContext)
+        _ = store.select(.today)
+        _ = store.select(.completed)
+        disclosures.toggle(first.id)
+        XCTAssertFalse(disclosures.contains(first.id))
+        XCTAssertEqual(writes, baseline, "Disclosing and filtering must not persist tasks")
+
+        let captured = TaskDeletionConfirmation(id: first.id, title: first.title)
+        var pending: TaskDeletionConfirmation? = captured
+        // Cancel clears the pending identity and cannot yield a deletion target.
+        pending = nil
+        XCTAssertNil(TaskDeletionConfirmation.confirmedID(captured: captured, pending: pending))
+        XCTAssertEqual(writes, baseline)
+        pending = captured
+        XCTAssertNil(TaskDeletionConfirmation.confirmedID(captured: captured,
+            pending: .init(id: second.id, title: second.title)))
+        XCTAssertEqual(TaskDeletionConfirmation.confirmedID(captured: captured, pending: pending), first.id)
+        _ = store.select(.upcoming) // Changed filter does not replace captured UUID.
+        let target = try XCTUnwrap(TaskDeletionConfirmation.confirmedID(captured: captured, pending: pending))
+        try store.delete(id: target)
+        XCTAssertEqual(writes, baseline + 1)
+        XCTAssertEqual(store.snapshots.map(\.id), [second.id])
+        XCTAssertEqual(try repository.fetchAll().map(\.id), [second.id])
+        // Today supplies no onDelete callback; shared rows accept nil and retain edit/completion.
+        _ = TaskRows(rows: [second], temporalContext: store.temporalContext,
+                     onEdit: { _ in }, onSetCompleted: { _, _ in })
+        XCTAssertEqual(writes, baseline + 1)
+    }
+
     func testTodayPracticeLabelsAndScheduleCueUseActualLocalToday() throws {
         XCTAssertEqual(TodayView.lessonOpenTitle(started: false), "Open")
         XCTAssertEqual(TodayView.lessonOpenTitle(started: true), "Resume")

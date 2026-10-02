@@ -1,119 +1,182 @@
 import SwiftUI
 
-/// Presentation shared by Tasks and Today's Next section. Membership and ordering
-/// come exclusively from TaskSelection, not from row display metadata.
-struct TaskRows: View {
-    let rows: [TaskSnapshot]
-    let temporalContext: TaskTemporalContext
-    var onEdit: ((TaskSnapshot) -> Void)? = nil
-    var onSetCompleted: ((TaskSnapshot, Bool) -> Void)? = nil
-    var onDelete: ((TaskSnapshot) -> Void)? = nil
-    var editFocus: FocusState<UUID?>.Binding? = nil
-    var deleteFocus: FocusState<UUID?>.Binding? = nil
+/// Pure, read-only projection. A plan is a civil date in its saved calendar;
+/// its saved zone is provenance, not a midnight instant in the current zone.
+struct TaskRowMetadata {
+    enum PlanPosition: Equatable { case today, past, future }
+    let dueAt: Date?
+    let isOverdue: Bool
+    let completedAt: Date?
+    let plannedDay: KontrolSchemaV1.PlannedDayComponents?
+    let planPosition: PlanPosition?
+    let isUnscheduled: Bool
+    let provenance: String?
 
-    private var dateStyle: Date.FormatStyle {
-        var style = Date.FormatStyle.dateTime.month(.abbreviated).day().year()
-        style.calendar = temporalContext.calendar
-        style.timeZone = temporalContext.timeZone
-        return style
-    }
-
-    private var timeStyle: Date.FormatStyle {
-        var style = Date.FormatStyle.dateTime.hour().minute()
-        style.calendar = temporalContext.calendar
-        style.timeZone = temporalContext.timeZone
-        return style
-    }
-
-    private func metadata(for task: TaskSnapshot) -> String {
-        var parts: [String] = []
-        var pastPlan = false
-        if let completed = task.completedAt {
-            parts.append("Completed \(completed.formatted(dateStyle)) at \(completed.formatted(timeStyle))")
-        }
-        if let due = task.dueAt {
-            let prefix = task.completedAt == nil && due < temporalContext.now ? "Overdue · Due" : "Due"
-            parts.append("\(prefix) \(due.formatted(dateStyle)) at \(due.formatted(timeStyle))")
-        }
+    init(_ task: TaskSnapshot, in context: TaskTemporalContext) {
+        dueAt = task.dueAt
+        isOverdue = task.completedAt == nil && (task.dueAt.map { $0 < context.now } ?? false)
+        completedAt = task.completedAt
+        plannedDay = task.plannedDay
         if let plan = task.plannedDay {
-            let components = plan
-            // Compare the selected local date in the saved plan's calendar, just as
-            // TaskSelection does. The saved zone describes where the plan was chosen;
-            // it is not a midnight instant or the zone for today's selection.
             let identifiers: [Calendar.Identifier] = [
                 .gregorian, .buddhist, .chinese, .coptic, .ethiopicAmeteMihret,
                 .ethiopicAmeteAlem, .hebrew, .iso8601, .indian, .islamic,
                 .islamicCivil, .japanese, .persian, .republicOfChina,
                 .islamicTabular, .islamicUmmAlQura
             ]
-            let selectedDay: DateComponents? = identifiers.first {
-                String(describing: $0) == components.calendarIdentifier
-            }.map { identifier in
-                var calendar = Calendar(identifier: identifier)
-                calendar.timeZone = temporalContext.timeZone
-                return calendar.dateComponents([.year, .month, .day], from: temporalContext.now)
+            let current = identifiers.first { String(describing: $0) == plan.calendarIdentifier }.map { id -> [Int] in
+                var calendar = Calendar(identifier: id)
+                calendar.timeZone = context.timeZone
+                let date = calendar.dateComponents([.year, .month, .day], from: context.now)
+                return [date.year ?? 0, date.month ?? 0, date.day ?? 0]
             }
-            let planned = [components.year, components.month, components.day]
-            let current = selectedDay.map { [$0.year ?? 0, $0.month ?? 0, $0.day ?? 0] }
-            pastPlan = current.map { planned.lexicographicallyPrecedes($0) } ?? false
-            let label: String
-            if current == planned {
-                label = "Today"
+            let chosen = [plan.year, plan.month, plan.day]
+            if let current {
+                planPosition = chosen == current ? .today : (chosen.lexicographicallyPrecedes(current) ? .past : .future)
             } else {
-                label = "\(pastPlan ? "(past)" : "for") \(components.year)-\(String(format: "%02d", components.month))-\(String(format: "%02d", components.day))"
+                planPosition = nil
             }
-            parts.append("Planned \(label) (\(plan.calendarIdentifier), \(task.plannedTimeZoneID ?? "unknown zone"))")
+            provenance = "Saved plan: \(plan.calendarIdentifier) calendar · \(task.plannedTimeZoneID ?? "unknown zone")"
+        } else {
+            planPosition = nil
+            provenance = nil
         }
-        if task.completedAt == nil && task.dueAt == nil && (task.plannedDay == nil || pastPlan) {
-            parts.append("Unscheduled")
+        isUnscheduled = task.completedAt == nil && task.dueAt == nil &&
+            (task.plannedDay == nil || planPosition == .past)
+    }
+
+    func compact(in context: TaskTemporalContext) -> String {
+        var dateStyle = Date.FormatStyle.dateTime.month(.abbreviated).day().year()
+        dateStyle.calendar = context.calendar
+        dateStyle.timeZone = context.timeZone
+        var timeStyle = Date.FormatStyle.dateTime.hour().minute()
+        timeStyle.calendar = context.calendar
+        timeStyle.timeZone = context.timeZone
+        var parts: [String] = []
+        if let completedAt {
+            parts.append("Completed \(completedAt.formatted(dateStyle)) at \(completedAt.formatted(timeStyle))")
         }
+        if let dueAt {
+            parts.append("\(isOverdue ? "Overdue · Due" : "Due") \(dueAt.formatted(dateStyle)) at \(dueAt.formatted(timeStyle))")
+        }
+        if let plannedDay {
+            let day = "\(plannedDay.year)-\(String(format: "%02d", plannedDay.month))-\(String(format: "%02d", plannedDay.day))"
+            switch planPosition {
+            case .today: parts.append("Planned Today")
+            case .past: parts.append("Planned (past) \(day)")
+            case .future: parts.append("Planned for \(day)")
+            case nil: parts.append("Planned \(day)")
+            }
+        }
+        if isUnscheduled { parts.append("Unscheduled") }
         return parts.joined(separator: " · ")
     }
+}
 
-    private func editButton(for row: TaskSnapshot, action: @escaping (TaskSnapshot) -> Void) -> some View {
-        ActionButton("Edit", action: { action(row) })
-            .accessibilityLabel("Edit \(row.title)")
-            .accessibilityIdentifier("task-edit-\(row.id.uuidString)")
-    }
+/// The modal captures an immutable UUID; filter changes cannot retarget it.
+struct TaskDeletionConfirmation: Equatable {
+    let id: UUID
+    let title: String
 
-    private func deleteButton(for row: TaskSnapshot, action: @escaping (TaskSnapshot) -> Void) -> some View {
-        ActionButton("Delete", action: { action(row) })
-            .accessibilityLabel("Delete \(row.title)")
-            .accessibilityIdentifier("task-delete-\(row.id.uuidString)")
+    static func confirmedID(captured: Self?, pending: Self?) -> UUID? {
+        guard let captured, captured == pending else { return nil }
+        return captured.id
     }
+}
+
+/// Pure local disclosure state, keyed by persisted identity. Toggling never calls a store.
+struct TaskRowDisclosureState {
+    private(set) var expandedIDs: Set<UUID> = []
+
+    func contains(_ id: UUID) -> Bool { expandedIDs.contains(id) }
+    mutating func toggle(_ id: UUID) {
+        if !expandedIDs.insert(id).inserted { expandedIDs.remove(id) }
+    }
+}
+
+/// Presentation shared by Tasks and Today's Tasks section. Membership and ordering
+/// come exclusively from TaskSelection, not from row display metadata.
+struct TaskRows: View {
+    @State private var disclosures = TaskRowDisclosureState()
+    let rows: [TaskSnapshot]
+    let temporalContext: TaskTemporalContext
+    var onEdit: ((TaskSnapshot) -> Void)? = nil
+    var onSetCompleted: ((TaskSnapshot, Bool) -> Void)? = nil
+    var onDelete: ((TaskSnapshot) -> Void)? = nil
+    var editFocus: FocusState<UUID?>.Binding? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             ForEach(rows) { row in
-                HStack(alignment: .center, spacing: AppMetrics.space3) {
-                    AppListRow(row.title, metadata: metadata(for: row),
-                               status: row.isCompleted ? StatusPill("Completed", kind: .success) : nil)
-                        .accessibilityElement(children: .combine)
-                        .accessibilityIdentifier("task-row-\(row.id.uuidString)")
-                    // The read-only row and its controls are independent AX children.
-                    // Never combine an ancestor containing buttons into one element.
-                    VStack(spacing: AppMetrics.space2) {
-                        if let onSetCompleted {
-                            ActionButton(row.isCompleted ? "Reopen" : "Complete") {
-                                onSetCompleted(row, !row.isCompleted)
-                            }
-                            .accessibilityLabel("\(row.isCompleted ? "Reopen" : "Complete") \(row.title)")
-                            .accessibilityIdentifier("task-\(row.isCompleted ? "reopen" : "complete")-\(row.id.uuidString)")
+                let projection = TaskRowMetadata(row, in: temporalContext)
+                TaskCompactRow(row: row, metadata: projection.compact(in: temporalContext),
+                               provenance: projection.provenance,
+                               onEdit: onEdit, onSetCompleted: onSetCompleted, onDelete: onDelete,
+                               disclosureFocus: editFocus,
+                               isExpanded: disclosures.contains(row.id),
+                               toggle: { disclosures.toggle(row.id) })
+            }
+        }
+    }
+}
+
+/// Stable ForEach identity also owns each row's independent disclosure state.
+private struct TaskCompactRow: View {
+    let row: TaskSnapshot
+    let metadata: String
+    let provenance: String?
+    let onEdit: ((TaskSnapshot) -> Void)?
+    let onSetCompleted: ((TaskSnapshot, Bool) -> Void)?
+    let onDelete: ((TaskSnapshot) -> Void)?
+    let disclosureFocus: FocusState<UUID?>.Binding?
+    let isExpanded: Bool
+    let toggle: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppMetrics.space2) {
+            HStack(alignment: .center, spacing: AppMetrics.space3) {
+                AppListRow(row.title, metadata: metadata,
+                           status: row.isCompleted ? StatusPill("Completed", kind: .success) : nil)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("task-row-\(row.id.uuidString)")
+                // The read-only row and its controls remain independent AX children.
+                if let onSetCompleted {
+                    ActionButton(row.isCompleted ? "Reopen" : "Complete") {
+                        onSetCompleted(row, !row.isCompleted)
+                    }
+                    .accessibilityLabel("\(row.isCompleted ? "Reopen" : "Complete") \(row.title)")
+                    .accessibilityIdentifier("task-\(row.isCompleted ? "reopen" : "complete")-\(row.id.uuidString)")
+                }
+            }
+            if onEdit != nil || onDelete != nil || provenance != nil {
+                let disclosure = ActionButton("Details & actions", symbol: isExpanded ? "chevron.down" : "chevron.right") {
+                    toggle() // Only local view state; never reads or writes a store.
+                }
+                .accessibilityLabel("Details & actions for \(row.title)")
+                .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
+                .accessibilityIdentifier("task-details-\(row.id.uuidString)")
+                if let disclosureFocus {
+                    disclosure.focused(disclosureFocus, equals: row.id)
+                } else {
+                    disclosure
+                }
+                if isExpanded {
+                    VStack(alignment: .leading, spacing: AppMetrics.space2) {
+                        if let provenance {
+                            Text(provenance)
+                                .appTypography(.metadata)
+                                .foregroundStyle(AppColors.textSecondary)
                         }
-                        if let onEdit {
-                            if let editFocus {
-                                editButton(for: row, action: onEdit)
-                                    .focused(editFocus, equals: row.id)
-                            } else {
-                                editButton(for: row, action: onEdit)
+                        HStack(spacing: AppMetrics.space2) {
+                            if let onEdit {
+                                ActionButton("Edit") { onEdit(row) }
+                                    .accessibilityLabel("Edit \(row.title)")
+                                    .accessibilityIdentifier("task-edit-\(row.id.uuidString)")
                             }
-                        }
-                        if let onDelete {
-                            if let deleteFocus {
-                                deleteButton(for: row, action: onDelete)
-                                    .focused(deleteFocus, equals: row.id)
-                            } else {
-                                deleteButton(for: row, action: onDelete)
+                            if let onDelete {
+                                ActionButton("Delete") { onDelete(row) }
+                                    .accessibilityLabel("Delete \(row.title)")
+                                    .accessibilityIdentifier("task-delete-\(row.id.uuidString)")
                             }
                         }
                     }
@@ -131,11 +194,10 @@ struct TasksView: View {
     @State private var editorOpenError = false
     @State private var actionError: TaskMutationError?
     @State private var lastEditorTriggerID: UUID?
-    @State private var pendingDeletion: PendingDeletion?
+    @State private var pendingDeletion: TaskDeletionConfirmation?
     @State private var isDeletePresented = false
     @FocusState private var addFocused: Bool
     @FocusState private var editFocusedID: UUID?
-    @FocusState private var deleteFocusedID: UUID?
     @State private var lastDeletionTriggerID: UUID?
 
     /// Own the draft at the moment of opening, not during a subsequent body redraw.
@@ -144,17 +206,11 @@ struct TasksView: View {
         let draft: TaskEditorDraft
     }
 
-    /// A frozen identity/copy of the displayed name, independent of filter changes
-    /// and subsequent store refreshes. Never look up a different visible row to delete.
-    private struct PendingDeletion {
-        let id: UUID
-        let title: String
-    }
-
-    private func confirmDelete(_ selection: PendingDeletion) {
+    private func confirmDelete(_ selection: TaskDeletionConfirmation) {
+        guard let id = TaskDeletionConfirmation.confirmedID(captured: selection, pending: pendingDeletion) else { return }
         pendingDeletion = nil
         do {
-            try store.delete(id: selection.id)
+            try store.delete(id: id)
             actionError = nil
         } catch {
             actionError = store.mutationError ?? .writeFailed
@@ -168,9 +224,9 @@ struct TasksView: View {
         DispatchQueue.main.async {
             let visible = store.select(filter)
             if visible.contains(where: { $0.id == id }) {
-                deleteFocusedID = id
+                editFocusedID = id
             } else if let survivor = visible.first {
-                deleteFocusedID = survivor.id
+                editFocusedID = survivor.id
             } else {
                 addFocused = true
             }
@@ -282,10 +338,10 @@ struct TasksView: View {
                         lastEditorTriggerID = row.id
                         edit(row)
                     }, onSetCompleted: setCompleted, onDelete: { row in
-                        pendingDeletion = PendingDeletion(id: row.id, title: row.title)
+                        pendingDeletion = TaskDeletionConfirmation(id: row.id, title: row.title)
                         lastDeletionTriggerID = row.id
                         isDeletePresented = true
-                    }, editFocus: $editFocusedID, deleteFocus: $deleteFocusedID)
+                    }, editFocus: $editFocusedID)
                 }
             }
             Spacer(minLength: 0)
