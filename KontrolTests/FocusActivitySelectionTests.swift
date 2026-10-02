@@ -133,6 +133,47 @@ final class FocusActivitySelectionTests: XCTestCase {
         XCTAssertNil(draft.fallbackMessage)
     }
 
+    func testReadyLinkSummaryFlagsUnavailableSelectionWithoutChoosingAnotherRecord() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let task = try SwiftDataTaskRepository(container: container).create(input: TaskInput(title: "Review work"))
+        let catalog = SwiftDataCatalogRepository(container: container)
+        _ = try catalog.importIfNeeded(BundledCatalogLoader.load())
+        let learning = LearningCatalogStore(repository: catalog)
+        learning.loadIfNeeded()
+        let lesson = try XCTUnwrap(FocusReadyDraft.lessons(from: learning.state)?.first)
+        let before = try catalog.loadSnapshot()
+        var draft = FocusReadyDraft()
+        func summary(_ tasks: [TaskSnapshot], _ readable: Bool,
+                     _ lessons: [LessonDefinitionSnapshot]?) -> FocusReadyLinkPresentation {
+            FocusReadyLinkPresentation(draft: draft, openTasks: tasks, tasksReadable: readable, lessons: lessons)
+        }
+        XCTAssertEqual(summary([], false, nil).summary, "No linked activity")
+        draft.selectActivityType(.task)
+        XCTAssertEqual(summary([task], true, nil).summary, "No linked activity")
+        XCTAssertNil(try draft.configuration(openTasks: [], tasksReadable: false).linkedTaskID)
+        draft.selectTask(task.id)
+        XCTAssertEqual(summary([task], true, nil).summary, "Task: Review work")
+        XCTAssertFalse(summary([task], true, nil).needsCorrection)
+        XCTAssertTrue(summary([task], false, nil).needsCorrection)
+        XCTAssertTrue(summary([], true, nil).summary.contains("Unavailable task"))
+        XCTAssertThrowsError(try draft.configuration(openTasks: [], tasksReadable: true))
+        draft.selectActivityType(.lesson)
+        draft.selectLesson(lesson.id)
+        XCTAssertEqual(summary([], false, [lesson]).summary, "Lesson: \(lesson.title)")
+        XCTAssertTrue(summary([], false, nil).needsCorrection)
+        XCTAssertThrowsError(try draft.configuration(openTasks: [], tasksReadable: false, lessons: nil))
+        draft.selectLesson(nil)
+        XCTAssertEqual(summary([], false, nil).summary, "No linked activity")
+        draft.selectDuration(.custom("0"))
+        XCTAssertFalse(summary([], false, nil).needsCorrection, "Duration correction belongs to the visible duration controls")
+        XCTAssertThrowsError(try draft.configuration(openTasks: [], tasksReadable: false))
+        draft = FocusReadyDraft(preferences: AppPreferencesSnapshot(
+            preferences: try AppPreferences(focusDefaultMinutes: 50), revision: UUID()))
+        XCTAssertEqual(draft.activityType, .none)
+        XCTAssertEqual(try draft.configuration(openTasks: [], tasksReadable: false).plannedSeconds(), 3000)
+        XCTAssertEqual(try catalog.loadSnapshot(), before, "Reading the summary never writes Learning")
+    }
+
     func testSelectingTypesAndLinksDoesNotWriteSessionsOrLearning() throws {
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
         let catalog = SwiftDataCatalogRepository(container: container)

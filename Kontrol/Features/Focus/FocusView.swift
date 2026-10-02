@@ -97,6 +97,28 @@ struct FocusReadyDraft {
     }
 }
 
+/// Read-only ready summary; an unavailable selected ID is never replaced by a fallback choice.
+struct FocusReadyLinkPresentation {
+    let summary: String
+    let needsCorrection: Bool
+
+    init(draft: FocusReadyDraft, openTasks: [TaskSnapshot], tasksReadable: Bool,
+         lessons: [LessonDefinitionSnapshot]?) {
+        if let id = draft.linkedTaskID {
+            let title = tasksReadable ? openTasks.first(where: { $0.id == id && !$0.isCompleted })?.title : nil
+            summary = title.map { "Task: \($0)" } ?? "Unavailable task — choose another or None"
+            needsCorrection = title == nil
+        } else if let id = draft.linkedLessonID {
+            let title = lessons?.first(where: { $0.id == id })?.title
+            summary = title.map { "Lesson: \($0)" } ?? "Unavailable lesson — choose another or None"
+            needsCorrection = title == nil
+        } else {
+            summary = "No linked activity"
+            needsCorrection = false
+        }
+    }
+}
+
 /// Display values come from the committed row; only the running countdown comes
 /// from the service's monotonic clock. No view-local timer or optimistic state.
 struct FocusTimerPresentation {
@@ -159,6 +181,7 @@ struct FocusView: View {
     @FocusState private var focusBackButton: Bool
     @AppScaledMetric(relativeTo: .largeTitle) private var countdownFontSize: CGFloat = 64
     @State private var startError: FocusError?
+    @State private var activityExpanded = false
     @State private var actionError: (sessionID: UUID, state: FocusSessionState, message: String)?
 
     private var openTasks: [TaskSnapshot] {
@@ -167,6 +190,11 @@ struct FocusView: View {
     }
 
     private var lessons: [LessonDefinitionSnapshot]? { FocusReadyDraft.lessons(from: learningStore.state) }
+
+    private var linkPresentation: FocusReadyLinkPresentation {
+        FocusReadyLinkPresentation(draft: draft, openTasks: openTasks,
+                                   tasksReadable: taskStore.readState == .loaded, lessons: lessons)
+    }
 
     private var configuration: FocusConfiguration? {
         try? draft.configuration(openTasks: openTasks, tasksReadable: taskStore.readState == .loaded,
@@ -179,9 +207,9 @@ struct FocusView: View {
                                         lessons: lessons)
             return nil
         } catch FocusError.unavailableTask {
-            return "The selected task is no longer available. Choose another open task or select No task."
+            return "The selected task is no longer available. In Link an activity, choose another open task or None."
         } catch FocusError.unavailableLesson {
-            return "The selected lesson is unavailable. Retry learning choices or choose another lesson or No link."
+            return "The selected lesson is unavailable. In Link an activity, retry learning choices, choose another lesson or None."
         } catch {
             return "Enter a positive whole number of minutes that fits the timer."
         }
@@ -267,6 +295,7 @@ struct FocusView: View {
     private func resetDraft() {
         draft = FocusReadyDraft(preferences: preferencesStore.editableSnapshot)
         startError = nil
+        activityExpanded = false
     }
 
     private func recoveryContent(_ session: FocusSessionSnapshot) -> some View {
@@ -480,6 +509,36 @@ struct FocusView: View {
                 .accessibilityLabel("Ready, \(durationLabel)")
                 .accessibilityIdentifier("focus-ready-countdown")
 
+            Text(linkPresentation.summary)
+                .appTypography(.section)
+                .accessibilityIdentifier("focus-ready-link-summary")
+            if let validationMessage {
+                Text(validationMessage)
+                    .appTypography(.metadata)
+                    .foregroundStyle(AppColors.error)
+                    .accessibilityIdentifier("focus-validation")
+            }
+            if let startError {
+                if startError == .persistenceFailure {
+                    ErrorBanner(.saveFailed)
+                        .accessibilityIdentifier("focus-start-error")
+                }
+                Text(startError == .unavailableTask
+                     ? "That task changed before Start. In Link an activity, choose another task or None, then try again."
+                     : startError == .unavailableLesson
+                     ? "That lesson changed before Start. In Link an activity, retry learning choices or choose another lesson or None, then try again."
+                     : startError == .activeSessionConflict
+                     ? "Another window has started a session. Focus can only run one session at a time."
+                     : "Start did not save. Your choices are still here; try Start again.")
+                    .appTypography(.metadata)
+                    .foregroundStyle(AppColors.textSecondary)
+            }
+            ActionButton("Start", symbol: "play.fill", variant: .primary,
+                         isEnabled: configuration != nil && service.readState.canStart && service.activeSession == nil) {
+                start()
+            }
+            .accessibilityIdentifier("focus-start")
+
             VStack(alignment: .leading, spacing: AppMetrics.space3) {
                 SectionHeader("Duration")
                 ViewThatFits(in: .horizontal) {
@@ -506,8 +565,47 @@ struct FocusView: View {
                 }
             }
 
-            VStack(alignment: .leading, spacing: AppMetrics.space3) {
-                SectionHeader("Optional task")
+            DisclosureGroup("Link an activity (optional)", isExpanded: Binding(
+                get: { activityExpanded || linkPresentation.needsCorrection },
+                set: { activityExpanded = $0 }
+            )) {
+                VStack(alignment: .leading, spacing: AppMetrics.space3) {
+                    AppMenuPicker("Activity type", selection: Binding(
+                        get: { draft.activityType },
+                        set: { draft.selectActivityType($0); startError = nil }
+                    ), options: [("None", FocusReadyDraft.ActivityType.none),
+                                 ("Task", .task), ("Lesson", .lesson)])
+                    .frame(maxWidth: 380)
+                    .accessibilityIdentifier("focus-activity-type")
+                    switch draft.activityType {
+                    case .none:
+                        Text("No activity selected. Starting Focus will not complete any task or lesson.")
+                            .appTypography(.metadata)
+                            .foregroundStyle(AppColors.textSecondary)
+                    case .task:
+                        taskLinkChoices
+                    case .lesson:
+                        lessonLinkChoices
+                    }
+                }
+                .padding(.top, AppMetrics.space3)
+            }
+            .accessibilityIdentifier("focus-activity-disclosure")
+            if linkPresentation.needsCorrection {
+                Text("Linked activity needs correction — choose again in Link an activity or select None.")
+                    .appTypography(.metadata)
+                    .foregroundStyle(AppColors.error)
+                    .accessibilityIdentifier("focus-link-correction")
+            }
+            ActionButton("Reset") {
+                resetDraft()
+            }
+            .accessibilityIdentifier("focus-cancel-configuration")
+        }
+    }
+
+    private var taskLinkChoices: some View {
+        VStack(alignment: .leading, spacing: AppMetrics.space3) {
                 if taskStore.readState != .loaded {
                     ErrorBanner(.readFailed, recoveryTitle: "Retry tasks", recovery: { taskStore.retryRead() })
                     Text("Task choices are unavailable. You can still start without a task.")
@@ -516,9 +614,11 @@ struct FocusView: View {
                 AppMenuPicker("Link to task", selection: Binding(
                     get: { draft.linkedTaskID },
                     set: { draft.selectTask($0); startError = nil }
-                ), options: [("No task", nil as UUID?)] + openTasks.map { ($0.title, Optional($0.id)) } +
+                ), options: [("Select a task (optional)", nil as UUID?)] +
+                    (taskStore.readState == .loaded ? openTasks.map { ($0.title, Optional($0.id)) } : []) +
                     (draft.linkedTaskID.map { id in
-                        openTasks.contains(where: { $0.id == id }) ? [] : [("Unavailable task — choose again", Optional(id))]
+                        taskStore.readState == .loaded && openTasks.contains(where: { $0.id == id })
+                            ? [] : [("Unavailable task — choose again", Optional(id))]
                     } ?? []))
                 .frame(maxWidth: 380)
                 .accessibilityIdentifier("focus-task-picker")
@@ -527,9 +627,11 @@ struct FocusView: View {
                         .appTypography(.metadata)
                         .foregroundStyle(AppColors.textSecondary)
                 }
-            }
-            VStack(alignment: .leading, spacing: AppMetrics.space3) {
-                SectionHeader("Optional lesson")
+        }
+    }
+
+    private var lessonLinkChoices: some View {
+        VStack(alignment: .leading, spacing: AppMetrics.space3) {
                 if lessons == nil {
                     ErrorBanner(.readFailed, recoveryTitle: "Retry learning choices", recovery: {
                         if case .failed = learningStore.state { learningStore.retry() }
@@ -541,7 +643,7 @@ struct FocusView: View {
                 AppMenuPicker("Link to lesson", selection: Binding(
                     get: { draft.linkedLessonID },
                     set: { draft.selectLesson($0); startError = nil }
-                ), options: [("No lesson", nil as String?)] + (lessons ?? []).map { ($0.title, Optional($0.id)) } +
+                ), options: [("Select a lesson (optional)", nil as String?)] + (lessons ?? []).map { ($0.title, Optional($0.id)) } +
                     (draft.linkedLessonID.map { id in
                         lessons?.contains(where: { $0.id == id }) == true ? [] : [("Unavailable lesson — choose again", Optional(id))]
                     } ?? []))
@@ -552,37 +654,6 @@ struct FocusView: View {
                         .appTypography(.metadata)
                         .foregroundStyle(AppColors.textSecondary)
                 }
-            }
-            if let validationMessage {
-                Text(validationMessage)
-                    .appTypography(.metadata)
-                    .foregroundStyle(AppColors.error)
-                    .accessibilityIdentifier("focus-validation")
-            }
-            if let startError {
-                if startError == .persistenceFailure {
-                    ErrorBanner(.saveFailed)
-                        .accessibilityIdentifier("focus-start-error")
-                }
-                Text(startError == .unavailableTask
-                     ? "That task changed before Start. Choose another task or No task, then try again."
-                     : startError == .unavailableLesson
-                     ? "That lesson changed before Start. Retry learning choices or choose another lesson or No link, then try again."
-                     : startError == .activeSessionConflict
-                     ? "Another window has started a session. Focus can only run one session at a time."
-                     : "Start did not save. Your choices are still here; try Start again.")
-                    .appTypography(.metadata)
-                    .foregroundStyle(AppColors.textSecondary)
-            }
-            ActionButton("Start", symbol: "play.fill", variant: .primary,
-                         isEnabled: configuration != nil && service.readState.canStart && service.activeSession == nil) {
-                start()
-            }
-            .accessibilityIdentifier("focus-start")
-            ActionButton("Cancel configuration") {
-                resetDraft()
-            }
-            .accessibilityIdentifier("focus-cancel-configuration")
         }
     }
 

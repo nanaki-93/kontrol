@@ -42,11 +42,11 @@ final class FocusPresentationTests: XCTestCase {
         XCTAssertNil(try draft.configuration(openTasks: graph.taskStore.snapshots, tasksReadable: true).linkedTaskID)
     }
 
-    func testCancelDraftWritesNothingAndSharedWindowsCannotCompete() throws {
+    func testResetDraftWritesNothingAndSharedWindowsCannotCompete() throws {
         let graph = try dependencies()
         var first = FocusReadyDraft()
         first.selectDuration(.fifty)
-        first = FocusReadyDraft() // Cancel/discard is local; no repository command.
+        first = FocusReadyDraft() // Reset is local; no repository command.
         XCTAssertEqual(try first.configuration(openTasks: [], tasksReadable: true).plannedSeconds(), 1500)
         XCTAssertTrue(try SwiftDataFocusRepository(container: graph.container).fetchAll().isEmpty)
         let second = FocusReadyDraft()
