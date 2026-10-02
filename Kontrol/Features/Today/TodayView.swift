@@ -29,6 +29,12 @@ struct TodayView: View {
         let draft: ScheduleEditorDraft
     }
 
+    /// Only the navigation owner may cross into Projects. Its existing draft-save
+    /// barrier decides when to publish the destination; Today never inspects a folder.
+    static func openProjectWork(navigation: NavigationStore) {
+        navigation.select(.projects)
+    }
+
     /// Recheck the displayed assignment against the latest committed projection.
     /// Flush before opening so a failed save creates neither an attempt nor a route.
     static func startNow(_ suggestion: TodayLessonSelection.Suggestion,
@@ -183,6 +189,19 @@ struct TodayView: View {
                     lastBlockTriggerID = nil
                     blockPresentation = BlockPresentation(draft: draft)
                 })
+            }
+            if let navigation {
+                VStack(alignment: .leading, spacing: AppMetrics.space2) {
+                    SectionHeader("Project work")
+                    Text("Continue in your project workspace.")
+                        .appTypography(.metadata)
+                        .foregroundStyle(AppColors.textSecondary)
+                    ActionButton("Next features", symbol: "arrow.right", variant: .primary) {
+                        Self.openProjectWork(navigation: navigation)
+                    }
+                    .accessibilityLabel("Open Project work in Projects")
+                    .accessibilityIdentifier("today-project-work")
+                }
             }
             ViewThatFits(in: .horizontal) {
                 HStack(alignment: .top, spacing: AppMetrics.space8) {
