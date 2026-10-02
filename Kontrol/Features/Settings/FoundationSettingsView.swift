@@ -79,88 +79,111 @@ struct FoundationSettingsView: View {
         .accessibilityIdentifier("settings-content")
     }
 
+    // Pure read-only projections from the shared owners. A retained snapshot is
+    // never evidence of a successful current read, even in a second Settings client.
+    static func generalSummary(_ store: AppPreferencesStore) -> String {
+        switch store.state {
+        case .loaded:
+            guard let snapshot = store.editableSnapshot else { return "General: saved preferences unavailable · system defaults in use" }
+            return "General: \(GeneralPreferencesView.summary(snapshot.preferences))"
+        case .loading:
+            return "General: loading saved preferences · system defaults in use"
+        case .failed:
+            return store.committed == nil
+                ? "General: saved preferences unavailable · system defaults in use"
+                : "General: read failed · previously loaded values retained, not verified · system defaults in use"
+        }
+    }
+
+    static func aiSummary(_ store: AISettingsStore) -> String {
+        if store.error == .storageFailure { return "AI lessons: settings unavailable · review required" }
+        if store.error == .staleRevision { return "AI lessons: settings changed · review required" }
+        if store.error != nil { return "AI lessons: configuration needs review" }
+        let state = store.presentation
+        let configuration = "AI lessons: \(state.enabled ? "On" : "Off") · \(state.modelID ?? "Not configured")"
+        switch store.credentialStatus {
+        case .missing: return configuration + " · saved key missing"
+        case .inaccessible: return configuration + " · key unavailable"
+        case .notConfigured, .available: return configuration
+        }
+    }
+
+    static func newsSummary(_ store: NewsStore) -> String {
+        if let failure = store.localFailure {
+            return failure == .save ? "News: saved changes need review" : "News: saved settings unavailable"
+        }
+        guard let snapshot = store.snapshot else {
+            return store.isLoading ? "News: loading saved settings" : "News: saved settings unavailable"
+        }
+        let enabled = snapshot.feeds.filter(\.isEnabled).count
+        return "News: \(NewsManagementView.selectedCountText(snapshot)) · \(enabled) of \(snapshot.feeds.count) feeds enabled"
+    }
+
     private var hub: some View {
-        VStack(alignment: .leading, spacing: AppMetrics.space4) {
+        VStack(alignment: .leading, spacing: AppMetrics.space2) {
             if saved {
                 StatusPill("Preferences saved", kind: .success)
                     .accessibilityIdentifier("settings-preferences-saved")
             }
-            Text("General & appearance").appTypography(.section).accessibilityAddTraits(.isHeader)
-            VStack(alignment: .leading, spacing: AppMetrics.space2) {
-                if let snapshot = preferences.editableSnapshot {
-                    Text("Focus default: \(snapshot.preferences.focusDefaultMinutes) minutes")
-                        .appTypography(.body)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityIdentifier("settings-focus-summary")
-                    Text(GeneralPreferencesView.summary(snapshot.preferences))
-                        .appTypography(.metadata)
-                        .foregroundStyle(AppColors.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityIdentifier("settings-appearance-summary")
-                } else {
-                    Label("Saved preferences unavailable · system appearance and 25-minute Focus fallback", systemImage: "exclamationmark.triangle")
-                        .appTypography(.body)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityIdentifier("settings-preferences-unavailable")
-                    ActionButton("Retry loading preferences") {
-                        preferences.retry()
-                        // Retry may disappear after a successful read.
-                        focusedAction = preferences.editableSnapshot == nil ? .retry : .general
-                    }
-                    .focused($focusedAction, equals: .retry)
-                    .accessibilityIdentifier("settings-preferences-retry")
-                }
-                ActionButton("Edit general & appearance") { saved = false; section = .general }
-                    .focused($focusedAction, equals: .general)
-                    .accessibilityIdentifier("settings-general")
-                Text("Black / Red Terminal · fixed theme")
-                    .appTypography(.metadata)
-                    .foregroundStyle(AppColors.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
+            hubSection("General", summary: Self.generalSummary(preferences), summaryID: "settings-general-summary",
+                       actionID: "settings-general", actionName: "Open General settings", focus: .general) {
+                saved = false
+                section = .general
             }
-            Divider()
-            Text("Connections").appTypography(.section).accessibilityAddTraits(.isHeader)
-            Text(ai.error == .storageFailure || ai.error == .staleRevision
-                 ? "AI settings need review"
-                 : "AI lessons: \(ai.presentation.enabled ? "On" : "Off") · \(ai.presentation.modelID ?? "Not configured")")
-                .appTypography(.body)
-                .fixedSize(horizontal: false, vertical: true)
-                .accessibilityIdentifier("settings-ai-summary")
-            ActionButton("Configure AI lessons") { section = .ai; focusedAction = .back }
-                .focused($focusedAction, equals: .ai)
-                .accessibilityIdentifier("settings-ai")
-            Text(newsSummary)
-                .appTypography(.body)
-                .fixedSize(horizontal: false, vertical: true)
-                .accessibilityIdentifier("settings-news-summary")
-            ActionButton("Manage News topics & feeds") { section = .news; focusedAction = .back }
-                .focused($focusedAction, equals: .news)
-                .accessibilityIdentifier("settings-news")
-            Text(ProjectFoldersSettingsView.summary(projects))
-                .appTypography(.body)
-                .fixedSize(horizontal: false, vertical: true)
-                .accessibilityIdentifier("settings-folders-summary")
-            ActionButton("Manage project folders") { section = .folders; focusedAction = .back }
-                .focused($focusedAction, equals: .folders)
-                .accessibilityIdentifier("settings-folders")
-            Divider()
-            Text("Local data").appTypography(.section).accessibilityAddTraits(.isHeader)
-            Text(LocalDataSettingsView.summary(export.state))
-                .appTypography(.body)
-                .fixedSize(horizontal: false, vertical: true)
-                .accessibilityIdentifier("settings-local-data-summary")
-            ActionButton("Manage local data") { section = .localData; focusedAction = .back }
-                .focused($focusedAction, equals: .localData)
-                .accessibilityIdentifier("settings-local-data")
+            if case .failed = preferences.state {
+                Label(preferences.committed == nil ? "Saved preferences unavailable · system appearance and 25-minute Focus fallback"
+                      : "Preference read failed · retained values are not verified · system appearance and 25-minute Focus fallback",
+                      systemImage: "exclamationmark.triangle")
+                    .appTypography(.body)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("settings-preferences-unavailable")
+                ActionButton("Retry loading preferences") {
+                    preferences.retry()
+                    focusedAction = preferences.editableSnapshot == nil ? .retry : .general
+                }
+                .focused($focusedAction, equals: .retry)
+                .accessibilityIdentifier("settings-preferences-retry")
+            }
+            hubSection("AI lessons", summary: Self.aiSummary(ai), summaryID: "settings-ai-summary",
+                       actionID: "settings-ai", actionName: "Open AI lessons settings", focus: .ai) {
+                section = .ai; focusedAction = .back
+            }
+            hubSection("News", summary: Self.newsSummary(news), summaryID: "settings-news-summary",
+                       actionID: "settings-news", actionName: "Open News settings", focus: .news) {
+                section = .news; focusedAction = .back
+            }
+            hubSection("Project folders", summary: ProjectFoldersSettingsView.summary(projects),
+                       summaryID: "settings-folders-summary", actionID: "settings-folders",
+                       actionName: "Open Project folders settings", focus: .folders) {
+                section = .folders; focusedAction = .back
+            }
+            hubSection("Local data", summary: LocalDataSettingsView.summary(export.state),
+                       summaryID: "settings-local-data-summary", actionID: "settings-local-data",
+                       actionName: "Open Local data settings", focus: .localData) {
+                section = .localData; focusedAction = .back
+            }
+            Text("Black / Red Terminal · fixed theme")
+                .appTypography(.metadata)
+                .foregroundStyle(AppColors.textSecondary)
         }
     }
 
-    private var newsSummary: String {
-        guard news.localFailure == nil, let snapshot = news.snapshot else {
-            return "News topics & feeds: saved settings unavailable"
+    private func hubSection(_ title: String, summary: String, summaryID: String,
+                            actionID: String, actionName: String, focus: HubAction,
+                            open: @escaping () -> Void) -> some View {
+        VStack(alignment: .leading, spacing: AppMetrics.space2) {
+            Text(title).appTypography(.section).accessibilityAddTraits(.isHeader)
+            Text(summary).appTypography(.body)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier(summaryID)
+            ActionButton("Open", action: open)
+                .focused($focusedAction, equals: focus)
+                .accessibilityLabel(actionName)
+                .accessibilityIdentifier(actionID)
         }
-        let enabled = snapshot.feeds.filter(\.isEnabled).count
-        return "News: \(NewsManagementView.selectedCountText(snapshot)) · \(enabled) of \(snapshot.feeds.count) feeds enabled"
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, AppMetrics.space2)
+        .accessibilityElement(children: .contain)
     }
 
     private var backAction: some View {

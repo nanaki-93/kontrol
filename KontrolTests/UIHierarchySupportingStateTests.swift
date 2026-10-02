@@ -57,7 +57,147 @@ private final class ProjectWorkWriter: FeatureFileWriting {
 }
 
 @MainActor
+private final class HubPreferencesRepository: AppPreferencesRepository {
+    var snapshot: AppPreferencesSnapshot = .defaults
+    var failRead = false
+    private(set) var reads = 0
+    private(set) var writes = 0
+    func load() throws -> AppPreferencesSnapshot {
+        reads += 1
+        if failRead { throw AppPreferencesError.invalidStoredData }
+        return snapshot
+    }
+    func save(_ draft: AppPreferencesDraft, expectedRevision: UUID?) throws -> AppPreferencesSnapshot {
+        writes += 1
+        throw AppPreferencesError.persistenceFailure
+    }
+}
+
+@MainActor
+private final class HubAIRepository: AISettingsRepository {
+    var failRead = false
+    var snapshot = AISettingsSnapshot.disabled
+    private(set) var writes = 0
+    func load() throws -> AISettingsSnapshot {
+        if failRead { throw AISettingsPersistenceError.invalidSettings }
+        return snapshot
+    }
+    func save(_ settings: AISettingsSnapshot, expectedRevision: UUID?) throws -> AISettingsSnapshot {
+        writes += 1
+        throw AISettingsPersistenceError.staleRevision
+    }
+}
+
+private actor HubFeedSpy: NewsRefreshing {
+    private(set) var calls = 0
+    func refresh(_ feeds: [FeedSourceSnapshot]) async -> [FeedRefreshOutcome] { calls += 1; return [] }
+    func validate(_ draft: FeedDraft) async throws -> ValidatedFeed {
+        calls += 1
+        throw FeedServiceError(code: .offline, retryNotBefore: nil)
+    }
+}
+
+@MainActor
 final class UIHierarchySupportingStateTests: XCTestCase {
+    func testSettingsHubSummariesReadSharedOwnersWithoutSideEffects() async throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let preferences = HubPreferencesRepository()
+        let ai = HubAIRepository()
+        let inspector = ProjectWorkInspector()
+        let references = ProjectWorkRepository()
+        let writer = ProjectWorkWriter()
+        let feeds = HubFeedSpy()
+        var generationFactories = 0
+        let graph = AppDependencies(container: container,
+            catalogRepository: SwiftDataCatalogRepository(container: container),
+            projectInspector: inspector, projectRepository: references, projectWriter: writer,
+            appPreferencesRepository: preferences, aiSettingsRepository: ai,
+            aiGenerator: { model, reference, credentials in
+                generationFactories += 1
+                return OpenAILessonGenerator(model: model, credentialReference: reference, credentials: credentials)
+            }, newsService: feeds)
+        // Both clients construct with the same owner graph; construction and summary
+        // projection cannot inspect a grant, contact a feed, generate or export.
+        _ = FoundationSettingsView(dependencies: graph)
+        _ = FoundationSettingsView(dependencies: graph)
+        XCTAssertEqual(FoundationSettingsView.generalSummary(graph.appPreferencesStore),
+                       "General: 25 minutes · System text · System motion")
+        XCTAssertEqual(FoundationSettingsView.aiSummary(graph.aiSettingsStore),
+                       "AI lessons: Off · Not configured")
+        XCTAssertEqual(FoundationSettingsView.newsSummary(graph.newsStore), "News: saved settings unavailable")
+        graph.newsStore.loadIfNeeded() // Local cache only; no feed refresh.
+        let snapshot = try XCTUnwrap(graph.newsStore.snapshot)
+        let enabled = snapshot.feeds.filter(\.isEnabled).count
+        XCTAssertEqual(FoundationSettingsView.newsSummary(graph.newsStore),
+                       "News: \(NewsManagementView.selectedCountText(snapshot)) · \(enabled) of \(snapshot.feeds.count) feeds enabled")
+        XCTAssertEqual(ProjectFoldersSettingsView.summary(graph.projectStore),
+                       "Project folders: saved references unavailable")
+        try graph.projectStore.loadReferencesIfNeeded()
+        XCTAssertEqual(ProjectFoldersSettingsView.summary(graph.projectStore),
+                       "Project folders: 0 saved references")
+        XCTAssertEqual(LocalDataSettingsView.summary(graph.exportService.state), "Local data: Ready to export")
+        preferences.snapshot = AppPreferencesSnapshot(preferences: try AppPreferences(focusDefaultMinutes: 37,
+            textSize: .large, reduceMotion: .reduce), revision: UUID())
+        graph.appPreferencesStore.retry()
+        XCTAssertEqual(FoundationSettingsView.generalSummary(graph.appPreferencesStore),
+                       "General: 37 minutes · Large text · Reduced motion")
+        preferences.failRead = true
+        graph.appPreferencesStore.retry()
+        XCTAssertNotNil(graph.appPreferencesStore.committed)
+        XCTAssertNil(graph.appPreferencesStore.editableSnapshot)
+        XCTAssertEqual(FoundationSettingsView.generalSummary(graph.appPreferencesStore),
+                       "General: read failed · previously loaded values retained, not verified · system defaults in use")
+        preferences.failRead = false
+        graph.appPreferencesStore.retry()
+        XCTAssertEqual(FoundationSettingsView.generalSummary(graph.appPreferencesStore),
+                       "General: 37 minutes · Large text · Reduced motion")
+        ai.snapshot = AISettingsSnapshot(enabled: false, providerID: "openai", modelID: "gpt-4o-mini",
+                                         credentialReference: nil, revision: UUID())
+        graph.aiSettingsStore.refresh()
+        XCTAssertEqual(FoundationSettingsView.aiSummary(graph.aiSettingsStore), "AI lessons: Off · gpt-4o-mini")
+        XCTAssertThrowsError(try graph.aiSettingsStore.saveConfiguration(modelID: "gpt-4o-mini",
+            expectedRevision: UUID()))
+        XCTAssertEqual(FoundationSettingsView.aiSummary(graph.aiSettingsStore),
+                       "AI lessons: settings changed · review required")
+        ai.failRead = true
+        graph.aiSettingsStore.refresh()
+        XCTAssertEqual(FoundationSettingsView.aiSummary(graph.aiSettingsStore),
+                       "AI lessons: settings unavailable · review required")
+        XCTAssertEqual(preferences.writes, 0)
+        XCTAssertEqual(ai.writes, 0)
+        XCTAssertEqual(inspector.calls, 0)
+        XCTAssertEqual(writer.calls, 0)
+        XCTAssertEqual(references.calls, 1, "Only the explicit local reference load reads references")
+        let feedCalls = await feeds.calls
+        XCTAssertEqual(feedCalls, 0)
+        XCTAssertEqual(graph.exportService.state, .idle)
+        XCTAssertEqual(generationFactories, 0)
+    }
+
+    func testSettingsHubInitialPreferenceFailureNeverClaimsSavedDefaults() throws {
+        let repository = HubPreferencesRepository()
+        repository.failRead = true
+        let store = AppPreferencesStore(repository: repository)
+        XCTAssertNil(store.committed)
+        XCTAssertEqual(FoundationSettingsView.generalSummary(store),
+                       "General: saved preferences unavailable · system defaults in use")
+        XCTAssertEqual(repository.reads, 1, "Summary does not retry")
+        repository.failRead = false
+        store.retry()
+        XCTAssertEqual(FoundationSettingsView.generalSummary(store),
+                       "General: 25 minutes · System text · System motion")
+        XCTAssertEqual(repository.writes, 0)
+    }
+
+    func testSettingsHubUnavailableNewsDoesNotReportAnEmptySubscription() throws {
+        let container = try ModelContainerFactory().makeContainer(mode: .inMemory)
+        let news = NewsStore(repository: SwiftDataNewsRepository(container: container),
+                             service: HubFeedSpy(), catalog: nil)
+        news.loadIfNeeded()
+        XCTAssertEqual(FoundationSettingsView.newsSummary(news), "News: saved settings unavailable")
+        XCTAssertNil(news.snapshot)
+    }
+
     private enum Injected: Error { case save }
 
     func testNewsDiagnosticDisclosureAndFiltersOnlyProjectCachedData() {

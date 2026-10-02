@@ -636,13 +636,13 @@ final class SettingsSceneTests: XCTestCase {
         try press("settings-general", in: window)
         try choose("Duration", item: "15 minutes", in: window)
         try press("preferences-save", in: window)
-        XCTAssertEqual(try value("settings-focus-summary", in: window), "Focus default: 15 minutes")
+        XCTAssertEqual(try value("settings-general-summary", in: window), "General: 15 minutes · System text · System motion")
         XCTAssertEqual(repository.saves, 1)
         try press("settings-general", in: window)
         try choose("Duration", item: "50 minutes", in: window)
         try press("preferences-cancel", in: window)
         XCTAssertEqual(repository.saves, 1, "Cancel must not persist")
-        XCTAssertEqual(try value("settings-focus-summary", in: window), "Focus default: 15 minutes")
+        XCTAssertEqual(try value("settings-general-summary", in: window), "General: 15 minutes · System text · System motion")
         try press("settings-general", in: window)
         try choose("Duration", item: "Custom", in: window)
         try input("1.5", in: window)
@@ -657,8 +657,7 @@ final class SettingsSceneTests: XCTestCase {
         XCTAssertEqual(try value("preferences-custom-minutes", in: window), "25", "Typing a preset must not collapse Custom")
         try input("00037", in: window)
         try press("preferences-save", in: window)
-        XCTAssertEqual(try value("settings-focus-summary", in: window), "Focus default: 37 minutes")
-        XCTAssertEqual(try value("settings-appearance-summary", in: window), "37 minutes · Large text · Reduced motion")
+        XCTAssertEqual(try value("settings-general-summary", in: window), "General: 37 minutes · Large text · Reduced motion")
         XCTAssertEqual(repository.saves, 2)
         _ = try node("settings-preferences-saved", in: window)
         try press("settings-ai", in: window)
@@ -717,7 +716,7 @@ final class SettingsSceneTests: XCTestCase {
         try press("preferences-save", in: second)
         XCTAssertEqual(repository.value.preferences, try AppPreferences(focusDefaultMinutes: 37, textSize: .large, reduceMotion: .reduce))
         for window in [first, second] {
-            XCTAssertEqual(try value("settings-focus-summary", in: window), "Focus default: 37 minutes")
+            XCTAssertEqual(try value("settings-general-summary", in: window), "General: 37 minutes · Large text · Reduced motion")
         }
     }
 
@@ -744,7 +743,7 @@ final class SettingsSceneTests: XCTestCase {
         try press("preferences-review", in: window)
         XCTAssertEqual(try value("preferences-custom-minutes", in: window), "37")
         try press("preferences-save", in: window)
-        XCTAssertEqual(try value("settings-focus-summary", in: window), "Focus default: 37 minutes")
+        XCTAssertEqual(try value("settings-general-summary", in: window), "General: 37 minutes · System text · System motion")
         XCTAssertEqual(repository.saves, 1)
         XCTAssertNil(graph.focusService.activeSession)
     }
@@ -2131,8 +2130,8 @@ final class SettingsSceneTests: XCTestCase {
                 (attribute($0, kAXValueAttribute) as? String == "Settings" ||
                  attribute($0, kAXDescriptionAttribute) as? String == "Settings")
             }.count, 1)
-            for identifier in ["settings-general", "settings-ai", "settings-news", "settings-folders", "settings-local-data", "settings-focus-summary",
-                               "settings-appearance-summary", "settings-ai-summary", "settings-news-summary", "settings-folders-summary", "settings-local-data-summary"] {
+            for identifier in ["settings-general", "settings-ai", "settings-news", "settings-folders", "settings-local-data", "settings-general-summary",
+                               "settings-ai-summary", "settings-news-summary", "settings-folders-summary", "settings-local-data-summary"] {
                 XCTAssertTrue(nodes.contains { attribute($0, kAXIdentifierAttribute) as? String == identifier },
                               "Both entries must expose implemented hub capability or saved summary: \(identifier)")
             }
@@ -2146,9 +2145,9 @@ final class SettingsSceneTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(settingsBounds.height, 340)
         let settingsNodes = axDescendants(settingsAX)
         let status = try XCTUnwrap(settingsNodes.first {
-            axAttribute($0, kAXIdentifierAttribute) as? String == "settings-focus-summary"
+            axAttribute($0, kAXIdentifierAttribute) as? String == "settings-general-summary"
         })
-        XCTAssertEqual(axAttribute(status, kAXValueAttribute) as? String, "Focus default: 25 minutes")
+        XCTAssertEqual(axAttribute(status, kAXValueAttribute) as? String, "General: 25 minutes · System text · System motion")
         XCTAssertTrue(settingsBounds.contains(try axFrame(status)), "130% status must be visible in compact Settings")
         let enlargedHeading = try XCTUnwrap(settingsNodes.first {
             axAttribute($0, kAXRoleAttribute) as? String == kAXHeadingRole &&
