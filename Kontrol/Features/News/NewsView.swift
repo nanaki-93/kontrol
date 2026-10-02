@@ -6,6 +6,7 @@ struct NewsView: View {
     @ObservedObject var store: NewsStore
     @State private var activeTopicID: String?
     @State private var expandedIDs = Set<UUID>()
+    @State private var diagnosticsExpanded = false
     @State private var showingTopics = false
     @FocusState private var focusedFilter: String?
 
@@ -21,6 +22,29 @@ struct NewsView: View {
 
     static func sections(in snapshot: NewsSnapshot, filter: String?) -> [NewsSelection.Section] {
         NewsSelection.sections(snapshot, filter: effectiveFilter(filter, in: snapshot))
+    }
+
+    struct FeedDiagnostic: Equatable, Identifiable {
+        let id: UUID
+        let text: String
+    }
+
+    struct BrowseProjection: Equatable {
+        let sections: [NewsSelection.Section]
+        let diagnostics: [FeedDiagnostic]
+    }
+
+    /// Filters and disclosure visibility only project detached cached values. Neither
+    /// choice changes selected topics, feed metadata, or the stored article states.
+    static func browse(in snapshot: NewsSnapshot, filter: String?,
+                       diagnosticsExpanded: Bool) -> BrowseProjection {
+        let diagnostics = snapshot.feeds.compactMap { feed -> FeedDiagnostic? in
+            guard feed.isEnabled, !feed.topicIDs.isDisjoint(with: snapshot.preferences.selectedTopicIDs),
+                  let error = feed.lastError else { return nil }
+            return FeedDiagnostic(id: feed.id, text: "\(feed.name): \(failureText(error, in: snapshot))")
+        }
+        return BrowseProjection(sections: sections(in: snapshot, filter: filter),
+                                diagnostics: diagnosticsExpanded ? diagnostics : [])
     }
 
     static func sourceName(for article: ArticleMetadata) -> String {
@@ -94,21 +118,15 @@ struct NewsView: View {
         let state = Self.contentState(snapshot: store.snapshot, isLoading: store.isLoading,
                                       localFailure: store.localFailure, filter: activeTopicID)
         let canRetry = store.canRetryRefresh(at: now)
+        let browse = store.snapshot.map {
+            Self.browse(in: $0, filter: activeTopicID, diagnosticsExpanded: diagnosticsExpanded)
+        }
         return VStack(alignment: .leading, spacing: AppMetrics.space6) {
             PageHeader("News")
             Text(Self.lastSuccessText(store.snapshot))
                 .appTypography(.metadata)
                 .foregroundStyle(AppColors.textSecondary)
             if let snapshot = store.snapshot { topicFilters(snapshot) }
-            HStack(spacing: AppMetrics.space2) {
-                ActionButton("Refresh", symbol: "arrow.clockwise", isEnabled: canRetry,
-                             isBusy: store.isRefreshing) {
-                    Task { await store.refresh(.manual) }
-                }
-                ActionButton("Topics & feeds", symbol: "slider.horizontal.3") {
-                    showingTopics = true
-                }
-            }
             if store.isRefreshing {
                 StatusPill(Self.refreshingText(store.snapshot), kind: .warning)
             }
@@ -126,18 +144,12 @@ struct NewsView: View {
                 ErrorBanner(.readFailed)
             }
             if let snapshot = store.snapshot {
-                let failed = snapshot.feeds.filter {
+                if snapshot.feeds.contains(where: {
                     $0.isEnabled && !$0.topicIDs.isDisjoint(with: snapshot.preferences.selectedTopicIDs) &&
                     $0.lastError != nil
-                }
-                if !failed.isEmpty {
+                }) {
                     StatusPill(store.isPartialRefresh ? "Partially refreshed · some feeds failed" :
                                "Some feeds could not be refreshed", kind: .warning)
-                    ForEach(failed) { feed in
-                        Text("\(feed.name): \(Self.failureText(feed.lastError!, in: snapshot))")
-                            .appTypography(.body)
-                            .foregroundStyle(AppColors.textSecondary)
-                    }
                 }
                 let blocked = snapshot.feeds.filter {
                     $0.isEnabled && !$0.topicIDs.isDisjoint(with: snapshot.preferences.selectedTopicIDs) &&
@@ -178,7 +190,10 @@ struct NewsView: View {
             case .headlines: EmptyView()
             }
             if let snapshot = store.snapshot, state == .headlines || state == .readFailure {
-                ForEach(Self.sections(in: snapshot, filter: activeTopicID), id: \.kind) { section in
+                if let browse, !browse.sections.isEmpty {
+                    SectionHeader("Headlines")
+                }
+                ForEach(browse?.sections ?? [], id: \.kind) { section in
                     VStack(alignment: .leading, spacing: 0) {
                         Text(section.title)
                             .appTypography(.section)
@@ -191,10 +206,40 @@ struct NewsView: View {
                     }
                 }
             }
+            // Feed management and refresh are explicit secondary actions; browsing cached
+            // headlines and opening diagnostics never invokes either command.
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: AppMetrics.space2) { newsActions(canRetry: canRetry) }
+                VStack(alignment: .leading, spacing: AppMetrics.space2) { newsActions(canRetry: canRetry) }
+            }
+            if let snapshot = store.snapshot, snapshot.feeds.contains(where: {
+                $0.isEnabled && !$0.topicIDs.isDisjoint(with: snapshot.preferences.selectedTopicIDs) &&
+                $0.lastError != nil
+            }) {
+                DisclosureGroup("Feed diagnostics", isExpanded: $diagnosticsExpanded) {
+                    ForEach(browse?.diagnostics ?? []) { diagnostic in
+                        Text(diagnostic.text)
+                            .appTypography(.body)
+                            .foregroundStyle(AppColors.textSecondary)
+                    }
+                }
+                .accessibilityIdentifier("news-feed-diagnostics")
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, AppMetrics.horizontalInset)
         .padding(.top, AppMetrics.space8)
+    }
+
+    @ViewBuilder
+    private func newsActions(canRetry: Bool) -> some View {
+        ActionButton("Refresh", symbol: "arrow.clockwise", isEnabled: canRetry,
+                     isBusy: store.isRefreshing) {
+            Task { await store.refresh(.manual) }
+        }
+        ActionButton("Topics & feeds", symbol: "slider.horizontal.3") {
+            showingTopics = true
+        }
     }
 
     private func topicFilters(_ snapshot: NewsSnapshot) -> some View {

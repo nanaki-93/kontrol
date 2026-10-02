@@ -60,6 +60,53 @@ private final class ProjectWorkWriter: FeatureFileWriting {
 final class UIHierarchySupportingStateTests: XCTestCase {
     private enum Injected: Error { case save }
 
+    func testNewsDiagnosticDisclosureAndFiltersOnlyProjectCachedData() {
+        let failedID = UUID(uuidString: "00000000-0000-0000-0000-000000000101")!
+        let otherID = UUID(uuidString: "00000000-0000-0000-0000-000000000102")!
+        let articleID = UUID(uuidString: "00000000-0000-0000-0000-000000000103")!
+        let date = Date(timeIntervalSince1970: 2_000_000_000)
+        func feed(_ id: UUID, name: String, topic: String, error: NewsErrorCode?) -> FeedSourceSnapshot {
+            FeedSourceSnapshot(id: id, name: name, url: URL(string: "https://feeds.example/rss")!,
+                topicIDs: [topic], isEnabled: true, configurationRevision: id,
+                etag: nil, lastModified: nil, lastAttemptAt: date, lastSuccessAt: nil,
+                lastError: error, retryNotBefore: nil)
+        }
+        let source = NewsArticleSource(feedID: failedID, feedName: "Failed feed", topicIDs: ["go"], guid: nil)
+        let article = ArticleMetadata(id: articleID, url: URL(string: "https://example.com/story")!,
+            canonicalURL: "https://example.com/story", title: "Retained headline",
+            publishedAt: date, firstFetchedAt: date, summary: "Saved summary", sources: [source])
+        let snapshot = NewsSnapshot(topics: [NewsTopic(id: "go", name: "Go"),
+                                             NewsTopic(id: "empty", name: "Empty"),
+                                             NewsTopic(id: "swift", name: "Swift")],
+            feeds: [feed(failedID, name: "Failed feed", topic: "go", error: .timeout),
+                    feed(otherID, name: "Unselected feed", topic: "swift", error: .offline)],
+            articleStates: [NewsSelection.State(article: article, aliases: [:])],
+            preferences: NewsPreferences(catalogVersion: 1, selectedTopicIDs: ["go", "empty"],
+                                         revision: UUID(), lastRefreshAt: date))
+        let before = snapshot
+        let closed = NewsView.browse(in: snapshot, filter: nil, diagnosticsExpanded: false)
+        let open = NewsView.browse(in: snapshot, filter: nil, diagnosticsExpanded: true)
+        XCTAssertEqual(closed.sections, open.sections)
+        XCTAssertEqual(open.sections.flatMap(\.articles).map(\.article.id), [articleID])
+        XCTAssertTrue(closed.diagnostics.isEmpty)
+        XCTAssertEqual(open.diagnostics.map(\.id), [failedID])
+        XCTAssertTrue(open.diagnostics[0].text.contains("Failed feed: A feed timed out."))
+        XCTAssertTrue(open.diagnostics[0].text.contains("Saved headlines remain available."))
+        let filtered = NewsView.browse(in: snapshot, filter: "swift", diagnosticsExpanded: true)
+        XCTAssertEqual(filtered.sections, open.sections, "Unselected filter falls back to All")
+        XCTAssertEqual(filtered.diagnostics, open.diagnostics)
+        let empty = NewsView.browse(in: snapshot, filter: "empty", diagnosticsExpanded: true)
+        XCTAssertTrue(empty.sections.isEmpty)
+        XCTAssertEqual(empty.diagnostics, open.diagnostics)
+        XCTAssertEqual(NewsView.contentState(snapshot: snapshot, isLoading: false,
+                                              localFailure: nil, filter: "empty"), .filteredEmpty)
+        XCTAssertEqual(NewsView.contentState(snapshot: snapshot, isLoading: false,
+                                              localFailure: .read, filter: nil), .readFailure)
+        XCTAssertEqual(NewsView.browse(in: snapshot, filter: nil, diagnosticsExpanded: false).sections,
+                       open.sections, "Retained headlines remain projected during a local read failure")
+        XCTAssertEqual(snapshot, before, "Disclosure and filtering cannot change subscriptions or cached content")
+    }
+
     func testCompactTaskMetadataKeepsCivilPlansDueInstantsAndProvenanceSeparate() throws {
         let zone = try XCTUnwrap(TimeZone(identifier: "Pacific/Auckland"))
         let savedZone = try XCTUnwrap(TimeZone(identifier: "America/Los_Angeles"))
