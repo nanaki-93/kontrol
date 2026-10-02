@@ -107,6 +107,55 @@ final class UIHierarchySupportingStateTests: XCTestCase {
         XCTAssertEqual(snapshot, before, "Disclosure and filtering cannot change subscriptions or cached content")
     }
 
+    func testNewsRefreshSummaryExplainsStoreAdmissionAndServerBlockedSubsets() throws {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let deadline = now.addingTimeInterval(120)
+        func feed(_ n: Int, selected: Bool = true, enabled: Bool = true,
+                  retry: Date? = nil) -> FeedSourceSnapshot {
+            let id = UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", n))!
+            return FeedSourceSnapshot(id: id, name: "Feed \(n)", url: URL(string: "https://example.com/feed")!,
+                topicIDs: [selected ? "go" : "other"], isEnabled: enabled, configurationRevision: id,
+                etag: nil, lastModified: nil, lastAttemptAt: nil, lastSuccessAt: nil,
+                lastError: retry == nil ? nil : .rateLimited, retryNotBefore: retry)
+        }
+        func snapshot(_ feeds: [FeedSourceSnapshot], topics: Set<String> = ["go"]) -> NewsSnapshot {
+            NewsSnapshot(topics: [NewsTopic(id: "go", name: "Go")], feeds: feeds, articleStates: [],
+                preferences: NewsPreferences(catalogVersion: 1, selectedTopicIDs: topics,
+                                             revision: UUID(), lastRefreshAt: nil))
+        }
+        func summary(_ value: NewsSnapshot?, loading: Bool = false, failure: NewsLocalFailure? = nil,
+                     refreshing: Bool = false, allowed: Bool = false, at date: Date? = nil)
+            -> NewsView.RefreshDisplaySummary {
+            NewsView.refreshDisplaySummary(snapshot: value, isLoading: loading, localFailure: failure,
+                isRefreshing: refreshing, canRetry: allowed, at: date ?? now)
+        }
+        XCTAssertTrue(try XCTUnwrap(summary(nil, loading: true).disabledReason).contains("loading"))
+        XCTAssertTrue(try XCTUnwrap(summary(nil, failure: .read).disabledReason).contains("could not be read"))
+        XCTAssertTrue(try XCTUnwrap(summary(nil).disabledReason).contains("until local News is loaded"))
+        let ready = snapshot([feed(1)])
+        XCTAssertTrue(try XCTUnwrap(summary(ready, refreshing: true).disabledReason).contains("in progress"))
+        XCTAssertTrue(try XCTUnwrap(summary(ready, failure: .read).disabledReason).contains("could not be read"),
+                      "Retained cache after failed read is not refreshable")
+        XCTAssertTrue(try XCTUnwrap(summary(snapshot([feed(1)], topics: [])).disabledReason).contains("select topics"))
+        XCTAssertTrue(try XCTUnwrap(summary(snapshot([feed(1, selected: false), feed(2, enabled: false)])).disabledReason).contains("enable a feed"))
+        XCTAssertNil(summary(ready, allowed: true).disabledReason)
+        let subset = snapshot([feed(1, retry: deadline), feed(2), feed(3, selected: false, retry: deadline)])
+        let partial = summary(subset, allowed: true)
+        XCTAssertNil(partial.disabledReason, "Only the store's admission decision enables the button")
+        XCTAssertTrue(try XCTUnwrap(partial.deadlineNote).contains("Other selected feeds are not server-blocked"))
+        XCTAssertFalse(try XCTUnwrap(partial.deadlineNote).contains("Selected feeds have server retry deadlines"))
+        let all = snapshot([feed(1, retry: deadline), feed(2, retry: deadline.addingTimeInterval(60))])
+        let blocked = summary(all)
+        XCTAssertTrue(try XCTUnwrap(blocked.disabledReason).contains("server retry deadlines"))
+        XCTAssertTrue(try XCTUnwrap(blocked.deadlineNote).contains("Next retry after \(deadline.formatted(date: .abbreviated, time: .shortened))"))
+        XCTAssertTrue(try XCTUnwrap(blocked.deadlineNote).contains("others may be later"))
+        XCTAssertNil(summary(all, allowed: true, at: deadline).disabledReason)
+        XCTAssertTrue(try XCTUnwrap(summary(all, allowed: true, at: deadline).deadlineNote)
+            .contains("Other selected feeds are not server-blocked"), "Expired deadlines do not block admission")
+        XCTAssertNil(summary(all, allowed: true, at: deadline.addingTimeInterval(60)).deadlineNote)
+        XCTAssertEqual(subset.feeds[0].retryNotBefore, deadline, "Projection cannot alter server policy")
+    }
+
     func testCompactTaskMetadataKeepsCivilPlansDueInstantsAndProvenanceSeparate() throws {
         let zone = try XCTUnwrap(TimeZone(identifier: "Pacific/Auckland"))
         let savedZone = try XCTUnwrap(TimeZone(identifier: "America/Los_Angeles"))

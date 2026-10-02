@@ -47,6 +47,53 @@ struct NewsView: View {
                                 diagnostics: diagnosticsExpanded ? diagnostics : [])
     }
 
+    struct RefreshDisplaySummary: Equatable {
+        let disabledReason: String?
+        let deadlineNote: String?
+    }
+
+    /// Describes the store's admission decision; this projection never decides whether
+    /// Refresh is enabled or schedules a feed. Deadlines are saved server constraints.
+    static func refreshDisplaySummary(snapshot: NewsSnapshot?, isLoading: Bool,
+                                      localFailure: NewsLocalFailure?, isRefreshing: Bool,
+                                      canRetry: Bool, at now: Date) -> RefreshDisplaySummary {
+        let relevant = snapshot.map { current in
+            current.feeds.filter {
+                $0.isEnabled && !$0.topicIDs.isDisjoint(with: current.preferences.selectedTopicIDs)
+            }
+        } ?? []
+        let blocked = relevant.compactMap { feed -> Date? in
+            guard let deadline = feed.retryNotBefore, deadline > now else { return nil }
+            return deadline
+        }
+        let deadlineNote: String?
+        if let next = blocked.min() {
+            let time = next.formatted(date: .abbreviated, time: .shortened)
+            deadlineNote = blocked.count == relevant.count
+                ? "Selected feeds have server retry deadlines. Next retry after \(time); others may be later."
+                : "Some feeds have server retry deadlines (next after \(time)). Other selected feeds are not server-blocked."
+        } else {
+            deadlineNote = nil
+        }
+        let reason: String?
+        if canRetry { reason = nil }
+        else if localFailure == .read { reason = "Refresh unavailable: local News could not be read. Retry loading local News." }
+        else if isLoading { reason = "Refresh unavailable while local News is loading." }
+        else if isRefreshing { reason = "Refresh unavailable while a refresh is in progress." }
+        else if snapshot == nil { reason = "Refresh unavailable until local News is loaded." }
+        else if snapshot?.preferences.selectedTopicIDs.isEmpty == true {
+            reason = "Refresh unavailable: select topics in Topics & feeds."
+        } else if relevant.isEmpty {
+            reason = "Refresh unavailable: enable a feed for a selected topic in Topics & feeds."
+        } else if blocked.count == relevant.count {
+            reason = "Refresh unavailable: selected feeds have server retry deadlines."
+        } else {
+            // The store remains authoritative even during a transient in-flight transition.
+            reason = "Refresh is temporarily unavailable. Try again shortly."
+        }
+        return RefreshDisplaySummary(disabledReason: reason, deadlineNote: deadlineNote)
+    }
+
     static func sourceName(for article: ArticleMetadata) -> String {
         article.sources.first?.feedName ?? "Unknown source"
     }
@@ -118,6 +165,8 @@ struct NewsView: View {
         let state = Self.contentState(snapshot: store.snapshot, isLoading: store.isLoading,
                                       localFailure: store.localFailure, filter: activeTopicID)
         let canRetry = store.canRetryRefresh(at: now)
+        let refreshSummary = Self.refreshDisplaySummary(snapshot: store.snapshot, isLoading: store.isLoading,
+            localFailure: store.localFailure, isRefreshing: store.isRefreshing, canRetry: canRetry, at: now)
         let browse = store.snapshot.map {
             Self.browse(in: $0, filter: activeTopicID, diagnosticsExpanded: diagnosticsExpanded)
         }
@@ -151,15 +200,11 @@ struct NewsView: View {
                     StatusPill(store.isPartialRefresh ? "Partially refreshed · some feeds failed" :
                                "Some feeds could not be refreshed", kind: .warning)
                 }
-                let blocked = snapshot.feeds.filter {
-                    $0.isEnabled && !$0.topicIDs.isDisjoint(with: snapshot.preferences.selectedTopicIDs) &&
-                    ($0.retryNotBefore.map { $0 > now } ?? false)
-                }
-                if !blocked.isEmpty {
-                    Text("Server retry available after \(blocked.compactMap(\.retryNotBefore).min()!.formatted(date: .abbreviated, time: .shortened)). Refresh will not request these feeds before then.")
-                        .appTypography(.metadata)
-                        .foregroundStyle(AppColors.textSecondary)
-                }
+            }
+            if let deadline = refreshSummary.deadlineNote {
+                Text(deadline)
+                    .appTypography(.metadata)
+                    .foregroundStyle(AppColors.textSecondary)
             }
             if let failure = store.browserOpenFailure {
                 VStack(alignment: .leading, spacing: AppMetrics.space2) {
@@ -211,6 +256,11 @@ struct NewsView: View {
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: AppMetrics.space2) { newsActions(canRetry: canRetry) }
                 VStack(alignment: .leading, spacing: AppMetrics.space2) { newsActions(canRetry: canRetry) }
+            }
+            if let reason = refreshSummary.disabledReason {
+                Text(reason)
+                    .appTypography(.metadata)
+                    .foregroundStyle(AppColors.textSecondary)
             }
             if let snapshot = store.snapshot, snapshot.feeds.contains(where: {
                 $0.isEnabled && !$0.topicIDs.isDisjoint(with: snapshot.preferences.selectedTopicIDs) &&
