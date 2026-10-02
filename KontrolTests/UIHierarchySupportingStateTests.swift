@@ -60,6 +60,28 @@ private final class ProjectWorkWriter: FeatureFileWriting {
 final class UIHierarchySupportingStateTests: XCTestCase {
     private enum Injected: Error { case save }
 
+    func testTodayPracticeLabelsAndScheduleCueUseActualLocalToday() throws {
+        XCTAssertEqual(TodayView.lessonOpenTitle(started: false), "Open")
+        XCTAssertEqual(TodayView.lessonOpenTitle(started: true), "Resume")
+
+        let zone = try XCTUnwrap(TimeZone(identifier: "America/New_York"))
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = zone
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-03-08T14:00:00Z"))
+        let temporal = TaskTemporalContext(now: now, calendar: calendar, timeZone: zone)
+        var day = TodayDaySelection()
+        XCTAssertNil(TodayView.lessonScheduleCue(day: day, temporal: temporal))
+        day.previous(in: temporal)
+        let browsed = try XCTUnwrap(day.selectedDate(in: temporal))
+        XCTAssertFalse(calendar.isDate(browsed, inSameDayAs: now))
+        let cue = try XCTUnwrap(TodayView.lessonScheduleCue(day: day, temporal: temporal))
+        XCTAssertEqual(cue, "Schedule… uses today, \(now.formatted(TodayView.localDateStyle(in: temporal))), not the selected day.")
+        XCTAssertFalse(cue.contains(browsed.formatted(TodayView.localDateStyle(in: temporal))),
+                       "Cue must not identify the browsed day as the scheduling day")
+        day.returnToToday()
+        XCTAssertNil(TodayView.lessonScheduleCue(day: day, temporal: temporal))
+    }
+
     func testTodayProjectWorkUsesNavigationBarrierAndDoesNotInspectOrMutateProjects() throws {
         var failSave = false
         let container = try ModelContainerFactory().makeContainer(mode: .inMemory)

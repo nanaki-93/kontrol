@@ -138,12 +138,23 @@ struct TodayView: View {
         state == .loaded && hasSelectedDay && rows.isEmpty
     }
 
-    private var localDateStyle: Date.FormatStyle {
+    static func localDateStyle(in temporal: TaskTemporalContext) -> Date.FormatStyle {
         var style = Date.FormatStyle.dateTime.weekday(.wide).day().month(.wide).year()
-        style.calendar = store.temporalContext.calendar
-        style.timeZone = store.temporalContext.timeZone
+        style.calendar = temporal.calendar
+        style.timeZone = temporal.timeZone
         return style
     }
+
+    static func lessonOpenTitle(started: Bool) -> String { started ? "Resume" : "Open" }
+
+    /// Scheduling a suggestion always uses the clock's local today, not the
+    /// browsed day. Keep the cue tied to that same temporal context.
+    static func lessonScheduleCue(day: TodayDaySelection, temporal: TaskTemporalContext) -> String? {
+        guard !day.followsToday else { return nil }
+        return "Schedule… uses today, \(temporal.now.formatted(localDateStyle(in: temporal))), not the selected day."
+    }
+
+    private var localDateStyle: Date.FormatStyle { Self.localDateStyle(in: store.temporalContext) }
 
     private var blockDateStyle: Date.FormatStyle {
         var style = Date.FormatStyle.dateTime.month(.abbreviated).day().hour().minute()
@@ -178,29 +189,15 @@ struct TodayView: View {
         let rows = Self.selectedRows(day: daySelection, tasks: store, blocks: scheduleStore)
         VStack(alignment: .leading, spacing: AppMetrics.space4) {
             PageHeader("Today", metadata: selectedDate?.formatted(localDateStyle) ?? "Date unavailable")
+            dayActions
             ViewThatFits(in: .horizontal) {
-                HStack(spacing: AppMetrics.space2) { dayActions; addActions }
-                VStack(alignment: .leading, spacing: AppMetrics.space2) { dayActions; addActions }
-            }
-            if let learningStore, let navigation {
-                TodayLessonSection(learningStore: learningStore, navigation: navigation,
-                                   temporalStore: store, scheduleStore: scheduleStore,
-                                   onAddToToday: { draft in
-                    lastBlockTriggerID = nil
-                    blockPresentation = BlockPresentation(draft: draft)
-                })
-            }
-            if let navigation {
-                VStack(alignment: .leading, spacing: AppMetrics.space2) {
-                    SectionHeader("Project work")
-                    Text("Continue in your project workspace.")
-                        .appTypography(.metadata)
-                        .foregroundStyle(AppColors.textSecondary)
-                    ActionButton("Next features", symbol: "arrow.right", variant: .primary) {
-                        Self.openProjectWork(navigation: navigation)
-                    }
-                    .accessibilityLabel("Open Project work in Projects")
-                    .accessibilityIdentifier("today-project-work")
+                HStack(alignment: .top, spacing: AppMetrics.space8) {
+                    practiceSection.frame(minWidth: 280, maxWidth: .infinity, alignment: .topLeading)
+                    projectWorkSection.frame(minWidth: 280, maxWidth: .infinity, alignment: .topLeading)
+                }
+                VStack(alignment: .leading, spacing: AppMetrics.space6) {
+                    practiceSection
+                    projectWorkSection
                 }
             }
             ViewThatFits(in: .horizontal) {
@@ -287,23 +284,52 @@ struct TodayView: View {
         }
     }
 
-    private var addActions: some View {
-        HStack(spacing: AppMetrics.space2) {
-            ActionButton("Add task", symbol: "plus", variant: .primary) {
-                // Quick capture always defaults to relative Today, not the browsed day.
-                showingCapture = true
+    @ViewBuilder
+    private var practiceSection: some View {
+        if let learningStore, let navigation {
+            TodayLessonSection(learningStore: learningStore, navigation: navigation,
+                               temporalStore: store, scheduleStore: scheduleStore,
+                               scheduleCue: Self.lessonScheduleCue(day: daySelection, temporal: store.temporalContext),
+                               onAddToToday: { draft in
+                lastBlockTriggerID = nil
+                blockPresentation = BlockPresentation(draft: draft)
+            })
+        } else {
+            VStack(alignment: .leading, spacing: AppMetrics.space4) {
+                SectionHeader("Practice")
+                Text("Learning suggestions are unavailable here.")
+                    .appTypography(.metadata)
+                    .foregroundStyle(AppColors.textSecondary)
             }
-            .accessibilityIdentifier("today-add-task")
-            .focused($addTaskFocused)
-            ActionButton("Add block", symbol: "plus", isEnabled: selectedDate != nil, action: addBlock)
-                .accessibilityIdentifier("today-add-block")
-                .focused($addBlockFocused)
+        }
+    }
+
+    @ViewBuilder
+    private var projectWorkSection: some View {
+        if let navigation {
+            VStack(alignment: .leading, spacing: AppMetrics.space2) {
+                SectionHeader("Project work")
+                Text("Continue in your project workspace.")
+                    .appTypography(.metadata)
+                    .foregroundStyle(AppColors.textSecondary)
+                ActionButton("Next features", symbol: "arrow.right", variant: .primary) {
+                    Self.openProjectWork(navigation: navigation)
+                }
+                .accessibilityLabel("Open Project work in Projects")
+                .accessibilityIdentifier("today-project-work")
+            }
         }
     }
 
     private func taskSection(_ tasks: [TaskSnapshot]) -> some View {
         VStack(alignment: .leading, spacing: AppMetrics.space4) {
             SectionHeader("Tasks")
+            ActionButton("Add task", symbol: "plus", variant: .primary) {
+                // Quick capture always defaults to relative Today, not the browsed day.
+                showingCapture = true
+            }
+            .accessibilityIdentifier("today-add-task")
+            .focused($addTaskFocused)
             if editorOpenError {
                 ErrorBanner(.readFailed, recoveryTitle: "Retry", recovery: {
                     editorOpenError = false
@@ -354,6 +380,9 @@ struct TodayView: View {
     private func scheduleSection(_ blocks: [ScheduleSnapshot]) -> some View {
         VStack(alignment: .leading, spacing: AppMetrics.space4) {
             SectionHeader("Schedule")
+            ActionButton("Add block", symbol: "plus", isEnabled: selectedDate != nil, action: addBlock)
+                .accessibilityIdentifier("today-add-block")
+                .focused($addBlockFocused)
             if let message = scheduleStore.readState.message {
                 ErrorBanner(.readFailed, recoveryTitle: "Retry", recovery: scheduleStore.retryRead)
                     .accessibilityIdentifier("today-schedule-error")
@@ -436,6 +465,7 @@ private struct TodayLessonSection: View {
     let navigation: NavigationStore
     @ObservedObject var temporalStore: TaskStore
     @ObservedObject var scheduleStore: ScheduleStore
+    let scheduleCue: String?
     let onAddToToday: (ScheduleEditorDraft) -> Void
     @State private var lessonError: LessonExperienceError?
     @State private var scheduleError: LessonExperienceError?
@@ -449,16 +479,23 @@ private struct TodayLessonSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppMetrics.space4) {
-            SectionHeader("Learning", metadata: "Suggestions for any day")
+            SectionHeader("Practice", metadata: "Suggestions for any day")
+            if let scheduleCue {
+                Text(scheduleCue)
+                    .appTypography(.metadata)
+                    .foregroundStyle(AppColors.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("today-lesson-schedule-date")
+            }
             if lessonError != nil {
                 ErrorBanner(.saveFailed)
-                Text("Could not start the lesson. Your work and location are retained. Retry Start now after resolving the error.")
+                Text("Could not open the lesson. Your work and location are retained. Retry Open or Resume after resolving the error.")
                     .appTypography(.metadata)
                     .foregroundStyle(AppColors.textSecondary)
             }
             if scheduleError != nil {
                 ErrorBanner(.readFailed)
-                Text("Could not prepare this lesson block. Refresh learning choices and try Add to Today again.")
+                Text("Could not prepare this lesson block. Refresh learning choices and try Schedule… again.")
                     .appTypography(.metadata)
                     .foregroundStyle(AppColors.textSecondary)
             }
@@ -487,7 +524,7 @@ private struct TodayLessonSection: View {
                         AppListRow(suggestion.lesson.title,
                                    metadata: "\(suggestion.started ? "Started" : "Available") · \(suggestion.lesson.estimatedMinutes) min · \(suggestion.lesson.format.capitalized)")
                         Spacer(minLength: 0)
-                        ActionButton("Start now", isEnabled: canStart) {
+                        ActionButton(TodayView.lessonOpenTitle(started: suggestion.started), isEnabled: canStart) {
                             do {
                                 try TodayView.startNow(suggestion, learning: learningStore, navigation: navigation)
                                 lessonError = nil
@@ -495,9 +532,9 @@ private struct TodayLessonSection: View {
                                 lessonError = (error as? LessonExperienceError) ?? .persistenceFailure
                             }
                         }
-                        .accessibilityLabel("Start now: \(suggestion.lesson.title)")
+                        .accessibilityLabel("\(TodayView.lessonOpenTitle(started: suggestion.started)) lesson: \(suggestion.lesson.title)")
                         .accessibilityIdentifier("today-start-\(suggestion.id)")
-                        ActionButton("Add to Today", isEnabled: learningStore.state.isAuthoritative) {
+                        ActionButton("Schedule…", isEnabled: learningStore.state.isAuthoritative) {
                             do {
                                 let draft = try TodayView.addToTodayDraft(
                                     suggestion, learning: learningStore,
@@ -508,7 +545,7 @@ private struct TodayLessonSection: View {
                                 scheduleError = (error as? LessonExperienceError) ?? .persistenceFailure
                             }
                         }
-                        .accessibilityLabel("Add to Today: \(suggestion.lesson.title)")
+                        .accessibilityLabel("Schedule lesson: \(suggestion.lesson.title) for today")
                         .accessibilityIdentifier("today-add-lesson-\(suggestion.id)")
                     }
                 }
