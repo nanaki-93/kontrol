@@ -35,8 +35,11 @@ function types(value: unknown): JobSource['employmentTypes'] {
   if (/internship|intern\b|praktikum/.test(raw)) result.push('internship');
   return result;
 }
-function mode(value: string, remote: boolean): JobSource['workMode'] {
-  if (/\bhybrid\b/i.test(value)) return 'hybrid';
+function mode(title: string, description: string, remote: boolean): JobSource['workMode'] {
+  const value = title + ' ' + description;
+  // Match an arrangement, not technical requirements such as hybrid cloud.
+  const hybrid = /\bhybrid[ -]+(?:work(?:ing)?|role|position|arrangement|schedule|model|setup|policy)\b|\b(?:work(?:ing)?|role|position|arrangement|schedule|model|setup|policy)(?:\s+is)?[\s:-]+hybrid\b/i;
+  if (hybrid.test(value) || /(?:^|[([]|\s[–—|-]\s*)hybrid(?:[)\]]|$)/i.test(title)) return 'hybrid';
   if (remote) return 'remote';
   if (/\b(fully remote|100% remote|remote only)\b/i.test(value)) return 'remote';
   if (/\b(on[ -]?site|office[ -]based|in[ -]office)\b/i.test(value)) return 'office';
@@ -67,7 +70,7 @@ export function parseJobPostings(html: string, pageURL: string): JobSource[] {
   })).filter(location => location.name || location.country).slice(0, 30);
   const description = plain(row.description), title = name(row.title), company = name(row.hiringOrganization);
   const remoteRegions = array(row.applicantLocationRequirements).map(name).filter(Boolean).slice(0, 30);
-  const workMode = mode(title + ' ' + description, array(row.jobLocationType).some(value => value === 'TELECOMMUTE'));
+  const workMode = mode(title, description, array(row.jobLocationType).some(value => value === 'TELECOMMUTE'));
   const parsed = jobSourceSchema.safeParse({ id: sourceID(url), url, title, company, description,
     cities, remoteRegions, workMode, employmentTypes: types(row.employmentType), salary: null,
     location: cities.map(city => [...new Set([city.name, city.region, city.country].filter(Boolean))].join(', ')).join(' · ').slice(0, 1000) ||
@@ -106,7 +109,7 @@ export function parseArbeitnow(input: string): JobSource[] {
       const country = parts.length > 1 ? parts.at(-1)! : '';
       const cities = location && !/^(remote|worldwide|anywhere)$/i.test(location) ? [{ name: parts[0].slice(0, 200), country: country.slice(0, 200) }] : [];
       const title = name(row.title), description = plain(row.description);
-      const inferredMode = mode(title + ' ' + description, row.remote === true);
+      const inferredMode = mode(title, description, row.remote === true);
       return [jobSourceSchema.parse({ id: sourceID(url), url, title, company: name(row.company_name), description,
         location: location || 'Location not specified', cities,
         remoteRegions: row.remote === true ? (country ? [country] : /^(worldwide|anywhere)$/i.test(location) ? ['Worldwide'] : []) : [],

@@ -143,6 +143,22 @@ test('Remotive normalizes employment, source attribution, dates and geographic r
   assert.deepEqual(source.employmentTypes, ['part_time']); assert.deepEqual(source.remoteRegions, ['Japan', 'Germany']);
   assert.throws(() => parseRemotive('{}'));
 });
+test('technical hybrid requirements do not exclude fully remote jobs', () => {
+  for (const jobLocationType of ['TELECOMMUTE', undefined]) {
+    const [remote] = parseJobPostings(html({ ...posting, jobLocationType,
+      description: 'Build hybrid cloud systems. This is a fully remote role.',
+      applicantLocationRequirements: { name: 'Worldwide' } }), job.url);
+    assert.equal(remote.workMode, 'remote');
+    assert.equal(matchesJobFilters(remote, { ...defaultJobPreferences, workModes: ['remote'] }, jobNow), true);
+  }
+  for (const description of ['Hybrid role building Go APIs.', 'Working model: hybrid.', 'A hybrid working arrangement.']) {
+    assert.equal(parseJobPostings(html({ ...posting, description }), job.url)[0].workMode, 'hybrid');
+  }
+  assert.equal(parseJobPostings(html({ ...posting, title: 'Backend engineer (Hybrid)', description: 'Build Go APIs.' }), job.url)[0].workMode, 'hybrid');
+  assert.equal(parseJobPostings(html({ ...posting, description: 'Build hybrid cloud systems.' }), job.url)[0].workMode, 'unknown');
+  assert.equal(parseArbeitnow(JSON.stringify({ data: [{ url: job.url, title: job.title, company_name: job.company,
+    description: 'Build hybrid cloud systems.', remote: true, location: 'Worldwide' }] }))[0].workMode, 'remote');
+});
 test('Arbeitnow uses source work arrangement and city/country metadata without inventing a country', () => {
   const row = { url: job.url, title: job.title, company_name: job.company, description: 'Build Go APIs.', remote: false,
     job_types: ['Part-time'], location: 'Berlin, DE', created_at: jobNow / 1000 };
