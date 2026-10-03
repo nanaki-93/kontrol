@@ -43,8 +43,10 @@ server first and copy the whole data directory.
 
 ## Dashboard and modules
 
-The Today page surfaces the next learning step, a short news briefing, and job
-matches or application follow-ups. It seeds no personal activity. **Customize** lets you show/hide,
+The Today page starts with compact links to the next learning step, a short news
+briefing, and job matches or application follow-ups. Their counts summarize what
+needs attention; the widgets below provide the detail. It seeds no personal
+activity. **Customize** lets you show/hide,
 move earlier/later, and select half/full width for each widget. Layout changes
 save in SQLite. Hiding a widget leaves its full page and data available.
 
@@ -149,7 +151,9 @@ saved response before choosing a version. Export includes server-saved answers,
 not an unsaved browser draft; wait for **Saved** before exporting.
 
 The dark theme uses brighter coral accents, lighter graphite panels, and clearer
-text and border colors. The layout adapts to narrow windows. Controls retain
+text and border colors. Shared text sizes keep nested badges and metadata
+readable; **Text size → Large** scales those sizes along with body copy. Reading text
+has a bounded line length, and the layout adapts to narrow windows. Controls retain
 visible focus styling, names, standard
 keyboard semantics, large text and reduced-motion support; these features are
 implemented without reinstating interactive validation gates.
@@ -304,6 +308,12 @@ profile is confirmed. Minimized panels show the CV name/profile status or curren
 filters; filter drafts stay intact and unsaved changes remain flagged. Upload,
 analysis and preference-save errors stay visible even when their panel is closed.
 
+Background refreshes preserve unsaved filter and profile edits. If another tab
+changes the same saved fields, the form shows the current saved version and
+requires **Use saved version** or **Keep my edits** before saving. Unrelated
+updates advance the revision without replacing the draft. The results section
+keeps source coverage and retrieval details under **How matching works & sources**.
+
 City lookup runs entirely on the server against the bundled `cities.json`
 GeoNames catalog, including towns above 1,000 population and administrative
 seats. It supports accent-insensitive search and optional country/state
@@ -358,6 +368,8 @@ geography, not visa or work authorization. With a specific employment or work
 arrangement filter, unstated values are excluded; selecting all arrangements
 also permits listings marked unknown. Known expired, future-dated and old listings
 are excluded; unknown posting dates remain clearly labeled.
+Hybrid work is inferred from work-arrangement language; technical requirements
+such as hybrid cloud do not override an explicitly remote role.
 
 The server passes at most 30 filtered candidates, a bounded description excerpt,
 the reviewed profile and preferences to PI. It accepts only exact retrieved

@@ -523,3 +523,97 @@ bookmarks or authored notes. No test evaluates live recommendation quality.
 edited frontend, shared, module and workspace-test sources, including untracked
 files, and passed. Existing work in progress and historical validation entries
 were retained.
+
+## Bug fixes, performance and UI clarity — 2026-10-03
+
+The pre-existing working tree was committed first as `57b7800`. Each subsequent
+fix or improvement was committed separately. This pass addresses:
+
+- PDF uploads at the advertised 5 MB limit without recursive base64 matching.
+- Work-arrangement parsing that distinguishes hybrid work from hybrid cloud.
+- Profile and filter drafts surviving background refreshes, with explicit
+  conflict recovery when another tab changes the same saved fields.
+- A shared 64 MB formatted JSON export/import limit. Oversized exports reject
+  with a database-directory backup alternative instead of offering an
+  unrestorable file. Other API request bodies retain their 16 MB limit.
+- Cached headline tokens, dates and canonical URLs, bounded five-story grouping,
+  and memoized briefing derivation. Related coverage appearing late in the
+  source list is retained.
+- Bounded API waits, query cancellation, slower idle polling, and a compact
+  Focus status endpoint so ordinary pages do not repeatedly download history.
+  Route content is isolated from shell timer updates; idle timers stop ticking.
+- Shared typography sizes that avoid compounded nested text shrinkage, compact
+  Today actions, and expandable Jobs source explanations with billing information
+  still visible beside the search action.
+
+Final validation ran from `web/` with Node **25.8.2**:
+
+```sh
+node --import tsx --test \
+  tests/domain.test.ts tests/api.test.ts tests/projects-persistence.test.ts \
+  tests/news-discovery.test.ts tests/news-ai.test.ts tests/news-api.test.ts \
+  tests/news-pi.test.ts tests/news-pi-cli.test.ts \
+  tests/jobs-domain.test.ts tests/jobs-api.test.ts tests/jobs-client.test.ts \
+  tests/workspace-domain.test.ts tests/workspace-api.test.ts
+npm run build
+```
+
+Results: **132 tests, 130 passed, 0 failed, 2 skipped**. The two skipped tests
+are opt-in installed-PI CLI checks; `KONTROL_TEST_PI_COMMAND` was not set. They
+are not reported as passing. The other PI tests use isolated fixtures.
+TypeScript and Vite production compilation passed. `git diff --check` passed
+from the repository root. Regression coverage includes a valid PDF at the exact
+upload limit, malformed base64, remote/hybrid parsing, draft revision conflicts,
+a formatted Unicode backup larger than 16 MB restoring every answer into a
+fresh database, late related news coverage, API deadlines, and Focus completion
+reconciliation while history is retained separately.
+
+A final non-GUI microbenchmark used 1,000 distinct, equally dated synthetic
+headlines, one warm-up and three measured iterations. It compared the checkpoint
+implementation against the current helper in the same Node process (V8
+**14.1.146.11-node.24**):
+
+| Grouping operation | Three elapsed times (ms) |
+| --- | --- |
+| Checkpoint: group all, then take five | 590.22 / 589.22 / 594.76 |
+| Current: group all | 29.77 / 28.80 / 28.67 |
+| Current: retain five leading groups | 0.81 / 0.79 / 0.78 |
+
+These are helper timings, not browser frame-time or end-to-end measurements.
+The exact benchmark command, run from `web/`, was:
+
+```sh
+node --import tsx --input-type=module <<'NODE'
+import { execFileSync } from 'node:child_process';
+import { stripTypeScriptTypes } from 'node:module';
+import { canonicalURL, groupStories } from './shared/workspace.ts';
+const original = execFileSync('git', ['show', '57b7800:web/shared/workspace.ts'], { encoding: 'utf8' });
+const source = original.slice(original.indexOf('export function groupStories')).replace('export function', 'function');
+const before = new Function('canonicalURL', stripTypeScriptTypes(source) + '; return groupStories;')(canonicalURL);
+const articles = Array.from({ length: 1000 }, (_, i) => ({
+  title: 'Language' + i + ' compiler' + i + ' release' + i + ' benchmark' + i,
+  url: 'https://example.com/story/' + i,
+  publishedAt: '2026-10-03T00:00:00.000Z',
+}));
+const measure = fn => {
+  fn();
+  return Array.from({ length: 3 }, () => {
+    const start = performance.now();
+    const result = fn();
+    return { ms: Number((performance.now() - start).toFixed(2)), groups: result.length };
+  });
+};
+console.log(JSON.stringify({ node: process.version, v8: process.versions.v8,
+  baseline: measure(() => before(articles).slice(0, 5)),
+  cachedAll: measure(() => groupStories(articles)),
+  boundedBriefing: measure(() => groupStories(articles, 5)),
+}, null, 2));
+NODE
+```
+
+Node emitted its experimental `stripTypeScriptTypes` warning; the benchmark
+completed successfully. Tests used isolated in-memory or scratch persistence,
+and no production data was changed. UI changes were checked through source
+review and compilation. No app/browser was launched or operated, and no GUI,
+Accessibility, native keyboard/focus, screenshot or presentation checks were run
+or required. Earlier validation evidence remains unchanged.
