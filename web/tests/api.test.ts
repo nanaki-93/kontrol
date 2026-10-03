@@ -5,6 +5,34 @@ import { request as httpRequest } from 'node:http';
 import { withAPI } from './helpers';
 import { exportData, importData } from '../server/modules/settings';
 import { nativeExportSchema, type Learning, type Task, type NewsState, type Session } from '../shared/schema';
+import { MAX_BACKUP_BYTES } from '../shared/backup';
+
+test('formatted backups larger than 16 MB restore their complete Unicode lesson answers', async () => {
+  await withAPI(async ({ request, store }) => {
+    const learning = store.get<Learning>('learning');
+    for (const lesson of learning.definitions.slice(0, 35)) {
+      assert.equal((await request('/learning/' + lesson.id + '/open', 'POST', {})).status, 200);
+    }
+    const state = store.get<Learning>('learning');
+    const answer = '学'.repeat(170_000);
+    for (const attempt of state.attempts) attempt.answerDraft = answer;
+    store.set('learning', state);
+    const exported = await request('/settings/export');
+    assert.equal(exported.status, 200);
+    const downloaded = await exported.text();
+    assert.ok(Buffer.byteLength(downloaded) > 16 * 1024 * 1024);
+    assert.ok(Buffer.byteLength(downloaded) <= MAX_BACKUP_BYTES);
+    const backup = JSON.parse(downloaded);
+    assert.equal(downloaded, JSON.stringify(backup, null, 2));
+    await withAPI(async ({ request: restore, store: restored }) => {
+      assert.equal((await restore('/settings/import/preview', 'POST', backup)).status, 200);
+      assert.equal((await restore('/settings/import', 'POST', backup)).status, 200);
+      const attempts = restored.get<Learning>('learning').attempts;
+      assert.equal(attempts.length, 35);
+      assert.ok(attempts.every(attempt => attempt.answerDraft === answer));
+    });
+  });
+});
 
 test('API rejects other origins, DNS rebinding hosts and missing client headers', async () => {
   await withAPI(async ({ request, origin }) => {

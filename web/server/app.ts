@@ -9,6 +9,7 @@ import { newsModule, type NewsOptions } from './modules/news';
 import { settingsModule } from './modules/settings';
 import { jobsModule, type JobsOptions } from './modules/jobs';
 import { workspaceModule } from './modules/workspace';
+import { MAX_BACKUP_BYTES, BACKUP_LIMIT_LABEL } from '../shared/backup';
 
 export function createApp(store: Store, options: { origin: string; clock?: () => number; feedFetcher?: (url: string) => Promise<string>; news?: NewsOptions; jobs?: JobsOptions }) {
   const app = express();
@@ -34,6 +35,7 @@ export function createApp(store: Store, options: { origin: string; clock?: () =>
     }
     next();
   });
+  app.use('/api/settings/import', express.json({ limit: MAX_BACKUP_BYTES }));
   app.use(express.json({ limit: '16mb' }));
   // Registration is explicit. Modules own their routes and persisted documents.
   app.use('/api/focus', focusModule(store, options.clock));
@@ -44,12 +46,13 @@ export function createApp(store: Store, options: { origin: string; clock?: () =>
   app.use('/api/workspace', workspaceModule(store, options.clock));
   app.use('/api/settings', settingsModule(store));
   app.use('/api', (_req, res) => res.status(404).json({ error: 'Unknown API route.' }));
-  const errors: ErrorRequestHandler = (error: unknown, _req, res, _next) => {
+  const errors: ErrorRequestHandler = (error: unknown, req, res, _next) => {
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: error.issues.slice(0, 5).map(i => (i.path.length ? i.path.join('.') + ': ' : '') + i.message).join(' · ') });
     } else if (error instanceof HttpError) res.status(error.status).json({ error: error.message });
     else if (error instanceof SyntaxError) res.status(400).json({ error: 'Invalid JSON. No data was changed.' });
-    else if ((error as { type?: string })?.type === 'entity.too.large') res.status(413).json({ error: 'The import exceeds 16 MB.' });
+    else if ((error as { type?: string })?.type === 'entity.too.large') res.status(413).json({ error:
+      req.path.startsWith('/api/settings/import') ? 'The import exceeds ' + BACKUP_LIMIT_LABEL + '.' : 'The request exceeds 16 MB.' });
     else res.status(500).json({ error: 'The operation could not be saved or read. Check local disk space and folder permissions; your data has not been reset.' });
   };
   app.use(errors);

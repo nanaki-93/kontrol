@@ -14,6 +14,7 @@ import { jobsStateSchema, type JobsState } from '../../shared/jobs';
 import { getJobs } from './jobs';
 import { workspaceSchema, hasWorkspaceWork, type Workspace } from '../../shared/workspace';
 import { getWorkspace } from './workspace';
+import { MAX_BACKUP_BYTES, BACKUP_LIMIT_LABEL } from '../../shared/backup';
 
 export function exportData(store: Store): NativeExport {
   return nativeExportSchema.parse({
@@ -98,9 +99,14 @@ export function settingsModule(store: Store): Router {
     res.json(layout);
   });
   router.get('/export', (_req, res) => {
+    const backup = { format: 'kontrol-web', schemaVersion: 5, data: exportData(store), layout: store.get<Layout>('layout'),
+      newsDiscovery: getDiscovery(store).preferences, jobs: getJobs(store), workspace: getWorkspace(store) };
+    const json = JSON.stringify(backup, null, 2);
+    if (Buffer.byteLength(json, 'utf8') > MAX_BACKUP_BYTES) {
+      throw new HttpError(413, 'This workspace exceeds the ' + BACKUP_LIMIT_LABEL + ' JSON backup limit. Stop Kontrol and copy its data directory for a full database backup. Your data has not changed.');
+    }
     res.setHeader('Content-Disposition', 'attachment; filename="kontrol-web-backup.json"');
-    res.json({ format: 'kontrol-web', schemaVersion: 5, data: exportData(store), layout: store.get<Layout>('layout'),
-      newsDiscovery: getDiscovery(store).preferences, jobs: getJobs(store), workspace: getWorkspace(store) });
+    res.type('json').send(json);
   });
   router.post('/import/preview', (req, res) => {
     const { data, discovery, jobs, workspace } = parseImport(req.body);

@@ -2,6 +2,7 @@ import { useState, type FormEvent, type ChangeEvent } from 'react';
 import { Check, Download, Upload, HardDrive, Blocks } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
 import type { Preferences } from '../../../shared/schema';
+import { MAX_BACKUP_BYTES, BACKUP_LIMIT_LABEL } from '../../../shared/backup';
 import { api, download, useCommand } from '../../lib/api';
 import { useSettings } from './api';
 import { PageHeader, ErrorMessage, Loading, Badge, Confirm } from '../../components/ui';
@@ -31,7 +32,7 @@ export function SettingsPage() {
     const file = e.target.files?.[0]; if (!file) return;
     setBusy(true); setError(null); setDone(false); setImport(null);
     try {
-      if (file.size > 16 * 1024 * 1024) throw new Error('Choose a JSON export smaller than 16 MB.');
+      if (file.size > MAX_BACKUP_BYTES) throw new Error('Choose a JSON export no larger than ' + BACKUP_LIMIT_LABEL + '.');
       const source: unknown = JSON.parse(await file.text());
       const summary = await api<ImportSummary>('/settings/import/preview', 'POST', source);
       setImport({ source, summary });

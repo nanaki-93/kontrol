@@ -190,7 +190,11 @@ exports exclude project references/paths, external files, browser drafts,
 news article caches and credentials. They contain unencrypted personal content,
 including the full extracted CV. Original PDF/DOCX/TXT file bytes are not retained.
 
-Current import limits are a 16 MB document, Gregorian/ISO planned dates, at most
+JSON export and import share a 64 MB UTF-8 document limit, including download
+formatting. Export checks the complete file before offering it for download.
+For larger workspaces, stop Kontrol and copy the full data directory (including
+any SQLite WAL/SHM sidecars) as a database backup; export explains this instead
+of producing a file that cannot be restored. Other import limits are Gregorian/ISO planned dates, at most
 four slots per topic, and a Focus preference of 1–1,440 minutes. Incompatible
 exports fail as a whole; no records are silently dropped. Old records without
 pinned lesson content remain readable as saved answers/history; they do not
