@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { JOB_ANALYSIS_TIMEOUT_MS, defaultJobPreferences, matchesJobFilters, jobPreferencesSchema, jobProfileSchema } from '../shared/jobs';
+import { MAX_CV_BYTES, JOB_ANALYSIS_TIMEOUT_MS, defaultJobPreferences, matchesJobFilters, jobPreferencesSchema, jobProfileSchema } from '../shared/jobs';
 import { extractCV } from '../server/jobs/cv';
 import { profilePrompt, matchingPrompt, parseProfile, parseJobMatches, jobAI } from '../server/jobs/ai';
 import { parseJobPostings, parseRemotive, parseArbeitnow, publicJobURL, jobQueries, parseJobSearchLinks, jobListingLinks, jobBoardIndexes, createJobDiscovery } from '../server/jobs/sources';
@@ -14,6 +14,16 @@ test('CV extraction reads TXT, real PDF and DOCX fixtures without retaining bina
     assert.match(cv.text, /Backend engineer/); assert.match(cv.text, /PostgreSQL/);
     assert.equal(cv.bytes, buffer.length); assert.equal(cv.uploadedAt, new Date(jobNow).toISOString());
     assert.deepEqual(Object.keys(cv).sort(), ['bytes', 'name', 'text', 'uploadedAt']);
+  }
+});
+test('CV extraction accepts a readable PDF at the advertised upload limit', async () => {
+  const pdf = pdfFixture();
+  const bytes = Buffer.concat([pdf, Buffer.from('\n%'), Buffer.alloc(MAX_CV_BYTES - pdf.length - 2, 32)]);
+  const cv = await extractCV({ name: 'large-fixture.pdf', base64: bytes.toString('base64') }, jobNow);
+  assert.equal(cv.bytes, MAX_CV_BYTES);
+  assert.match(cv.text, /Backend engineer/);
+  for (const base64 of ['AAA', 'A===', 'AA=A', 'AAAA=', 'AAAA\n', 'AA?=']) {
+    await assert.rejects(extractCV({ name: 'invalid.txt', base64 }));
   }
 });
 test('CV extraction rejects empty, scanned, corrupt, unsupported, binary and oversized inputs', async () => {

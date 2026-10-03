@@ -4,7 +4,10 @@ import { HttpError } from '../errors';
 
 const uploadSchema = z.object({
   name: z.string().trim().min(1).max(180).refine(name => !/[\\/\x00-\x1f]/.test(name), 'Use a filename without a path.'),
-  base64: z.string().min(4).max(Math.ceil(MAX_CV_BYTES / 3) * 4).regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/),
+  // A flat character run avoids the RegExp stack growth of repeating groups
+  // across multi-megabyte uploads. Padding is allowed only at the end.
+  base64: z.string().min(4).max(Math.ceil(MAX_CV_BYTES / 3) * 4)
+    .regex(/^[A-Za-z0-9+/]*={0,2}$/).refine(value => value.length % 4 === 0, 'Invalid base64 length.'),
 });
 
 // Inspect ZIP directory sizes before the DOCX parser inflates any member.
