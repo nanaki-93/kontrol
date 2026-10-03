@@ -5,6 +5,7 @@ import type { Preferences } from '../../../shared/schema';
 import { api, download, useCommand } from '../../lib/api';
 import { useSettings } from './api';
 import { PageHeader, ErrorMessage, Loading, Badge, Confirm } from '../../components/ui';
+import { ProfileSettings } from '../workspace/profile';
 
 function PreferencesForm({ preferences }: { preferences: Preferences }) {
   const command = useCommand(['settings']);
@@ -21,7 +22,7 @@ function PreferencesForm({ preferences }: { preferences: Preferences }) {
     <ErrorMessage error={command.error} /><div className="actions"><button className="button primary" disabled={command.isPending}>Save preferences</button>{saved && <span className="success-text" role="status"><Check size={14} /> Saved</span>}</div>
   </form>;
 }
-interface ImportSummary { source: string; tasks: number; blocks: number; sessions: number; lessons: number; answers: number; feeds: number }
+interface ImportSummary { source: string; sessions: number; lessons: number; answers: number; feeds: number }
 export function SettingsPage() {
   const query = useSettings(), command = useCommand(['settings']), client = useQueryClient();
   const [error, setError] = useState<Error | null>(null), [busy, setBusy] = useState(false), [done, setDone] = useState(false);
@@ -49,11 +50,12 @@ export function SettingsPage() {
     catch (error) { setError(error as Error); } finally { setBusy(false); }
   }
   return <><PageHeader eyebrow="YOUR WORKSPACE, YOUR WAY" title="Settings" description="A few thoughtful defaults. Everything saved on this Mac." />
+    <ProfileSettings />
     <ErrorMessage error={query.error} />{query.isPending ? <Loading /> : query.data && <PreferencesForm key={JSON.stringify(query.data.preferences)} preferences={query.data.preferences} />}
     <div className="settings-grid"><div className="panel"><Blocks size={23} className="accent-text" /><h2>A dashboard that fits.</h2><p className="muted">Choose which widgets you see, change their width, and put them in the order that makes sense to you.</p>
       <a className="button secondary" href="#/?customize=1">Customize dashboard</a></div><div className="panel"><HardDrive size={23} className="accent-text" /><h2>Local by design.</h2><p className="muted">Your data stays on this computer. Connected project files stay in their original folders.</p><Badge tone="success">No account required</Badge></div></div>
     <div className="panel"><div className="section-title"><h2>Your data belongs to you.</h2><Badge>Data transfer</Badge></div><p className="muted">Import a Kontrol backup or a version 1 JSON export from the former macOS app. Imports require an empty workspace and are validated before anything is written.</p>
-      <p className="footnote">Tasks, plans, Focus history, lessons, saved answers, news interests, feeds, JOB and preferences are included. JOB backups include extracted CV text, your profile, preferences and matches. Reconnect project folders separately. API keys and native folder permissions are never imported. Backups contain personal content as unencrypted plain text.</p>
+      <p className="footnote">Backups include goals, saved articles and notes, lesson bookmarks and reviews, application history, follow-up dates, learning, Focus, news interests, feeds, Jobs and preferences. Jobs includes extracted CV text and your reviewed profile. Records from earlier versions are retained. Reconnect project folders separately. Credentials are excluded. Backups contain personal content as unencrypted plain text.</p>
       <div className="actions"><button className="button secondary" onClick={() => void backup()} disabled={busy}><Download size={16} /> Export backup</button><label className={'button secondary file-button ' + (busy ? 'disabled' : '')}><Upload size={16} /> Import JSON<input type="file" accept=".json,application/json" disabled={busy} onChange={e => void preview(e)} /></label></div>
       <ErrorMessage error={error ?? command.error} />{busy && <p role="status" className="muted">Working with your data…</p>}
       {pendingImport && <><div className="import-stats">{Object.entries(pendingImport.summary).map(([key, value]) => <div key={key}><span className="row-meta">{key}</span><strong>{value}</strong></div>)}</div>
@@ -62,7 +64,7 @@ export function SettingsPage() {
     </div>
     <div className="panel"><h2>About Kontrol</h2><p className="muted">Kontrol 0.1 · All 40 starter lessons are included. Previously generated lessons can be imported; creating new AI lessons is not supported.</p>
       <p className="muted">News includes cross-source discovery and optional AI web search. AI search uses your existing PI login and model to interpret specific interests. Check the PI connection in News; standard search needs no key.</p>
-      <p className="muted">JOB uses the same PI connection to analyze an uploaded CV and match retrieved job offers to your reviewed profile, work arrangements, employment types and cities.</p>
+      <p className="muted">Jobs uses the same PI connection to analyze an uploaded CV and match retrieved job offers to your reviewed profile, work arrangements, employment types and cities.</p>
       <p className="footnote">The server listens on this Mac only. Keep it running while using the dashboard. No cloud sync or remote access is configured.</p></div>
   </>;
 }

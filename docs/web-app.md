@@ -43,21 +43,104 @@ server first and copy the whole data directory.
 
 ## Dashboard and modules
 
-The Overview page shows actual counts and independent widgets; it seeds no
-personal tasks, sessions or project references. **Customize** lets you show/hide,
+The Today page surfaces the next learning step, a short news briefing, and job
+matches or application follow-ups. It seeds no personal activity. **Customize** lets you show/hide,
 move earlier/later, and select half/full width for each widget. Layout changes
 save in SQLite. Hiding a widget leaves its full page and data available.
 
+The primary navigation is **Today, Learning, News, Jobs**. Saved library, Focus
+and Projects remain available as utilities; a compact Focus timer can be opened
+from any page. New workspaces start with Learning, News and Jobs widgets.
+Existing layouts are retained. **Customize → Balanced / Learning / Job search**
+previews a preset; **Save layout** applies it and Cancel discards the preview.
+
+**Settings → Your goals and interests** stores a goal, preferred learning topics,
+target roles, interests, a learning path, a weekly lesson target and up to three
+world clocks. Interests and target roles prioritize the briefing. Target roles
+can be copied into the CV review form before confirmation; confirming that form
+also updates the shared target roles. Changing workspace goals alone does not
+silently alter a reviewed CV profile or run a new search.
+
+Today includes quick notes and links, world clocks and a weekly review. The
+review uses the current browser time zone and a Monday week boundary, showing
+completed lessons, recall reviews, saved stories and application stage changes.
+Due application follow-ups are surfaced on Today; they do not schedule background
+notifications or send messages.
+
 | Module | Implemented web behavior |
 | --- | --- |
-| Tasks | Today/overdue, open, unplanned and completed filters; search; quick capture; notes, planned date and due time; edit, complete/reopen and confirmed deletion. |
-| Planner | Date navigation, add/edit/remove time blocks, lesson links, explicit overlap approval, half-open interval comparison. |
-| Focus | Custom duration and presets, optional task link, one active session, pause/resume/end, bounded completion, history, restart reconciliation and backward-clock recovery. Completion leaves the linked record unchanged. |
-| Learning | The 40 existing offline lessons, four persistent choices per topic, all four content formats, pinned attempts, saved responses, solution reveal/self-check, completion, dismissal/restore, history and practiced-concept coverage. |
+| Focus | Custom duration and presets, one active session, pause/resume/end, bounded completion, history, restart reconciliation and backward-clock recovery. |
+| Learning | Forty offline lessons, four persistent choices per topic, pinned answers, self-checks, goal-based paths, mini-project prompts, saved lessons and recall reviews. |
 | Projects | Explicit absolute-path connection to local .kontrol folders, manifests, roadmap/context/rules, deterministic next-three feature selection, validated frontmatter completion and revision-checked Undo, reference-only disconnection. |
-| News | Specific saved interests, cross-publisher search, optional AI web search with cited sources and match explanations, language/region/recency/keyword filters, bounded offline cache, and optional RSS/Atom subscriptions. |
-| JOB | PDF/DOCX/TXT CV upload, PI profile analysis and editable review, independent work-arrangement/employment filters, offline worldwide city search, retrieved job offers ranked by fit with source links and gaps, persisted profile and matches. |
+| News | A finite briefing, related coverage, read status, persistent bookmarks and notes, specific interests, cross-publisher search, optional AI selection and RSS/Atom subscriptions. |
+| Jobs | CV analysis and matching plus saved applications, manual job links, stages, notes, follow-up dates, comparisons and optional learning suggestions. |
 | Settings | Focus/text/motion defaults, data export, web backup restore and legacy macOS export import. |
+
+### Learning paths and recall
+
+Learning includes Go backend interviews, Java backend skills and System Design
+paths assembled from existing catalog objectives. A followed path and preferred
+topics inform the next-lesson suggestion; an already-started lesson takes priority.
+Each path has a mini-project brief that can be saved as a practice project in the
+library, with notes and an optional implementation link. No code is run or graded.
+
+Completed lessons with their full original content pinned become due for recall
+after one day. Reviews save separate responses and self-assessments: Again sets
+one day, Okay three days, and Confident spaces reviews from seven up to thirty
+days. Original answers and completion records are untouched. Historical records
+without full pinned content remain viewable but are not replaced by current
+catalog content to manufacture a review. Neither completion nor recall is a
+mastery score. Lesson bookmarks are searchable in Saved library.
+
+### Briefing and saved reading
+
+News opens on a briefing of up to five stories from the latest searches and
+enabled feeds. It does not fetch automatically. Similar dated headlines are
+grouped conservatively as related coverage; grouping is heuristic, not a verified
+event identity. Source dates remain visible, including unknown dates. AI text is
+labeled as an interpretation of retrieved snippets, including after bookmarking.
+Kontrol does not retrieve full articles for the briefing.
+
+**Save for later**, **Mark read/unread**, and reading notes work on both discovery
+and feed articles. Bookmarks copy the title, excerpt, source, original link and
+dates into the workspace so cache refreshes or interest/feed deletion cannot
+remove saved reading. Reading notes also bookmark a story. If it is later
+unbookmarked, its authored notes are still searchable in Saved library. Links
+to Learning suggest existing lessons and explicitly report missing coverage.
+
+### Applications and preparation
+
+Save retrieved offers or use **Jobs → Applications & preparation → Add a job
+link**, which works without a CV or PI. Saved offers retain their source snapshot
+even after another search, changed filters, or CV removal. Manually entered links
+are saved without fetching or submitting anything. Check original listings for
+current availability.
+
+Applications move through Saved, Applied, Interviewing, Offer and Archived.
+Their notes, stage history and calendar follow-up dates persist. The due filter
+includes today and overdue dates, excluding Offer and Archived. Select two or
+three opportunities to compare their source details side by side.
+
+Preparation identifies supported topic names mentioned in a saved listing. Users
+confirm experience or choose **I want to practice this** before seeing lesson
+suggestions. Missing CV information is not treated as a skill deficiency. Topics
+without suitable catalog content say so; completing a lesson never changes an
+estimated fit score or claims professional proficiency.
+
+### Saved library and persistence
+
+Saved library searches articles and reading notes, lesson titles/content, saved
+offers and application notes, quick notes, pinned links and practice projects.
+Forms keep their current drafts after rejected saves, and conflicting edits
+offer the currently saved content for review before another save.
+
+Workspace records use their own validated SQLite document and are separate from
+News and Jobs search caches. Capacity is bounded to 1,000 article records, 500
+applications, 1,000 notes, 1,000 lesson bookmarks and 1,000 review records, with an
+8 MB workspace limit. Each review and application history allows 1,000 entries.
+Only unbookmarked article records without notes may be evicted when space is
+needed; explicit bookmarks and authored content are never silently discarded.
+Other capacity violations reject the entire write.
 
 Responses autosave after a short delay and on module navigation. Pending drafts
 are also retained in browser storage, namespaced by the database instance.
@@ -81,22 +164,27 @@ implemented without reinstating interactive validation gates.
    credentials, paths and external project contents are absent from the macOS
    export and cannot be transferred through it.
 
-The importer accepts native export schema version 1 or a version-1/version-2/version-3
-kontrol-web backup envelope. New web exports use version 3 to include JOB
-alongside news interests; version 1 and native imports retain current interests,
-and older formats retain the current empty JOB state. Legacy six-widget layouts
-gain JOB without changing existing widget order, visibility or width. Every
-included module is validated before an
+The importer accepts native export schema version 1 or a version-1 through version-5
+kontrol-web backup envelope. New web exports use version 5 with the five-module
+dashboard layout, Jobs, news interests and the saved workspace. Versions 1–4
+remain accepted; version 5 additionally preserves goals, bookmarks, notes,
+applications and reviews. Version 1 and native imports retain
+current interests, and formats before version 3 retain the current empty Jobs state.
+Existing layouts and older backups drop the retired Tasks and Planner widgets;
+six-widget layouts also gain Jobs. The remaining widgets keep their order,
+visibility and width. Saved Tasks and Planner records are retained for backup
+compatibility, and historical Focus titles and links remain intact. These retired
+sections have no pages, widgets or API routes. Every included record is validated before an
 atomic SQLite transaction. Saved authored text, answers, content pins,
 historical snapshots, generated lesson definitions and nonsecret configuration
 are retained. Only an entirely empty curriculum gets the bundled definitions.
 No current definition is substituted for missing historical lesson content.
 
-Import requires a database without personal tasks, blocks, Focus sessions,
-started/terminal learning progress, attempts, or a saved CV, and allows one import per
+Import requires a database without archived tasks or blocks, Focus sessions,
+started/terminal learning progress, attempts, a saved CV, or saved workspace content, and allows one import per
 database. It fails rather than merging ambiguously or overwriting existing
 work. Use a separate KONTROL_DATA_DIR to restore a backup alongside current
-work. The web backup includes dashboard layout, news interests, extracted CV text,
+work. The web backup includes the saved workspace, dashboard layout, news interests, extracted CV text,
 reviewed job profile, job preferences and cached matches; native exports do not. Web
 exports exclude project references/paths, external files, browser drafts,
 news article caches and credentials. They contain unencrypted personal content,
@@ -185,9 +273,9 @@ and connection status), and server/modules/news.ts
 (HTTP routes and persistence). UI components for interests, connection, discovery,
 articles, feeds and the dashboard widget live under src/modules/news/.
 
-## JOB: CV to matching offers
+## Jobs: CV to matching offers
 
-1. Open **JOB** and upload a **PDF, DOCX or UTF-8 TXT** CV (up to 5 MB,
+1. Open **Jobs** and upload a **PDF, DOCX or UTF-8 TXT** CV (up to 5 MB,
    PDF up to 25 pages, extracted text up to 60,000 characters). Extraction uses
    local PDF.js/Mammoth parsers; scanned PDFs need OCR before upload. Invalid,
    unreadable and oversized files leave the previous CV intact.
@@ -219,18 +307,48 @@ qualifiers, such as `Tokyo, Japan`, `Berlin, DE`, or `Paris, Texas`. Only matchi
 city records reach the browser; the catalog is not part of the frontend bundle.
 Attribution is shown in the city picker. City and profile review work offline.
 
-Search uses up to two reviewed role titles per selected city (at most ten Bing
-queries), bounded direct page retrieval, the latest 100 Remotive remote postings,
-and up to 500 Arbeitnow postings. Only single structured `JobPosting` records
-are accepted from web pages; general search snippets and news articles cannot
-become offers. Direct job-board records provide an additional source, with
+Search asks PI to find current listings using its model provider's hosted
+web search. This supports PI's OpenAI Responses and Codex providers and uses the
+existing PI login; no separate search API key is needed. It does not select or
+guarantee Google as the underlying search index. Only public URLs present in
+completed provider search evidence are accepted, and Kontrol then retrieves each
+page before accepting a listing. PI receives roles, skills, selected cities and
+filters, including the posting-date cutoff, for discovery.
+
+For software profiles selecting cities in Japan or Milan, discovery also reads
+TokyoDev and Reteinformaticalavoro indexes directly, concurrently with PI search.
+These indexes are fetched afresh and their linked offers must pass the same
+structured-data and filter checks. This does not depend on a search engine
+returning the board in its results. Italian `/lavoro/` links are supported.
+Direct board retrieval has a 30-second cap and follows at most ten offers per
+site, twenty total, within one level of each index.
+
+If PI search and direct boards yield no readable, relevant postings passing the
+filters, Bing and then DuckDuckGo provide fallbacks using up to two reviewed role
+titles per selected city (at most ten queries per provider). Each provider can
+retrieve up to 20 result pages and one level of up to 20 relevant offer links
+from those pages, capped at ten linked offers per site. Source discovery shares
+a 110-second limit: PI inference has a 60-second limit, its search/retrieval phase
+has an 80-second cap, and Bing has a 15-second cap. The latest 100 Remotive remote
+postings and up to 500 Arbeitnow postings provide additional candidates.
+Only single structured `JobPosting` records are accepted from web pages; job
+directories, general search snippets and news articles cannot become offers.
+Direct job-board records provide an additional source, with
 Arbeitnow focused mainly on Germany. Source URLs and metadata come from retrieved
-records, never from the model. Provider and page failures are reported separately
-from an empty successful search, and no inference runs for an empty candidate list.
+records, never from the model's prose. Provider and page failures are reported
+separately from an empty successful search, and ranking is skipped for an empty
+candidate list.
 
 Office/hybrid city matching requires both city and country evidence. Ambiguous
 Arbeitnow locations get a bounded attempt to read their structured posting;
-missing countries are not guessed. Remote listings must explicitly cover a
+missing countries are not guessed. Tokyo also includes ward addresses such as
+Minato-ku when the source explicitly identifies Tokyo as the region and Japan
+as the country. Italian listings using Milano match the catalog's Milan entry;
+a repeated matching country in the city field, such as `Milano, Italy`, is also
+accepted. The separate country must still match; conflicting country qualifiers
+are rejected. Other same-named states or prefectures are not
+treated as cities.
+Remote listings must explicitly cover a
 selected country or worldwide work when cities are selected. This checks source
 geography, not visa or work authorization. With a specific employment or work
 arrangement filter, unstated values are excluded; selecting all arrangements
@@ -246,18 +364,23 @@ and structured metadata. Check current availability and eligibility on the sourc
 Remotive's API is delayed by 24 hours; its response is cached for six hours,
 Arbeitnow's for ten minutes, within the running server process.
 
-JOB reuses News's PI executable/model/login configuration and `PI_NEWS_*`
-overrides. It uses a dedicated job-analysis system prompt with the same isolated,
-tool-free, session-free runner. Upload and city search make no AI request. Only
-**Analyze CV** sends CV text; **Find matching jobs** sends the reviewed profile
-and source descriptions to PI and role/location/filter queries to Bing. Inference
+Jobs reuses News's PI executable/model/login configuration and `PI_NEWS_*`
+overrides. Analysis and ranking use dedicated system prompts and the isolated,
+tool-free, session-free runner. Discovery enables one bundled extension that
+adds only hosted web search and records provider source URLs in the temporary
+directory; local tools, user extensions, repository context and saved sessions
+remain disabled. Upload and city search make no AI request. Only **Analyze CV**
+sends CV text; **Find matching jobs** sends roles/skills/filters to PI for search,
+then the reviewed profile and retrieved descriptions for ranking. Role/location/
+filter queries also go to Bing and DuckDuckGo when fallback is needed. Inference
 uses the configured provider's usage limits or billing. No CV is sent to a job
 board, recruiter or employer. Do not put contact details into reviewed profile
 fields if you do not want those fields included in matching requests.
 
-One JOB upload/analysis/search can run at a time. Analysis has a 120-second limit;
-search has a 110-second shared limit, including bounded source retrieval and at
-most one PI ranking invocation. Mutations compare revisions. A changed CV,
+One Jobs upload/analysis/search can run at a time. Analysis has a 120-second limit;
+search has a 180-second shared limit, including bounded source retrieval, at most
+one PI discovery invocation and at most one PI ranking invocation. Mutations
+compare revisions. A changed CV,
 profile or preference set clears stale matches. Failed requests retain previous
 data, and deletion cancels an in-flight request and prevents late results from
 restoring removed data. Saved matches can be read without a network. Remove CV
@@ -278,6 +401,7 @@ deadline for the response. Completed commands update the profile and release
 their busy state immediately, without waiting for a background status refresh.
 
 Source references: [Remotive API](https://github.com/remotive-com/remote-jobs-api),
+[OpenAI hosted web search](https://developers.openai.com/api/docs/guides/tools-web-search),
 [Arbeitnow API terms](https://www.arbeitnow.com/terms),
 [JobPosting vocabulary](https://schema.org/JobPosting),
 [cities.json / GeoNames](https://github.com/lutangar/cities.json),
@@ -303,8 +427,10 @@ src/app/modules.ts is the frontend registration point. A module supplies its
 ID, navigation label/icon, page and widget. Page and widget share the same query
 cache and API; the dashboard has no second copy of feature state. Module
 components are loaded in separate frontend chunks and have error boundaries.
-Shared query hooks are separate from component entry points to avoid pulling
-entire module UIs into the shell.
+The shared workspace API owns durable bookmarks, applications, notes, goals and
+reviews. The library and Today use the same query cache as feature pages.
+Schemas and deterministic recommendation/grouping helpers live in
+shared/workspace.ts; routes live in server/modules/workspace.ts.
 
 To add a module:
 
@@ -337,7 +463,7 @@ for the supported `.kontrol` files.
 ## Scope and limits
 
 - Creating new AI lessons is not supported. Imported generated lessons and
-  nonsecret AI settings are retained. News and JOB AI use PI as described above.
+  nonsecret AI settings are retained. News and Jobs AI use PI as described above.
 - The web app runs locally, with no cloud sync, accounts or remote access.
 - Project connection uses an absolute-path field; symbolic links inside
   `.kontrol` are conservatively rejected.

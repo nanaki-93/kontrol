@@ -8,11 +8,13 @@ import { withAPI } from './helpers';
 import { Store } from '../server/store';
 import { jobsModule, getJobs } from '../server/modules/jobs';
 import { jobAI } from '../server/jobs/ai';
+import { createJobDiscovery } from '../server/jobs/sources';
+import { piJobSearch } from '../server/jobs/search';
 import { NewsFetchError } from '../server/news/transport';
 import { settingsModule } from '../server/modules/settings';
-import { defaultLayout, type Layout } from '../shared/schema';
+import { type Layout } from '../shared/schema';
 import { emptyJobs, type JobsResponse, type JobsState } from '../shared/jobs';
-import { berlin, profile, cvText, cvUpload, job, match, jobNow, readyPI } from './jobs-fixtures';
+import { berlin, tokyo, profile, cvText, cvUpload, job, match, jobNow, readyPI } from './jobs-fixtures';
 
 type Request = Parameters<Parameters<typeof withAPI>[0]>[0]['request'];
 async function state(request: Request): Promise<JobsResponse> { return (await request('/jobs')).json(); }
@@ -120,6 +122,50 @@ test('empty discovery is a successful empty result without PI ranking; warnings 
     assert.deepEqual(saved.lastSearch?.warnings, ['Fixture source unavailable.']);
   }, { jobs: { ...options, sources: async () => ({ sources: [], warnings: ['Fixture source unavailable.'] }), rank: async () => { calls++; return []; } } });
 });
+for (const provider of ['PI', 'DuckDuckGo', 'Direct boards']) test(`search ranks and saves verified ${provider} listings from discovery through the JOB API`, async () => {
+  const offer = provider === 'Direct boards' ? 'https://www.tokyodev.com/companies/fixture/jobs/backend' : 'https://board.example/jobs/backend';
+  const calls: string[] = [];
+  const sources = createJobDiscovery(async url => {
+    calls.push(url);
+    if (url.includes('remotive.com/api')) return '{"jobs":[]}';
+    if (url.includes('arbeitnow.com/api')) return '{"data":[]}';
+    if (provider === 'Direct boards' && url === 'https://www.tokyodev.com/jobs/backend') return '<a href="/companies/fixture/jobs/backend">Backend engineer</a>';
+    if (url.includes('bing.com/search')) return '<rss><channel><item><title>Backend tutorials</title><link>https://example.com/tutorials</link></item></channel></rss>';
+    if (url.includes('duckduckgo.com/html')) return '<a class="result__a" href="https://board.example/jobs">Backend jobs</a>';
+    if (url === 'https://board.example/jobs') return '<a href="/jobs/backend">Backend Engineer</a>';
+    if (url === offer) return '<script type="application/ld+json">' + JSON.stringify({ '@type': 'JobPosting', title: job.title,
+      hiringOrganization: { name: job.company }, description: job.description, datePosted: '2026-10-01', employmentType: 'FULL_TIME',
+      jobLocation: { address: { addressLocality: 'Minato-ku', addressRegion: 'Tokyo', addressCountry: 'JP' } },
+    }) + '</script>';
+    return '<p>Backend tutorial</p>';
+  }, provider !== 'DuckDuckGo' ? piJobSearch({ run: async prompt => {
+    assert.deepEqual(JSON.parse(prompt).roles, profile.roles);
+    assert.doesNotMatch(prompt, /Fixture Candidate/);
+    if (provider === 'Direct boards') return { text: '{"links":[]}', urls: [] };
+    return { text: JSON.stringify({ links: [
+      { url: offer, title: 'Model title must not replace the retrieved job title' },
+      { url: 'https://invented.example/jobs/fake', title: 'Invented listing' },
+    ] }), urls: [offer] };
+  } }) : undefined);
+  const ai = jobAI({ run: async prompt => {
+    const evidence = JSON.parse(prompt).sources;
+    assert.equal(evidence.length, 1); assert.equal(evidence[0].url, offer); assert.equal(evidence[0].title, job.title);
+    return JSON.stringify({ matches: [{ id: evidence[0].id, score: 88, reason: 'Go and PostgreSQL match.', gaps: ['Confirm job requirements.'] }] });
+  } });
+  await withAPI(async ({ request }) => {
+    await prepare(request);
+    const preferences = { ...(await state(request)).preferences, cities: [tokyo], employmentTypes: ['full_time'] };
+    assert.equal((await action(request, '/preferences', 'PUT', { preferences })).status, 200);
+    assert.equal((await action(request, '/search')).status, 200);
+    const saved = await state(request);
+    assert.equal(saved.lastSearch?.sourceCount, 1); assert.equal(saved.lastSearch?.error, null);
+    assert.equal(saved.matches.length, 1); assert.equal(saved.matches[0].url, offer);
+    assert.deepEqual(saved.matches[0].cities, [{ name: 'Minato-ku', region: 'Tokyo', country: 'JP' }]);
+    assert.equal(calls.filter(url => url === offer).length, 1);
+    assert.equal(calls.some(url => url.includes('invented.example')), false);
+    assert.equal(calls.some(url => /bing\.com|duckduckgo\.com/.test(url)), provider === 'DuckDuckGo');
+  }, { jobs: { ...options, sources, rank: ai.rank } });
+});
 test('stale revisions cannot overwrite current CVs, filters or profiles', async () => {
   await withAPI(async ({ request }) => {
     const original = await state(request);
@@ -156,32 +202,39 @@ test('city lookup is validated independently of CV upload and returns selected c
     assert.equal(response.status, 200); assert.deepEqual(await response.json(), [berlin]);
   }, { jobs: { ...options, cities: async query => { assert.equal(query, 'Berlin'); return [berlin]; } } });
 });
-test('version-3 backups round-trip JOB data and protect existing CVs from import', async () => {
+test('version-3 through version-5 backups round-trip JOB data and protect existing CVs from import', async () => {
   let backup: Record<string, unknown> = {}, saved: JobsState | null = null;
   await withAPI(async ({ request, store }) => {
     await prepare(request); await action(request, '/search'); saved = getJobs(store);
     backup = await (await request('/settings/export')).json();
-    assert.equal(backup.schemaVersion, 3); assert.deepEqual(backup.jobs, saved);
+    assert.equal(backup.schemaVersion, 5); assert.deepEqual(backup.jobs, saved);
     assert.equal((await request('/settings/import', 'POST', backup)).status, 409);
     assert.deepEqual(getJobs(store), saved);
   }, { jobs: options });
-  await withAPI(async ({ request, store }) => {
-    const preview = await (await request('/settings/import/preview', 'POST', backup)).json();
+  for (const schemaVersion of [3, 4, 5]) await withAPI(async ({ request, store }) => {
+    const layout = backup.layout as Layout;
+    const source = { ...backup, schemaVersion, layout: schemaVersion === 3 ? [
+      { id: 'tasks', visible: true, width: 'normal' }, ...layout,
+      { id: 'schedule', visible: false, width: 'wide' },
+    ] : layout };
+    const preview = await (await request('/settings/import/preview', 'POST', source)).json();
     assert.equal(preview.cvs, 1); assert.equal(preview.jobMatches, 1);
-    assert.equal((await request('/settings/import', 'POST', backup)).status, 200);
+    assert.equal((await request('/settings/import', 'POST', source)).status, 200);
+    assert.deepEqual((await (await request('/settings')).json()).layout, layout);
     const restored = getJobs(store);
     assert.notEqual(restored.revision, saved!.revision);
     assert.deepEqual({ ...restored, revision: saved!.revision }, saved);
   });
 });
-test('legacy backups add JOB without losing hidden widgets, order or widths; malformed JOB import stays atomic', async () => {
+test('legacy backups retire sections and add JOB without losing customization; malformed JOB import stays atomic', async () => {
   let backup: Record<string, unknown> = {};
   await withAPI(async ({ request }) => { backup = await (await request('/settings/export')).json(); });
-  const legacyLayout = defaultLayout.filter(item => item.id !== 'jobs').reverse().map(item => ({ ...item, visible: false, width: 'normal' }));
+  const legacyLayout = ['tasks', 'focus', 'schedule', 'projects', 'learning', 'news'].reverse().map(id => ({ id, visible: false, width: 'normal' }));
+  const remaining = legacyLayout.filter(item => item.id !== 'tasks' && item.id !== 'schedule');
   for (const schemaVersion of [1, 2]) await withAPI(async ({ request }) => {
     assert.equal((await request('/settings/import', 'POST', { ...backup, schemaVersion, layout: legacyLayout })).status, 200);
     const saved = await (await request('/settings')).json();
-    assert.deepEqual(saved.layout.slice(0, 6), legacyLayout); assert.equal(saved.layout[6].id, 'jobs');
+    assert.deepEqual(saved.layout, [...remaining, { id: 'jobs', visible: true, width: 'wide' }]);
     assert.equal((await state(request)).cv, null);
   });
   await withAPI(async ({ request, store }) => {
@@ -194,7 +247,9 @@ test('legacy backups add JOB without losing hidden widgets, order or widths; mal
 test('JOB and existing dashboard layout survive reopening an isolated database', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'kontrol-jobs-persistence-')), path = join(directory, 'fixture.sqlite');
   try {
-    const store = new Store(path), layout = defaultLayout.filter(item => item.id !== 'jobs').reverse();
+    const store = new Store(path), layout = ['tasks', 'focus', 'schedule', 'projects', 'learning', 'news', 'jobs'].reverse()
+      .map((id, index) => ({ id, visible: index % 2 === 0, width: index % 2 === 0 ? 'normal' : 'wide' }));
+    const remaining = layout.filter(item => item.id !== 'tasks' && item.id !== 'schedule');
     store.set('layout', layout); jobsModule(store, options); settingsModule(store);
     const saved = { ...getJobs(store), cv: { name: 'cv.txt', bytes: Buffer.byteLength(cvText), text: cvText, uploadedAt: new Date(jobNow).toISOString() }, profile, profileConfirmed: true, matches: [match] };
     store.set('jobs', saved); store.close();
@@ -202,8 +257,7 @@ test('JOB and existing dashboard layout survive reopening an isolated database',
     try {
       jobsModule(reopened, options); settingsModule(reopened);
       assert.deepEqual(getJobs(reopened), saved);
-      assert.deepEqual(reopened.get<Layout>('layout').slice(0, 6), layout);
-      assert.equal(reopened.get<Layout>('layout').length, 7);
+      assert.deepEqual(reopened.get<Layout>('layout'), remaining);
     } finally { reopened.close(); }
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

@@ -1,36 +1,47 @@
 import { Suspense, useEffect, useState } from 'react';
 import { ArrowDown, ArrowUp, ArrowUpRight, Check, SlidersHorizontal, RotateCcw, Plus } from 'lucide-react';
 import { defaultLayout, type Layout } from '../../shared/schema';
-import { dayKey, isTaskForDay } from '../../shared/dates';
+import { dayKey } from '../../shared/dates';
+import { canonicalURL, dueReviews, nextLesson, layoutPresets } from '../../shared/workspace';
 import { useCommand } from '../lib/api';
-import { useTasks } from '../modules/tasks/api';
-import { useFocus } from '../modules/focus/api';
 import { useSettings } from '../modules/settings/api';
 import { useLearning } from '../modules/learning/api';
-import { useProjects } from '../modules/projects/api';
+import { useJobs } from '../modules/jobs/api';
+import { useNews } from '../modules/news/api';
+import { briefingStories } from '../modules/news/briefing';
+import { useWorkspace } from '../modules/workspace/api';
+import { QuickCapture } from '../modules/workspace/notes';
+import { WeeklyReview } from '../modules/workspace/weekly';
 import { ErrorMessage, Loading, Empty, ModuleBoundary, PageHeader } from '../components/ui';
 import { modules } from './modules';
 
-function OverviewStats() {
-  const tasks = useTasks(), focus = useFocus(), learning = useLearning(), projects = useProjects();
-  const today = dayKey();
-  const stats = [
-    { label: 'TASKS TO DO', value: tasks.data?.filter(t => !t.completedAt && isTaskForDay(t, today)).length, unit: 'for today', route: 'tasks', caption: 'Make a little headway' },
-    { label: 'TIME WELL SPENT', value: focus.data && Math.floor(focus.data.sessions.filter(s => s.endedAt && dayKey(new Date(s.endedAt)) === today).reduce((n, s) => n + s.accumulatedActiveSeconds, 0) / 60), unit: 'min today', route: 'focus', caption: 'Give your attention a home' },
-    { label: 'SMALL DISCOVERIES', value: learning.data?.progress.filter(p => p.status === 'completed').length, unit: 'lessons finished', route: 'learning', caption: 'Build on what you know' },
-    { label: 'PROJECTS CONNECTED', value: projects.data?.length, unit: 'in your workspace', route: 'projects', caption: 'Keep moving things forward' },
+function TodayActions() {
+  const learning = useLearning(), workspace = useWorkspace(), news = useNews(), jobs = useJobs();
+  const lesson = learning.data ? nextLesson(learning.data, workspace.data) : undefined;
+  const due = learning.data && workspace.data ? dueReviews(learning.data, workspace.data).length : 0;
+  const stories = news.data ? briefingStories(news.data, workspace.data) : [];
+  const unread = stories.filter(s => !workspace.data?.articles.some(a => canonicalURL(a.article.url) === canonicalURL(s.lead.url) && a.readAt)).length;
+  const followups = workspace.data?.jobs.filter(j => j.followUpOn && j.followUpOn <= dayKey() && !['archived', 'offer'].includes(j.stage)) ?? [];
+  const matches = jobs.data?.matches.filter(job => (!job.expiresAt || Date.parse(job.expiresAt) > Date.now()) && !workspace.data?.jobs.some(j => canonicalURL(j.job.url) === canonicalURL(job.url))) ?? [];
+  const actions = [
+    { label: 'LEARN', title: lesson?.title ?? 'Choose your next learning step', detail: lesson ? lesson.estimatedMinutes + ' min · ' + due + ' reviews due' : due + ' reviews due', route: lesson ? 'learning?lesson=' + encodeURIComponent(lesson.id) : 'learning', action: 'Continue learning' },
+    { label: 'STAY INFORMED', title: stories.length ? stories.length + ' stories in your briefing' : 'Build your daily briefing', detail: stories.length ? unread + ' unread · from your latest refresh' : 'Start with an interest you care about', route: stories.length ? 'news' : 'news?view=discover', action: stories.length ? 'Read your briefing' : 'Find relevant stories' },
+    { label: 'YOUR NEXT OPPORTUNITY', title: followups.length ? followups.length + ' follow-ups need your attention' : matches.length ? matches.length + ' matches to review' : 'Find and save your next role', detail: followups.length ? 'Applications due today or earlier' : 'Keep a shortlist and prepare your next move', route: followups.length ? 'jobs?view=tracker&due=1' : 'jobs', action: followups.length ? 'Review follow-ups' : 'Explore opportunities' },
   ];
-  return <div className="stats-grid">{stats.map((stat, i) => <a href={'#/' + stat.route} className="stat-card" key={stat.label}><div className="row-spread"><span className="eyebrow">{stat.label}</span><span className="stat-index">0{i + 1}</span></div><div className="stat-value">{stat.value === undefined ? '—' : String(stat.value).padStart(2, '0')}<span>{stat.unit}</span></div><p>{stat.caption}<ArrowUpRight size={14} /></p></a>)}</div>;
+  return <><ErrorMessage error={workspace.error ?? learning.error ?? news.error ?? jobs.error} />
+    <div className="today-actions">{actions.map((item, i) => <a href={'#/' + item.route} className="today-action" key={item.label}><div className="row-spread"><span className="eyebrow">{item.label}</span><span className="stat-index">0{i + 1}</span></div><h2>{[learning.isPending, news.isPending, jobs.isPending][i] ? 'Loading your next step…' : item.title}</h2><p>{workspace.isPending ? 'Loading your saved goals…' : item.detail}</p><span className="action-caption">{item.action}<ArrowUpRight size={15} /></span></a>)}</div>
+  </>;
 }
 export function Dashboard() {
   const settings = useSettings(), command = useCommand(['settings']);
+  const workspace = useWorkspace();
   const [customizing, setCustomizing] = useState(window.location.hash.includes('customize=1'));
   const [draft, setDraft] = useState<Layout | null>(null);
   const [now, setNow] = useState(new Date());
   useEffect(() => { const timer = setInterval(() => setNow(new Date()), 60_000); return () => clearInterval(timer); }, []);
   const layout = draft ?? settings.data?.layout ?? defaultLayout;
   const date = now.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
-  const greeting = now.getHours() < 12 ? 'A little clarity for your morning.' : now.getHours() < 18 ? 'A little clarity for your day.' : 'A little clarity for your evening.';
+  const greeting = workspace.data?.profile.goal || 'Learn something useful. Stay informed. Move toward your next opportunity.';
   function move(index: number, direction: number) {
     const next = [...layout];
     [next[index], next[index + direction]] = [next[index + direction], next[index]];
@@ -40,12 +51,13 @@ export function Dashboard() {
     try { await command.mutateAsync({ path: '/settings/layout', method: 'PUT', body: layout }); setCustomizing(false); setDraft(null); history.replaceState(null, '', '#/'); }
     catch { /* Keep layout edits. */ }
   }
-  return <><PageHeader eyebrow={date.toUpperCase()} title="Your day, in view." description={greeting}
+  return <><PageHeader eyebrow={date.toUpperCase()} title="What matters today." description={greeting}
     action={<button className={'button ' + (customizing ? 'primary' : 'secondary')} onClick={() => { setDraft(null); setCustomizing(!customizing); }}><SlidersHorizontal size={16} />{customizing ? 'Close customization' : 'Customize'}</button>} />
-    <OverviewStats />
+    <TodayActions />
     <div className="dashboard-divider"><div><span className="eyebrow">YOUR DASHBOARD</span><span className="dashboard-count">{layout.filter(w => w.visible).length} widgets</span></div><span className="row-meta">A space for what matters.</span></div>
     <ErrorMessage error={settings.error} />
     {customizing && <section className="panel layout-editor"><div className="section-title"><h2>Arrange your workspace.</h2><button className="text-link" onClick={() => setDraft(defaultLayout)}><RotateCcw size={14} /> Reset layout</button></div><p className="muted">Show what you need. Change the size. Put your priorities first.</p>
+      <div className="actions layout-presets"><span className="row-meta">Start with a preset:</span>{(['balanced', 'learning', 'job-search'] as const).map(preset => <button key={preset} className="button secondary" onClick={() => setDraft(structuredClone(layoutPresets[preset]))}>{preset === 'job-search' ? 'Job search' : preset === 'learning' ? 'Learning' : 'Balanced'}</button>)}</div>
       <ol className="layout-list">{layout.map((item, index) => {
         const module = modules.find(m => m.id === item.id)!;
         return <li key={item.id}><label className="checkbox-label"><input type="checkbox" checked={item.visible} onChange={e => setDraft(layout.map(w => w.id === item.id ? { ...w, visible: e.target.checked } : w))} /><module.icon size={17} /><span>{module.title}</span></label>
@@ -61,6 +73,10 @@ export function Dashboard() {
       </section>;
     })}</div>}
     {!layout.some(w => w.visible) && <div className="panel"><Empty title="A blank canvas, by choice." action={<button className="button secondary" onClick={() => setCustomizing(true)}><Plus size={16} /> Add widgets</button>}>Bring back a widget whenever you need it. Your data and feature pages are still here.</Empty></div>}
+    <div className="today-utilities"><QuickCapture /><section className="panel"><div className="section-title"><h2>Across time zones</h2><a className="text-link" href="#/settings">Edit clocks →</a></div>
+      {workspace.data?.profile.timeZones.length ? <div className="world-clocks">{workspace.data.profile.timeZones.map(zone => <div key={zone.label + zone.zone}><span>{zone.label}</span><strong>{now.toLocaleTimeString(undefined, { timeZone: zone.zone, hour: '2-digit', minute: '2-digit' })}</strong><span className="row-meta">{now.toLocaleDateString(undefined, { timeZone: zone.zone, weekday: 'short', month: 'short', day: 'numeric' })}</span></div>)}</div> : <p className="muted">Add clocks for the places where you work or apply in Settings.</p>}
+    </section></div>
+    <WeeklyReview />
     <footer className="dashboard-footer"><span><i className="status-dot" /> LOCAL WORKSPACE</span><span>A little more intentional, every day.</span><span>KONTROL / 0.1</span></footer>
   </>;
 }

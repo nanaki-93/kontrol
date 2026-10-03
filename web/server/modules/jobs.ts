@@ -8,8 +8,10 @@ import { NewsFetchError } from '../news/transport';
 import { piStatus, type PIOptions } from '../news/pi';
 import { extractCV } from '../jobs/cv';
 import { jobAI } from '../jobs/ai';
-import { createJobDiscovery } from '../jobs/sources';
+import { createJobDiscovery, fetchJobText } from '../jobs/sources';
+import { piJobSearch } from '../jobs/search';
 import { searchCities } from '../jobs/cities';
+import { getWorkspace } from './workspace';
 
 export interface JobsOptions {
   clock?: () => number; pi?: PIOptions;
@@ -25,7 +27,7 @@ function message(error: unknown): string {
 }
 export function jobsModule(store: Store, options: JobsOptions = {}): Router {
   const router = Router(), now = options.clock ?? Date.now, ai = jobAI({ pi: options.pi });
-  const discover = options.sources ?? createJobDiscovery();
+  const discover = options.sources ?? createJobDiscovery(fetchJobText, piJobSearch({ pi: options.pi }));
   store.init('jobs', emptyJobs(randomUUID()));
   getJobs(store); // Reject malformed persisted records rather than resetting them.
   let activity: JobsResponse['activity'] = null, controller: AbortController | null = null;
@@ -80,7 +82,15 @@ export function jobsModule(store: Store, options: JobsOptions = {}): Router {
     const state = current(req.body);
     if (!state.cv || !state.profile) throw new HttpError(409, 'Upload and analyze your CV before reviewing the profile.');
     const profile = jobProfileSchema.parse(req.body.profile);
-    res.json(changed({ ...state, profile, profileConfirmed: true }));
+    res.json(store.transaction(() => {
+      const saved = changed({ ...state, profile, profileConfirmed: true });
+      if (store.has('workspace')) {
+        const workspace = getWorkspace(store);
+        workspace.profile.targetRoles = [...profile.roles]; workspace.revision = randomUUID();
+        store.set('workspace', workspace);
+      }
+      return saved;
+    }));
   });
   router.post('/analyze', async (req, res) => {
     const state = current(req.body);

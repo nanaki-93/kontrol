@@ -25,6 +25,7 @@ export function jobCommandOptions(client: QueryClient) {
       await client.cancelQueries({ queryKey: ['jobs'] });
       client.setQueryData<JobsResponse>(['jobs'], state => state ? { ...state, ...data, activity: null } : state);
       void client.invalidateQueries({ queryKey: ['jobs'] });
+      void client.invalidateQueries({ queryKey: ['workspace'] });
     },
   });
 }

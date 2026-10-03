@@ -2,14 +2,13 @@ import express, { type ErrorRequestHandler } from 'express';
 import { z } from 'zod';
 import { Store } from './store';
 import { HttpError } from './errors';
-import { tasksModule } from './modules/tasks';
-import { scheduleModule } from './modules/schedule';
 import { focusModule } from './modules/focus';
 import { learningModule } from './modules/learning';
 import { projectsModule } from './modules/projects';
 import { newsModule, type NewsOptions } from './modules/news';
 import { settingsModule } from './modules/settings';
 import { jobsModule, type JobsOptions } from './modules/jobs';
+import { workspaceModule } from './modules/workspace';
 
 export function createApp(store: Store, options: { origin: string; clock?: () => number; feedFetcher?: (url: string) => Promise<string>; news?: NewsOptions; jobs?: JobsOptions }) {
   const app = express();
@@ -37,13 +36,12 @@ export function createApp(store: Store, options: { origin: string; clock?: () =>
   });
   app.use(express.json({ limit: '16mb' }));
   // Registration is explicit. Modules own their routes and persisted documents.
-  app.use('/api/tasks', tasksModule(store));
-  app.use('/api/schedule', scheduleModule(store));
   app.use('/api/focus', focusModule(store, options.clock));
   app.use('/api/learning', learningModule(store));
   app.use('/api/projects', projectsModule(store));
   app.use('/api/news', newsModule(store, options.feedFetcher, options.news));
   app.use('/api/jobs', jobsModule(store, options.jobs));
+  app.use('/api/workspace', workspaceModule(store, options.clock));
   app.use('/api/settings', settingsModule(store));
   app.use('/api', (_req, res) => res.status(404).json({ error: 'Unknown API route.' }));
   const errors: ErrorRequestHandler = (error: unknown, _req, res, _next) => {

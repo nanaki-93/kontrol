@@ -11,7 +11,7 @@
     "build": "tsc --noEmit && vite build",
     "start": "tsx server/index.ts --production",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test tests/domain.test.ts tests/api.test.ts tests/projects-persistence.test.ts tests/news-discovery.test.ts tests/news-ai.test.ts tests/news-api.test.ts tests/news-pi.test.ts tests/news-pi-cli.test.ts tests/jobs-domain.test.ts tests/jobs-api.test.ts tests/jobs-client.test.ts"
+    "test": "tsx --test tests/domain.test.ts tests/api.test.ts tests/projects-persistence.test.ts tests/news-discovery.test.ts tests/news-ai.test.ts tests/news-api.test.ts tests/news-pi.test.ts tests/news-pi-cli.test.ts tests/jobs-domain.test.ts tests/jobs-api.test.ts tests/jobs-client.test.ts tests/workspace-domain.test.ts tests/workspace-api.test.ts"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.104.0",

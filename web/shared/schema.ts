@@ -8,7 +8,8 @@ export const instant = z.iso.datetime({ precision: 3 }).refine(value =>
   Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value, 'Invalid date.');
 const nullableInstant = instant.nullable();
 const stringList = z.array(id).max(10_000).refine(values => new Set(values).size === values.length, 'Duplicate IDs in a set.');
-export const plannedDaySchema = z.object({
+// Retained only to validate and preserve records in backups from earlier versions.
+const plannedDaySchema = z.object({
   calendarIdentifier: z.enum(['gregorian', 'iso8601'], {
     error: 'Web import supports Gregorian/ISO planned dates. Other calendars need conversion before import.',
   }),
@@ -24,11 +25,11 @@ export const plannedDaySchema = z.object({
   return date.getUTCFullYear() === value.year && date.getUTCMonth() === value.month - 1 && date.getUTCDate() === value.day;
 }, 'Invalid planned day.');
 
-export const taskSchema = z.object({
+const taskSchema = z.object({
   id: z.uuid(), title, notes: text.nullable(), dueAt: nullableInstant,
   plannedDay: plannedDaySchema.nullable(), createdAt: instant, completedAt: nullableInstant,
 });
-export const blockSchema = z.object({
+const blockSchema = z.object({
   id: z.uuid(), title, startAt: instant, endAt: instant, note: text.nullable(),
   lessonID: id.nullable(), linkedTitleSnapshot: text.nullable(),
 }).refine(value => value.endAt > value.startAt, 'The end must be after the start.');
@@ -153,17 +154,26 @@ export const nativeExportSchema = z.object({
   }
 });
 
-export const widgetIDs = ['tasks', 'schedule', 'focus', 'learning', 'projects', 'news', 'jobs'] as const;
+export const widgetIDs = ['focus', 'learning', 'projects', 'news', 'jobs'] as const;
 export const layoutSchema = z.array(z.object({
   id: z.enum(widgetIDs), visible: z.boolean(), width: z.enum(['normal', 'wide']),
 })).length(widgetIDs.length).refine(items => new Set(items.map(x => x.id)).size === widgetIDs.length);
-// Version 1/2 backups and existing workspaces predate JOB. Add only the new
-// widget, preserving all prior order, width and visibility choices.
+// Remove retired widgets from complete six/seven-widget layouts. Older backups
+// also gain JOB; all remaining order, width and visibility choices are preserved.
+const legacyWidgetIDs = ['tasks', 'schedule', 'focus', 'learning', 'projects', 'news'] as const;
+const legacyLayoutSchema = z.array(z.object({
+  id: z.enum([...legacyWidgetIDs, 'jobs']), visible: z.boolean(), width: z.enum(['normal', 'wide']),
+})).min(6).max(7).refine(items => {
+  const ids = new Set(items.map(item => item.id));
+  return ids.size === items.length && legacyWidgetIDs.every(id => ids.has(id));
+}).transform(items => {
+  const remaining = items.filter((item): item is Layout[number] => item.id !== 'tasks' && item.id !== 'schedule');
+  return remaining.some(item => item.id === 'jobs') ? remaining :
+    [...remaining, { id: 'jobs' as const, visible: true, width: 'wide' as const }];
+}).pipe(layoutSchema);
 export const compatibleLayoutSchema = z.union([
   layoutSchema,
-  z.array(z.object({ id: z.enum(['tasks', 'schedule', 'focus', 'learning', 'projects', 'news']), visible: z.boolean(), width: z.enum(['normal', 'wide']) }))
-    .length(6).refine(items => new Set(items.map(item => item.id)).size === 6)
-    .transform(items => [...items, { id: 'jobs' as const, visible: true, width: 'wide' as const }]),
+  legacyLayoutSchema,
 ]);
 
 export type Task = z.infer<typeof taskSchema>;
@@ -178,8 +188,8 @@ export type Preferences = z.infer<typeof generalPreferencesSchema>;
 export type NativeExport = z.infer<typeof nativeExportSchema>;
 export type Layout = z.infer<typeof layoutSchema>;
 export type WidgetID = typeof widgetIDs[number];
-export const defaultLayout: Layout = (['tasks', 'focus', 'schedule', 'projects', 'learning', 'news', 'jobs'] as const)
-  .map(id => ({ id, visible: true, width: id === 'schedule' || id === 'news' || id === 'jobs' ? 'wide' : 'normal' }));
+export const defaultLayout: Layout = (['learning', 'news', 'jobs', 'focus', 'projects'] as const)
+  .map(id => ({ id, visible: id !== 'focus' && id !== 'projects', width: id === 'jobs' ? 'wide' : 'normal' }));
 export const defaultPreferences: Preferences = {
   schemaVersion: 1, focusDefaultMinutes: 25, textSize: 'system', reduceMotion: 'system',
   ai: { enabled: false, providerID: 'openai', modelID: null },

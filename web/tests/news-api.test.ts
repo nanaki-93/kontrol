@@ -180,7 +180,7 @@ test('web backups restore interests with fresh revisions and old web backups rem
   await withAPI(async ({ request }) => {
     await request('/news/interests', 'POST', { ...interestPresets[0], name: 'Specific role', excludedTerms: ['senior'] });
     const state: NewsResponse = await (await request('/news')).json(); saved = state.discovery.preferences.interests;
-    backup = await (await request('/settings/export')).json(); assert.equal(backup.schemaVersion, 3);
+    backup = await (await request('/settings/export')).json(); assert.equal(backup.schemaVersion, 5);
   });
   await withAPI(async ({ request }) => {
     assert.equal((await request('/settings/import', 'POST', backup)).status, 200);

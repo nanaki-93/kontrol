@@ -1,27 +1,29 @@
 import { useEffect, useRef, useState } from 'react';
-import { ArrowLeft, ArrowRight, BookOpen, Check, Eye, CalendarPlus } from 'lucide-react';
+import { ArrowLeft, ArrowRight, BookOpen, Check, Eye } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
 import type { Learning, Attempt, Definition } from '../../../shared/schema';
 import { api, useCommand, navigate } from '../../lib/api';
 import { useLearning } from './api';
 import { useSettings } from '../settings/api';
 import { PageHeader, Empty, ErrorMessage, Loading, Badge, SectionTitle, formatDate } from '../../components/ui';
+import { dueReviews, nextLesson, lessonDefinition } from '../../../shared/workspace';
+import { useWorkspace } from '../workspace/api';
+import { SaveLesson, LearningPaths, ReviewQueue, ExploreLessons } from './journey';
 
 function LessonCard({ lesson, onOpen, status }: { lesson: Definition; onOpen: () => void; status?: string }) {
   return <button className="lesson-card" onClick={onOpen}><div className="row-spread"><Badge>{lesson.format}</Badge><span className="row-meta">{lesson.estimatedMinutes} min</span></div>
     <h3>{lesson.title}</h3><p>{lesson.objective || lesson.objectiveKey}</p><div className="lesson-card-footer"><span>{status === 'started' ? 'Continue lesson' : 'Make a little progress'}</span><ArrowRight size={16} /></div></button>;
 }
 export function LearningWidget() {
-  const query = useLearning();
+  const query = useLearning(), workspace = useWorkspace();
   if (query.isPending) return <Loading />;
   if (query.error) return <ErrorMessage error={query.error} />;
   const state = query.data;
-  const first = state.slots.find(s => state.progress.some(p => p.lessonID === s.lessonID && p.status === 'started')) ?? state.slots[0];
-  const lesson = first && (state.attempts.find(a => a.lessonID === first.lessonID && !a.completedAt)?.pinnedContent?.definition ?? state.definitions.find(d => d.id === first.lessonID));
-  const completed = state.progress.filter(p => p.status === 'completed').length;
-  return <><div className="learning-intro"><BookOpen size={20} /><span>{state.topics.length} paths to explore<span className="muted"> · {completed} lessons completed</span></span></div>
+  const lesson = nextLesson(state, workspace.data), due = workspace.data ? dueReviews(state, workspace.data).length : 0;
+  return <><div className="learning-intro"><BookOpen size={20} /><span>One useful step toward your goals</span></div>
     {lesson ? <LessonCard lesson={lesson} status={state.progress.find(p => p.lessonID === lesson.id)?.status} onOpen={() => navigate('/learning?lesson=' + encodeURIComponent(lesson.id))} /> :
-      <Empty title="You have explored your available choices.">Open Learning to review your history or restore a dismissed lesson.</Empty>}</>;
+      <Empty title="You have explored your available choices.">Open Learning to review your history or restore a dismissed lesson.</Empty>}
+    <div className="reading-actions"><a className="text-link" href="#/learning?view=reviews">{due} reviews due →</a><a className="text-link" href="#/learning?view=paths">Explore learning paths →</a></div><ErrorMessage error={workspace.error} /></>;
 }
 
 // A small local draft survives route changes and failed network saves. Revision
@@ -129,7 +131,7 @@ function LessonWorkspace({ lessonID, state, close }: { lessonID: string; state: 
   const revealed = !!attempt?.solutionRevealedAt || progress?.status === 'completed';
   return <div className="lesson-workspace"><div className="toolbar"><button className="button secondary" onClick={async () => { try { await draft.save(); close(); } catch { /* Keep current page. */ } }}><ArrowLeft size={16} /> All lessons</button>
     <div className="actions"><Badge>{content.format}</Badge><Badge>{content.difficulty}</Badge>{historical && <Badge tone="success">{progress?.status}</Badge>}</div></div>
-    <div className="panel lesson-content"><p className="eyebrow">{definition?.topicID ?? 'YOUR LEARNING HISTORY'}{definition && ' / ' + definition.estimatedMinutes + ' MIN'}</p><h1>{content.title}</h1>
+    <div className="panel lesson-content"><p className="eyebrow">{definition?.topicID ?? 'YOUR LEARNING HISTORY'}{definition && ' / ' + definition.estimatedMinutes + ' MIN'}</p><h1>{content.title}</h1><SaveLesson lessonID={lessonID} />
       <section><h2>The idea</h2><div className="prose-text">{content.explanation}</div></section>
       <section><h2>A worked example</h2><pre className="lesson-code">{content.workedExample}</pre></section>
       <section><h2>Your turn</h2><div className="prose-text">{content.exercise}</div></section>
@@ -151,13 +153,15 @@ function LessonWorkspace({ lessonID, state, close }: { lessonID: string; state: 
         <button className="button primary" disabled={!revealed || !acknowledged || action.isPending} onClick={() => void perform('complete')}><Check size={16} /> Complete lesson</button>
         <button className="button secondary" disabled={action.isPending || draft.answer === null} onClick={() => void perform('dismiss')}>Dismiss for now</button></>}
         {progress?.status === 'dismissed' && <button className="button primary" disabled={action.isPending} onClick={() => void perform('restore')}>Restore lesson</button>}</div>
-        {definition && <a className="text-link" href={'#/schedule?lesson=' + encodeURIComponent(lessonID) + '&title=' + encodeURIComponent(content.title)}><CalendarPlus size={16} /> Add to planner</a>}</div>
+      </div>
       <p className="footnote">Completion records your own practice. It is not an assessment score.</p>
     </div></div>;
 }
 export function LearningPage() {
   const query = useLearning();
-  const [topic, setTopic] = useState('go'), [tab, setTab] = useState('choices');
+  const params = new URLSearchParams(window.location.hash.split('?')[1]);
+  const initialView = params.get('view') ?? 'choices';
+  const [topic, setTopic] = useState('go'), [tab, setTab] = useState(params.has('review') ? 'reviews' : ['choices', 'paths', 'reviews', 'history', 'concepts'].includes(initialView) ? initialView : 'choices');
   const [selected, setSelected] = useState<string | null>(new URLSearchParams(window.location.hash.split('?')[1]).get('lesson'));
   if (query.isPending) return <Loading />;
   if (query.error) return <ErrorMessage error={query.error} />;
@@ -178,16 +182,18 @@ export function LearningPage() {
     .concat(state.terminalRecords.filter(t => state.progress.some(p => p.lessonID === t.lessonID && p.status === 'completed')).flatMap(t => t.conceptIDs ?? [])));
   const covered = concepts.filter(c => practiced.has(c.id)).length;
   return <><PageHeader eyebrow="STAY CURIOUS" title="Learning" description="Small lessons. Useful ideas. Progress at your pace." action={<Badge tone="success">Available offline</Badge>} />
-    <div className="toolbar"><div className="tabs" aria-label="Learning topic">{state.topics.map(t => <button key={t.id} className={t.id === topicID ? 'active' : ''} aria-pressed={t.id === topicID} onClick={() => setTopic(t.id)}>{t.name}</button>)}</div></div>
+    {params.get('explore') && <ExploreLessons state={state} query={params.get('explore')!} />}
+    {!['paths', 'reviews'].includes(tab) && <><div className="toolbar"><div className="tabs" aria-label="Learning topic">{state.topics.map(t => <button key={t.id} className={t.id === topicID ? 'active' : ''} aria-pressed={t.id === topicID} onClick={() => setTopic(t.id)}>{t.name}</button>)}</div></div>
     <div className="coverage-panel"><div><p className="eyebrow">CONCEPT COVERAGE</p><h2>{covered}<span className="muted"> / {concepts.length}</span></h2><p>Distinct concepts practiced · not a mastery score</p></div>
-      <div className="coverage-track"><div style={{ width: (concepts.length ? covered / concepts.length * 100 : 0) + '%' }} /></div><BookOpen size={35} strokeWidth={1} /></div>
-    <div className="toolbar"><div className="tabs"><button className={tab === 'choices' ? 'active' : ''} onClick={() => setTab('choices')}>Your next lessons</button><button className={tab === 'history' ? 'active' : ''} onClick={() => setTab('history')}>History</button><button className={tab === 'concepts' ? 'active' : ''} onClick={() => setTab('concepts')}>Concepts</button></div></div>
+      <div className="coverage-track"><div style={{ width: (concepts.length ? covered / concepts.length * 100 : 0) + '%' }} /></div><BookOpen size={35} strokeWidth={1} /></div></>}
+    <div className="toolbar"><div className="tabs"><button className={tab === 'choices' ? 'active' : ''} onClick={() => setTab('choices')}>Your next lessons</button><button className={tab === 'paths' ? 'active' : ''} onClick={() => setTab('paths')}>Learning paths</button><button className={tab === 'reviews' ? 'active' : ''} onClick={() => setTab('reviews')}>Review</button><button className={tab === 'history' ? 'active' : ''} onClick={() => setTab('history')}>History</button><button className={tab === 'concepts' ? 'active' : ''} onClick={() => setTab('concepts')}>Concepts</button></div></div>
+    {tab === 'paths' && <LearningPaths state={state} />}{tab === 'reviews' && <ReviewQueue state={state} />}
     {tab === 'choices' && <><div className="lesson-grid">{choices.map(lesson => <LessonCard key={lesson.id} lesson={lesson} onOpen={() => setSelected(lesson.id)} status={state.progress.find(p => p.lessonID === lesson.id)?.status} />)}</div>
       {!choices.length && <div className="panel"><Empty title="No eligible lessons right now.">Review your history or restore a dismissed lesson. Completed lessons are never repeated just to fill a slot.</Empty></div>}</>}
     {tab === 'history' && <div className="panel"><SectionTitle>Saved practice</SectionTitle>{historyItems.length ? <ul className="simple-list">{historyItems.map(p => {
       const attempt = state.attempts.find(a => a.lessonID === p.lessonID);
       const title = attempt?.pinnedContent?.definition.title ?? attempt?.completedContentSnapshot?.title ?? state.terminalRecords.find(t => t.lessonID === p.lessonID)?.title ?? p.lessonID;
-      return <li key={p.lessonID}><button className="list-link" onClick={() => setSelected(p.lessonID)}><strong>{title}</strong><span className="row-meta">{formatDate(p.completedAt ?? p.dismissedAt!)} · Open saved work</span></button><Badge tone={p.status === 'completed' ? 'success' : ''}>{p.status}</Badge></li>;
+      return <li key={p.lessonID}><button className="list-link" onClick={() => setSelected(p.lessonID)}><strong>{title}</strong><span className="row-meta">{formatDate(p.completedAt ?? p.dismissedAt!)} · Open saved work</span></button><div className="actions">{p.status === 'completed' && lessonDefinition(state, p.lessonID) && <a className="text-link" href={'#/learning?review=' + encodeURIComponent(p.lessonID)}>Practice recall →</a>}<Badge tone={p.status === 'completed' ? 'success' : ''}>{p.status}</Badge></div></li>;
     })}</ul> : <Empty title="Your practice will live here.">Completed and dismissed lessons stay in your history.</Empty>}</div>}
     {tab === 'concepts' && <div className="panel"><ul className="simple-list">{concepts.map(c => <li key={c.id}><span>{c.name}</span><Badge tone={practiced.has(c.id) ? 'success' : ''}>{practiced.has(c.id) ? 'Practiced' : 'Not yet practiced'}</Badge></li>)}</ul></div>}
   </>;

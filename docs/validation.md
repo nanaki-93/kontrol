@@ -298,3 +298,228 @@ commands use npm and `clean` targets only `web/dist` and `web/coverage`.
 No app or browser was launched, no GUI checks were run, and validation did not
 open or change production data. No signing, packaging or distribution check is
 claimed for the removed application.
+
+## JOB discovery coverage repair — 2026-10-02
+
+A read-only query of the saved JOB search metadata showed three assessed sources,
+zero matches and no error for full-time roles in Tokyo/Kyoto within 30 days.
+An isolated source probe reproduced the cause: Bing returned tutorials and
+unrelated pages, Arbeitnow supplied no listings passing these filters, and
+Remotive supplied only office-assistant, sales-contractor and service-desk roles.
+The probe used a synthetic backend profile and did not send CV text or invoke PI.
+
+Discovery now falls back to DuckDuckGo when Bing produces no relevant readable
+postings, follows bounded same-origin links from directories to individual
+structured offers, and retains explicit region evidence for Tokyo ward matching.
+Empty-source coverage and zero strong profile matches have distinct messages.
+
+Executed from `web/` with Node **25.8.2**:
+
+```sh
+npm run typecheck
+node --import tsx --test tests/jobs-domain.test.ts tests/jobs-api.test.ts tests/jobs-client.test.ts
+npm run build
+```
+
+TypeScript and the Vite production build passed. The final explicit non-GUI test
+selection passed **34 tests, 0 failures, 0 skips**. Regression fixtures cover
+irrelevant/unavailable primary search, directory-to-offer retrieval, private and
+advertising links, traversal depth, strict city filters, Tokyo ward metadata, and
+fallback discovery through ranking and persistence in an in-memory database.
+The ranking response in the integration test is injected, not a live PI call.
+
+Read-only source probes used `node --import tsx --input-type=module` to call
+`createJobDiscovery` directly. With the same cities, employment filter and date
+window, the repaired discovery returned **11 candidates**, including eight
+software/backend listings, in about nine seconds. Some source pages and searches
+were unavailable and produced coverage warnings. These counts are retrieved
+candidates, not live AI match results or guarantees of current job availability.
+No app, browser or native UI was launched. Production data was inspected through
+read-only SQLite for diagnosis and was not modified.
+
+## Tasks and Planner removal — 2026-10-02
+
+Removed both modules' pages, navigation entries, dashboard widgets, task counter,
+Focus task picker, Learning planner action, API routes and unused styles/helpers.
+Existing six/seven-widget layouts migrate to the five remaining modules while
+preserving their order, widths and visibility. Version-4 backups use the new
+layout; native version-1 and web version-1 through version-3 imports remain
+supported. Retired records and existing Focus links/titles remain in backups.
+
+Executed from `web/` with Node **25.8.2**:
+
+```sh
+npm run build
+node --import tsx --test tests/domain.test.ts tests/api.test.ts tests/projects-persistence.test.ts tests/news-api.test.ts tests/jobs-api.test.ts
+```
+
+TypeScript and the Vite production build passed. The explicitly selected
+non-GUI suites passed **50 tests, 0 failures, 0 skips**. Coverage includes retired
+routes rejecting reads/writes, standalone Focus creation, preserved historical
+Focus records, legacy/current backup restore, layout migration and customization,
+reopening an isolated SQLite database, import rollback and remaining module APIs.
+
+Source review found no remaining frontend references to the removed sections or
+imports of their deleted modules/helpers. `git diff --check` passed. Validation
+used only in-memory databases, temporary files and injected network/PI fixtures.
+No app/browser was launched, no GUI checks were run and production data was not
+opened or modified. Earlier validation evidence is preserved unchanged.
+
+## PI web search for JOB — 2026-10-03
+
+The installed PI was verified to support hosted web search through the existing
+OpenAI Codex login. JOB now uses that capability for discovery, then fetches the
+returned pages and ranks only retrieved structured listings. A bundled extension
+enables only hosted search and records completed provider source evidence; URLs
+invented in assistant text cannot become candidates. User extensions, local
+tools, context files and saved sessions stay disabled. Unsupported or failed PI
+search falls back to the existing public sources. Normal News inference keeps
+its original tool-free behavior.
+
+The first live discovery probe found 14 URLs but still returned only the same
+three unrelated remote records after filtering. Inspection identified a valid
+Milan posting rejected because its source used the Italian name Milano. Matching
+now accepts that alias only within Italy. An older Tokyo listing was correctly
+excluded by the 30-day window; the search prompt now includes an explicit posting
+cutoff and prioritizes HTML detail pages over application forms and PDFs.
+
+Executed from `web/` with Node **25.8.2**:
+
+```sh
+npm run typecheck
+KONTROL_TEST_PI_COMMAND=/opt/homebrew/bin/pi node --import tsx --test \
+  tests/news-pi.test.ts tests/news-pi-cli.test.ts \
+  tests/jobs-domain.test.ts tests/jobs-api.test.ts tests/jobs-client.test.ts
+npm run build
+```
+
+The selected non-GUI suites passed **50 tests, 0 failures, 0 skips**. TypeScript
+and the Vite production build passed. `git diff --check` passed from the repository
+root. Tests cover source-evidence enforcement, unsupported providers, process
+isolation/cleanup/cancellation, city aliases and PI discovery through retrieval,
+ranking and persistence in an in-memory database. The installed-CLI tests use a
+temporary local HTTP provider with fixture credentials and streamed Responses
+events, including a valid-looking answer without actual search evidence.
+
+Read-only live probes used `node --import tsx --input-type=module`, a synthetic
+Java/Kotlin backend profile, and the selected Tokyo/Kyoto/Milan, full-time and
+30-day filters. After the changes, PI returned 12 search links; retrieval produced
+**7 candidates, including 4 software/backend listings**, in approximately 55
+seconds without invoking Bing or DuckDuckGo. Some pages remained unavailable and
+produced a coverage warning. A separate fetch of the Milano Java backend posting
+confirmed that it now passes the saved filters. These are discovery results,
+not live profile-fit scores or guarantees of vacancy availability. No live
+ranking request used personal CV data, no production records were modified, and
+no app/browser or GUI validation was run. Earlier evidence remains unchanged.
+
+## JOB discovery reliability and complete ranking — 2026-10-03
+
+The next user search still saved only three unrelated remote records and zero
+matches. Read-only inspection confirmed that the updated server was running;
+the failure remained in source discovery. A further live probe showed variable
+PI results, including stale URLs, blocked pages and Italian directories whose
+`/lavoro/` offer links the reader did not recognize. Some structured listings
+also supplied `Milano, Italy` as the locality, which failed exact city matching.
+
+Software searches for selected Japanese cities and Milan now retrieve TokyoDev
+and Reteinformaticalavoro indexes independently of PI search. Retrieval remains
+bounded, shares URL deduplication, and requires a fetched structured offer for
+every candidate. Italian offer paths and locality fields containing a repeated,
+matching country are accepted. Date, employment, work-mode and country filters
+remain enforced. The UI and active guide describe the additional sources.
+
+Executed from `web/` with Node **25.8.2**:
+
+```sh
+npm run typecheck
+node --import tsx --test tests/jobs-domain.test.ts tests/jobs-api.test.ts tests/jobs-client.test.ts
+npm run build
+```
+
+The selected non-GUI suites passed **45 tests, 0 failures, 0 skips**. TypeScript
+and the Vite production build passed. `git diff --check` passed from the repository
+root. New regressions cover empty/unavailable/blocked/unstructured PI discovery,
+direct-board retrieval through ranking and persistence, Italian directory links,
+country-qualified city names, expired offers and conflicting geography.
+
+Two isolated live probes used `node --import tsx --input-type=module` and a
+synthetic seven-year Java/Kotlin backend profile with representative skills and
+languages, plus Tokyo/Kyoto/Milan, full-time and 30-day preferences:
+
+- The complete live PI search → retrieval → live PI ranking path returned
+  **15 candidates and 6 ranked matches** in approximately 84 seconds. Matches
+  included Java/Kotlin backend work in Tokyo and Java backend work in Milan.
+  Some source pages were unavailable and generated a coverage warning.
+- With PI discovery deliberately returning no links, fresh direct-board
+  retrieval still returned **10 software listings** (13 total candidates) in
+  approximately 3.4 seconds, with no Bing/DuckDuckGo queries or warnings.
+
+Synthetic inputs and public retrieved evidence from the complete run are in
+`discovery.json` and `matches.json` under
+`/var/folders/lz/20cqfx4x2k98r89q68w3q3ch0000gn/T/kontrol-job-live-check-FCXBss/`.
+These checks did not save matches into the user's database. Production state was
+read only for diagnosis; no CV text was transmitted. No app/browser was launched
+or operated, and no GUI checks were run. Historical evidence above is unchanged.
+
+## Today, saved workspace and connected learning — 2026-10-03
+
+This change adds Today actions and layout presets, goal preferences, a saved
+library, notes/links/clocks, weekly summaries, finite news briefings and bookmarks,
+application tracking/comparison/follow-ups, learning paths and recall reviews.
+Saved articles and offers use durable snapshots independent of discovery caches.
+Web backup version 5 includes the workspace; versions 1–4 remain accepted.
+
+Validation was non-interactive and used in-memory SQLite or uniquely named
+scratch databases. No production database, personal CV or provider credentials
+were accessed. No application/browser was launched or operated. No GUI,
+Accessibility, screenshot, presentation or live-app checks were run or required.
+
+The first new domain/API selection passed **12 tests**. The broader explicit
+selection below then passed **120 tests, 0 failures, 2 skips**:
+
+```sh
+# From web/
+./node_modules/.bin/tsx --test \
+  tests/domain.test.ts tests/api.test.ts tests/projects-persistence.test.ts \
+  tests/news-discovery.test.ts tests/news-ai.test.ts tests/news-api.test.ts \
+  tests/news-pi.test.ts tests/news-pi-cli.test.ts \
+  tests/jobs-domain.test.ts tests/jobs-api.test.ts tests/jobs-client.test.ts \
+  tests/workspace-domain.test.ts tests/workspace-api.test.ts
+```
+
+The skipped tests are the opt-in installed-PI CLI fixture checks because
+`KONTROL_TEST_PI_COMMAND` was not set. They are not reported as passing. The
+remaining PI tests use isolated executable/provider fixtures.
+
+Source review then tightened historical lesson handling, AI-summary provenance,
+conflict recovery, shared target roles, and bounded read-marker retention.
+Additional regressions cover these changes. The final affected selection passed
+**54 tests, 0 failures, 0 skips**, including **15 workspace tests**:
+
+```sh
+# From web/
+npm run build
+./node_modules/.bin/tsx --test \
+  tests/workspace-domain.test.ts tests/workspace-api.test.ts \
+  tests/jobs-api.test.ts tests/jobs-client.test.ts tests/news-api.test.ts \
+  tests/api.test.ts
+```
+
+The final production build passed both TypeScript and Vite compilation. During
+implementation, one typecheck caught an insufficiently narrowed discovery source;
+an intermediate build caught a missing Record annotation in a backup test.
+Both were corrected, and the final command above passed. An earlier affected
+selection passed 53 tests before the additional capacity regression was added.
+
+Coverage includes canonical-link deduplication, saved content surviving cache/CV
+replacement, manual jobs without AI, stage history, invalid follow-up dates,
+revision conflicts (including edits at identical timestamps), goal validation,
+full saved lesson content for reviews, separate recall answers, due scheduling,
+backup round-trips and atomic import rejection, SQLite reopening, preservation
+of AI provenance, and eviction of disposable read markers without loss of
+bookmarks or authored notes. No test evaluates live recommendation quality.
+
+`git diff --check` passed. A separate Python whitespace scan covered new and
+edited frontend, shared, module and workspace-test sources, including untracked
+files, and passed. Existing work in progress and historical validation entries
+were retained.

@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, writeFile, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parsePIOutput, piStatus, runPI } from '../server/news/pi';
+import { parsePIOutput, piStatus, runPI, runPIWebSearch } from '../server/news/pi';
+import webSearchExtension from '../server/news/pi-web-search-extension';
 
 function events(text = '{"articles":[]}', stopReason = 'stop') {
   return [
@@ -110,4 +111,56 @@ test('PI honors an explicit deadline even when its caller has no deadline, then 
     await assert.rejects(access(report.cwd), { code: 'ENOENT' });
     assert.throws(() => process.kill(report.pid, 0), { code: 'ESRCH' });
   }, `require('node:fs').writeFileSync(require('node:path').join(process.env.PI_CODING_AGENT_DIR, 'started.json'), JSON.stringify({ cwd: process.cwd(), pid: process.pid })); setInterval(() => {}, 1000);`);
+});
+test('native search enables only the hosted tool and records provider evidence rather than assistant URLs', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'kontrol-search-extension-'));
+  // The same two callbacks are exercised by the installed-CLI fixture below.
+  const handlers: Record<string, (event: any, context: any) => unknown> = {};
+  webSearchExtension({ on(event: string, handler: (event: any, context: any) => unknown) { handlers[event] = handler; } });
+  const context = { cwd: directory, model: { api: 'openai-codex-responses' } };
+  try {
+    const payload = handlers.before_provider_request({ payload: { tools: [{ type: 'function', name: 'bash' }], include: ['reasoning.encrypted_content'] } }, context) as Record<string, unknown>;
+    assert.deepEqual(payload.tools, [{ type: 'web_search', external_web_access: true }]);
+    assert.equal(payload.tool_choice, 'required');
+    assert.deepEqual(payload.include, ['reasoning.encrypted_content', 'web_search_call.action.sources']);
+    assert.throws(() => handlers.before_provider_request({ payload: {} }, { ...context, model: { api: 'other' } }), /does not support/);
+    const call = { type: 'web_search_call', id: 'search-1', status: 'completed', action: { type: 'search', sources: [
+      { type: 'url', url: 'https://example.com/jobs/backend' }, { type: 'url', url: 'file:///private' },
+    ] } };
+    handlers.provider_stream_event({ data: { type: 'response.output_item.done', item: call } }, context);
+    handlers.provider_stream_event({ data: { type: 'response.completed', response: { output: [call,
+      { type: 'message', content: [{ type: 'output_text', text: 'https://invented.example/jobs/fake' }] },
+    ] } } }, context);
+    assert.deepEqual(JSON.parse(await readFile(join(directory, 'web-search-evidence.json'), 'utf8')), {
+      searches: 1, urls: ['https://example.com/jobs/backend'],
+    });
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+test('PI native search loads one explicit extension and retains process isolation and cleanup', async () => {
+  await fixture(async (directory, command) => {
+    const result = await runPIWebSearch('Search only public jobs.', { command, agentDir: directory, provider: 'openai-codex' });
+    const report = JSON.parse(result.text);
+    assert.deepEqual(result.urls, ['https://example.com/jobs/backend']);
+    for (const flag of ['--no-tools', '--no-extensions', '--no-context-files', '--no-session']) assert.ok(report.args.includes(flag));
+    assert.equal(report.args.filter((arg: string) => arg === '--extension').length, 1);
+    assert.match(report.args[report.args.indexOf('--extension') + 1], /pi-web-search-extension\.ts$/);
+    await assert.rejects(access(report.cwd), { code: 'ENOENT' });
+  }, `const fs = require('node:fs'); process.stdin.resume(); process.stdin.on('end', () => {
+    fs.writeFileSync('web-search-evidence.json', JSON.stringify({ searches: 1, urls: ['https://example.com/jobs/backend'] }));
+    const report = { cwd: process.cwd(), args: process.argv.slice(2) };
+    console.log(JSON.stringify({ type: 'message_end', message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: JSON.stringify(report) }] } }));
+    console.log(JSON.stringify({ type: 'agent_settled' }));
+  });`);
+});
+test('native search rejects answers without completed provider evidence and unsupported providers', async () => {
+  for (const evidence of [null, { searches: 0, urls: ['https://example.com/jobs/remembered'] }]) {
+    await fixture(async (directory, command) => {
+      await assert.rejects(runPIWebSearch('Search public jobs.', { command, agentDir: directory, provider: 'openai-codex' }), /completed web-search evidence/);
+      await assert.rejects(runPIWebSearch('Search public jobs.', { command, agentDir: directory }), /needs an OpenAI Responses or Codex model/);
+    }, `process.stdin.resume(); process.stdin.on('end', () => {
+      const evidence = ${JSON.stringify(evidence)};
+      if (evidence) require('node:fs').writeFileSync('web-search-evidence.json', JSON.stringify(evidence));
+      process.stdout.write(${JSON.stringify(events('{"links":[{"url":"https://example.com/jobs/remembered","title":"Backend engineer"}]}'))});
+    });`);
+  }
 });

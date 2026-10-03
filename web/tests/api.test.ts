@@ -4,62 +4,79 @@ import { randomUUID } from 'node:crypto';
 import { request as httpRequest } from 'node:http';
 import { withAPI } from './helpers';
 import { exportData, importData } from '../server/modules/settings';
-import { nativeExportSchema, type Learning, type Task, type NewsState } from '../shared/schema';
+import { nativeExportSchema, type Learning, type Task, type NewsState, type Session } from '../shared/schema';
 
 test('API rejects other origins, DNS rebinding hosts and missing client headers', async () => {
   await withAPI(async ({ request, origin }) => {
-    assert.equal((await request('/tasks', 'POST', {}, { Origin: 'https://elsewhere.example' })).status, 403);
+    assert.equal((await request('/focus', 'POST', {}, { Origin: 'https://elsewhere.example' })).status, 403);
     const reboundStatus = await new Promise<number | undefined>((resolve, reject) => {
-      const req = httpRequest(origin + '/api/tasks', { headers: { Host: 'hostile.example', 'X-Kontrol-Client': 'web' } }, res => { res.resume(); resolve(res.statusCode); });
+      const req = httpRequest(origin + '/api/focus', { headers: { Host: 'hostile.example', 'X-Kontrol-Client': 'web' } }, res => { res.resume(); resolve(res.statusCode); });
       req.on('error', reject); req.end();
     });
     assert.equal(reboundStatus, 403);
-    assert.equal((await fetch(origin + '/api/tasks')).status, 403);
-    assert.equal((await request('/tasks', 'POST', {}, { 'Content-Type': 'text/plain' })).status, 415);
+    assert.equal((await fetch(origin + '/api/focus')).status, 403);
+    assert.equal((await request('/focus', 'POST', {}, { 'Content-Type': 'text/plain' })).status, 415);
     assert.equal((await request('/missing')).status, 404);
   });
 });
-test('tasks support create, edit, complete, reopen and delete; invalid changes preserve saved data', async () => {
+test('retired Tasks and Planner routes are unavailable and cannot mutate archived records', async () => {
   await withAPI(async ({ request, store }) => {
-    const result = await request('/tasks', 'POST', { title: 'Write plan', notes: ' keep whitespace\n', plannedDay: null, dueAt: null });
-    assert.equal(result.status, 201);
-    const task = await result.json() as Task;
-    assert.equal((await request('/tasks/' + task.id, 'PATCH', { title: ' ' })).status, 400);
-    assert.equal(store.get<Task[]>('tasks')[0].title, 'Write plan');
-    assert.equal((await request('/tasks/' + task.id, 'PATCH', { title: 'Review plan', completedAt: new Date().toISOString() })).status, 200);
-    assert.ok(store.get<Task[]>('tasks')[0].completedAt);
-    assert.equal((await request('/tasks/' + task.id, 'PATCH', { completedAt: null })).status, 200);
-    assert.equal(store.get<Task[]>('tasks')[0].completedAt, null);
-    assert.equal(store.get<Task[]>('tasks')[0].notes, ' keep whitespace\n');
-    assert.equal((await request('/tasks/' + task.id, 'DELETE')).status, 204);
-    assert.equal(store.get<Task[]>('tasks').length, 0);
+    const data = exportData(store);
+    data.tasks.push({ id: randomUUID(), title: 'Archived task', notes: ' keep whitespace\n',
+      plannedDay: null, dueAt: null, completedAt: null, createdAt: '2026-10-02T00:00:00.000Z' });
+    data.blocks.push({ id: randomUUID(), title: 'Archived plan', startAt: '2026-10-02T08:00:00.000Z',
+      endAt: '2026-10-02T09:00:00.000Z', note: null, lessonID: null, linkedTitleSnapshot: null });
+    store.set('tasks', data.tasks); store.set('schedule', data.blocks);
+    for (const [route, record] of [['tasks', data.tasks[0]], ['schedule', data.blocks[0]]] as const) {
+      assert.equal((await request('/' + route)).status, 404);
+      assert.equal((await request('/' + route, 'POST', record)).status, 404);
+      for (const method of ['GET', 'PUT', 'PATCH', 'DELETE']) {
+        assert.equal((await request('/' + route + '/' + record.id, method, method === 'GET' ? undefined : record)).status, 404);
+      }
+    }
+    assert.deepEqual(exportData(store).tasks, data.tasks);
+    assert.deepEqual(exportData(store).blocks, data.blocks);
+    assert.equal((await request('/settings/import', 'POST', data)).status, 409);
   });
 });
-test('schedule validates bounds and requires explicit overlapping-block approval', async () => {
-  await withAPI(async ({ request }) => {
-    const block = { title: 'Deep work', startAt: '2026-10-02T08:00:00.000Z', endAt: '2026-10-02T09:00:00.000Z', note: null, lessonID: null, linkedTitleSnapshot: null };
-    assert.equal((await request('/schedule', 'POST', block)).status, 201);
-    assert.equal((await request('/schedule', 'POST', block)).status, 409);
-    assert.equal((await request('/schedule', 'POST', { ...block, allowOverlap: true })).status, 201);
-    assert.equal((await request('/schedule', 'POST', { ...block, endAt: block.startAt })).status, 400);
-    assert.equal((await request('/schedule', 'POST', { ...block, startAt: block.endAt, endAt: '2026-10-02T10:00:00.000Z' })).status, 201);
-  });
-});
-test('Focus maintains one active session and never completes a linked task', async () => {
+test('Focus starts without a task, rejects task links, and maintains one active session', async () => {
   let clock = Date.parse('2026-10-02T08:00:00.000Z');
   await withAPI(async ({ request, store }) => {
-    const task = await (await request('/tasks', 'POST', { title: 'Stay open', notes: null, dueAt: null, plannedDay: null })).json();
-    const first = await request('/focus', 'POST', { minutes: 1, taskID: task.id });
+    assert.equal((await request('/focus', 'POST', { minutes: 1, taskID: randomUUID() })).status, 400);
+    assert.deepEqual(store.get('focus'), []);
+    const first = await request('/focus', 'POST', { minutes: 1 });
     assert.equal(first.status, 201);
     const session = await first.json();
-    assert.equal((await request('/focus', 'POST', { minutes: 1, taskID: null })).status, 409);
+    assert.equal(session.linkedTaskID, null);
+    assert.equal(session.linkedTitleSnapshot, null);
+    assert.equal((await request('/focus', 'POST', { minutes: 1 })).status, 409);
     clock += 90_000;
     const current = await (await request('/focus')).json();
     assert.equal(current.sessions[0].state, 'completed');
     assert.equal(current.sessions[0].accumulatedActiveSeconds, 60);
     assert.equal((await request('/focus/' + session.id + '/end', 'POST')).status, 200);
-    assert.equal(store.get<Task[]>('tasks')[0].completedAt, null);
     assert.equal((await (await request('/focus')).json()).sessions.length, 1);
+  }, { clock: () => clock });
+});
+test('existing Focus sessions keep their historical links and titles after the linked sections retire', async () => {
+  let clock = Date.parse('2026-10-02T08:00:00.000Z');
+  await withAPI(async ({ request, store }) => {
+    const data = exportData(store);
+    data.tasks.push({ id: randomUUID(), title: 'Archived task', notes: null, plannedDay: null,
+      dueAt: null, completedAt: null, createdAt: new Date(clock).toISOString() });
+    const saved: Session = { id: randomUUID(), state: 'running', plannedSeconds: 60, accumulatedActiveSeconds: 0,
+      activeSegmentStartedAt: new Date(clock).toISOString(), deadline: new Date(clock + 60_000).toISOString(),
+      pausedAt: null, startedAt: new Date(clock).toISOString(), endedAt: null, checkpointAt: new Date(clock).toISOString(),
+      recoveryRequired: false, linkedTaskID: data.tasks[0].id, linkedLessonID: null, linkedTitleSnapshot: 'Original focus title' };
+    data.sessions.push(saved);
+    assert.equal((await request('/settings/import', 'POST', data)).status, 200);
+    clock += 90_000;
+    const completed = (await (await request('/focus')).json()).sessions[0];
+    assert.equal(completed.state, 'completed');
+    assert.equal(completed.linkedTitleSnapshot, saved.linkedTitleSnapshot);
+    assert.equal(completed.linkedTaskID, saved.linkedTaskID);
+    assert.deepEqual(exportData(store).tasks, data.tasks);
+    assert.deepEqual(exportData(store).sessions, [completed]);
   }, { clock: () => clock });
 });
 test('learning saves exact answers, rejects stale writes, requires self-check, completes once and rotates one slot', async () => {
@@ -96,14 +113,20 @@ test('native import validates before writing, preserves historical data and cann
     const data = exportData(store);
     data.tasks.push({ id: randomUUID(), title: ' Migrated task ', notes: 'literal secret-looking text \n',
       plannedDay: null, dueAt: null, completedAt: null, createdAt: '2026-10-02T00:00:00.000Z' });
+    data.blocks.push({ id: randomUUID(), title: ' Migrated plan ', startAt: '2026-10-02T08:00:00.000Z',
+      endAt: '2026-10-02T09:00:00.000Z', note: ' original notes\n', lessonID: data.learning.slots[0].lessonID, linkedTitleSnapshot: 'Original lesson title' });
     const invalid = structuredClone(data);
     invalid.tasks.push({ ...invalid.tasks[0] });
     assert.equal((await request('/settings/import', 'POST', invalid)).status, 400);
     assert.equal(store.get<Task[]>('tasks').length, 0);
-    assert.equal((await request('/settings/import/preview', 'POST', data)).status, 200);
+    const preview = await request('/settings/import/preview', 'POST', data);
+    assert.equal(preview.status, 200);
+    const summary = await preview.json();
+    assert.equal('tasks' in summary, false); assert.equal('blocks' in summary, false);
     assert.equal((await request('/settings/import', 'POST', data)).status, 200);
     const backup = await (await request('/settings/export')).json();
     assert.deepEqual(backup.data.tasks, data.tasks);
+    assert.deepEqual(backup.data.blocks, data.blocks);
     assert.equal(nativeExportSchema.safeParse(backup.data).success, true);
     assert.equal((await request('/settings/import', 'POST', data)).status, 409);
     const serialized = JSON.stringify(backup);
@@ -171,7 +194,8 @@ test('legacy missing lesson pins cannot manufacture a completion or lose the sav
 test('web backup restores layout and personal records into a fresh isolated database', async () => {
   let backup: unknown;
   await withAPI(async ({ request }) => {
-    await request('/tasks', 'POST', { title: 'Keep me', notes: null, dueAt: null, plannedDay: null });
+    const session = await (await request('/focus', 'POST', { minutes: 1 })).json();
+    assert.equal((await request('/focus/' + session.id + '/end', 'POST')).status, 200);
     const settings = await (await request('/settings')).json();
     settings.layout.reverse(); settings.layout[0].visible = false;
     assert.equal((await request('/settings/layout', 'PUT', settings.layout)).status, 200);
@@ -179,7 +203,8 @@ test('web backup restores layout and personal records into a fresh isolated data
   });
   await withAPI(async ({ request }) => {
     assert.equal((await request('/settings/import', 'POST', backup)).status, 200);
-    assert.equal((await (await request('/tasks')).json())[0].title, 'Keep me');
+    const sessions = (await (await request('/focus')).json()).sessions;
+    assert.equal(sessions.length, 1); assert.equal(sessions[0].state, 'ended');
     assert.equal((await (await request('/settings')).json()).layout[0].visible, false);
   });
 });

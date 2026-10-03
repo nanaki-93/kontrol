@@ -1,8 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { sessionSchema, nativeExportSchema, defaultLayout, layoutSchema, type Session, type Feed } from '../shared/schema';
-import { overlap, isTaskForDay, fromDayInput } from '../shared/dates';
+import { sessionSchema, nativeExportSchema, defaultLayout, layoutSchema, compatibleLayoutSchema, type Session, type Feed } from '../shared/schema';
 import { activeSeconds, transition } from '../server/modules/focus';
 import { initialLearning, fillSlots, practicedConcepts } from '../server/modules/learning';
 import { canonicalURL, isPublicIP, parseFeed, mergeArticles } from '../server/modules/news';
@@ -32,17 +31,6 @@ test('Focus recovers a backward clock and caps time after process downtime', () 
   const complete = transition(session(), 'reconcile', start + 86_400_000);
   assert.equal(complete.accumulatedActiveSeconds, 1500);
   assert.equal(complete.endedAt, session().deadline);
-});
-test('half-open schedule intervals allow touching boundaries', () => {
-  const a = { startAt: '2026-10-02T08:00:00.000Z', endAt: '2026-10-02T09:00:00.000Z' };
-  assert.equal(overlap(a, { startAt: a.endAt, endAt: '2026-10-02T10:00:00.000Z' }), false);
-  assert.equal(overlap(a, { startAt: '2026-10-02T08:30:00.000Z', endAt: '2026-10-02T09:30:00.000Z' }), true);
-});
-test('planned days stay calendar dates, separate from due instants', () => {
-  const task = { id: randomUUID(), title: 'Plan', notes: null, dueAt: null, plannedDay: fromDayInput('2026-10-03'),
-    createdAt: new Date(start).toISOString(), completedAt: null };
-  assert.equal(isTaskForDay(task, '2026-10-02'), false);
-  assert.equal(isTaskForDay(task, '2026-10-03'), true);
 });
 test('catalog loads all forty authored lessons with four stable choices per topic', () => {
   const state = initialLearning();
@@ -74,6 +62,22 @@ test('layout rejects duplicate or missing widgets and retains ordered sizes', ()
   assert.deepEqual(layoutSchema.parse(defaultLayout), defaultLayout);
   assert.equal(layoutSchema.safeParse([...defaultLayout.slice(0, -1), defaultLayout[0]]).success, false);
   assert.equal(layoutSchema.safeParse(defaultLayout.slice(1)).success, false);
+});
+test('layout migration removes retired widgets while preserving customization and rejects corrupt layouts', () => {
+  const legacy = ['news', 'tasks', 'learning', 'schedule', 'focus', 'projects'].map((id, index) => ({
+    id, visible: index % 2 === 0, width: index % 2 === 0 ? 'normal' : 'wide',
+  }));
+  const remaining = [legacy[0], legacy[2], legacy[4], legacy[5]];
+  assert.deepEqual(compatibleLayoutSchema.parse(legacy), [...remaining, { id: 'jobs', visible: true, width: 'wide' }]);
+  const jobs = { id: 'jobs', visible: false, width: 'normal' };
+  const migrated = compatibleLayoutSchema.parse([jobs, ...legacy]);
+  assert.deepEqual(migrated, [jobs, ...remaining]);
+  assert.deepEqual(compatibleLayoutSchema.parse(migrated), migrated);
+  assert.equal(layoutSchema.safeParse(legacy).success, false);
+  for (const invalid of [legacy.slice(1), [...legacy, legacy[0]], [...legacy, { ...jobs, id: 'unknown' }],
+    legacy.map(item => item.id === 'projects' ? { ...item, id: 'jobs' } : item)]) {
+    assert.equal(compatibleLayoutSchema.safeParse(invalid).success, false);
+  }
 });
 const feed: Feed = { id: randomUUID(), name: 'Fixture', endpoint: 'https://example.com/feed', topicIDs: ['go'], isEnabled: true };
 test('RSS and Atom are parsed as plain text with safe links and unknown dates', () => {

@@ -5,7 +5,7 @@ import type { NewsResponse } from './news';
 export const MAX_CV_BYTES = 5 * 1024 * 1024;
 export const MAX_CV_TEXT = 60_000;
 export const JOB_ANALYSIS_TIMEOUT_MS = 120_000;
-export const JOB_SEARCH_TIMEOUT_MS = 110_000;
+export const JOB_SEARCH_TIMEOUT_MS = 180_000;
 export const jobProfileLimits = { roles: 5, skills: 30, languages: 10 } as const;
 export const workModes = ['remote', 'hybrid', 'office'] as const;
 export const employmentTypes = ['full_time', 'part_time', 'contract', 'freelance', 'internship'] as const;
@@ -39,7 +39,7 @@ export const jobSourceSchema = z.object({
   }),
   title: line, company: line, description: z.string().max(12_000),
   location: z.string().max(1000),
-  cities: z.array(z.object({ name: z.string().max(200), country: z.string().max(200) })).max(30),
+  cities: z.array(z.object({ name: z.string().max(200), country: z.string().max(200), region: z.string().max(200).optional() })).max(30),
   remoteRegions: z.array(z.string().max(200)).max(30),
   workMode: z.enum([...workModes, 'unknown']), employmentTypes: z.array(z.enum(employmentTypes)).max(5),
   salary: z.string().max(300).nullable(), publishedAt: instant.nullable(), expiresAt: instant.nullable(),
@@ -86,6 +86,16 @@ function sameCountry(country: string, city: City) {
   const canonical = (value: string) => aliases[normalized(value)] ?? normalized(value);
   return [city.country, city.countryCode].some(value => canonical(value) === canonical(country));
 }
+function sameCity(name: string, city: City) {
+  // Italian job boards use Milano; the English city catalog calls it Milan.
+  // Scope the alias to Italy so same-named cities elsewhere remain distinct.
+  const canonical = (value: string) => city.countryCode === 'IT' && normalized(value) === 'milano' ? 'milan' : normalized(value);
+  // Some boards repeat the country inside addressLocality ("Milano, Italy").
+  // Remove only an explicit matching country, never another city or region.
+  const parts = name.split(',').map(part => part.trim());
+  const locality = parts.length === 2 && sameCountry(parts[1], city) ? parts[0] : name;
+  return canonical(locality) === canonical(city.name);
+}
 export function matchesJobFilters(job: JobSource, preferences: JobPreferences, now: number): boolean {
   if (job.expiresAt && Date.parse(job.expiresAt) <= now) return false;
   if (job.publishedAt && (Date.parse(job.publishedAt) > now + 86_400_000 || Date.parse(job.publishedAt) < now - preferences.days * 86_400_000)) return false;
@@ -98,5 +108,10 @@ export function matchesJobFilters(job: JobSource, preferences: JobPreferences, n
       preferences.cities.some(city => sameCountry(region, city) || normalized(region) === normalized(city.name + ', ' + city.country)));
   }
   return preferences.cities.some(city => job.cities.some(location =>
-    normalized(location.name) === normalized(city.name) && sameCountry(location.country, city)));
+    sameCountry(location.country, city) && (sameCity(location.name, city) ||
+      // Tokyo's special wards are commonly used as addressLocality. Keep the
+      // prefecture as evidence without treating other same-named states as cities.
+      (city.countryCode === 'JP' && normalized(city.name) === 'tokyo' &&
+        ['tokyo', 'tokyo to', '東京都'].includes(normalized(location.region ?? '')) &&
+        /(?:[ -]ku| ward|区)$/iu.test(location.name.trim())))));
 }

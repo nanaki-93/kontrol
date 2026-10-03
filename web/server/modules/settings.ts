@@ -12,6 +12,8 @@ import { discoveryPreferencesSchema, type DiscoveryPreferences, type DiscoverySt
 import { getDiscovery } from '../news/discovery';
 import { jobsStateSchema, type JobsState } from '../../shared/jobs';
 import { getJobs } from './jobs';
+import { workspaceSchema, hasWorkspaceWork, type Workspace } from '../../shared/workspace';
+import { getWorkspace } from './workspace';
 
 export function exportData(store: Store): NativeExport {
   return nativeExportSchema.parse({
@@ -26,24 +28,28 @@ const webBackupSchema = z.discriminatedUnion('schemaVersion', [
   z.object({ format: z.literal('kontrol-web'), schemaVersion: z.literal(2), data: nativeExportSchema,
     layout: compatibleLayoutSchema, newsDiscovery: discoveryPreferencesSchema }),
   z.object({ format: z.literal('kontrol-web'), schemaVersion: z.literal(3), data: nativeExportSchema,
+    layout: compatibleLayoutSchema, newsDiscovery: discoveryPreferencesSchema, jobs: jobsStateSchema }),
+  z.object({ format: z.literal('kontrol-web'), schemaVersion: z.literal(4), data: nativeExportSchema,
     layout: layoutSchema, newsDiscovery: discoveryPreferencesSchema, jobs: jobsStateSchema }),
+  z.object({ format: z.literal('kontrol-web'), schemaVersion: z.literal(5), data: nativeExportSchema,
+    layout: layoutSchema, newsDiscovery: discoveryPreferencesSchema, jobs: jobsStateSchema, workspace: workspaceSchema }),
 ]);
-export function parseImport(input: unknown): { data: NativeExport; layout: Layout | null; discovery: DiscoveryPreferences | null; jobs: JobsState | null } {
+export function parseImport(input: unknown): { data: NativeExport; layout: Layout | null; discovery: DiscoveryPreferences | null; jobs: JobsState | null; workspace: Workspace | null } {
   if (typeof input === 'object' && input !== null && 'format' in input) {
     const backup = webBackupSchema.parse(input);
     return { data: backup.data, layout: backup.layout, discovery: backup.schemaVersion >= 2 && 'newsDiscovery' in backup ? backup.newsDiscovery : null,
-      jobs: backup.schemaVersion === 3 ? backup.jobs : null };
+      jobs: 'jobs' in backup ? backup.jobs : null, workspace: 'workspace' in backup ? backup.workspace : null };
   }
-  return { data: nativeExportSchema.parse(input), layout: null, discovery: null, jobs: null };
+  return { data: nativeExportSchema.parse(input), layout: null, discovery: null, jobs: null, workspace: null };
 }
 export function importData(store: Store, input: unknown): void {
-  const { data, layout, discovery, jobs } = parseImport(input);
+  const { data, layout, discovery, jobs, workspace } = parseImport(input);
   store.transaction(() => {
     const learning = store.get<Learning>('learning');
     if (store.has('imported') || store.get<Task[]>('tasks').length || store.get<Block[]>('schedule').length ||
       store.get<Session[]>('focus').length || learning.attempts.length ||
       learning.progress.some(p => p.status !== 'available') || learning.terminalRecords.length ||
-      (store.has('jobs') && getJobs(store).cv)) {
+      (store.has('jobs') && getJobs(store).cv) || (store.has('workspace') && hasWorkspaceWork(getWorkspace(store)))) {
       throw new HttpError(409, 'Import needs a fresh web database so it cannot overwrite your work. Use a new KONTROL_DATA_DIR, then import.');
     }
     // Preserve native historical records and pinned definitions exactly. Only an
@@ -60,11 +66,20 @@ export function importData(store: Store, input: unknown): void {
       articles: [], runs: {},
     });
     if (jobs) store.set('jobs', { ...jobs, revision: randomUUID() });
+    if (workspace) store.set('workspace', { ...workspace, revision: randomUUID() });
+    else if (store.has('workspace') && jobs?.profileConfirmed && jobs.profile) {
+      const current = getWorkspace(store); current.profile.targetRoles = jobs.profile.roles;
+      store.set('workspace', { ...current, revision: randomUUID() });
+    }
     store.set('imported', { at: new Date().toISOString(), sourceVersion: data.appVersion });
   });
 }
 export function settingsModule(store: Store): Router {
   const router = Router();
+  // Retired modules have no routes. Keep their saved records available to backup
+  // and import so removing sections never deletes personal data.
+  store.init<Task[]>('tasks', []);
+  store.init<Block[]>('schedule', []);
   store.init('preferences', defaultPreferences);
   store.init('layout', defaultLayout);
   store.set('layout', compatibleLayoutSchema.parse(store.get('layout')));
@@ -84,14 +99,15 @@ export function settingsModule(store: Store): Router {
   });
   router.get('/export', (_req, res) => {
     res.setHeader('Content-Disposition', 'attachment; filename="kontrol-web-backup.json"');
-    res.json({ format: 'kontrol-web', schemaVersion: 3, data: exportData(store), layout: store.get<Layout>('layout'),
-      newsDiscovery: getDiscovery(store).preferences, jobs: getJobs(store) });
+    res.json({ format: 'kontrol-web', schemaVersion: 5, data: exportData(store), layout: store.get<Layout>('layout'),
+      newsDiscovery: getDiscovery(store).preferences, jobs: getJobs(store), workspace: getWorkspace(store) });
   });
   router.post('/import/preview', (req, res) => {
-    const { data, discovery, jobs } = parseImport(req.body);
-    res.json({ source: data.appVersion, tasks: data.tasks.length, blocks: data.blocks.length,
-      sessions: data.sessions.length, lessons: data.learning.definitions.length, answers: data.learning.attempts.length,
-      feeds: data.feedPreferences.feeds.length, interests: discovery?.interests.length ?? 0, cvs: jobs?.cv ? 1 : 0, jobMatches: jobs?.matches.length ?? 0 });
+    const { data, discovery, jobs, workspace } = parseImport(req.body);
+    res.json({ source: data.appVersion, sessions: data.sessions.length, lessons: data.learning.definitions.length, answers: data.learning.attempts.length,
+      feeds: data.feedPreferences.feeds.length, interests: discovery?.interests.length ?? 0, cvs: jobs?.cv ? 1 : 0, jobMatches: jobs?.matches.length ?? 0,
+      savedArticles: workspace?.articles.filter(a => a.savedAt).length ?? 0, applications: workspace?.jobs.length ?? 0,
+      notes: workspace?.notes.length ?? 0, savedLessons: workspace?.savedLessons.length ?? 0, reviews: workspace?.reviews.length ?? 0 });
   });
   router.post('/import', (req, res) => {
     importData(store, req.body);

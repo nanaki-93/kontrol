@@ -3,10 +3,12 @@ import { Check, Pencil, UserRound } from 'lucide-react';
 import { jobProfileLimits, jobProfileSchema, type JobProfile } from '../../../shared/jobs';
 import { Badge, ErrorMessage } from '../../components/ui';
 import { useJobCommand } from './api';
+import { useWorkspace } from '../workspace/api';
 
 const lines = (value: string) => value.split('\n').map(line => line.trim()).filter(Boolean);
 export function ProfilePanel({ profile, revision, confirmed, busy, onDirty }: { profile: JobProfile; revision: string; confirmed: boolean; busy: boolean; onDirty: (dirty: boolean) => void }) {
   const command = useJobCommand(), [editing, setEditing] = useState(!confirmed);
+  const workspace = useWorkspace();
   const [draft, setDraft] = useState(profile), [roles, setRoles] = useState(profile.roles.join('\n')), [skills, setSkills] = useState(profile.skills.join('\n')), [languages, setLanguages] = useState(profile.languages.join('\n'));
   const [error, setError] = useState<unknown>(null);
   const pending = busy || command.isPending;
@@ -20,7 +22,8 @@ export function ProfilePanel({ profile, revision, confirmed, busy, onDirty }: { 
     } catch { /* Keep edits visible. */ }
   }
   return <section className="panel job-profile"><div className="section-title"><div><p className="eyebrow">03 / YOUR PROFESSIONAL PROFILE</p><h2>{editing ? 'A profile, with your final say.' : profile.headline}</h2></div><Badge tone={confirmed ? 'success' : 'warning'}>{confirmed ? 'Reviewed' : 'Review needed'}</Badge></div>
-    {editing ? <form className="editor" onSubmit={event => void confirm(event)}><p className="muted">Check the AI summary and correct anything it missed. Only this reviewed profile is used to match jobs.</p>
+    {editing ? <form className="editor" onSubmit={event => void confirm(event)}><p className="muted">Check the AI summary and correct anything it missed. Only this reviewed profile is used to match jobs. Confirming also saves your target roles to your workspace goals.</p>
+      {!!workspace.data?.profile.targetRoles.length && <button type="button" className="text-link" disabled={pending} onClick={() => { setRoles(workspace.data!.profile.targetRoles.join('\n')); onDirty(true); }}>Use target roles from my workspace goals</button>}
       <fieldset className="job-profile-fields" disabled={pending}>
         <label>Professional headline<input required maxLength={200} value={draft.headline} onChange={event => { setDraft({ ...draft, headline: event.target.value }); onDirty(true); }} /></label>
         <label>Summary<textarea required rows={3} maxLength={1500} value={draft.summary} onChange={event => { setDraft({ ...draft, summary: event.target.value }); onDirty(true); }} /></label>

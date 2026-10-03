@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { z } from 'zod';
-import { sessionSchema, type Session, type Task } from '../../shared/schema';
+import { sessionSchema, type Session } from '../../shared/schema';
 import { Store } from '../store';
 import { HttpError, requireFound } from '../errors';
 
@@ -52,18 +52,17 @@ export function focusModule(store: Store, clock?: () => number): Router {
   }
   router.get('/', (_req, res) => res.json({ sessions: reconcile(), serverNow: now() }));
   router.post('/', (req, res) => {
-    const input = z.object({ minutes: z.number().int().min(1).max(1440), taskID: z.uuid().nullable() }).parse(req.body);
+    const input = z.object({ minutes: z.number().int().min(1).max(1440) }).strict().parse(req.body);
     reconcile();
     const session = store.transaction(() => {
       const sessions = store.get<Session[]>('focus');
       if (sessions.some(s => s.state === 'running' || s.state === 'paused')) throw new HttpError(409, 'Finish the active session first.');
-      const task = input.taskID ? requireFound(store.get<Task[]>('tasks').find(t => t.id === input.taskID), 'The linked task no longer exists.') : null;
       const timestamp = now(), at = new Date(timestamp).toISOString();
       const session = sessionSchema.parse({
         id: randomUUID(), state: 'running', plannedSeconds: input.minutes * 60,
         accumulatedActiveSeconds: 0, activeSegmentStartedAt: at, deadline: new Date(timestamp + input.minutes * 60_000).toISOString(),
         pausedAt: null, startedAt: at, endedAt: null, checkpointAt: at, recoveryRequired: false,
-        linkedTaskID: task?.id ?? null, linkedLessonID: null, linkedTitleSnapshot: task?.title ?? null,
+        linkedTaskID: null, linkedLessonID: null, linkedTitleSnapshot: null,
       });
       store.set('focus', [...sessions, session]);
       return session;

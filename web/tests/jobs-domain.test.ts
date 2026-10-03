@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { JOB_ANALYSIS_TIMEOUT_MS, defaultJobPreferences, matchesJobFilters, jobPreferencesSchema, jobProfileSchema } from '../shared/jobs';
 import { extractCV } from '../server/jobs/cv';
 import { profilePrompt, matchingPrompt, parseProfile, parseJobMatches, jobAI } from '../server/jobs/ai';
-import { parseJobPostings, parseRemotive, parseArbeitnow, publicJobURL, jobQueries, createJobDiscovery } from '../server/jobs/sources';
+import { parseJobPostings, parseRemotive, parseArbeitnow, publicJobURL, jobQueries, parseJobSearchLinks, jobListingLinks, jobBoardIndexes, createJobDiscovery } from '../server/jobs/sources';
 import { searchCities } from '../server/jobs/cities';
+import { jobSearchPrompt, piJobSearch } from '../server/jobs/search';
 import { berlin, tokyo, profile, job, jobNow, cvText, cvUpload, pdfFixture, docxFixture } from './jobs-fixtures';
 
 test('CV extraction reads TXT, real PDF and DOCX fixtures without retaining binary files', async () => {
@@ -55,6 +56,23 @@ test('remote does not imply worldwide eligibility or unrestricted country access
   assert.equal(matchesJobFilters({ ...remote, remoteRegions: ['Worldwide'] }, filters, jobNow), true);
   assert.equal(matchesJobFilters({ ...remote, remoteRegions: ['USA'] }, { ...filters, cities: [{ ...berlin, name: 'New York', country: 'United States', countryCode: 'US' }] }, jobNow), true);
   assert.equal(matchesJobFilters({ ...remote, remoteRegions: ['UK'] }, { ...filters, cities: [{ ...berlin, name: 'London', country: 'United Kingdom', countryCode: 'GB' }] }, jobNow), true);
+});
+test('Italian Milano listings match Milan without accepting other cities or countries', () => {
+  const milan = { ...berlin, name: 'Milan', country: 'Italy', countryCode: 'IT', region: 'Lombardy' };
+  const filters = { ...defaultJobPreferences, cities: [milan] };
+  const source = { ...job, cities: [{ name: 'Milano', country: 'IT' }] };
+  assert.equal(matchesJobFilters(source, filters, jobNow), true);
+  assert.equal(matchesJobFilters(source, { ...filters, cities: [{ ...milan, name: 'Milano' }] }, jobNow), true);
+  assert.equal(matchesJobFilters({ ...source, cities: [{ name: 'Milan', country: 'Italy' }] }, filters, jobNow), true);
+  for (const name of ['Milano, Italy', 'Milan, IT']) {
+    assert.equal(matchesJobFilters({ ...source, cities: [{ name, country: 'IT' }] }, filters, jobNow), true);
+  }
+  for (const name of ['Milano, Japan', 'Milano, Rome', 'Milano, Lombardy']) {
+    assert.equal(matchesJobFilters({ ...source, cities: [{ name, country: 'IT' }] }, filters, jobNow), false);
+  }
+  assert.equal(matchesJobFilters({ ...source, cities: [{ name: 'Milano', country: 'US' }] }, filters, jobNow), false);
+  assert.equal(matchesJobFilters({ ...source, cities: [{ name: 'Rome', country: 'IT' }] }, filters, jobNow), false);
+  assert.equal(matchesJobFilters(source, { ...filters, cities: [{ ...milan, name: 'Rome' }] }, jobNow), false);
 });
 test('profile and matching contracts limit evidence, reject hallucinated source IDs and keep source fields authoritative', async () => {
   assert.deepEqual(parseProfile('```json\n' + JSON.stringify(profile) + '\n```'), profile);
@@ -159,4 +177,151 @@ test('a cached board duplicate cannot revive a posting whose page states that it
   });
   const result = await discover(profile, defaultJobPreferences, jobNow, new AbortController().signal);
   assert.deepEqual(result.sources, []);
+});
+
+test('Tokyo filters include explicitly located special wards without broadening other city filters', () => {
+  const [source] = parseJobPostings(html({ ...posting, jobLocation: { address: {
+    addressLocality: 'Minato-ku', addressRegion: 'Tokyo', addressCountry: 'JP',
+  } } }), job.url);
+  assert.deepEqual(source.cities, [{ name: 'Minato-ku', region: 'Tokyo', country: 'JP' }]);
+  assert.equal(source.location, 'Minato-ku, Tokyo, JP');
+  assert.equal(matchesJobFilters(source, { ...defaultJobPreferences, cities: [tokyo] }, jobNow), true);
+  for (const city of [
+    { name: 'Minato-ku', country: 'JP' }, { name: 'Minato-ku', country: 'US', region: 'Tokyo' },
+    { name: 'Minato-ku', country: 'JP', region: 'Osaka' }, { name: 'Hachioji', country: 'JP', region: 'Tokyo' },
+  ]) assert.equal(matchesJobFilters({ ...source, cities: [city] }, { ...defaultJobPreferences, cities: [tokyo] }, jobNow), false);
+  const newYork = { ...tokyo, name: 'New York', country: 'United States', countryCode: 'US', region: 'New York' };
+  assert.equal(matchesJobFilters({ ...source, cities: [{ name: 'Albany', country: 'US', region: 'New York' }] }, { ...defaultJobPreferences, cities: [newYork] }, jobNow), false);
+});
+const searchLink = (url: string, title = 'Backend jobs') => '<a class="result__a" href="//duckduckgo.com/l/?uddg=' + encodeURIComponent(url) + '">' + title + '</a>';
+test('fallback search unwraps only organic public destinations and does not follow ads or private URLs', () => {
+  const endpoint = 'https://html.duckduckgo.com/html/?q=backend';
+  const links = parseJobSearchLinks(searchLink(job.url) + searchLink(job.url + '?utm_source=search') + searchLink('http://127.0.0.1/private') +
+    '<a class="result__a" href="https://duckduckgo.com/y.js?ad_provider=bing">Sponsored job</a>' +
+    '<a href="https://example.com/navigation">Backend engineer</a>', endpoint);
+  assert.deepEqual(links, [{ url: job.url, title: 'Backend jobs' }]);
+  assert.throws(() => parseJobSearchLinks('<form id="challenge-form">Challenge</form>', endpoint), /challenge/);
+});
+test('directory links prioritize relevant roles, stay on the source site and require retrieved posting evidence', () => {
+  const links = jobListingLinks('<a href="/companies/acme/jobs/backend">Backend Engineer</a>' +
+    '<a href="/companies/acme/jobs/backend?utm_source=board">Backend Engineer</a>' +
+    '<a href="/jobs/sales">Sales Associate</a><a href="/articles/backend">Backend engineering guide</a>' +
+    '<a href="https://other.example/jobs/backend">Backend Engineer</a>' +
+    '<a href="http://localhost/jobs/backend">Backend Engineer</a>', 'https://example.com/jobs', profile);
+  assert.deepEqual(links, [{ url: 'https://example.com/companies/acme/jobs/backend', title: 'Backend Engineer' }]);
+  const italian = jobListingLinks('<a href="/lavoro/61521/java-back-end-milano">Java back end</a>' +
+    '<a href="/lavoro/61521/java-back-end-milano">Vedi i dettagli</a>' +
+    '<a href="/offerte-di-lavoro/milano">Backend jobs</a><a href="https://other.example/lavoro/private">Backend job</a>',
+  'https://example.com/offerte-di-lavoro/milano', profile);
+  assert.deepEqual(italian, [{ url: 'https://example.com/lavoro/61521/java-back-end-milano', title: 'Java back end' }]);
+});
+test('direct board coverage follows the selected geography and software profile', () => {
+  assert.equal(jobBoardIndexes(profile, { ...defaultJobPreferences, cities: [tokyo] }).length, 1);
+  assert.deepEqual(jobBoardIndexes(profile, { ...defaultJobPreferences, cities: [berlin] }), []);
+  assert.deepEqual(jobBoardIndexes({ ...profile, roles: ['Nurse'], skills: ['Patient care'] }, { ...defaultJobPreferences, cities: [tokyo] }), []);
+});
+for (const searchResult of ['empty', 'unavailable', 'blocked', 'unstructured']) test(`direct boards return fresh offers when PI discovery is ${searchResult}`, async () => {
+  const calls: string[] = [];
+  const milan = { ...berlin, name: 'Milan', country: 'Italy', countryCode: 'IT', region: 'Lombardy' };
+  const offers = ['https://www.tokyodev.com/companies/fixture/jobs/backend', 'https://reteinformaticalavoro.it/lavoro/61521/java-back-end-milano'];
+  const discover = createJobDiscovery(async url => {
+    calls.push(url);
+    if (url.includes('remotive.com/api')) return '{"jobs":[]}';
+    if (url.includes('arbeitnow.com/api')) return '{"data":[]}';
+    if (url === 'https://www.tokyodev.com/jobs/backend') return '<a href="/companies/fixture/jobs/backend">Backend engineer</a>';
+    if (url === 'https://reteinformaticalavoro.it/offerte-di-lavoro/milano') return '<a href="/lavoro/61521/java-back-end-milano">Java back end</a><a href="/lavoro/old">Backend engineer</a>';
+    if (url === offers[0]) return html({ ...posting, jobLocation: { address: { addressLocality: 'Tokyo', addressCountry: 'JP' } } });
+    if (url === offers[1] || url.endsWith('/lavoro/old')) return html({ ...posting,
+      datePosted: url.endsWith('/old') ? '2020-01-01' : '2026-10-01',
+      jobLocation: { address: { addressLocality: 'Milano, Italy', addressCountry: 'IT' } },
+    });
+    if (url === 'https://search.example/jobs/unreadable' && searchResult === 'unstructured') return '<p>No structured posting.</p>';
+    throw new Error('PRIVATE-SOURCE-ERROR');
+  }, async () => {
+    if (searchResult === 'unavailable') throw new Error('PRIVATE-PI-ERROR');
+    return searchResult === 'empty' ? [] : [{ url: 'https://search.example/jobs/unreadable', title: 'Backend engineer' }];
+  });
+  const result = await discover(profile, { ...defaultJobPreferences, cities: [tokyo, milan], employmentTypes: ['full_time'] }, jobNow, new AbortController().signal);
+  assert.deepEqual(result.sources.map(source => source.url).sort(), offers.sort());
+  assert.equal(calls.filter(url => url === offers[0]).length, 1);
+  assert.equal(calls.filter(url => url === offers[1]).length, 1);
+  assert.equal(calls.some(url => /bing\.com|duckduckgo\.com/.test(url)), false);
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE|no readable job postings/);
+});
+for (const bingFails of [false, true]) test(`discovery recovers from ${bingFails ? 'unavailable' : 'irrelevant'} Bing results through a job board and a structured offer`, async () => {
+  const calls: string[] = [], offer = 'https://board.example/companies/acme/jobs/backend';
+  const discover = createJobDiscovery(async url => {
+    calls.push(url);
+    if (url.includes('remotive.com/api')) return '{"jobs":[]}';
+    if (url.includes('arbeitnow.com/api')) return '{"data":[]}';
+    if (url.includes('bing.com/search')) {
+      if (bingFails) throw new Error('Fixture unavailable');
+      return '<rss><channel><item><title>Backend tutorial</title><link>https://example.com/tutorial</link></item></channel></rss>';
+    }
+    if (url.includes('duckduckgo.com/html')) return searchLink('https://board.example/jobs');
+    if (url === 'https://board.example/jobs') return '<a href="/companies/acme/jobs/backend">Backend Software Engineer</a>';
+    if (url === offer) return html({ ...posting, jobLocation: { address: { addressLocality: 'Shibuya-ku', addressRegion: 'Tokyo', addressCountry: 'JP' } } });
+    return '<p>Backend tutorials are not job offers.</p>';
+  });
+  const result = await discover(profile, { ...defaultJobPreferences, employmentTypes: ['full_time'], cities: [tokyo] }, jobNow, new AbortController().signal);
+  assert.deepEqual(result.sources.map(source => source.url), [offer]);
+  assert.equal(calls.filter(url => url === offer).length, 1);
+  assert.ok(calls.some(url => url.includes('duckduckgo.com/html')));
+});
+test('discovery reports unreadable coverage, preserves strict filters and follows directories for only one level', async () => {
+  const calls: string[] = [];
+  const discover = createJobDiscovery(async url => {
+    calls.push(url);
+    if (url.includes('remotive.com/api')) return '{"jobs":[]}';
+    if (url.includes('arbeitnow.com/api')) return '{"data":[]}';
+    if (url.includes('bing.com/search')) return '<rss><channel /></rss>';
+    if (url.includes('duckduckgo.com/html')) return searchLink('https://board.example/jobs');
+    if (url === 'https://board.example/jobs') return '<a href="/jobs/backend">Backend Engineer</a><a href="/jobs/engineer">Software Engineer</a>';
+    if (url === 'https://board.example/jobs/backend') return '<a href="/jobs/backend/deep">Backend Engineer</a>';
+    return html(posting); // Berlin does not match Tokyo.
+  });
+  const result = await discover(profile, { ...defaultJobPreferences, cities: [tokyo] }, jobNow, new AbortController().signal);
+  assert.deepEqual(result.sources, []);
+  assert.ok(result.warnings.some(warning => /no readable job postings matching your filters/.test(warning)));
+  assert.equal(calls.includes('https://board.example/jobs/backend/deep'), false);
+});
+test('PI search uses roles and skills and accepts only URLs grounded in public provider evidence', async () => {
+  const prompt = JSON.parse(jobSearchPrompt({ ...profile, summary: 'PRIVATE-SUMMARY', experience: 'PRIVATE-EXPERIENCE' }, { ...defaultJobPreferences, cities: [tokyo] }, jobNow));
+  assert.deepEqual(prompt.roles, profile.roles); assert.deepEqual(prompt.skills, profile.skills);
+  assert.deepEqual(prompt.preferences.cities, [{ name: 'Tokyo', country: 'Japan' }]);
+  assert.doesNotMatch(JSON.stringify(prompt), /PRIVATE|Fixture Candidate|1850147/);
+  const link = { url: job.url, title: job.title };
+  const run: Parameters<typeof piJobSearch>[0] = { run: async () => ({ text: JSON.stringify({ links: [link,
+    { ...link, url: job.url + '?utm_source=search' }, { ...link, url: 'https://invented.example/jobs/backend' },
+    { ...link, url: 'http://127.0.0.1/private' },
+  ] }), urls: [job.url, 'http://127.0.0.1/private'] }) };
+  assert.deepEqual(await piJobSearch(run)(profile, defaultJobPreferences, jobNow, new AbortController().signal), [link]);
+  const ungrounded = piJobSearch({ run: async () => ({ text: JSON.stringify({ links: [link] }), urls: [] }) });
+  await assert.rejects(ungrounded(profile, defaultJobPreferences, jobNow, new AbortController().signal), /backed by web-search evidence/);
+});
+test('PI-discovered links retrieve real postings before ranking and avoid scraping search engines on success', async () => {
+  const calls: string[] = [];
+  const discover = createJobDiscovery(async url => {
+    calls.push(url);
+    if (url.includes('remotive.com/api')) return '{"jobs":[]}';
+    if (url.includes('arbeitnow.com/api')) return '{"data":[]}';
+    if (url === job.url) return html(posting);
+    throw new Error('Search-engine scraping should not be needed');
+  }, async () => [{ url: job.url, title: job.title }]);
+  const result = await discover(profile, { ...defaultJobPreferences, cities: [berlin] }, jobNow, new AbortController().signal);
+  assert.equal(result.sources.length, 1); assert.equal(result.sources[0].url, job.url);
+  assert.deepEqual(result.warnings, []);
+  assert.equal(calls.some(url => /bing|duckduckgo/.test(url)), false);
+});
+test('PI discovery failure is sanitized and falls back to verified public listings', async () => {
+  const discover = createJobDiscovery(async url => {
+    if (url.includes('remotive.com/api')) return '{"jobs":[]}';
+    if (url.includes('arbeitnow.com/api')) return '{"data":[]}';
+    if (url.includes('bing.com/search')) return '<rss><channel><item><title>Backend engineer</title><link>' + job.url + '</link></item></channel></rss>';
+    return html(posting);
+  }, async () => { throw new Error('PRIVATE-PROVIDER-ERROR'); });
+  const result = await discover(profile, defaultJobPreferences, jobNow, new AbortController().signal);
+  assert.equal(result.sources.length, 1);
+  assert.match(result.warnings.join(' '), /PI web search could not finish/);
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE/);
 });

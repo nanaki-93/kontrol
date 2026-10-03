@@ -1,9 +1,10 @@
 # Kontrol
 
-A local web dashboard for Tasks, Planner, Focus, Learning, Projects, News and JOB.
-Each module has its own page and dashboard widgets you can show, hide, resize and
-reorder. React and TypeScript provide the interface; a Node/Express server stores
-your data in SQLite on this computer.
+A local workspace for Learning, News and Jobs, brought together in **Today**.
+Continue a lesson, read a short briefing, and follow up on opportunities. A saved
+library, notes, clocks, Focus and Projects support those activities. React and
+TypeScript provide the interface; a Node/Express server stores your data in
+SQLite on this computer.
 
 ## Getting started
 
@@ -24,14 +25,18 @@ and `npm start`.
 
 ## What is included
 
-- Tasks, daily planning and Focus sessions with persistent history.
-- Forty offline lessons, saved answers, self-checks and learning coverage.
+- An actionable Today dashboard, layout presets, shared goals and weekly reviews.
+- Forty offline lessons, three learning paths, saved answers, recall reviews and mini-project prompts.
+- A daily briefing, related coverage, saved articles, reading notes and read/unread status.
+- CV-based job matching, persistent applications, comparisons, follow-up dates and relevant lesson suggestions.
+- A searchable saved library, quick notes, pinned links and configurable world clocks.
+- Focus sessions with persistent history, available from every page.
 - Local `.kontrol` project inspection, next-feature suggestions, completion and Undo.
 - News interests, cross-publisher search and optional RSS/Atom subscriptions.
-- JOB CV extraction, reviewed profiles, city/work filters and ranked job offers.
+- Jobs CV extraction, reviewed profiles, city/work filters and ranked job offers.
 - Dashboard customization, preferences, JSON backup and validated import.
 
-News AI and JOB analysis use your existing **PI** installation, login and saved
+News AI and Jobs analysis use your existing **PI** installation, login and saved
 model. Configure PI before using those actions; Kontrol does not collect an API
 key. See the [setup and module guide](docs/web-app.md) for configuration, source
 coverage and feature limits.
@@ -44,7 +49,7 @@ with it. `KONTROL_DATA_DIR` selects an independent data directory;
 using [web/.env.example](web/.env.example) as a starting point. Local data,
 credentials, dependencies and generated output are ignored by Git.
 
-Settings exports version-3 web backups and imports previous web backups or
+Settings exports version-5 web backups and imports previous web backups or
 legacy macOS version-1 JSON exports into an empty workspace. Backups contain
 unencrypted personal content, including extracted CV text. Reconnect project
 folders separately. See [data migration and backup details](docs/web-app.md#move-existing-data).

@@ -63,13 +63,14 @@ export function parseJobPostings(html: string, pageURL: string): JobSource[] {
   const row = found[0];
   const cities = array(row.jobLocation).map(location => record(record(location).address)).map(address => ({
     name: name(address.addressLocality), country: name(address.addressCountry),
+    ...(name(address.addressRegion) ? { region: name(address.addressRegion) } : {}),
   })).filter(location => location.name || location.country).slice(0, 30);
   const description = plain(row.description), title = name(row.title), company = name(row.hiringOrganization);
   const remoteRegions = array(row.applicantLocationRequirements).map(name).filter(Boolean).slice(0, 30);
   const workMode = mode(title + ' ' + description, array(row.jobLocationType).some(value => value === 'TELECOMMUTE'));
   const parsed = jobSourceSchema.safeParse({ id: sourceID(url), url, title, company, description,
     cities, remoteRegions, workMode, employmentTypes: types(row.employmentType), salary: null,
-    location: cities.map(city => [city.name, city.country].filter(Boolean).join(', ')).join(' · ').slice(0, 1000) ||
+    location: cities.map(city => [...new Set([city.name, city.region, city.country].filter(Boolean))].join(', ')).join(' · ').slice(0, 1000) ||
       (remoteRegions.join(', ').slice(0, 1000) || 'Location not specified'),
     publishedAt: date(row.datePosted), expiresAt: date(row.validThrough), source: new URL(url).hostname.replace(/^www\./, ''),
   });
@@ -124,6 +125,65 @@ export function jobQueries(profile: JobProfile, preferences: JobPreferences): st
   return locations.flatMap(location => profile.roles.slice(0, 2).map(role =>
     [role.replaceAll('"', ''), 'job vacancy', location, arrangements, employment].filter(Boolean).join(' ').slice(0, 500)));
 }
+export interface JobLink { url: string; title: string }
+export type JobWebSearch = (profile: JobProfile, preferences: JobPreferences, now: number, signal: AbortSignal) => Promise<JobLink[]>;
+export function jobBoardIndexes(profile: JobProfile, preferences: JobPreferences): JobLink[] {
+  const terms = [...profile.roles, ...profile.skills].join(' ').toLowerCase();
+  if (!/\b(software|backend|back.end|frontend|front.end|developer|java|kotlin|spring|javascript|typescript|python|golang)\b/.test(terms)) return [];
+  const indexes: JobLink[] = [];
+  if (preferences.cities.some(city => city.countryCode === 'JP')) indexes.push({
+    url: 'https://www.tokyodev.com/jobs' + (/\b(backend|back.end|java|kotlin|spring)\b/.test(terms) ? '/backend' : ''),
+    title: 'TokyoDev software engineering jobs in Japan',
+  });
+  if (preferences.cities.some(city => city.countryCode === 'IT' && /^(milan|milano)$/i.test(city.name))) indexes.push({
+    url: 'https://reteinformaticalavoro.it/offerte-di-lavoro/milano' + (/\bspring\b/.test(terms) ? '/spring' : ''),
+    title: 'Reteinformaticalavoro software jobs in Milan',
+  });
+  return indexes;
+}
+function attribute(attributes: string, key: string): string {
+  return plain(attributes.match(new RegExp('(?:^|\\s)' + key + '\\s*=\\s*["\']([^"\']*)["\']', 'i'))?.[1]);
+}
+function anchors(html: string): { attributes: string; title: string }[] {
+  return [...html.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a\s*>/gi)].slice(0, 3000)
+    .map(match => ({ attributes: match[1], title: plain(match[2]).slice(0, 200) }));
+}
+export function parseJobSearchLinks(html: string, endpoint: string): JobLink[] {
+  if (/anomaly-modal|challenge-form/i.test(html)) throw new Error('Search challenge');
+  const links = new Map<string, JobLink>();
+  for (const anchor of anchors(html)) {
+    if (!attribute(anchor.attributes, 'class').split(/\s+/).includes('result__a')) continue;
+    try {
+      const link = new URL(attribute(anchor.attributes, 'href'), endpoint);
+      const isSearchHost = (host: string) => host === 'duckduckgo.com' || host.endsWith('.duckduckgo.com');
+      const destination = isSearchHost(link.hostname) && link.pathname === '/l/' ? link.searchParams.get('uddg') : link.href;
+      const url = publicJobURL(destination ?? '');
+      // Never follow ads, tracking links or internal search navigation.
+      if (isSearchHost(new URL(url).hostname)) continue;
+      links.set(url, { url, title: anchor.title });
+    } catch { /* Search links are untrusted, including redirect destinations. */ }
+  }
+  return [...links.values()];
+}
+const words = (text: string) => text.toLowerCase().replace(/back[ -]end/g, 'backend').replace(/front[ -]end/g, 'frontend').match(/[\p{L}\p{N}+#.]+/gu) ?? [];
+function linkRelevance(link: JobLink, profile: JobProfile): number {
+  const title = new Set(words(link.title));
+  const roles = new Set(profile.roles.flatMap(words).filter(word => !['senior', 'junior', 'lead', 'staff', 'principal', 'of', 'and', 'the'].includes(word)));
+  return [...roles].filter(word => title.has(word)).length * 4 + profile.skills.filter(skill => title.has(skill.toLowerCase())).length;
+}
+export function jobListingLinks(html: string, pageURL: string, profile: JobProfile): JobLink[] {
+  const origin = new URL(publicJobURL(pageURL)).origin, links = new Map<string, JobLink>();
+  for (const anchor of anchors(html)) {
+    try {
+      const url = publicJobURL(new URL(attribute(anchor.attributes, 'href'), pageURL).href), parsed = new URL(url);
+      const link = { url, title: anchor.title };
+      // Follow one level of same-origin job links, never arbitrary site navigation.
+      if (parsed.origin !== origin || url === pageURL || !/\/(?:jobs?|careers?|positions?|openings?|vacancies|requisitions?|lavoro)[/-].+/i.test(parsed.pathname) || !linkRelevance(link, profile)) continue;
+      if (!links.has(url) || linkRelevance(link, profile) > linkRelevance(links.get(url)!, profile)) links.set(url, link);
+    } catch { /* Ignore private or malformed destinations. */ }
+  }
+  return [...links.values()].sort((a, b) => linkRelevance(b, profile) - linkRelevance(a, profile)).slice(0, 20);
+}
 async function mapBounded<T, R>(items: T[], concurrency: number, action: (value: T) => Promise<R>): Promise<PromiseSettledResult<R>[]> {
   const results: PromiseSettledResult<R>[] = new Array(items.length);
   let next = 0;
@@ -137,11 +197,11 @@ async function mapBounded<T, R>(items: T[], concurrency: number, action: (value:
   return results;
 }
 export interface JobSources { sources: JobSource[]; warnings: string[] }
-export function createJobDiscovery(fetcher: JobFetcher = fetchJobText) {
+export function createJobDiscovery(fetcher: JobFetcher = fetchJobText, nativeSearch?: JobWebSearch) {
   let remotiveCache: { at: number; jobs: JobSource[] } | null = null;
   let arbeitnowCache: { at: number; jobs: JobSource[] } | null = null;
   return async (profile: JobProfile, preferences: JobPreferences, now: number, signal: AbortSignal): Promise<JobSources> => {
-    const deadline = AbortSignal.any([signal, AbortSignal.timeout(40_000)]);
+    const deadline = AbortSignal.any([signal, AbortSignal.timeout(nativeSearch ? 110_000 : 40_000)]);
     const warnings: string[] = [];
     const terms = [...profile.roles, ...profile.skills].map(value => value.toLowerCase());
     const relevance = (source: JobSource) => terms.reduce((score, term) => score +
@@ -175,26 +235,88 @@ export function createJobDiscovery(fetcher: JobFetcher = fetchJobText) {
       return jobs;
     };
     const web = async (): Promise<JobSource[]> => {
-      const pages = new Set<string>();
-      const searches = await mapBounded(jobQueries(profile, preferences), 3, async query => {
-        deadline.throwIfAborted();
-        const endpoint = 'https://www.bing.com/search?' + new URLSearchParams({ q: query, format: 'rss' });
-        const xml = await fetcher(endpoint, deadline);
-        return parseFeed(xml, { id: 'jobs', name: 'Job search', endpoint, isEnabled: true, topicIDs: [] }, new Date(now).toISOString());
-      });
-      if (searches.every(result => result.status === 'rejected')) throw new Error('Web search unavailable');
-      if (searches.some(result => result.status === 'rejected')) warnings.push('Some city or role searches could not be reached.');
-      for (const search of searches) if (search.status === 'fulfilled') {
-        for (const article of search.value.slice(0, 5)) {
-          try { pages.add(publicJobURL(article.url)); } catch { /* Exclude private destinations before fetching. */ }
+      const visited = new Set<string>(), jobs: JobSource[] = [];
+      let responsiveProviders = 0;
+      const warn = (message: string) => { if (!warnings.includes(message)) warnings.push(message); };
+      const read = async (links: JobLink[], providerSignal: AbortSignal) => {
+        const pages = links.filter(link => {
+          if (visited.has(link.url)) return false;
+          visited.add(link.url); return true;
+        });
+        const documents = await mapBounded(pages, 4, async ({ url }) => {
+          providerSignal.throwIfAborted();
+          const html = await fetcher(url, AbortSignal.any([providerSignal, AbortSignal.timeout(8_000)]));
+          const postings = parseJobPostings(html, url);
+          return { postings, links: postings.length ? [] : jobListingLinks(html, url, profile) };
+        });
+        if (documents.some(result => result.status === 'rejected')) warn('Some web pages could not be read. Web results include only accessible structured job postings.');
+        return documents.flatMap(result => result.status === 'fulfilled' ? [result.value] : []);
+      };
+      const collect = async (links: JobLink[], providerSignal: AbortSignal) => {
+        const documents = await read(links.slice(0, 20), providerSignal);
+        jobs.push(...documents.flatMap(document => document.postings));
+        const candidates = new Map<string, JobLink>();
+        for (const link of documents.flatMap(document => document.links)) if (!visited.has(link.url)) candidates.set(link.url, link);
+        const perSite = new Map<string, number>();
+        const details = [...candidates.values()].sort((a, b) => linkRelevance(b, profile) - linkRelevance(a, profile)).filter(link => {
+          const host = new URL(link.url).hostname, count = perSite.get(host) ?? 0;
+          perSite.set(host, count + 1); return count < 10;
+        }).slice(0, 20);
+        // A search result often points to a board. Retrieve the linked offer
+        // before accepting it; directory text and snippets never become jobs.
+        const offers = await read(details, providerSignal);
+        jobs.push(...offers.flatMap(document => document.postings));
+        return documents.length + offers.length;
+      };
+      const hasRelevantJobs = () => jobs.some(job => matchesJobFilters(job, preferences, now) && linkRelevance(job, profile) > 0);
+      // Read known, relevant board indexes independently of search-engine
+      // ranking. Every offer still needs its own fetched JobPosting record.
+      const indexes = jobBoardIndexes(profile, preferences);
+      const boards = indexes.length ? collect(indexes, AbortSignal.any([deadline, AbortSignal.timeout(30_000)]))
+        .then(read => { if (read) responsiveProviders++; })
+        .catch(() => { warn('Some direct job boards could not be read. Other sources are still used.'); }) : Promise.resolve();
+      if (nativeSearch) {
+        const providerSignal = AbortSignal.any([deadline, AbortSignal.timeout(80_000)]);
+        try {
+          const links = await nativeSearch(profile, preferences, now, providerSignal);
+          responsiveProviders++;
+          await collect(links, providerSignal);
+        } catch {
+          warn('PI web search could not finish. Public search and job-board sources are being used.');
         }
       }
-      const documents = await mapBounded([...pages].slice(0, 20), 4, async url => {
-        deadline.throwIfAborted();
-        return parseJobPostings(await fetcher(url, AbortSignal.any([deadline, AbortSignal.timeout(8_000)])), url);
-      });
-      if (documents.some(result => result.status === 'rejected')) warnings.push('Some web pages could not be read. Web results include only accessible structured job postings.');
-      return documents.flatMap(result => result.status === 'fulfilled' ? result.value : []);
+      await boards;
+      if (hasRelevantJobs()) return jobs;
+      for (const provider of ['Bing', 'DuckDuckGo'] as const) {
+        // Slow primary results must leave time for the fallback provider.
+        const providerSignal = AbortSignal.any([deadline, AbortSignal.timeout(provider === 'Bing' ? 15_000 : 25_000)]);
+        try {
+          const searches = await mapBounded(jobQueries(profile, preferences), 2, async query => {
+            providerSignal.throwIfAborted();
+            const endpoint = provider === 'Bing' ? 'https://www.bing.com/search?' + new URLSearchParams({ q: query, format: 'rss' }) :
+              'https://html.duckduckgo.com/html/?' + new URLSearchParams({ q: query });
+            const body = await fetcher(endpoint, AbortSignal.any([providerSignal, AbortSignal.timeout(8_000)]));
+            return provider === 'Bing' ? parseFeed(body, { id: 'jobs', name: 'Job search', endpoint, isEnabled: true, topicIDs: [] }, new Date(now).toISOString()) :
+              parseJobSearchLinks(body, endpoint);
+          });
+          if (searches.every(result => result.status === 'rejected')) throw new Error('Search unavailable');
+          responsiveProviders++;
+          if (searches.some(result => result.status === 'rejected')) warn('Some city or role searches could not be reached.');
+          const links = new Map<string, JobLink>();
+          for (const search of searches) if (search.status === 'fulfilled') {
+            for (const link of search.value.slice(0, 8)) {
+              try { const url = publicJobURL(link.url); links.set(url, { ...link, url }); } catch { /* Ignore unsafe results. */ }
+            }
+          }
+          await collect([...links.values()], providerSignal);
+          if (hasRelevantJobs()) break;
+        } catch {
+          warn(provider + ' search is unavailable; results may be limited.');
+        }
+      }
+      if (!responsiveProviders) throw new Error('Web search unavailable');
+      if (!jobs.some(job => matchesJobFilters(job, preferences, now))) warn('Web search found no readable job postings matching your filters. Job-board coverage may be limited.');
+      return jobs;
     };
     const results = await Promise.allSettled([web(), remote(), arbeitnow()]);
     signal.throwIfAborted();

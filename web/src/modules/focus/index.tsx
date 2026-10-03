@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Play, Pause, Square, Timer } from 'lucide-react';
 import { useCommand } from '../../lib/api';
-import { useTasks } from '../tasks/api';
 import { useSettings } from '../settings/api';
 import { useFocus } from './api';
 import { Badge, Empty, ErrorMessage, Loading, PageHeader, SectionTitle, formatDate } from '../../components/ui';
@@ -9,8 +8,8 @@ import { dayKey } from '../../../shared/dates';
 
 function duration(seconds: number): string { return String(Math.floor(seconds / 60)).padStart(2, '0') + ':' + String(Math.floor(seconds % 60)).padStart(2, '0'); }
 function FocusTimer({ compact = false }: { compact?: boolean }) {
-  const query = useFocus(), settings = useSettings(), tasks = useTasks(), command = useCommand(['focus']);
-  const [customMinutes, setMinutes] = useState<number | null>(null), [taskID, setTaskID] = useState('');
+  const query = useFocus(), settings = useSettings(), command = useCommand(['focus']);
+  const [customMinutes, setMinutes] = useState<number | null>(null);
   const [clock, setClock] = useState({ base: 0, sampled: performance.now(), tick: performance.now() });
   useEffect(() => {
     if (query.data) setClock({ base: query.data.serverNow, sampled: performance.now(), tick: performance.now() });
@@ -35,9 +34,8 @@ function FocusTimer({ compact = false }: { compact?: boolean }) {
       <button className="button secondary" disabled={command.isPending} onClick={() => command.mutate({ path: '/focus/' + active.id + '/end' })}><Square size={14} /> End session</button></div> :
       <><div className="duration-presets">{[15, 25, 50].map(n => <button key={n} className={minutes === n ? 'selected' : ''} aria-pressed={minutes === n} onClick={() => setMinutes(n)}>{n} min</button>)}
         <label className="custom-duration"><span className="sr-only">Custom duration in minutes</span><input type="number" min={1} max={1440} value={minutes} onChange={e => setMinutes(Number(e.target.value))} /><span>min</span></label></div>
-        <select aria-label="Link a task to Focus" value={taskID} onChange={e => setTaskID(e.target.value)}><option value="">No task attached</option>{tasks.data?.filter(t => !t.completedAt).map(t => <option key={t.id} value={t.id}>{t.title}</option>)}</select>
         <button className="button primary focus-start" disabled={command.isPending || !Number.isInteger(minutes) || minutes < 1 || minutes > 1440}
-          onClick={() => command.mutate({ path: '/focus', body: { minutes, taskID: taskID || null } })}><Play size={16} /> Start focusing</button></>}
+          onClick={() => command.mutate({ path: '/focus', body: { minutes } })}><Play size={16} /> Start focusing</button></>}
     <ErrorMessage error={command.error} />
   </div>;
 }
@@ -49,7 +47,7 @@ export function FocusPage() {
   return <><PageHeader eyebrow="PROTECT YOUR ATTENTION" title="Focus" description="Less switching. More finishing. Take it one session at a time." />
     <div className="split-grid"><div className="panel"><FocusTimer /></div><div className="panel">
       <SectionTitle meta={<Badge>{todayMinutes} min today</Badge>}>Session history</SectionTitle>
-      <p className="muted">Finishing a session leaves its linked task or lesson unchanged.</p>
+      <p className="muted">A record of the time you’ve given your attention.</p>
       {history.length ? <ul className="simple-list">{history.map(s => <li key={s.id}><div><strong>{s.linkedTitleSnapshot ?? 'Open focus'}</strong><div className="row-meta">{formatDate(s.endedAt!)} · {Math.floor(s.accumulatedActiveSeconds / 60)} min focused</div></div><Badge tone={s.state === 'completed' ? 'success' : ''}>{s.state === 'completed' ? 'Completed' : 'Ended early'}</Badge></li>)}</ul> : <Empty title="Build a little momentum.">Your finished sessions will collect here.</Empty>}
     </div></div>
   </>;
