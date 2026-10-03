@@ -33,7 +33,7 @@ export function transition(session: Session, action: 'reconcile' | 'pause' | 're
       deadline: new Date(Date.parse(at) + (s.plannedSeconds - seconds) * 1000).toISOString(),
       checkpointAt: at, recoveryRequired: false };
   }
-  return s;
+  return session;
 }
 
 export function focusModule(store: Store, clock?: () => number): Router {
@@ -46,11 +46,15 @@ export function focusModule(store: Store, clock?: () => number): Router {
     return store.transaction(() => {
       const old = store.get<Session[]>('focus');
       const next = old.map(s => transition(s, 'reconcile', now()));
-      if (JSON.stringify(old) !== JSON.stringify(next)) store.set('focus', next);
+      if (next.some((session, index) => session !== old[index])) store.set('focus', next);
       return next;
     });
   }
   router.get('/', (_req, res) => res.json({ sessions: reconcile(), serverNow: now() }));
+  router.get('/status', (_req, res) => res.json({
+    active: reconcile().find(session => session.state === 'running' || session.state === 'paused') ?? null,
+    serverNow: now(),
+  }));
   router.post('/', (req, res) => {
     const input = z.object({ minutes: z.number().int().min(1).max(1440) }).strict().parse(req.body);
     reconcile();

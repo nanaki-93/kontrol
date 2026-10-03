@@ -1,22 +1,27 @@
 import { useEffect, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { Play, Pause, Square, Timer } from 'lucide-react';
 import { useCommand } from '../../lib/api';
 import { useSettings } from '../settings/api';
-import { useFocus } from './api';
+import { useFocus, useFocusStatus } from './api';
 import { Badge, Empty, ErrorMessage, Loading, PageHeader, SectionTitle, formatDate } from '../../components/ui';
 import { dayKey } from '../../../shared/dates';
 
 function duration(seconds: number): string { return String(Math.floor(seconds / 60)).padStart(2, '0') + ':' + String(Math.floor(seconds % 60)).padStart(2, '0'); }
 function FocusTimer({ compact = false }: { compact?: boolean }) {
-  const query = useFocus(), settings = useSettings(), command = useCommand(['focus']);
+  const query = useFocusStatus(), settings = useSettings(), command = useCommand(['focus', 'focus-status']);
   const [customMinutes, setMinutes] = useState<number | null>(null);
   const [clock, setClock] = useState({ base: 0, sampled: performance.now(), tick: performance.now() });
   useEffect(() => {
     if (query.data) setClock({ base: query.data.serverNow, sampled: performance.now(), tick: performance.now() });
   }, [query.data, query.dataUpdatedAt]);
-  useEffect(() => { const interval = setInterval(() => setClock(c => ({ ...c, tick: performance.now() })), 250); return () => clearInterval(interval); }, []);
+  useEffect(() => {
+    if (query.data?.active?.state !== 'running') return;
+    const interval = setInterval(() => setClock(c => ({ ...c, tick: performance.now() })), 250);
+    return () => clearInterval(interval);
+  }, [query.data?.active?.state]);
   const minutes = customMinutes ?? settings.data?.preferences.focusDefaultMinutes ?? 25;
-  const active = query.data?.sessions.find(s => ['running', 'paused'].includes(s.state));
+  const active = query.data?.active;
   const now = clock.base + clock.tick - clock.sampled;
   const remaining = active ? active.state === 'running' && active.deadline ?
     Math.ceil(Math.min(active.plannedSeconds, Math.max(0, (Date.parse(active.deadline) - now) / 1000))) :
@@ -41,13 +46,17 @@ function FocusTimer({ compact = false }: { compact?: boolean }) {
 }
 export function FocusWidget() { return <FocusTimer compact />; }
 export function FocusPage() {
-  const query = useFocus();
+  const query = useFocus(), status = useFocusStatus(), client = useQueryClient();
+  useEffect(() => {
+    if (status.data && !status.data.active) void client.invalidateQueries({ queryKey: ['focus'] });
+  }, [status.data?.active?.id, client]);
   const history = [...(query.data?.sessions ?? [])].filter(s => s.endedAt).sort((a, b) => b.endedAt!.localeCompare(a.endedAt!));
   const todayMinutes = Math.floor(history.filter(s => dayKey(new Date(s.endedAt!)) === dayKey()).reduce((sum, s) => sum + s.accumulatedActiveSeconds, 0) / 60);
   return <><PageHeader eyebrow="PROTECT YOUR ATTENTION" title="Focus" description="Less switching. More finishing. Take it one session at a time." />
     <div className="split-grid"><div className="panel"><FocusTimer /></div><div className="panel">
       <SectionTitle meta={<Badge>{todayMinutes} min today</Badge>}>Session history</SectionTitle>
       <p className="muted">A record of the time you’ve given your attention.</p>
+      <ErrorMessage error={query.error} />
       {history.length ? <ul className="simple-list">{history.map(s => <li key={s.id}><div><strong>{s.linkedTitleSnapshot ?? 'Open focus'}</strong><div className="row-meta">{formatDate(s.endedAt!)} · {Math.floor(s.accumulatedActiveSeconds / 60)} min focused</div></div><Badge tone={s.state === 'completed' ? 'success' : ''}>{s.state === 'completed' ? 'Completed' : 'Ended early'}</Badge></li>)}</ul> : <Empty title="Build a little momentum.">Your finished sessions will collect here.</Empty>}
     </div></div>
   </>;

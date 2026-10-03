@@ -47,6 +47,23 @@ test('API rejects other origins, DNS rebinding hosts and missing client headers'
     assert.equal((await request('/missing')).status, 404);
   });
 });
+test('compact Focus status reconciles completion while retaining history separately', async () => {
+  let now = Date.parse('2026-10-03T00:00:00.000Z');
+  await withAPI(async ({ request }) => {
+    const started = await (await request('/focus', 'POST', { minutes: 1 })).json();
+    let status = await (await request('/focus/status')).json();
+    assert.equal(status.active.id, started.id);
+    assert.deepEqual(Object.keys(status).sort(), ['active', 'serverNow']);
+    now += 60_000;
+    status = await (await request('/focus/status')).json();
+    assert.equal(status.active, null);
+    const history = await (await request('/focus')).json();
+    assert.equal(history.sessions.length, 1); assert.equal(history.sessions[0].state, 'completed');
+    assert.equal(history.sessions[0].accumulatedActiveSeconds, 60);
+    assert.equal((await (await request('/focus/status')).json()).active, null);
+    assert.deepEqual((await (await request('/focus')).json()).sessions, history.sessions);
+  }, { clock: () => now });
+});
 test('retired Tasks and Planner routes are unavailable and cannot mutate archived records', async () => {
   await withAPI(async ({ request, store }) => {
     const data = exportData(store);

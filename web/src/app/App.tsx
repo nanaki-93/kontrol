@@ -1,17 +1,24 @@
-import { lazy, Suspense, useEffect, useState } from 'react';
+import { lazy, memo, Suspense, useEffect, useState } from 'react';
 import { LayoutDashboard, Settings2, ArrowUpRight, Command, Library, Timer } from 'lucide-react';
 import { Dashboard } from './Dashboard';
 import { modules } from './modules';
 import { useSettings } from '../modules/settings/api';
-import { useFocus } from '../modules/focus/api';
+import { useFocusStatus } from '../modules/focus/api';
 import { Loading, ModuleBoundary } from '../components/ui';
 
 const SettingsPage = lazy(() => import('../modules/settings').then(m => ({ default: m.SettingsPage })));
 const LibraryPage = lazy(() => import('../modules/workspace/library').then(m => ({ default: m.LibraryPage })));
 const FocusWidget = lazy(() => import('../modules/focus').then(m => ({ default: m.FocusWidget })));
+const RoutedPage = memo(function RoutedPage({ route, hash }: { route: string; hash: string }) {
+  const module = modules.find(m => m.id === route);
+  return <ModuleBoundary key={hash}><Suspense fallback={<Loading />}>
+    {!route ? <Dashboard key={hash} /> : route === 'settings' ? <SettingsPage /> : route === 'library' ? <LibraryPage /> : module ? <module.page key={hash} /> :
+      <div className="panel empty"><h1>This page is not in your workspace.</h1><a className="button secondary" href="#/">Back to dashboard</a></div>}
+  </Suspense></ModuleBoundary>;
+});
 export function App() {
   const [hash, setHash] = useState(window.location.hash || '#/');
-  const settings = useSettings(), focus = useFocus();
+  const settings = useSettings(), focus = useFocusStatus();
   const [showFocus, setShowFocus] = useState(false);
   useEffect(() => {
     const onHash = () => setHash(window.location.hash || '#/');
@@ -20,7 +27,7 @@ export function App() {
   }, []);
   const route = hash.replace(/^#\/?/, '').split('?')[0];
   const module = modules.find(m => m.id === route);
-  const active = focus.data?.sessions.find(s => ['running', 'paused'].includes(s.state));
+  const active = focus.data?.active;
   const pageTitle = module?.title ?? (route === 'settings' ? 'Settings' : route === 'library' ? 'Saved library' : 'Today');
   useEffect(() => { document.title = 'Kontrol — ' + pageTitle; }, [pageTitle]);
   return <div className={'app-shell ' + (settings.data?.preferences.textSize === 'large' ? 'large-text ' : '') + (settings.data?.preferences.reduceMotion === 'reduce' ? 'reduce-motion' : '')}>
@@ -39,10 +46,7 @@ export function App() {
       <div className="focus-utility"><button className="text-link" aria-expanded={showFocus} aria-controls="quick-focus" onClick={() => setShowFocus(!showFocus)}><Timer size={15} />{active ? active.state === 'running' ? 'Focus running' : 'Focus paused' : 'Focus timer'}</button>
         {showFocus && <section className="panel focus-popover" id="quick-focus" aria-label="Quick focus timer"><div className="section-title"><h2>Focus</h2><button className="text-link" onClick={() => setShowFocus(false)}>Close</button></div><ModuleBoundary><Suspense fallback={<Loading />}><FocusWidget /></Suspense></ModuleBoundary></section>}
       </div></div>
-      <main id="main-content" tabIndex={-1}><ModuleBoundary key={hash}><Suspense fallback={<Loading />}>
-        {!route ? <Dashboard key={hash} /> : route === 'settings' ? <SettingsPage /> : route === 'library' ? <LibraryPage /> : module ? <module.page key={hash} /> :
-          <div className="panel empty"><h1>This page is not in your workspace.</h1><a className="button secondary" href="#/">Back to dashboard</a></div>}
-      </Suspense></ModuleBoundary></main>
+      <main id="main-content" tabIndex={-1}><RoutedPage route={route} hash={hash} /></main>
     </div>
   </div>;
 }
