@@ -439,13 +439,14 @@ label > input:not([type="checkbox"]), label > textarea, label > select { margin-
 }
 
 /* Today keeps the three core activities prominent; utilities stay compact. */
-.today-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
-.today-action { display: flex; flex-direction: column; min-width: 0; padding: 23px; border: 1px solid var(--line); border-radius: 7px; background: linear-gradient(135deg, var(--raised), var(--surface)); }
+.today-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.today-action { display: flex; align-items: center; gap: 14px; min-width: 0; padding: 18px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
 .today-action:first-child { border-color: var(--accent-line); background: linear-gradient(135deg, var(--accent-soft), var(--surface)); }
 .today-action:hover { border-color: var(--accent); }
-.today-action h2 { font-size: 1.22em; line-height: 1.5; margin: 22px 0 10px; overflow-wrap: anywhere; }
-.today-action > p { color: var(--muted); font-size: var(--font-small); margin-bottom: 24px; }
-.action-caption { display: flex; justify-content: space-between; align-items: center; gap: 10px; color: var(--accent); font-size: var(--font-small); margin-top: auto; padding-top: 16px; border-top: 1px solid var(--line); }
+.today-action-icon, .today-action-arrow { flex-shrink: 0; color: var(--accent); }
+.today-action-copy { display: grid; flex: 1; min-width: 0; gap: 7px; overflow-wrap: anywhere; }
+.today-action-copy strong { font-size: var(--font-body); line-height: 1.4; font-weight: 500; }
+.today-action-detail { color: var(--muted); font-size: var(--font-small); line-height: 1.5; }
 .today-utilities { display: grid; grid-template-columns: 1.3fr 1fr; gap: 22px; margin-top: 24px; }
 .today-utilities .panel { margin-bottom: 0; }
 .pinned-links { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 18px; }
@@ -508,9 +509,7 @@ label > input:not([type="checkbox"]), label > textarea, label > select { margin-
 .comparison thead { background: var(--raised); }
 @media (max-width: 1100px) {
   .today-actions { grid-template-columns: 1fr; }
-  .today-action { padding: 20px; }
-  .today-action h2 { margin-top: 12px; }
-  .today-action > p { margin-bottom: 14px; }
+  .today-action { padding: 16px 18px; }
   .today-utilities { grid-template-columns: 1fr; }
 }
 @media (max-width: 600px) {

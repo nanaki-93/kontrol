@@ -1,5 +1,5 @@
 import { Suspense, useEffect, useState } from 'react';
-import { ArrowDown, ArrowUp, ArrowUpRight, Check, SlidersHorizontal, RotateCcw, Plus } from 'lucide-react';
+import { ArrowDown, ArrowUp, ArrowUpRight, BookOpen, BriefcaseBusiness, Check, Rss, SlidersHorizontal, RotateCcw, Plus } from 'lucide-react';
 import { defaultLayout, type Layout } from '../../shared/schema';
 import { dayKey } from '../../shared/dates';
 import { canonicalURL, dueReviews, nextLesson, layoutPresets } from '../../shared/workspace';
@@ -23,12 +23,16 @@ function TodayActions() {
   const followups = workspace.data?.jobs.filter(j => j.followUpOn && j.followUpOn <= dayKey() && !['archived', 'offer'].includes(j.stage)) ?? [];
   const matches = jobs.data?.matches.filter(job => (!job.expiresAt || Date.parse(job.expiresAt) > Date.now()) && !workspace.data?.jobs.some(j => canonicalURL(j.job.url) === canonicalURL(job.url))) ?? [];
   const actions = [
-    { label: 'LEARN', title: lesson?.title ?? 'Choose your next learning step', detail: lesson ? lesson.estimatedMinutes + ' min · ' + due + ' reviews due' : due + ' reviews due', route: lesson ? 'learning?lesson=' + encodeURIComponent(lesson.id) : 'learning', action: 'Continue learning' },
-    { label: 'STAY INFORMED', title: stories.length ? stories.length + ' stories in your briefing' : 'Build your daily briefing', detail: stories.length ? unread + ' unread · from your latest refresh' : 'Start with an interest you care about', route: stories.length ? 'news' : 'news?view=discover', action: stories.length ? 'Read your briefing' : 'Find relevant stories' },
-    { label: 'YOUR NEXT OPPORTUNITY', title: followups.length ? followups.length + ' follow-ups need your attention' : matches.length ? matches.length + ' matches to review' : 'Find and save your next role', detail: followups.length ? 'Applications due today or earlier' : 'Keep a shortlist and prepare your next move', route: followups.length ? 'jobs?view=tracker&due=1' : 'jobs', action: followups.length ? 'Review follow-ups' : 'Explore opportunities' },
+    { label: 'LEARNING', icon: BookOpen, detail: lesson ? lesson.estimatedMinutes + ' min · ' + due + ' reviews due' : due + ' reviews due', route: lesson ? 'learning?lesson=' + encodeURIComponent(lesson.id) : 'learning', action: lesson ? 'Continue learning' : 'Choose a learning step', pending: learning.isPending },
+    { label: 'NEWS', icon: Rss, detail: stories.length ? stories.length + ' stories · ' + unread + ' unread' : 'Build a briefing around your interests', route: stories.length ? 'news' : 'news?view=discover', action: stories.length ? 'Read your briefing' : 'Find relevant stories', pending: news.isPending },
+    { label: 'JOBS', icon: BriefcaseBusiness, detail: followups.length ? followups.length + ' due today or earlier' : matches.length ? matches.length + ' matches to review' : 'Find and save your next role', route: followups.length ? 'jobs?view=tracker&due=1' : 'jobs', action: followups.length ? 'Review follow-ups' : 'Explore opportunities', pending: jobs.isPending },
   ];
   return <><ErrorMessage error={workspace.error ?? learning.error ?? news.error ?? jobs.error} />
-    <div className="today-actions">{actions.map((item, i) => <a href={'#/' + item.route} className="today-action" key={item.label}><div className="row-spread"><span className="eyebrow">{item.label}</span><span className="stat-index">0{i + 1}</span></div><h2>{[learning.isPending, news.isPending, jobs.isPending][i] ? 'Loading your next step…' : item.title}</h2><p>{workspace.isPending ? 'Loading your saved goals…' : item.detail}</p><span className="action-caption">{item.action}<ArrowUpRight size={15} /></span></a>)}</div>
+    <nav className="today-actions" aria-label="Your next actions">{actions.map(item => <a href={'#/' + item.route} className="today-action" key={item.label}>
+      <item.icon className="today-action-icon" size={20} aria-hidden="true" />
+      <span className="today-action-copy"><span className="eyebrow">{item.label}</span><strong>{item.action}</strong><span className="today-action-detail">{item.pending || workspace.isPending ? 'Loading your next step…' : item.detail}</span></span>
+      <ArrowUpRight className="today-action-arrow" size={16} aria-hidden="true" />
+    </a>)}</nav>
   </>;
 }
 export function Dashboard() {
