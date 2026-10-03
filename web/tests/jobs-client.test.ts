@@ -56,6 +56,20 @@ test('API preserves actionable server errors and supports query cancellation', a
   controller.abort();
   await assert.rejects(pending, { name: 'AbortError' });
 });
+test('shared API deadlines bound ordinary requests without cutting off batch discovery or backup imports', async context => {
+  const deadlines: number[] = [];
+  context.mock.method(AbortSignal, 'timeout', (milliseconds: number) => {
+    deadlines.push(milliseconds); return new AbortController().signal;
+  });
+  context.mock.method(globalThis, 'fetch', async (_input: unknown, init: RequestInit) => {
+    assert.ok(init.signal instanceof AbortSignal);
+    return Response.json({ saved: true });
+  });
+  await api('/workspace'); await api('/focus', 'POST', { minutes: 25 });
+  await api('/news/discover', 'POST'); await api('/news/refresh', 'POST');
+  await api('/settings/import/preview', 'POST'); await api('/settings/export');
+  assert.deepEqual(deadlines, [15_000, 30_000, 390_000, 210_000, 120_000, 120_000]);
+});
 for (const succeeds of [true, false]) test(`JOB command ${succeeds ? 'success' : 'failure'} settles while its status refetch stalls`, async context => {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   const initial: JobsResponse = { ...emptyJobs(randomUUID()),

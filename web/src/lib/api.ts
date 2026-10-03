@@ -1,8 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
 export async function api<T>(path: string, method = 'GET', body?: unknown, options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<T> {
-  const timeout = options.timeoutMs === undefined ? undefined : AbortSignal.timeout(options.timeoutMs);
-  const signal = timeout && options.signal ? AbortSignal.any([timeout, options.signal]) : timeout ?? options.signal;
+  // News can process twelve interests or forty feeds in bounded batches.
+  // Ordinary reads and writes should not wait indefinitely behind those jobs.
+  const defaultTimeout = path === '/news/discover' ? 390_000 : path === '/news/refresh' ? 210_000 :
+    path.startsWith('/settings/import') || path === '/settings/export' ? 120_000 : method === 'GET' ? 15_000 : 30_000;
+  const timeout = AbortSignal.timeout(options.timeoutMs ?? defaultTimeout);
+  const signal = options.signal ? AbortSignal.any([timeout, options.signal]) : timeout;
   let response: Response;
   let result: unknown;
   try {
@@ -23,13 +27,14 @@ export async function api<T>(path: string, method = 'GET', body?: unknown, optio
 }
 export function useResource<T>(key: string, path: string, interval?: number) {
   return useQuery<T, Error>({
-    queryKey: [key], queryFn: () => api<T>(path), refetchInterval: interval,
+    queryKey: [key], queryFn: ({ signal }) => api<T>(path, 'GET', undefined, { signal }), refetchInterval: interval,
     staleTime: 5_000, retry: 1,
   });
 }
 export function useCommand<T = unknown>(keys: string[]) {
   const client = useQueryClient();
   return useMutation<T, Error, { path: string; method?: string; body?: unknown }>({
+    mutationKey: ['command', ...keys],
     mutationFn: ({ path, method = 'POST', body = {} }) => api<T>(path, method, body),
     onSuccess: async () => { await Promise.all(keys.map(key => client.invalidateQueries({ queryKey: [key] }))); },
   });
