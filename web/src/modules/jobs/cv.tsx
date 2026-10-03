@@ -29,7 +29,7 @@ export function CVPanel({ state, busy }: { state: JobsResponse; busy: boolean })
     } catch (failure) { setError(failure); }
     finally { setReading(false); }
   }
-  return <JobSetupPanel name="cv" eyebrow="01 / YOUR EXPERIENCE" title="Your CV" icon={<FileText size={22} />}
+  return <JobSetupPanel name="cv" eyebrow="YOUR EXPERIENCE" title="Your CV" icon={<FileText size={22} />}
     defaultExpanded={!state.profileConfirmed} summary={state.cv ? `${state.cv.name} · ${state.profileConfirmed ? 'Profile confirmed' : state.profile ? 'Profile ready to review' : 'Ready to analyze'}` : 'Upload a PDF, DOCX or TXT CV to get started.'}
     feedback={<ErrorMessage error={error ?? command.error} />}>
     <p className="muted">Bring your experience, skills and career history. AI will turn them into a profile you can review.</p>

@@ -300,6 +300,10 @@ label > input:not([type="checkbox"]), label > textarea, label > select { margin-
 .job-setup-status { margin: 12px 0 0; }
 .job-setup-body { margin-top: 22px; }
 .job-setup-body > :last-child { margin-bottom: 0; }
+.job-method { margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--line); }
+.job-method summary { cursor: pointer; color: var(--muted); font-size: var(--font-small); }
+.job-method summary:hover { color: var(--accent); }
+.job-method .footnote { max-width: 85ch; }
 .job-upload { display: flex; flex-direction: column; align-items: center; gap: 13px; text-align: center; border: 1px dashed var(--accent-line); background: var(--raised); border-radius: 7px; padding: 30px 20px; margin-top: 24px; }
 .job-upload > svg { color: var(--accent); }
 .job-upload > strong { font-size: var(--font-small); }

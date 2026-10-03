@@ -28,7 +28,7 @@ export function ProfilePanel({ profile, revision, confirmed, busy, onDirty }: { 
       form.accept(fields(next.profile!), next.revision); setEditing(false);
     } catch { /* Keep edits visible. */ }
   }
-  return <section className="panel job-profile"><div className="section-title"><div><p className="eyebrow">03 / YOUR PROFESSIONAL PROFILE</p><h2>{editing ? 'A profile, with your final say.' : profile.headline}</h2></div><Badge tone={confirmed ? 'success' : 'warning'}>{confirmed ? 'Reviewed' : 'Review needed'}</Badge></div>
+  return <section className="panel job-profile"><div className="section-title"><div><p className="eyebrow">YOUR PROFILE</p><h2>{editing ? 'Review your profile' : profile.headline}</h2></div><Badge tone={confirmed ? 'success' : 'warning'}>{confirmed ? 'Reviewed' : 'Review needed'}</Badge></div>
     {editing ? <form className="editor" onSubmit={event => void confirm(event)}><p className="muted">Check the AI summary and correct anything it missed. Only this reviewed profile is used to match jobs. Confirming also saves your target roles to your workspace goals.</p>
       {!!workspace.data?.profile.targetRoles.length && <button type="button" className="text-link" disabled={pending} onClick={() => { setDraft({ ...draft, roles: workspace.data!.profile.targetRoles.join('\n') }); }}>Use target roles from my workspace goals</button>}
       <fieldset className="job-profile-fields" disabled={pending}>

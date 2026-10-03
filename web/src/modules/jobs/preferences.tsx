@@ -35,7 +35,7 @@ export function PreferencesPanel({ state, busy, onDirty }: { state: JobsResponse
     draft.cities.length ? draft.cities.map(city => `${city.name}, ${city.countryCode}`).join('; ') : 'Any location',
     `Past ${draft.days} days`,
   ].join(' · ');
-  return <JobSetupPanel name="preferences" eyebrow="02 / YOUR PREFERENCES" title="Search filters" icon={<MapPin size={22} />}
+  return <JobSetupPanel name="preferences" eyebrow="SEARCH PREFERENCES" title="Search filters" icon={<MapPin size={22} />}
     defaultExpanded={!state.profileConfirmed} summary={summary} status={dirty ? 'Unsaved changes' : undefined}
     feedback={<><ErrorMessage error={error ?? command.error} />{form.conflict && <DraftConflict
       onReload={() => { form.reload(); setSaved(false); command.reset(); }} onKeep={() => { form.keep(); setSaved(false); command.reset(); }}>
