@@ -7,8 +7,7 @@ import { useCommand } from '../lib/api';
 import { useSettings } from '../modules/settings/api';
 import { useLearning } from '../modules/learning/api';
 import { useJobs } from '../modules/jobs/api';
-import { useNews } from '../modules/news/api';
-import { briefingStories } from '../modules/news/briefing';
+import { useNews, useBriefingStories } from '../modules/news/api';
 import { useWorkspace } from '../modules/workspace/api';
 import { QuickCapture } from '../modules/workspace/notes';
 import { WeeklyReview } from '../modules/workspace/weekly';
@@ -19,7 +18,7 @@ function TodayActions() {
   const learning = useLearning(), workspace = useWorkspace(), news = useNews(), jobs = useJobs();
   const lesson = learning.data ? nextLesson(learning.data, workspace.data) : undefined;
   const due = learning.data && workspace.data ? dueReviews(learning.data, workspace.data).length : 0;
-  const stories = news.data ? briefingStories(news.data, workspace.data) : [];
+  const stories = useBriefingStories(news.data, workspace.data);
   const unread = stories.filter(s => !workspace.data?.articles.some(a => canonicalURL(a.article.url) === canonicalURL(s.lead.url) && a.readAt)).length;
   const followups = workspace.data?.jobs.filter(j => j.followUpOn && j.followUpOn <= dayKey() && !['archived', 'offer'].includes(j.stage)) ?? [];
   const matches = jobs.data?.matches.filter(job => (!job.expiresAt || Date.parse(job.expiresAt) > Date.now()) && !workspace.data?.jobs.some(j => canonicalURL(j.job.url) === canonicalURL(job.url))) ?? [];

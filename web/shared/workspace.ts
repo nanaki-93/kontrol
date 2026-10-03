@@ -154,19 +154,24 @@ export function jobSkillCandidates(job: TrackedJob): string[] {
   return [...new Set([...job.skills.map(s => s.label), ...skills.filter(([, pattern]) => pattern.test(source)).map(([label]) => label)])].slice(0, 30);
 }
 export interface StoryGroup<T> { lead: T; related: T[] }
-export function groupStories<T extends Pick<Article, 'title' | 'url' | 'publishedAt'>>(articles: T[]): StoryGroup<T>[] {
-  const groups: StoryGroup<T>[] = [];
+export function groupStories<T extends Pick<Article, 'title' | 'url' | 'publishedAt'>>(articles: T[], limit = Infinity): StoryGroup<T>[] {
+  const groups: { story: StoryGroup<T>; url: string; urls: Set<string>; words: Set<string>; published: number | null }[] = [];
   const tokens = (title: string) => new Set((title.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []).filter(w => w.length > 2 && !['the', 'and', 'for', 'with', 'from', 'that', 'this'].includes(w)));
   for (const article of articles) {
-    const words = tokens(article.title);
+    const words = tokens(article.title), url = canonicalURL(article.url);
+    const published = article.publishedAt ? Date.parse(article.publishedAt) : null;
     const existing = groups.find(group => {
-      if (canonicalURL(group.lead.url) === canonicalURL(article.url)) return true;
-      if (!article.publishedAt || !group.lead.publishedAt || Math.abs(Date.parse(article.publishedAt) - Date.parse(group.lead.publishedAt)) > 3 * 86_400_000) return false;
-      const other = tokens(group.lead.title), shared = [...words].filter(w => other.has(w)).length;
-      return shared >= 4 && shared / new Set([...words, ...other]).size >= 0.65;
+      if (group.url === url) return true;
+      if (published === null || group.published === null || Math.abs(published - group.published) > 3 * 86_400_000) return false;
+      let shared = 0;
+      for (const word of words) if (group.words.has(word)) shared++;
+      return shared >= 4 && shared / (words.size + group.words.size - shared) >= 0.65;
     });
-    if (existing) { if (!existing.related.some(a => canonicalURL(a.url) === canonicalURL(article.url)) && canonicalURL(existing.lead.url) !== canonicalURL(article.url)) existing.related.push(article); }
-    else groups.push({ lead: article, related: [] });
+    if (existing) {
+      if (!existing.urls.has(url)) { existing.story.related.push(article); existing.urls.add(url); }
+    } else if (groups.length < limit) {
+      groups.push({ story: { lead: article, related: [] }, url, urls: new Set([url]), words, published });
+    }
   }
-  return groups;
+  return groups.map(group => group.story);
 }

@@ -25,6 +25,17 @@ test('briefing groups similar dated coverage but does not invent events for unda
   assert.equal(groups.length, 3); assert.equal(groups[0].related.length, 1);
   assert.equal(groups[1].lead.publishedAt, null);
 });
+test('bounded briefing keeps late related sources and the same leading stories as full grouping', () => {
+  const articles = Array.from({ length: 1000 }, (_, i) => ({ title: 'Language' + i + ' compiler' + i + ' release' + i + ' benchmark' + i,
+    url: 'https://example.com/story/' + i, publishedAt: '2026-10-03T00:00:00.000Z' }));
+  articles.push({ ...articles[0], url: 'https://related.example/coverage' });
+  articles.push({ ...articles[0], url: 'https://related.example/coverage?utm_source=duplicate' });
+  articles.push({ ...articles[1], url: 'https://undated.example/story', publishedAt: '2026-09-01T00:00:00.000Z' });
+  const limited = groupStories(articles, 5);
+  assert.deepEqual(limited, groupStories(articles).slice(0, 5));
+  assert.equal(limited[0].related.length, 1);
+  assert.equal(limited[1].related.length, 0);
+});
 test('learning paths reference real catalog objectives and every dashboard preset remains customizable', () => {
   const state = initialLearning();
   for (const path of learningPaths) for (const objective of path.objectives) assert.ok(state.definitions.some(d => d.objectiveKey === objective), objective);

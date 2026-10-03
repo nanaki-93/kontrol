@@ -1,24 +1,15 @@
 import { useState } from 'react';
-import { visibleDiscoveries, type NewsResponse } from '../../../shared/news';
-import { canonicalURL, groupStories, type Workspace } from '../../../shared/workspace';
+import { canonicalURL } from '../../../shared/workspace';
 import { Badge, Empty, ErrorMessage, Loading } from '../../components/ui';
-import { ArticleList, type ReadableArticle } from './articles';
-import { useNews } from './api';
+import { ArticleList } from './articles';
+import { useNews, useBriefingStories } from './api';
 import { useWorkspace } from '../workspace/api';
 
-export function briefingStories(news: NewsResponse, workspace?: Workspace) {
-  const enabled = new Set(news.preferences.feeds.filter(f => f.isEnabled).map(f => f.id));
-  const articles: ReadableArticle[] = [...visibleDiscoveries(news.discovery), ...news.articles.filter(a => a.feedIDs.some(id => enabled.has(id)) && a.topicIDs.some(id => news.preferences.selectedTopicIDs.includes(id)))];
-  const terms = [...(workspace?.profile.interests ?? []), ...(workspace?.profile.targetRoles ?? [])].map(s => s.toLowerCase());
-  const relevance = (a: ReadableArticle) => terms.filter(t => (a.title + ' ' + a.summary).toLowerCase().includes(t)).length;
-  articles.sort((a, b) => relevance(b) - relevance(a) || (b.publishedAt ?? b.fetchedAt).localeCompare(a.publishedAt ?? a.fetchedAt));
-  return groupStories(articles).slice(0, 5);
-}
 export function Briefing({ compact = false }: { compact?: boolean }) {
   const query = useNews(), workspace = useWorkspace();
+  const groups = useBriefingStories(query.data, workspace.data);
   if (query.isPending || workspace.isPending) return <Loading />;
   if (!query.data) return <ErrorMessage error={query.error} />;
-  const groups = briefingStories(query.data, workspace.data);
   return <><ErrorMessage error={query.error ?? workspace.error} />
     <p className="muted">{compact ? 'Up to five stories from your latest searches and feeds.' : 'Up to five stories from your latest searches and feeds, prioritized by your saved interests. Similar headlines are grouped as related coverage.'}</p>
     {groups.length ? groups.map(group => <div className="briefing-story" key={group.lead.url}><ArticleList articles={[group.lead]} compact={compact} interests={query.data.discovery.preferences.interests} />
