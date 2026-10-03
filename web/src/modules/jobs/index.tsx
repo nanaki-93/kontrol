@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useIsMutating } from '@tanstack/react-query';
 import { ArrowUpRight, BriefcaseBusiness, MapPin, RefreshCw, Search, Sparkles } from 'lucide-react';
 import { workModeLabels, employmentLabels, type JobMatch, type JobsResponse } from '../../../shared/jobs';
@@ -28,9 +28,6 @@ function JobWorkspace({ state, refresh }: { state: JobsResponse; refresh: () => 
   const search = useJobCommand();
   const activeCommands = useIsMutating({ mutationKey: ['jobs-command'] });
   const [dirtyPreferences, setDirtyPreferences] = useState(false), [dirtyProfile, setDirtyProfile] = useState(false);
-  const savedPreferences = JSON.stringify(state.preferences), savedProfile = JSON.stringify(state.profile) + state.profileConfirmed;
-  useEffect(() => setDirtyPreferences(false), [savedPreferences]);
-  useEffect(() => setDirtyProfile(false), [savedProfile]);
   const busy = !!state.activity || activeCommands > 0, dirty = dirtyPreferences || dirtyProfile;
   const ready = !!state.cv && state.profileConfirmed && !dirty && state.ai.configured;
   const stage = !state.cv ? 0 : !state.profile || !state.profileConfirmed ? 1 : 2;
@@ -45,8 +42,8 @@ function JobWorkspace({ state, refresh }: { state: JobsResponse; refresh: () => 
     <div className="job-connection"><div><Sparkles size={18} /><span><strong>{state.ai.configured ? 'PI available' : 'Connect PI to analyze and match'}</strong><small>{state.ai.model} · {state.ai.message}</small></span></div><button className="icon-button" aria-label="Refresh PI connection" onClick={refresh}><RefreshCw size={16} /></button></div>
     {!state.ai.configured && <p className="footnote">Install PI 1.0 or later, sign in with <code>/login</code>, select a model with <code>/model</code> and save it as the default in PI. Then refresh the connection above.</p>}
     {state.activity && <p className="job-progress" role="status" aria-live="polite"><Sparkles size={16} className="spin" />{state.activity === 'uploading' ? 'Reading your CV…' : state.activity === 'analyzing' ? 'Preparing your professional profile… This can take up to two minutes.' : 'PI is searching the web, checking listings and assessing your fit… This can take up to three minutes.'} You can leave this section while it works.</p>}
-    <div className="job-setup-grid"><CVPanel state={state} busy={busy || dirty} /><PreferencesPanel key={JSON.stringify(state.preferences)} state={state} busy={busy} onDirty={setDirtyPreferences} /></div>
-    {state.profile && <ProfilePanel key={JSON.stringify(state.profile) + state.profileConfirmed} profile={state.profile} revision={state.revision} confirmed={state.profileConfirmed} busy={busy} onDirty={setDirtyProfile} />}
+    <div className="job-setup-grid"><CVPanel state={state} busy={busy || dirty} /><PreferencesPanel state={state} busy={busy} onDirty={setDirtyPreferences} /></div>
+    {state.profile && <ProfilePanel profile={state.profile} revision={state.revision} confirmed={state.profileConfirmed} busy={busy} onDirty={setDirtyProfile} />}
     <section className="panel job-results"><div className="section-title"><div><p className="eyebrow">YOUR NEXT MOVE</p><h2>Offers that fit your experience.</h2></div><button className="button primary" disabled={busy || !ready} onClick={() => search.mutate({ path: '/search', body: { expectedRevision: state.revision } })}><Search size={16} />{busy && state.activity === 'searching' ? 'Searching…' : 'Find matching jobs'}</button></div>
       <p className="muted">{dirty ? 'Save your preferences and confirm your profile edits before searching.' : !state.cv ? 'Upload a CV, choose your preferences, then analyze and review your profile.' : !state.profileConfirmed ? 'Analyze your CV and confirm the profile above to unlock your job search.' : 'Search with your reviewed profile and saved preferences. Every match links to a retrieved listing.'}</p>
       <p className="footnote">Search checks relevant job boards and uses PI web search with your reviewed roles, skills and saved filters. PI then ranks retrieved listings against your profile. Bing and DuckDuckGo provide additional search when needed. Your PI provider’s usage limits or billing apply. CV text is used only for analysis. No applications are sent.</p>

@@ -5,6 +5,14 @@ export function ErrorMessage({ error }: { error: unknown }) {
   if (!error) return null;
   return <div className="error-message" role="alert"><AlertCircle size={17} /><span>{error instanceof Error ? error.message : String(error)}</span></div>;
 }
+export function DraftConflict({ children, onReload, onKeep }: { children: ReactNode; onReload: () => void; onKeep: () => void }) {
+  return <div className="confirmation" role="status"><strong>Saved details changed in another tab.</strong>
+    <p>Your edits are still here. Review the saved version before choosing which to keep.</p>
+    <details><summary>Review saved details</summary>{children}</details>
+    <div className="actions"><button type="button" className="button secondary" onClick={onReload}>Use saved version</button>
+      <button type="button" className="button secondary" onClick={onKeep}>Keep my edits</button></div>
+  </div>;
+}
 export function Loading() { return <div className="loading" role="status"><LoaderCircle size={18} className="spin" /> Loading your workspace…</div>; }
 export function Empty({ title, children, action }: { title: string; children?: ReactNode; action?: ReactNode }) {
   return <div className="empty"><div className="empty-mark" aria-hidden="true">⌁</div><h3>{title}</h3>{children && <p>{children}</p>}{action}</div>;

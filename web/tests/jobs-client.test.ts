@@ -6,6 +6,21 @@ import { api } from '../src/lib/api';
 import { jobCommandOptions, jobsQueryOptions } from '../src/modules/jobs/api';
 import { emptyJobs, type JobsResponse } from '../shared/jobs';
 import { cvText, profile, readyPI } from './jobs-fixtures';
+import { createDraft, refreshDraft } from '../src/lib/draft';
+
+test('background refresh preserves dirty fields and the revision of their saved baseline', () => {
+  const original = { summary: 'Saved summary', roles: 'Engineer' };
+  const dirty = { ...createDraft(original, 'revision-1'), value: { ...original, summary: 'My unsaved draft' } };
+  const remote = { ...original, summary: 'Updated in another tab' };
+  const conflicted = refreshDraft(dirty, remote, 'revision-2');
+  assert.deepEqual(conflicted, dirty);
+  assert.deepEqual(refreshDraft(conflicted, remote, 'revision-2'), dirty);
+  const kept = { ...conflicted, baseline: remote, revision: 'revision-2' };
+  assert.deepEqual(refreshDraft(kept, remote, 'revision-2').value, dirty.value);
+  assert.deepEqual(refreshDraft(createDraft(original, 'revision-1'), remote, 'revision-2'), createDraft(remote, 'revision-2'));
+  assert.deepEqual(refreshDraft(dirty, original, 'unrelated-update'), { ...dirty, revision: 'unrelated-update' });
+  assert.deepEqual(refreshDraft(dirty, dirty.value, 'saved-update'), createDraft(dirty.value, 'saved-update'));
+});
 
 // Transport/cache tests only: no DOM, browser, app launch or UI interaction.
 function untilAborted(signal: AbortSignal): Promise<never> {
