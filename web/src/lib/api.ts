@@ -3,7 +3,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 export async function api<T>(path: string, method = 'GET', body?: unknown, options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<T> {
   // News can process twelve interests or forty feeds in bounded batches.
   // Ordinary reads and writes should not wait indefinitely behind those jobs.
-  const defaultTimeout = path === '/news/discover' ? 390_000 : path === '/news/refresh' ? 210_000 :
+  // Discovery runs six batches of up to 90 s each (the AI deadline) plus a 30 s margin.
+  const defaultTimeout = path === '/news/discover' ? 570_000 : path === '/news/refresh' ? 210_000 :
     path.startsWith('/settings/import') || path === '/settings/export' ? 120_000 : method === 'GET' ? 15_000 : 30_000;
   const timeout = AbortSignal.timeout(options.timeoutMs ?? defaultTimeout);
   const signal = options.signal ? AbortSignal.any([timeout, options.signal]) : timeout;

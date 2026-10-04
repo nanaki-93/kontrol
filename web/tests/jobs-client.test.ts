@@ -68,7 +68,7 @@ test('shared API deadlines bound ordinary requests without cutting off batch dis
   await api('/workspace'); await api('/focus', 'POST', { minutes: 25 });
   await api('/news/discover', 'POST'); await api('/news/refresh', 'POST');
   await api('/settings/import/preview', 'POST'); await api('/settings/export');
-  assert.deepEqual(deadlines, [15_000, 30_000, 390_000, 210_000, 120_000, 120_000]);
+  assert.deepEqual(deadlines, [15_000, 30_000, 570_000, 210_000, 120_000, 120_000]);
 });
 for (const succeeds of [true, false]) test(`JOB command ${succeeds ? 'success' : 'failure'} settles while its status refetch stalls`, async context => {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
