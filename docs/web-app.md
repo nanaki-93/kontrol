@@ -43,31 +43,54 @@ server first and copy the whole data directory.
 
 ## Dashboard and modules
 
-The Today page starts with compact links to the next learning step, a short news
-briefing, and job matches or application follow-ups. Their counts summarize what
-needs attention; the widgets below provide the detail. It seeds no personal
-activity. **Customize** lets you show/hide,
+The Today page opens with a feature showing an actual next step:
+the oldest due application follow-up, a due recall review, or the next lesson.
+When those are unavailable it highlights a briefing story or an unsaved,
+unexpired job match, then falls back to learning paths. **Overview** keeps
+Learning, News and Jobs reachable with content previews, reading counts, lesson
+time or due-work counts. Unavailable counts use a dash. The widgets below provide
+more detail. It seeds no personal activity. **Customize** lets you show/hide,
 move earlier/later, and select half/full width for each widget. Layout changes
 save in SQLite. Hiding a widget leaves its full page and data available.
 
-The primary navigation is **Today, Learning, News, Jobs**. Saved library, Focus
+The primary navigation is **Today, Learning, News, Jobs**. Library, Focus
 and Projects remain available as utilities; a compact Focus timer can be opened
 from any page. New workspaces start with Learning, News and Jobs widgets.
 Existing layouts are retained. **Customize → Balanced / Learning / Job search**
 previews a preset; **Save layout** applies it and Cancel discards the preview.
 
-**Settings → Your goals and interests** stores a goal, preferred learning topics,
+**Settings → Goals & interests** stores a goal, preferred learning topics,
 target roles, interests, a learning path, a weekly lesson target and up to three
 world clocks. Interests and target roles prioritize the briefing. Target roles
 can be copied into the CV review form before confirmation; confirming that form
 also updates the shared target roles. Changing workspace goals alone does not
 silently alter a reviewed CV profile or run a new search.
 
-Today includes quick notes and links, world clocks and a weekly review. The
+Today includes quick notes and links, configured world clocks and a weekly review. The
 review uses the current browser time zone and a Monday week boundary, showing
 completed lessons, recall reviews, saved stories and application stage changes.
 Due application follow-ups are surfaced on Today; they do not schedule background
-notifications or send messages.
+notifications or send messages. Weekly totals stay visible, with the activity
+list under **Activity**. The Matrix theme uses a near-black canvas, electric
+green actions and accents, monospace headings, square panels and a static grid.
+Every section shares this palette, including navigation, widgets and weekly
+totals. Other colors are reserved for meaningful information and status:
+blue for informational badges and application progress, amber for warnings,
+and red for errors or destructive actions. Success stays green. Text and symbols
+identify each state as well. Fonts are local system fonts.
+
+Pages use a title and relevant actions without slogans or app-usage paragraphs.
+Page headers do not accept subtitles. Today displays a saved personal goal as
+user content. Empty states use an icon, brief status and an action where needed.
+Use short labels for primary actions and named icon buttons with tooltips for
+repeated save, read, edit, remove and close actions. Filter summaries use chips;
+match reasons, salary sources and project descriptions use expandable details.
+Apply this pattern to new features as well. Setup walkthroughs,
+search-method explanations and promotional panels are omitted from the interface;
+configuration and source details remain in this guide. Field formats, content
+provenance, errors, and concise notices about data transfer, provider billing and
+destructive actions remain where they affect a decision. Lesson explanations,
+exercises, source excerpts and personal notes are content and remain available.
 
 | Module | Implemented web behavior |
 | --- | --- |
@@ -97,13 +120,28 @@ mastery score. Lesson bookmarks are searchable in Saved library.
 ### Briefing and saved reading
 
 News opens on a briefing of up to five stories from the latest searches and
-enabled feeds. It does not fetch automatically. Similar dated headlines are
-grouped conservatively as related coverage; grouping is heuristic, not a verified
+enabled feeds. Briefing, Discover, Saved and Feeds group articles by publication
+day, newest first. Headings show **Today**, **Yesterday** and dated groups in
+the browser's local time zone; unknown publication dates stay in **Undated** at
+the end rather than taking the retrieval date. It does not fetch automatically.
+Similar dated headlines are grouped conservatively as related coverage; grouping is heuristic, not a verified
 event identity. Source dates remain visible, including unknown dates. AI text is
 labeled as an interpretation of retrieved snippets, including after bookmarking.
 Kontrol does not retrieve full articles for the briefing.
 
-**Save for later**, **Mark read/unread**, and reading notes work on both discovery
+The Today widget previews the first three stories and links to the full briefing.
+The lead story receives a larger headline and a labeled excerpt; numbered story
+cards show read status. Article cards show a **0–100% match** estimate for their
+closest enabled news interest, with the interest name on full cards. Selecting
+one interest in Discover limits the percentage to that interest. Full article
+cards show each interest's percentage, reason and estimate method under
+**Interest matches**. Related coverage, reading notes and save/read actions
+remain available.
+In Discover, **Manage** expands the saved interest cards; search controls
+and results remain visible when those cards are collapsed. Source excerpts and
+AI snippet summaries keep distinct labels.
+
+The bookmark, read/unread and notes buttons work on both discovery
 and feed articles. Bookmarks copy the title, excerpt, source, original link and
 dates into the workspace so cache refreshes or interest/feed deletion cannot
 remove saved reading. Reading notes also bookmark a story. If it is later
@@ -112,8 +150,8 @@ to Learning suggest existing lessons and explicitly report missing coverage.
 
 ### Applications and preparation
 
-Save retrieved offers or use **Jobs → Applications & preparation → Add a job
-link**, which works without a CV or PI. Saved offers retain their source snapshot
+Save retrieved offers or use **Jobs → Applications → Add job**,
+which works without a CV or PI. Saved offers retain their source snapshot
 even after another search, changed filters, or CV removal. Manually entered links
 are saved without fetching or submitting anything. Check original listings for
 current availability.
@@ -150,8 +188,9 @@ Revision conflicts preserve the local draft and offer review of the currently
 saved response before choosing a version. Export includes server-saved answers,
 not an unsaved browser draft; wait for **Saved** before exporting.
 
-The dark theme uses brighter coral accents, lighter graphite panels, and clearer
-text and border colors. Shared text sizes keep nested badges and metadata
+The Matrix theme uses a shared green accent, prominent headlines, and quieter
+secondary controls. Lesson cards surface titles, difficulty and duration;
+job cards pair estimated fit with expandable **Match details**. Shared text sizes keep nested badges and metadata
 readable; **Text size → Large** scales those sizes along with body copy. Reading text
 has a bounded line length, and the layout adapts to narrow windows. Controls retain
 visible focus styling, names, standard
@@ -207,30 +246,85 @@ become invented completed snapshots.
 ## Specific news interests
 
 Open **News → Discover**. The initial interests are **Programming jobs in Japan**
-and **AI models & releases**. Add or edit up to 12 interests with a specific query,
-news/opportunities intent, English or Japanese, a search region, and a 1-, 7- or
+and **AI models & releases**. Add or edit up to 12 interests with a search
+description of **at least five words**, such as **Java and Kotlin backend hiring
+trends in Japan**. The editor shows a word count; Boolean operators,
+excluded phrases and search filters such as `site:` do not count toward the
+minimum. Japanese descriptions use word segmentation, including text without
+spaces. Short existing interests and backups stay readable; expand their
+descriptions or pause those interests before running another search. Choose the
+**News & announcements** or **Career & industry news** coverage, English or
+Japanese, a search region, and a 1-, 7- or
 30-day publication window. Advanced filters require every keyword group, accept
 alternatives within a group separated by a vertical bar, and exclude phrases.
 Change those keywords when changing the query or language.
 
+Every News interest searches for individual articles, reporting, blog posts and
+announcements. Career topics cover hiring trends, the developer job market,
+skills and working conditions. Job offers, generic homepages, product pages and
+directories are excluded. Existing interests saved with the old opportunities
+type follow the same article rules. Descriptions requesting no job offers are
+removed from the literal search keywords; adjacent Boolean groups get a space.
+
 **Standard search** needs no key. It queries Google News RSS across publishers,
-then applies keyword groups, exclusions, freshness and a relevance/recency rank
-locally. It is a news index, so a very specific job search may legitimately return
+then applies keyword groups, exclusions and the publication window locally.
+Match percentages measure keyword coverage in the title and excerpt, independently
+of publication age. Required keyword groups contribute 70% when configured,
+and query keyword coverage contributes 30%; without groups, query coverage supplies
+the full score. Common filler words and repeated query words do not inflate it.
+It is a news index, so a very specific job search may legitimately return
 no matches. Zero matches are distinct from a failed fetch; neither is padded
 with unrelated headlines. Links from this provider use Google News redirects to
 the publisher. Search depends on the availability and coverage of that index.
 
 **AI search** uses your local **PI** installation and its saved provider/model.
-Kontrol retrieves current search results from Google News RSS and Bing web-search
-RSS, then asks PI to rank those sources, summarize their snippets and explain each
-match. This supports general web results, including job pages, as well as news.
-Coverage depends on those search indexes; a precise query can return no matches.
-PI does not browse full articles. Returned URLs must occur in the retrieved source
-list; invented links, weak scores, excluded phrases and dates outside the selected
-window are rejected. Source titles and publication dates come from the search
-results, never the model. General web-search timestamps are treated as unknown
-publication dates. Unknown dates remain labeled, and job availability still needs
-source review.
+With OpenAI Responses or Codex models, PI searches the web directly, using focused
+queries for news or career reporting, summarizes retrieved facts and explains each
+match. Current AI matches use PI's estimated percentage of interest fit; the prompts
+keep recency separate from that score. Feed articles, saved snapshots and older
+standard results receive current keyword estimates, so editing or pausing an
+interest updates their displayed fit. Percentages are estimates of relevance,
+not probabilities or guarantees about an article's claims.
+This does not depend on Google News or Bing RSS returning useful results.
+Only public URLs present in completed provider search evidence are accepted.
+Kontrol then retrieves those pages to verify article evidence and read their
+titles, descriptions, bounded article text and publication metadata. Required
+concepts are checked against that source evidence, so a concise AI summary can
+omit a keyword without causing a false rejection, and invented summary keywords
+cannot make an unrelated source pass. Regular English forms such as
+release/releases/released are recognized. Unrelated structured metadata is
+ignored. Job postings and generic pages, invented links, weak scores, excluded
+phrases and known dates outside the selected window are rejected. Titles and
+publication dates come from retrieved pages,
+never the model's answer. Page modification dates do not count as publication.
+Unknown dates remain labeled. If all proposed results are rejected, the error
+reports how many failed citation, article-type, date, relevance or keyword checks;
+previous results are retained. Obvious homepages and listings in an older
+discovery cache are hidden without rewriting the stored cache or saved bookmarks.
+
+For PI providers without hosted web search, Kontrol retains Google News RSS and
+Bing web-search RSS retrieval followed by PI snippet ranking. Coverage in that
+fallback depends on those indexes; a precise query can return no matches.
+General web-search timestamps are treated as unknown publication dates; their
+target pages must supply article evidence and publication metadata. Failed
+hosted searches are reported as errors and retain saved results rather than
+silently falling back to an empty successful search.
+
+Source pages are read with a browser-compatible page request profile (a
+browser-style user agent and language header). The profile applies only to News AI
+page reads, not to Feeds, Jobs or other requests. Up to five redirects are followed,
+and a page larger than 2 MB is truncated rather than rejected. When PI's cited
+pages all fail, the error names the categorized reasons, such as pages that blocked
+automated access, rate-limited the request, timed out, returned an HTTP error, a
+verification or unreadable page, or could not be reached.
+
+**News-index fallback.** When hosted search cites sources but every page read fails,
+Kontrol ranks Google News RSS snippets for the interest in one further PI inference.
+Those snippets carry their own titles and dates and need no page reads. Other
+failures do not trigger it. If the fallback finds no usable articles, or itself
+fails or hits the deadline, the search still ends in an error that includes the
+original retrieval reasons, and saved results are retained; an empty fallback is
+never a successful search.
 
 Install **PI 1.0 or later** and configure it in your terminal. In PI, use **/login**
 to sign in to your provider and **/model** to choose a model; save it as the default
@@ -253,17 +347,23 @@ Changes to .env require a server restart. OPENAI_NEWS_MODEL and Kontrol's former
 OpenAI-key connection are no longer used. Provider environment credentials can
 still be used by PI itself. Do not prefix credentials with VITE_.
 
-Searches run only on request, with at most one PI inference per selected, enabled
-interest, two concurrent interests and a shared one-minute search/inference
-deadline. No inference is made for an empty source list. Automatic provider and
+Searches run only on request, with at most two PI inferences per selected, enabled
+interest (the second only for the news-index fallback), two concurrent interests and
+a shared 90-second search/retrieval deadline. Hosted search runs even when RSS would
+be empty. In the snippet-ranking
+fallback, no inference is made for an empty source list. Automatic provider and
 agent retries are disabled for this invocation. Your configured PI provider's
-usage limits and billing apply. Only the interest, filters, date window and
-retrieved title/URL/snippet/date fields enter the request. PI runs in a temporary
-working directory with tools, extensions, skills, context files and prompt
-templates disabled, and no saved session. Its temporary settings are removed
-when the process exits, including failure or cancellation. This integration uses
+usage limits and billing apply. Only the interest, filters and date window enter
+hosted search; the fallback also sends retrieved title/URL/snippet/date fields.
+PI runs in a temporary working directory, with no local tools, user extensions,
+skills, context files, prompt templates or saved session. Hosted search enables
+one explicit extension that adds the provider's web tool and records source URLs.
+Source-page retrieval is bounded to four concurrent requests, eight seconds per
+page, five redirects and 2 MB per response, within the shared deadline. A larger
+page is truncated to its first 2 MB rather than rejected. Temporary settings are
+removed when the process exits, including failure or cancellation. This integration uses
 PI's built-in providers and models.json; extension-defined providers are not loaded.
-The dashboard widget's **Standard search** action never invokes PI.
+The **Standard search** option in Discover never invokes PI.
 
 A successful search replaces that interest's previous matches, deduplicating
 canonical URLs across interests; errors preserve saved results. Edited, paused,
@@ -272,11 +372,12 @@ checks. Search cache and run state use a separate newsDiscovery document, so
 adding discovery leaves existing feeds/articles intact. The cache is capped at
 500 results and 30 days, with the chosen interest window applied for display.
 Unknown dates use first discovery time for retention, not an invented publication
-date. **Saved feeds** retains the existing subscriptions and manual refresh.
+date. **Feeds** retains the existing subscriptions and manual refresh.
 
 The news implementation is split into server/news/transport.ts (bounded public
 HTTP fetch), feeds.ts (RSS/Atom parsing), discovery.ts (standard search and merge),
-ai.ts (live source retrieval and citation acceptance), pi.ts (isolated PI runner
+ai.ts (live source retrieval and citation acceptance), pages.ts (source-page
+titles and publication metadata), pi.ts (isolated PI runner
 and connection status), and server/modules/news.ts
 (HTTP routes and persistence). UI components for interests, connection, discovery,
 articles, feeds and the dashboard widget live under src/modules/news/.
@@ -290,29 +391,37 @@ articles, feeds and the dashboard widget live under src/modules/news/.
 2. Select **Remote / Hybrid / Office**, then optional **Full-time / Part-time /
    Contract / Freelance / Internship** filters. Employment type is independent
    of where the work happens. Pick up to five cities and a 7/30/90-day window;
-   choose **Save preferences**. No cities means any location, and no employment
+   choose **Save filters**. No cities means any location, and no employment
    types means any type. A work arrangement must be selected.
-3. Choose **Analyze CV** to send extracted text to the provider configured in
+3. Choose **Analyze** to send extracted text to the provider configured in
    PI. Review the headline, summary, suggested roles, skills, experience and
    languages. Analysis can take up to two minutes. The profile selects up to
    five target roles and 30 primary skills; edit errors and **Confirm profile**
    before searching.
-4. Choose **Find matching jobs**. Each result shows a source title, company,
+4. Choose **Find matches**. Each result shows a source title, company,
    location and employment metadata, estimated fit, specific match reasons,
    gaps/uncertainties, and a link to the original offer. No applications are sent.
 
-Use **Minimize / Expand** on **Your CV** and **Search filters** to make more room
-for offers. Each panel remembers its own choice in this browser. Without a saved
+The **CV** and **Filters** headings expand or collapse their panels.
+Each panel remembers its own choice in this browser. Without a saved
 choice, panels start open during setup and minimized on later visits once the
 profile is confirmed. Minimized panels show the CV name/profile status or current
 filters; filter drafts stay intact and unsaved changes remain flagged. Upload,
 analysis and preference-save errors stay visible even when their panel is closed.
 
+Once the profile is confirmed, **Matches** appears before **Profile & filters**.
+The search area shows saved filter chips and links to the setup section;
+**↑ Matches** returns to the search action. Setup drafts stay mounted when confirmation
+changes the section order. Confirmed profile details, offer descriptions and
+items needing confirmation are expandable. Salary and estimated fit stay visible
+on the offer card; a fit score is not a hiring probability.
+
 Background refreshes preserve unsaved filter and profile edits. If another tab
 changes the same saved fields, the form shows the current saved version and
-requires **Use saved version** or **Keep my edits** before saving. Unrelated
-updates advance the revision without replacing the draft. The results section
-keeps source coverage and retrieval details under **How matching works & sources**.
+requires **Use saved** or **Keep my edits** before saving. Unrelated
+updates advance the revision without replacing the draft. Source coverage and
+retrieval details are documented here; results retain source names, dates,
+match reasons and current search warnings.
 
 City lookup runs entirely on the server against the bundled `cities.json`
 GeoNames catalog, including towns above 1,000 population and administrative
@@ -371,6 +480,44 @@ are excluded; unknown posting dates remain clearly labeled.
 Hybrid work is inferred from work-arrangement language; technical requirements
 such as hybrid cloud do not override an explicitly remote role.
 
+RAL filters accept optional minimum and maximum **annual gross salary in euros**.
+Ranges overlap inclusively: a declared €50,000–€70,000 range meets a €60,000
+minimum, without promising that the employer will offer the upper amount.
+One-sided salaries use the stated bound; unknown bounds are not invented.
+Leave both filters empty to keep offers with unavailable RAL. Setting either
+bound excludes offers whose annual gross euro salary cannot be verified.
+Saving a changed RAL filter clears the previous matches, like other filters.
+
+Before filtering and ranking, salary enrichment reads `JobPosting.baseSalary`
+and explicitly annual salary text from the offer. Unknown currency or period,
+monthly/hourly pay, net pay and total compensation are not guessed into RAL.
+Foreign currencies are converted using the [ECB reference rates](https://www.ecb.europa.eu/stats/policy_and_exchange_rates/euro_reference_exchange_rates/html/index.en.html).
+The original annual amount, currency and rate date remain visible. Rates are
+cached for six hours and must be no more than seven days old; if a rate is
+unavailable, the offer's original pay remains visible without a euro RAL.
+
+For offers without usable declared annual salary, PI searches for the average,
+median or typical gross base salary for the same company, position, seniority
+and location. Identical company/role/location queries are grouped. At most 30
+candidates are researched in batches of six, with two concurrent batches,
+45 seconds per PI invocation and a 100-second shared research deadline.
+Estimates must cite provider-retrieved public URLs. The server fetches the cited
+page and verifies a verbatim salary passage, company, role and location evidence;
+generic market averages, fabricated links/amounts, and unreadable evidence are
+discarded. The research step receives only job IDs, company, role and location,
+never the CV or reviewed profile. Research failure leaves other offers usable
+and produces a warning; it does not manufacture an estimate.
+
+Job previews, dashboard cards and saved applications display RAL with green
+**Declared** or amber **Estimate** badges; comparisons spell out the provenance.
+Researched figures and currency conversions use an approximation marker.
+**Salary sources** expands the source links, check date and any currency
+conversion; **Listed pay** retains an unverified original amount. Unverified amounts read **RAL
+unavailable**. Run **Find matches** to populate salary evidence for existing
+search results. Saved application snapshots and backups retain the salary and
+its sources. Older records and backups default to unrestricted RAL filters and
+unavailable salary evidence, without discarding their other data.
+
 The server passes at most 30 filtered candidates, a bounded description excerpt,
 the reviewed profile and preferences to PI. It accepts only exact retrieved
 source IDs and scores of at least 60, rechecks filters, deduplicates links and
@@ -385,8 +532,8 @@ overrides. Analysis and ranking use dedicated system prompts and the isolated,
 tool-free, session-free runner. Discovery enables one bundled extension that
 adds only hosted web search and records provider source URLs in the temporary
 directory; local tools, user extensions, repository context and saved sessions
-remain disabled. Upload and city search make no AI request. Only **Analyze CV**
-sends CV text; **Find matching jobs** sends roles/skills/filters to PI for search,
+remain disabled. Upload and city search make no AI request. Only **Analyze**
+sends CV text; **Find matches** sends roles/skills/filters to PI for search,
 then the reviewed profile and retrieved descriptions for ranking. Role/location/
 filter queries also go to Bing and DuckDuckGo when fallback is needed. Inference
 uses the configured provider's usage limits or billing. No CV is sent to a job
@@ -394,8 +541,8 @@ board, recruiter or employer. Do not put contact details into reviewed profile
 fields if you do not want those fields included in matching requests.
 
 One Jobs upload/analysis/search can run at a time. Analysis has a 120-second limit;
-search has a 180-second shared limit, including bounded source retrieval, at most
-one PI discovery invocation and at most one PI ranking invocation. Mutations
+search has a 300-second shared limit, including bounded source retrieval, salary
+research, at most one PI discovery invocation and at most one PI ranking invocation. Mutations
 compare revisions. A changed CV,
 profile or preference set clears stale matches. Failed requests retain previous
 data, and deletion cancels an in-flight request and prevents late results from
