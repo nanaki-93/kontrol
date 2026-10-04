@@ -4,6 +4,7 @@ import { isIP, type LookupFunction } from 'node:net';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { createGunzip, createInflate, createBrotliDecompress } from 'node:zlib';
+import type { Readable, Transform } from 'node:stream';
 import { HttpError } from '../errors';
 
 export class NewsFetchError extends Error {
@@ -44,24 +45,96 @@ function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
     promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
   });
 }
-export async function fetchFeed(endpoint: string, redirects = 0, signal = AbortSignal.timeout(20_000), options: { accept?: string; maxBytes?: number } = {}): Promise<string> {
+export interface FetchOptions {
+  accept?: string;
+  maxBytes?: number;
+  userAgent?: string;
+  acceptLanguage?: string;
+  /** Redirect hops allowed for this request (default 3, at most 10). */
+  maxRedirects?: number;
+  /** Keep the first `maxBytes` decoded bytes instead of rejecting oversized bodies (default false). */
+  truncate?: boolean;
+}
+export const DEFAULT_USER_AGENT = 'Kontrol-Web/0.2';
+export const FEED_ACCEPT = 'application/rss+xml, application/atom+xml, application/xml, text/xml';
+// News AI reads publisher article pages, many of which reject non-browser
+// agents. Only the page profile uses this; feeds, search and Jobs keep
+// DEFAULT_USER_AGENT.
+export const PAGE_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36';
+export const PAGE_ACCEPT = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8';
+export function pageRequestOptions(language: 'en' | 'ja'): Required<FetchOptions> {
+  return {
+    userAgent: PAGE_USER_AGENT, accept: PAGE_ACCEPT,
+    acceptLanguage: language === 'ja' ? 'ja-JP,ja;q=0.9,en;q=0.8' : 'en-US,en;q=0.9',
+    maxRedirects: 5, truncate: true, maxBytes: 2_000_000,
+  };
+}
+export function requestHeaders(options: FetchOptions = {}): Record<string, string> {
+  return {
+    'User-Agent': options.userAgent ?? DEFAULT_USER_AGENT,
+    Accept: options.accept ?? FEED_ACCEPT,
+    ...(options.acceptLanguage ? { 'Accept-Language': options.acceptLanguage } : {}),
+    'Accept-Encoding': 'gzip, deflate, br',
+  };
+}
+export function redirectLimit(value: number | undefined): number {
+  return value === undefined || !Number.isFinite(value) ? 3 : Math.max(0, Math.min(Math.floor(value), 10));
+}
+/**
+ * Collects a response body while enforcing both the wire (compressed) and the
+ * decoded size limit. Without truncation an oversized body rejects with the
+ * `size` error; with truncation it resolves with the first `maxBytes` decoded
+ * bytes. Either way the request, response and decoder are destroyed as soon as
+ * the limit is reached. The promise settles exactly once.
+ */
+export function collectBody(response: Readable, decoder: Transform | null, maxBytes: number, truncate: boolean,
+  request?: { destroy(): unknown }): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    let settled = false, size = 0, wireSize = 0;
+    const chunks: Buffer[] = [];
+    const stop = () => { request?.destroy(); response.destroy(); decoder?.destroy(); };
+    const fail = (error: unknown) => { if (settled) return; settled = true; reject(error); };
+    const finish = () => { if (settled) return; settled = true; resolve(Buffer.concat(chunks).toString('utf8')); };
+    const limitReached = () => {
+      if (settled) return;
+      if (truncate) finish();
+      else fail(new NewsFetchError('size', 'The source exceeds the ' + Math.ceil(maxBytes / 1_000_000) + ' MB limit.'));
+      stop();
+    };
+    // Plain bodies have identical wire and decoded sizes, so a single counter
+    // keeps the truncated prefix exact.
+    if (decoder) response.on('data', (chunk: Buffer) => { if (settled) return; wireSize += chunk.length; if (wireSize > maxBytes) limitReached(); });
+    const stream = decoder ? response.pipe(decoder) : response;
+    stream.on('data', (chunk: Buffer) => {
+      if (settled) return;
+      const before = size;
+      size += chunk.length;
+      if (size > maxBytes) {
+        if (truncate) chunks.push(chunk.subarray(0, maxBytes - before));
+        limitReached();
+      } else chunks.push(chunk);
+    });
+    response.on('error', fail);
+    if (decoder) decoder.on('error', fail);
+    stream.on('end', finish);
+  });
+}
+export async function fetchFeed(endpoint: string, redirects = 0, signal = AbortSignal.timeout(20_000), options: FetchOptions = {}): Promise<string> {
   const url = safeWebURL(endpoint), host = url.hostname.replace(/^\[|\]$/g, '');
   const maxBytes = Math.min(options.maxBytes ?? 2_000_000, 8_000_000);
+  const maxRedirects = redirectLimit(options.maxRedirects);
   const addresses = await abortable(lookup(host, { all: true }), signal);
   if (!addresses.length || addresses.some(a => !isPublicIP(a.address))) throw new NewsFetchError('private-address', 'Sources must resolve to public internet addresses.');
   return new Promise<string>((resolve, reject) => {
     const request = (url.protocol === 'https:' ? httpsRequest : httpRequest)(url, {
       lookup: pinnedLookup(addresses),
-      headers: {
-        'User-Agent': 'Kontrol-Web/0.2', Accept: options.accept ?? 'application/rss+xml, application/atom+xml, application/xml, text/xml',
-        'Accept-Encoding': 'gzip, deflate, br',
-      },
+      headers: requestHeaders(options),
       signal,
     }, response => {
       const status = response.statusCode ?? 500;
       if (status >= 300 && status < 400 && response.headers.location) {
         response.destroy();
-        if (redirects >= 3) reject(new NewsFetchError('redirect', 'The source redirected too many times.'));
+        if (redirects >= maxRedirects) reject(new NewsFetchError('redirect', 'The source redirected too many times.'));
         else {
           try { fetchFeed(new URL(response.headers.location, url).href, redirects + 1, signal, options).then(resolve, reject); }
           catch { reject(new NewsFetchError('redirect', 'The source returned an invalid redirect.')); }
@@ -77,21 +150,7 @@ export async function fetchFeed(endpoint: string, redirects = 0, signal = AbortS
       const decoder = encoding === 'gzip' ? createGunzip() : encoding === 'deflate' ? createInflate() :
         encoding === 'br' ? createBrotliDecompress() : null;
       if (encoding && encoding !== 'identity' && !decoder) { response.destroy(); reject(new NewsFetchError('encoding', 'Unsupported source compression.')); return; }
-      const stream = decoder ? response.pipe(decoder) : response;
-      let size = 0, wireSize = 0;
-      const chunks: Buffer[] = [];
-      const tooLarge = () => {
-        reject(new NewsFetchError('size', 'The source exceeds the ' + Math.ceil(maxBytes / 1_000_000) + ' MB limit.'));
-        request.destroy(); response.destroy(); decoder?.destroy();
-      };
-      response.on('data', (chunk: Buffer) => { wireSize += chunk.length; if (wireSize > maxBytes) tooLarge(); });
-      stream.on('data', (chunk: Buffer) => {
-        size += chunk.length;
-        if (size > maxBytes) tooLarge(); else chunks.push(chunk);
-      });
-      response.on('error', reject);
-      stream.on('error', reject);
-      stream.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+      collectBody(response, decoder, maxBytes, options.truncate ?? false, request).then(resolve, reject);
     });
     request.on('error', reject);
     request.end();
