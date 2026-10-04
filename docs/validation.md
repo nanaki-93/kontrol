@@ -617,3 +617,662 @@ and no production data was changed. UI changes were checked through source
 review and compilation. No app/browser was launched or operated, and no GUI,
 Accessibility, native keyboard/focus, screenshot or presentation checks were run
 or required. Earlier validation evidence remains unchanged.
+
+## UI hierarchy and concise copy — 2026-10-03
+
+Source review identified oversized introductory copy, persistent setup details
+above results, and equally emphasized secondary controls. The update reduces
+header and card spacing, uses slate surfaces with teal actions, and keeps amber
+attention states and red errors distinct. Today highlights due work and previews
+three briefing stories; confirmed Jobs profiles put matches before setup, with
+stable section keys retaining drafts. News interests, confirmed profile details,
+offer details and weekly activity use disclosure controls.
+
+Executed from `web/`:
+
+```sh
+node --import tsx --test tests/workspace-domain.test.ts tests/jobs-client.test.ts
+npm run build
+```
+
+The explicitly selected non-GUI suites passed **12 tests, 0 failures, 0 skips**.
+They cover existing recommendation/recall helpers, briefing grouping, layout
+presets, draft refresh/revision handling, and request/cache completion. These
+are domain and client-state checks, not rendered UI validation. TypeScript and
+the Vite production build passed. `git diff --check` passed from the repository
+root. No dependencies, persistence schemas or production data were changed.
+
+UI validation was limited to source review and compilation under `AGENTS.md`.
+No browser/app launch, interactive journey, screenshot, accessibility, native
+keyboard/focus or presentation checks were run or required. Visual appearance
+has not been verified in a running app.
+
+## PI news search returning zero results — 2026-10-03
+
+Read-only inspection of the discovery document showed a successful AI run with
+zero matches for **Programming jobs in Japan**. Direct source retrieval reproduced
+the cause: Google News returned 14 candidates, none satisfying the interest's
+keyword groups; Bing RSS returned no candidates. Three simpler Bing queries
+also returned no candidates. PI was ranking this limited input rather than
+performing web search.
+
+News AI now uses PI's existing hosted web-search integration for OpenAI Responses
+and Codex models. Public provider-cited URLs are retrieved before acceptance;
+titles and publication dates come from page metadata. Providers without hosted
+search retain the RSS-ranking path. Search/evidence/page failures preserve
+previous results and remain errors. No persistence schema changed.
+
+Executed from `web/`:
+
+```sh
+node --import tsx --test tests/news-ai.test.ts tests/news-api.test.ts tests/news-discovery.test.ts tests/news-pi.test.ts
+KONTROL_TEST_PI_COMMAND=/opt/homebrew/bin/pi node --import tsx --test tests/news-pi-cli.test.ts
+node --import tsx --test tests/news-ai.test.ts tests/news-api.test.ts
+npm run build
+```
+
+The first selection passed **40 tests**, and both installed-PI fixture tests
+passed (**2 tests**). The final AI/API selection, after refining metadata
+selection and adding unreadable-page cache-retention assertions, passed
+**23 tests**. All selections had **0 failures and 0 skips**. The installed-PI
+checks use temporary credentials/configuration and local provider fixtures.
+The TypeScript check and Vite production build passed. `git diff --check` passed
+from the repository root.
+
+A separate live, non-interactive adapter check used the configured
+`openai-codex/gpt-6-astra` model and the shipped Japan interest, with fresh fixture
+IDs. The exact command, run from `web/`, was:
+
+```sh
+node --import tsx --input-type=module <<'JS'
+import { randomUUID } from 'node:crypto';
+import { interestPresets } from './shared/news.ts';
+import { aiDiscovery } from './server/news/ai.ts';
+import { runPIWebSearch } from './server/news/pi.ts';
+import { fetchFeed } from './server/news/transport.ts';
+import { parseSourcePage } from './server/news/pages.ts';
+const interest = { ...interestPresets[0], id: randomUUID(), revision: randomUUID() };
+const started = Date.now();
+const rows = await aiDiscovery({
+  webSearch: async (...args) => {
+    const result = await runPIWebSearch(...args);
+    console.log(JSON.stringify({ providerEvidenceURLs: result.urls.length, answer: JSON.parse(result.text) }));
+    return result;
+  },
+  fetcher: async (...args) => {
+    const html = await fetchFeed(...args);
+    const source = parseSourcePage(html, args[0]);
+    console.log(JSON.stringify({ fetchedHost: new URL(args[0]).hostname, title: source?.title, publishedAt: source?.publishedAt }));
+    return html;
+  },
+})(interest);
+console.log(JSON.stringify({ elapsedMs: Date.now() - started, accepted: rows.length, results: rows.map(({ title, url, publishedAt }) => ({ title, url, publishedAt })) }, null, 2));
+JS
+```
+
+This completed in **34,365 ms**, with **29 provider-evidence URLs** and **5 accepted
+sources**: Robert Walters, TokyoDev, WorkinGames, ranked.jp and Michael Page.
+These were opportunity directories with unknown publication dates; they were
+kept undated, and individual job availability was not verified. The check called
+the adapter directly and did not persist results or operate the application.
+
+All automated tests used isolated fixtures. Production application data was
+read only and left untouched. No app/browser launch, GUI journey, screenshot,
+Accessibility, keyboard/focus or presentation validation was run or required.
+Historical validation results above remain unchanged.
+
+## Editorial UI and content hierarchy — 2026-10-04
+
+Today now opens with a light **Start here** feature using an actual due
+follow-up, recall review, lesson, briefing story or job match. Its adjacent
+**On your radar** section retains direct routes and uses dashes for unavailable
+counts. The shared shell uses a charcoal canvas with separate Learning, News
+and Jobs accents. Lesson cards surface objectives and duration, briefings give
+the lead story a headline and labeled excerpt, and job cards show estimated fit
+alongside a match-reason preview. Existing save/read, notes, application,
+customization and disclosure controls remain in the source.
+
+The final source review included responsive rules, long-text wrapping, pending
+and unavailable data, link destinations, source/AI labels, module styling,
+large text and reduced-motion preferences. The brand mark, favicon and HTML
+browser theme color were aligned. Existing work in progress was retained;
+this pass changed no dependencies, persistence schemas or production data.
+
+Executed from `web/` with Node **25.8.2**:
+
+```sh
+node --import tsx --test tests/workspace-domain.test.ts tests/jobs-client.test.ts
+npm run build
+```
+
+The explicitly selected non-GUI suites passed **12 tests, 0 failures, 0 skips**.
+These check recommendation/recall helpers, briefing grouping, layout presets,
+draft refresh/revision handling and request/cache completion. They are domain
+and client-state checks, not rendered UI tests. TypeScript and the Vite
+production build passed, including a final build after the refinements.
+
+Executed from the repository root:
+
+```sh
+git diff --check
+python3 - <<'PY'
+from pathlib import Path
+from xml.etree import ElementTree
+ElementTree.parse('web/public/favicon.svg')
+assert Path('web/src/main.tsx').is_file()
+assert 'href="/favicon.svg"' in Path('web/index.html').read_text()
+assert 'content="#131613"' in Path('web/index.html').read_text()
+print('Static SVG and HTML asset checks passed.')
+PY
+```
+
+Whitespace, SVG parsing and HTML asset checks passed. No app or browser was
+launched or operated. No GUI, Accessibility, keyboard/focus, screenshot or
+presentation validation was run or required. Appearance in a running app remains
+unverified. Earlier validation evidence remains unchanged.
+
+## UI copy and information cleanup — 2026-10-04
+
+Removed page slogans, repeated labels, app-usage paragraphs, setup walkthroughs,
+search-method explanations, promotional panels and instructional empty states
+across Today, Learning, News, Jobs, Focus, Projects, Library and Settings.
+Page descriptions are optional; Today retains a user-authored goal when set.
+Empty clocks are omitted, headers are smaller, and unused copy-related styles
+were removed. Actual lesson material, article excerpts, match reasons and user
+notes remain. Field formats, source/AI provenance, error recovery, provider
+usage, CV transfer and destructive-action notices retain concise wording.
+
+Executed from `web/` with Node **25.8.2**:
+
+```sh
+npm run build
+git diff --check
+```
+
+TypeScript and the Vite production build passed after the copy changes and again
+after spacing refinements. Whitespace checks passed. No new unit tests were added
+or run for this presentation-only change; earlier test results above are historical.
+
+An initial ad hoc static source audit through `node --input-type=module` stopped
+before checking files with `TypeError: ts.createPrinter is not a function`.
+Inspection showed the installed TypeScript package exports version metadata but
+not that legacy compiler API. This was an audit-tool limitation, not a successful
+check. The audit was then completed with the parser already bundled by Rolldown:
+
+```sh
+node --input-type=module <<'JS'
+import assert from 'node:assert/strict';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join, relative } from 'node:path';
+import { parseSync, Visitor } from 'rolldown/utils';
+const baseline = '/var/folders/lz/20cqfx4x2k98r89q68w3q3ch0000gn/T/kontrol-copy-baseline-5eyy45ax/web/src';
+const keys = new Set(['onClick', 'onSubmit', 'onChange', 'onKeyDown', 'disabled', 'required', 'min', 'max', 'minLength', 'maxLength', 'accept', 'type', 'value', 'checked']);
+const positions = new Set(['start', 'end', 'range', 'loc', 'raw']);
+function bindings(text) {
+  const result = parseSync('source.tsx', text);
+  assert.equal(result.errors.length, 0);
+  const values = [];
+  new Visitor({ JSXAttribute(node) {
+    if (keys.has(node.name.name)) values.push(JSON.stringify(node, (key, value) => positions.has(key) ? undefined : value));
+  } }).visit(result.program);
+  return values.sort();
+}
+let files = 0, attributes = 0;
+function check(directory) {
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) check(path);
+    else if (path.endsWith('.tsx')) {
+      const previous = bindings(readFileSync(join(baseline, relative('src', path)), 'utf8'));
+      const current = bindings(readFileSync(path, 'utf8'));
+      assert.deepEqual(current, previous, path + ': event handlers or field constraints changed');
+      files++; attributes += current.length;
+    }
+  }
+}
+check('src');
+console.log(`Static source comparison passed: ${files} TSX files, ${attributes} unchanged event and field attributes.`);
+JS
+```
+
+The source comparison passed across **27 TSX files and 408 event/field
+attributes** against the snapshot taken before this copy cleanup. It verifies
+source bindings and constraints, not rendered behavior. No dependencies,
+server logic, persistence schemas or production data changed in this pass.
+No app/browser was launched or operated, and no GUI, Accessibility,
+keyboard/focus, screenshot or presentation checks were run or required.
+Visual appearance remains unverified in a running app.
+
+## Matrix visual direction — 2026-10-04
+
+Applied the selected Matrix direction to the existing app: near-black surfaces,
+electric green actions, bright text, square panel/control corners, monospace
+headings and a static grid behind the Today feature. Module accent overrides and
+pastel weekly totals are replaced by the shared palette. Navigation keeps its
+labels with a simple divider; redundant group labels and the large decorative
+feature arrow are removed. The heading underscore is decorative. Amber warning
+and red error treatments remain distinct. The favicon and browser theme color
+match the app. Fonts use local system stacks with no new assets or dependencies.
+
+Executed from `web/`:
+
+```sh
+npm run build
+node --input-type=module <<'JS'
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import postcss from 'postcss';
+import { parseSync, Visitor } from 'rolldown/utils';
+const baseline = '/var/folders/lz/20cqfx4x2k98r89q68w3q3ch0000gn/T/kontrol-matrix-baseline-rpj8chhg/web';
+const css = postcss.parse(readFileSync('src/styles.css', 'utf8'));
+const tokens = new Set();
+const references = new Set();
+css.walkDecls(decl => {
+  if (decl.prop.startsWith('--')) tokens.add(decl.prop);
+  for (const match of decl.value.matchAll(/var\((--[\w-]+)/g)) references.add(match[1]);
+});
+assert.deepEqual([...references].filter(name => !tokens.has(name)), []);
+assert(!readFileSync('src/styles.css', 'utf8').includes('@import'));
+const keys = new Set(['onClick', 'onSubmit', 'onChange', 'onKeyDown', 'disabled', 'required', 'min', 'max', 'minLength', 'maxLength', 'accept', 'type', 'value', 'checked', 'href']);
+const positions = new Set(['start', 'end', 'range', 'loc', 'raw']);
+function bindings(text) {
+  const result = parseSync('source.tsx', text);
+  assert.equal(result.errors.length, 0);
+  const values = [];
+  new Visitor({ JSXAttribute(node) {
+    if (keys.has(node.name.name)) values.push(JSON.stringify(node, (key, value) => positions.has(key) ? undefined : value));
+  } }).visit(result.program);
+  return values.sort();
+}
+let attributes = 0;
+const files = ['src/app/App.tsx', 'src/app/Dashboard.tsx', 'src/components/ui.tsx'];
+for (const file of files) {
+  const previous = bindings(readFileSync(baseline + '/' + file, 'utf8'));
+  const current = bindings(readFileSync(file, 'utf8'));
+  assert.deepEqual(current, previous, file + ': interaction bindings changed');
+  attributes += current.length;
+}
+console.log('CSS parsed; ' + tokens.size + ' custom properties resolve. No font imports.');
+console.log('Static source comparison: ' + files.length + ' TSX files, ' + attributes + ' unchanged event, field and link attributes.');
+JS
+```
+
+TypeScript and the Vite production build passed: 2,070 modules, 46.67 kB CSS.
+The stylesheet parsed successfully with 35 defined custom properties and no
+unresolved variable references. All 45 event, field and link attributes in the
+three edited TSX files match the snapshot taken before this theme change.
+This is a source comparison, not evidence of rendered behavior.
+
+Executed from the repository root:
+
+```sh
+git diff --check
+python3 - <<'PY'
+from pathlib import Path
+from xml.etree import ElementTree
+icon = ElementTree.parse('web/public/favicon.svg')
+html = Path('web/index.html').read_text()
+assert Path('web/src/main.tsx').is_file()
+assert 'href="/favicon.svg"' in html
+assert 'content="#030805"' in html
+print('Whitespace, SVG and HTML asset checks passed.')
+PY
+```
+
+Whitespace, SVG parsing and HTML resource checks passed. No new unit tests were
+added or run for this presentation change. No server logic, persistence schemas
+or production data changed in this pass. No app or browser was launched or
+operated; no GUI, Accessibility, keyboard/focus, screenshot or presentation
+validation was run or required. Appearance in a running app remains unverified.
+Earlier validation evidence remains unchanged.
+
+## RAL filters and salary provenance — 2026-10-04
+
+Jobs now accepts optional annual gross EUR bounds, extracts explicitly annual
+declared pay, researches missing company/role pay against retrieved source
+evidence, and converts supported foreign currencies with dated ECB rates.
+Research runs before RAL filtering; unknown amounts remain visible only when
+the salary filter is unrestricted. Preview cards, saved applications and
+comparisons distinguish declared salaries from researched estimates.
+
+Executed from `web/` during implementation:
+
+```sh
+npm run typecheck
+./node_modules/.bin/tsx --test tests/jobs-salaries.test.ts tests/jobs-domain.test.ts tests/jobs-api.test.ts tests/jobs-client.test.ts
+./node_modules/.bin/tsx --test tests/jobs-salaries.test.ts tests/jobs-api.test.ts tests/workspace-domain.test.ts tests/workspace-api.test.ts
+```
+
+TypeScript and the first 62 selected tests passed. The first expanded API/
+workspace run passed 44 tests and failed one new integration test: its direct
+`POST /workspace/jobs` fixture omitted the required `expectedRevision`, so the
+API correctly returned 400 rather than the asserted 200. The fixture now reads
+the current workspace revision and supplies it, as the actual client already
+does. No production revision guard was weakened.
+
+Final validation executed from `web/`:
+
+```sh
+npm run build
+./node_modules/.bin/tsx --test tests/jobs-domain.test.ts tests/jobs-api.test.ts tests/jobs-client.test.ts tests/jobs-salaries.test.ts tests/workspace-domain.test.ts tests/workspace-api.test.ts
+```
+
+The TypeScript check and Vite production build passed (2,072 modules). All **80
+selected non-GUI tests passed**, with zero failures, skips or cancellations.
+Coverage includes optional/invalid/reversed bounds; inclusive salary overlap;
+legacy persisted defaults; annual salary parsing across all adapters; rejection
+of monthly/hourly, net, bonus, ambiguous and mixed-currency pay; missing-salary
+discovery retention; evidence URL/quote/company/role/location checks; original
+currency and ECB conversion provenance; research failures and cancellation;
+filtering before ranking; and salary/source preservation in applications and
+backup import/export. PI, salary pages and exchange-rate requests use isolated
+fixtures in these tests; actual PI salary-search quality was not measured.
+
+The ECB XML endpoint was also read once with `curl --fail --silent --show-error
+--max-time 15 https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml` to
+confirm its documented structure and base-currency convention. No user data was
+sent. `git diff --check` passed from the repository root.
+
+No production database was changed and no app/browser was launched or operated.
+GUI, Accessibility, keyboard/focus, screenshots and presentation checks were
+neither run nor required. Historical evidence above remains unchanged.
+
+## Concise controls and section colors — 2026-10-04
+
+Removed shared page-subtitle and empty-state-description slots, unused module
+slogans, lesson-card objectives, path introductions and repeated action copy.
+Today, Learning, News, Jobs, Focus, Projects, Library and Settings use shorter
+labels, icons and compact badges. Each module has a consistent accent across
+navigation, widgets and weekly totals. Repeated icon controls retain names,
+tooltips and state feedback. Match reasons, project descriptions, salary sources
+and city-data attribution remain available in disclosures. Lesson material,
+article excerpts, personal content and concise decision notices remain available.
+
+Executed from `web/` with Node **25.8.2**:
+
+```sh
+npm run build
+node /var/folders/lz/20cqfx4x2k98r89q68w3q3ch0000gn/T/kontrol-concise-ui-utliaa04/audit.mjs
+```
+
+TypeScript and the Vite production build passed (**2,073 modules**). The scratch
+source audit compares the current TSX syntax trees against a snapshot taken
+before this pass. It passed across **29 TSX files**, with **532 unchanged event,
+state, link and field attributes**; the added filter-summary component contains
+no interaction bindings. The same audit parsed the stylesheet and resolved all
+**41 custom properties**. The audit script and starting snapshot are local
+scratch evidence, not repository dependencies. An earlier inline audit also
+passed its narrower selection of 447 attributes before the final refinements.
+
+Executed from the repository root:
+
+```sh
+git diff --check
+node --version
+```
+
+Whitespace checks passed. No new unit tests were added or run for this
+presentation change. Existing work in progress was retained. No dependencies,
+server logic, persistence schemas or production data changed in this pass.
+Validation was limited to source review, static checks and compilation; no
+app/browser, interactive journey, GUI, Accessibility, native keyboard/focus,
+screenshot or presentation checks were run or required. Running-app appearance
+remains unverified. Historical results above are unchanged.
+
+## Restore Matrix theme with status accents — 2026-10-04
+
+Restored the shared near-black/electric-green Matrix palette across every
+section by removing module-level accent overrides. Blue is limited to
+informational/progress badges, amber to warnings and red to errors/destructive
+actions; success remains green. The concise copy, icons, disclosures and
+controls from the preceding pass remain. The only TSX change is the AI
+provenance badge's color tone.
+
+Executed from `web/`:
+
+```sh
+npm run build
+node --input-type=module <<'JS'
+import assert from 'node:assert/strict';
+import { readdirSync, readFileSync } from 'node:fs';
+import postcss from 'postcss';
+const css = postcss.parse(readFileSync('src/styles.css', 'utf8'));
+const tokens = new Set(), references = new Set();
+css.walkDecls(decl => {
+  if (decl.prop.startsWith('--')) tokens.add(decl.prop);
+  if (decl.prop.startsWith('--accent') || decl.prop === '--on-accent') assert.equal(decl.parent.selector, ':root');
+  for (const match of decl.value.matchAll(/var\((--[\w-]+)/g)) references.add(match[1]);
+});
+assert.deepEqual([...references].filter(name => !tokens.has(name)), []);
+assert(readFileSync('src/styles.css', 'utf8').includes('--accent: #63ff98;'));
+const baseline = '/var/folders/lz/20cqfx4x2k98r89q68w3q3ch0000gn/T/kontrol-matrix-restore-rg5z73v2/src/';
+const files = readdirSync('src', { recursive: true }).filter(file => /\.tsx?$/.test(file));
+for (const file of files) {
+  const previous = readFileSync(baseline + file, 'utf8');
+  const expected = file === 'modules/news/articles.tsx' ? previous.replace('tone="violet"', 'tone="info"') : previous;
+  assert.equal(readFileSync('src/' + file, 'utf8'), expected, file);
+}
+console.log(`Matrix accents are root-only; ${tokens.size} CSS properties resolve.`);
+console.log(`${files.length} source files unchanged except the AI badge tone.`);
+JS
+```
+
+TypeScript and the Vite production build passed (**2,073 modules**). The static
+check passed: all **38 CSS properties** resolve, the shared accent has no
+section overrides, and **39 TS/TSX files** match the starting snapshot except
+for the intended badge tone. `git diff --check` passed from the repository root.
+No unit tests were added or run for this styling correction. No production data,
+server logic or schemas changed. No app/browser or interactive validation was
+run; running-app appearance remains unverified. Historical evidence is retained.
+
+## News dates, detailed interests and match percentages — 2026-10-05
+
+Briefing, Discover, Saved and Feeds now group articles by publication day, newest
+first, with local Today/Yesterday headings and unknown dates at the end. Article
+cards show the closest enabled interest's estimated percentage and disclose
+per-interest reasons. Standard scores measure title/excerpt keyword coverage
+without a recency bonus; current AI matches use PI's estimate, with prompts
+keeping publication age separate. Saved articles are compared with current
+interests. Detailed profile interests can break publication-time ties in the
+briefing without requiring an exact phrase in the headline.
+
+New and edited search descriptions require at least five words, with a word
+count and example in the editor. Boolean operators, exclusions and search
+filters do not satisfy the word minimum. Japanese word segmentation supports
+unspaced descriptions. Stored short interests and old backups remain readable
+and exportable/importable; they can be paused, but need more detail before a
+new search. No production database or credentials were accessed or modified.
+
+Executed from `web/` with Node **25.8.2**:
+
+```sh
+npm run typecheck
+node --import tsx --test tests/news-domain.test.ts tests/news-discovery.test.ts tests/news-ai.test.ts tests/news-api.test.ts tests/workspace-domain.test.ts tests/workspace-api.test.ts
+npm run build
+```
+
+The first typecheck passed before the new tests were added. The first selected
+test run passed **38** tests and failed **19** because the sandbox rejected
+temporary loopback fixture listeners with `listen EPERM`. The same selected
+non-GUI tests were then run with permission to bind those isolated listeners:
+**57 passed**, no failures or skips. They passed again after adding the legacy
+backup-import assertion and finishing the source changes. Network and PI
+responses are injected fixtures; no live provider or running application was
+driven.
+
+The first build after adding tests found three TypeScript errors in test
+fixtures (excess properties in two narrowed arguments and a nonexistent feed
+preferences field). Those fixtures were corrected. The final TypeScript check
+and Vite production build passed (**2,075 modules**). The new domain tests cover
+publication dates across UTC offsets, daylight saving and year boundaries;
+undated/invalid dates; chronology over old ranks; detailed interest validation;
+full/partial/unrelated keyword coverage; required alternatives and exclusions;
+and stale, paused or invalid AI estimates. HTTP tests cover short-query rejection,
+pausing legacy interests, editing them into valid queries and backup compatibility.
+
+`git diff --check` passed. Validation uses source review, compilation and selected
+non-GUI domain, persistence and HTTP integration tests. No app/browser, GUI,
+Accessibility, keyboard/focus, screenshot or presentation validation was run or
+required. Running-app appearance remains unverified. Prior work in progress and
+historical validation evidence were preserved.
+
+## News search rejects valid articles and returns directories — 2026-10-05
+
+Source review found two contributing paths: the legacy opportunities coverage
+explicitly requested job-board directories, and AI acceptance checked required
+concepts in the generated summary while ignoring retrieved descriptions and
+article text. News now searches for individual reporting, articles, blog posts
+and announcements for every coverage type. Career interests cover hiring and
+industry reporting. Homepages, directories, product pages and job postings are
+excluded using URL rules and retrieved page evidence. Existing career interests
+need no data rewrite. Obvious old discovery homepages are hidden without changing
+stored results or saved bookmarks.
+
+Acceptance now checks required concepts and exclusions against source titles,
+descriptions and up to 10,000 characters of article text, omitting navigation,
+sidebars and footers. A short AI summary can omit a source keyword; its invented
+keywords cannot make an unrelated source pass. Regular English word forms are
+recognized. Structured article metadata referring to another URL is ignored.
+Citation matching normalizes query parameter order while preserving meaningful
+parameter values. All-rejected answers identify citation, page type, publication
+window, score or keyword failures and still retain prior results. Fallback web
+RSS links require fetched article evidence instead of relying on index timestamps.
+Descriptions such as the supplied Java/Kotlin/Backend query remove the literal
+request to exclude job offers and separate adjacent Boolean groups.
+
+Executed from `web/` with Node **25.8.2**:
+
+```sh
+npm run typecheck
+node --import tsx --test tests/news-ai.test.ts tests/news-domain.test.ts
+node --import tsx --test tests/news-domain.test.ts tests/news-discovery.test.ts tests/news-ai.test.ts tests/news-api.test.ts tests/news-pi.test.ts tests/workspace-domain.test.ts tests/workspace-api.test.ts
+npm run build
+git diff --check
+```
+
+The first typecheck identified a fixture missing the new required source-kind
+field; the fixture was corrected and subsequent TypeScript checks passed. Two
+focused runs had **22/23** and **31/32** passes: one fixture used `/job` for a
+supposed article, and another represented a successful empty index using an
+invalid empty RSS channel. Those fixtures were corrected while preserving the
+transport and date assertions. The corrected focused run passed **32/32**.
+
+The first expanded selection passed **75/77**. Two existing regressions exposed
+an overly broad URL rule classifying the individual `/release` permalink as a
+directory. The rule was narrowed while retaining the existing tests; a further
+regression was added for vacancy content disguised as article metadata. The
+final expanded selection passed **78/78**, with no failures or skips. Loopback
+HTTP tests ran with permission for temporary isolated fixture listeners. PI
+process tests use temporary configuration and fixture executables; network and
+search results are injected. No live PI/provider search, personal credentials
+or production database was accessed.
+
+Regression coverage includes the supplied Japan programming/career interest,
+Japan Dev homepage rejection with specific blog-article acceptance, vacancy
+rejection, short-summary omissions, source-grounded keyword checks, article
+metadata isolation, fallback freshness, citation parameter order, actionable
+error reasons, old-cache visibility and HTTP retention of valid prior articles.
+The final TypeScript check and Vite production build passed (**2,075 modules**),
+and whitespace checks passed. Validation remained non-interactive: no app/browser
+launch, GUI journey, screenshot, Accessibility, keyboard/focus or presentation
+checks were run or required. Running-app and live-search behavior remain
+unverified; earlier results and work in progress were preserved.
+
+## News search page retrieval and fallback — 2026-10-05
+
+A News AI search for **AI models & releases** returned zero results with
+“PI found sources, but their pages could not be retrieved. Saved results are
+retained; try again. Saved results are retained.” Source review found three
+causes. First, cited article pages were fetched with the RSS transport profile:
+a non-browser `Kontrol-Web/0.2` agent, no language header, three redirects, and
+rejection of bodies over 2 MB. Second, when every cited page failed, the run
+ended with an error even when the news index had matching dated stories. Third,
+the Discover page appended the retained-results notice a second time, and the
+message did not explain why retrieval failed.
+
+Behavior changes:
+- **Page requests:** News AI page reads (hosted-search citations and Bing
+  wider-web results) use a browser-compatible `Mozilla/5.0` agent, an HTML
+  `Accept` header and an `Accept-Language` matching the interest. They follow up
+  to five redirects and truncate pages over 2 MB instead of rejecting them.
+  Feeds, Standard search and Jobs keep `Kontrol-Web/0.2`, three redirects and
+  reject-on-oversize. Public-IP pinning and URL, port, timeout and concurrency
+  limits are unchanged.
+- **Failure reasons:** Each failed page is counted in a fixed category (blocked
+  automated access, rate-limited, timed out, HTTP error, verification or
+  unreadable page, could not be reached). Messages never include raw error text.
+- **News-index fallback:** This runs only when every cited page fails. Kontrol
+  ranks Google News RSS snippets in one further PI inference, validated by the
+  existing evidence rules. If it yields articles, the run succeeds with
+  `mode: 'ai'`. If it finds nothing, fails or times out, the run fails with the
+  retrieval reasons and “The news-index fallback found no usable articles”, and
+  saved results are kept. Other failures never use the fallback.
+- **Deadlines:** The shared AI discovery deadline is now 90 s (was 60 s). The
+  client `/news/discover` timeout is 570,000 ms (was 390,000 ms).
+- **Error text:** Discover shows the retained-results notice only once.
+
+Executed from `web/` with Node **25.8.2**:
+
+```sh
+npm run typecheck
+node --import tsx --test tests/domain.test.ts tests/api.test.ts tests/projects-persistence.test.ts tests/news-discovery.test.ts tests/news-domain.test.ts tests/news-ai.test.ts tests/news-api.test.ts tests/news-pi.test.ts tests/news-pi-cli.test.ts tests/jobs-domain.test.ts tests/jobs-api.test.ts tests/jobs-client.test.ts tests/jobs-salaries.test.ts tests/workspace-domain.test.ts tests/workspace-api.test.ts
+KONTROL_TEST_PI_COMMAND=/opt/homebrew/bin/pi node --import tsx --test tests/news-pi-cli.test.ts
+npm run build
+```
+
+From the repository root: `git diff --check`.
+
+- **Typecheck:** passed.
+- **Full selected suite** (the explicit non-GUI list in `package.json`):
+  **186 tests, 184 passed, 0 failed, 2 skipped**. The two skipped tests are the
+  installed-PI fixture tests, which need `KONTROL_TEST_PI_COMMAND`. No
+  `listen EPERM` occurred, so no second run was needed for loopback permission.
+- **Installed-PI fixture tests**, run separately with the variable set:
+  **2 passed, 0 failed, 0 skipped**. They use temporary PI configuration and
+  loopback provider fixtures.
+- **Production build:** the TypeScript check and Vite build passed
+  (**2,075 modules**).
+- **`git diff --check`:** passed for the working tree and for the feature
+  commits against their baseline.
+
+New and updated tests cover:
+- request headers for the page profile and the transport defaults;
+- the body collector on plain and gzip streams (under the limit, truncated,
+  rejected, wire limit, cut-off multi-byte character);
+- page options received by the hosted and Bing fetchers;
+- ordered failure summaries without raw text;
+- fallback success, empty, throwing and deadline cases;
+- no fallback for provider, evidence, format or validation failures, or for
+  partial retrieval;
+- news-index-only sources;
+- HTTP retention and fallback replacement;
+- the 570,000 ms client deadline;
+- the single retained-results notice.
+
+Optional live adapter diagnostics were run non-interactively from `web/`. They
+used the configured PI default model and the network, and called `aiDiscovery`
+directly with fresh fixture interest IDs. Nothing was persisted, and the app was
+not launched.
+- **Unmodified preset run:** this used real hosted search and real page reads.
+  It finished in **25,692 ms** with **36 provider-evidence URLs** and **4
+  proposed** results. Three page reads were still blocked with HTTP 403 (two
+  apnews.com, one axios.com). One TechRadar page (1.88 MB) was retrieved. Partial
+  retrieval succeeded without the fallback, accepting **1 article** dated
+  2026-09-29.
+- **Forced fallback run:** hosted search was replaced by one synthetic citation
+  whose page read was forced to fail with HTTP 403. The real Google News RSS
+  index supplied **30 sources**, and one real PI ranking call accepted **3
+  articles** with `mode: 'ai'` (dated 2026-09-28 to 2026-09-30). It finished in
+  **39,250 ms**, with one fallback call and one PI call.
+
+These are single live samples. Publisher blocking and index coverage vary, so a
+search can still end in the documented retrieval error. The 2 MB truncation path
+was covered by unit tests only, not by a live page.
+
+No test runner, watcher, dev server or loopback fixture was left running. The
+tests and diagnostics ran in the foreground, and PI child processes ended with
+their commands. No GUI, app/browser launch, Accessibility, keyboard/focus,
+screenshot or presentation checks were run or required. No production database,
+application data or stored credentials were read or modified. Kontrol never
+reads PI credentials; the live diagnostics used PI's own login. Earlier
+validation entries remain unchanged.
