@@ -1,14 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import type { NewsInterest } from '../shared/news';
+import type { DiscoveredArticle, NewsInterest } from '../shared/news';
+import type { Discover } from '../server/news/discovery';
 import {
   EXPLORE_IDEATION_DEADLINE_MS, EXPLORE_MAX_MODEL_BYTES, EXPLORE_MAX_MODEL_CANDIDATES,
   EXPLORE_SESSION_TTL_MS, EXPLORE_GENERATION_DEADLINE_MS, EXPLORE_AVAILABILITY_DEADLINE_MS,
   EXPLORE_MAX_RETAINED_BYTES, exploreBytes, exploreStatusResponseSchema,
+  EXPLORE_SEARCH_DEADLINE_MS, EXPLORE_MAX_ARTICLES_PER_TOPIC, exploreArticleSchema,
+  type ExploreSession,
 } from '../shared/news-explore';
 import {
   createExploreService, ExploreServiceError, EXPLORE_GENERATION_BOOKKEEPING_BYTES,
+  EXPLORE_SEARCH_BOOKKEEPING_BYTES,
   type ExploreDependencies, type ExploreSchedule,
 } from '../server/news/explore';
 import {
@@ -528,4 +532,358 @@ test('session: disposal cancels active work, clears retained evidence and cannot
   f.service.dispose(); f.service.invalidate(); f.service.invalidateSources([parent.id]);
   assert.equal(f.service.snapshot().lifecycle.state, 'expired');
   assert.equal(calls, 2);
+});
+
+function retrieved(descriptor: NewsInterest, overrides: Partial<DiscoveredArticle> = {}): DiscoveredArticle {
+  return { id: 'adapter-identity', url: 'https://publisher.example/news/infrastructure', title: 'Retrieved infrastructure report',
+    source: 'Publisher', summary: 'A real fixture source excerpt, not an AI elaboration.', publishedAt: null,
+    fetchedAt: '2026-10-06T18:00:00.000Z', feedIDs: ['synthetic-feed'], topicIDs: ['synthetic-topic'], contentKind: 'article',
+    matches: [{ interestID: descriptor.id, interestRevision: descriptor.revision, mode: 'search', score: 80, reason: 'Retrieved.' }], ...overrides };
+}
+function previewFixture(discover: Discover, overrides: Partial<ExploreDependencies> = {}) {
+  const descriptors: NewsInterest[] = [];
+  const f = sessionFixture({ discover: async (descriptor, cancellation) => {
+    descriptors.push(structuredClone(descriptor)); return discover(descriptor, cancellation);
+  }, ...overrides });
+  return { ...f, descriptors,
+    search: (session: ExploreSession, index = 0, search = session.topics[index].proposedSearch, cancellation?: AbortSignal) =>
+      f.service.search(session.id, session.topics[index].id, { expectedSessionRevision: session.revision, search }, cancellation),
+    topic: (index = 0) => {
+      const status = f.service.snapshot();
+      if (status.lifecycle.state !== 'available') throw new Error('Expected current session');
+      return status.lifecycle.session.topics[index];
+    },
+  };
+}
+
+test('preview: local selection does no work; Standard-only descriptor uses reviewed fields without source filters or public matches', async t => {
+  const f = previewFixture(async descriptor => [retrieved(descriptor)]); t.after(f.close);
+  const { session } = await f.service.generate();
+  f.service.snapshot(); f.topic(1); f.topic(0);
+  assert.equal(f.descriptors.length, 0);
+  const search = { query: 'Public libraries language archives research tools', language: 'ja' as const, region: 'JP' as const, days: 30 as const };
+  const response = await f.search(session, 0, search);
+  assert.equal(response.sessionID, session.id); assert.equal(response.topicID, session.topics[0].id);
+  assert.equal(response.sessionRevision, session.revision);
+  assert.equal(response.preview.state, 'successful');
+  if (response.preview.state !== 'successful') throw new Error('Expected result');
+  assert.deepEqual(response.preview.result.search, search);
+  assert.equal(response.preview.result.succeededAt, new Date(f.clock.now()).toISOString());
+  const [descriptor] = f.descriptors;
+  assert.equal(descriptor.id, session.topics[0].id); assert.notEqual(descriptor.id, f.parent.id);
+  assert.notEqual(descriptor.revision, f.parent.revision);
+  assert.deepEqual({ ...descriptor, id: '', revision: '' }, { id: '', revision: '', name: session.topics[0].title,
+    ...search, intent: 'news', enabled: true, requiredTerms: [], excludedTerms: [] });
+  const [article] = response.preview.result.articles;
+  assert.ok(exploreArticleSchema.safeParse(article).success);
+  assert.equal(article.summaryKind, 'source'); assert.deepEqual(article.feedIDs, []); assert.deepEqual(article.topicIDs, []);
+  assert.equal('matches' in article, false); assert.equal('contentKind' in article, false); assert.notEqual(article.id, 'adapter-identity');
+  assert.deepEqual(f.calls(), { availabilityCalls: 1, ideationCalls: 1 }, 'Search invokes neither PI availability nor ideation');
+  assert.equal(f.clock.size(), 1, 'Only session expiry remains');
+  response.preview.result.articles[0].title = 'Caller mutation';
+  assert.equal(f.service.resolve(article.url)?.article.title, 'Retrieved infrastructure report');
+});
+
+test('preview: per-topic concurrency, duplicate gates and out-of-order responses never relabel coverage', async t => {
+  const waits = [deferred<DiscoveredArticle[]>(), deferred<DiscoveredArticle[]>()];
+  let calls = 0;
+  const f = previewFixture(async () => waits[calls++].promise); t.after(f.close);
+  const { session } = await f.service.generate();
+  const first = f.search(session, 0), second = f.search(session, 1);
+  await assert.rejects(f.search(session, 0), serviceCode('busy'));
+  await assert.rejects(f.search(session, 2), serviceCode('busy'));
+  await flush(); assert.equal(calls, 2);
+  assert.equal(f.topic(0).preview.state, 'pending'); assert.equal(f.topic(1).preview.state, 'pending');
+  assert.equal(f.topic(2).preview.state, 'not-searched');
+  waits[1].resolve([retrieved(f.descriptors[1], { title: 'Second topic', url: 'https://publisher.example/news/second' })]); await second;
+  assert.equal(f.topic(0).preview.state, 'pending');
+  waits[0].resolve([retrieved(f.descriptors[0], { title: 'First topic', url: 'https://publisher.example/news/first' })]); await first;
+  for (const [index, title] of ['First topic', 'Second topic'].entries()) {
+    const preview = f.topic(index).preview;
+    if (preview.state !== 'successful') throw new Error('Expected success');
+    assert.equal(preview.result.articles[0].title, title);
+    assert.deepEqual(preview.result.search, session.topics[index].proposedSearch);
+  }
+  assert.equal(f.clock.size(), 1);
+});
+
+test('preview: changed-query failure retains original successful parameters and timestamp; empty success removes old evidence', async t => {
+  let mode: 'success' | 'error' | 'empty' = 'success';
+  const f = previewFixture(async descriptor => { if (mode === 'error') throw new Error('PRIVATE_PROVIDER_ERROR'); return mode === 'empty' ? [] : [retrieved(descriptor)]; });
+  t.after(f.close); const { session } = await f.service.generate();
+  const first = await f.search(session);
+  if (first.preview.state !== 'successful') throw new Error('Expected success');
+  const original = structuredClone(first.preview.result);
+  const changed = { ...session.topics[0].proposedSearch, query: 'Other reviewed adjacent infrastructure policy research' };
+  f.clock.advance(1000); mode = 'error';
+  await assert.rejects(f.search(session, 0, changed), serviceCode('search-failed'));
+  const retained = f.topic().preview;
+  assert.equal(retained.state, 'failed-retained');
+  if (retained.state !== 'failed-retained') throw new Error('Expected retained');
+  assert.deepEqual(retained.previous, original); assert.deepEqual(retained.attempt.search, changed);
+  assert.doesNotMatch(JSON.stringify(retained), /PRIVATE_/);
+  assert.equal(f.service.resolve(original.articles[0].url)?.article.summary, original.articles[0].summary);
+  mode = 'empty'; f.clock.advance(1000);
+  const empty = await f.search(session, 0, changed);
+  assert.equal(empty.preview.state, 'successful-empty');
+  if (empty.preview.state !== 'successful-empty') throw new Error('Expected empty');
+  assert.deepEqual(empty.preview.result.articles, []); assert.deepEqual(empty.preview.result.search, changed);
+  assert.notEqual(empty.preview.result.succeededAt, original.succeededAt);
+  assert.equal(f.service.resolve(original.articles[0].url), undefined);
+});
+
+test('preview: normalization rejects invalid injected evidence and reuses URL/type/date eligibility while preserving unknown dates', async t => {
+  const f = previewFixture(async descriptor => {
+    const base = retrieved(descriptor);
+    const invalid = [null, { ...base, title: '' }, { ...base, summary: 123 }, { ...base, summary: 'x'.repeat(50_001) },
+      { ...base, url: 'not a URL' }, { ...base, url: 'javascript:alert(1)' }, { ...base, url: 'https://secret@publisher.example/story' },
+      { ...base, url: 'https://publisher.example:999/news/story' }, { ...base, url: 'https://publisher.example/' },
+      { ...base, url: 'https://publisher.example/news' }, { ...base, url: 'https://publisher.example/jobs/123' },
+      { ...base, contentKind: 'job' }, { ...base, contentKind: 'generic' }, { ...base, summaryKind: 'ai-snippet' },
+      { ...base, publishedAt: 'invalid' }, { ...base, publishedAt: '2026-09-01T00:00:00.000Z' },
+      { ...base, publishedAt: '2026-10-08T00:00:00.000Z' }, { ...base, fetchedAt: 'invalid' },
+      { ...base, matches: null }, { ...base, matches: [null] }, { ...base, matches: [{ ...base.matches[0], mode: 'ai' }] },
+      { ...base, matches: [{ ...base.matches[0], interestRevision: randomUUID() }] }];
+    return [...invalid, { ...base, url: base.url + '?b=2&utm_source=test&a=1#fragment', fetchedAt: '2020-01-01T00:00:00.000Z' },
+      { ...base, title: 'Duplicate', url: base.url + '?a=1&b=2' },
+      { ...base, url: 'https://publisher.example/news/dated', publishedAt: '2026-10-05T18:00:00.000Z' }] as DiscoveredArticle[];
+  }); t.after(f.close); const { session } = await f.service.generate();
+  const response = await f.search(session);
+  if (response.preview.state !== 'successful') throw new Error('Expected success');
+  const articles = response.preview.result.articles;
+  assert.equal(articles.length, 2); assert.equal(articles[0].url, 'https://publisher.example/news/infrastructure?a=1&b=2');
+  assert.equal(articles[0].publishedAt, null); assert.equal(articles[0].fetchedAt, new Date(f.clock.now()).toISOString());
+  assert.equal(articles[0].title, 'Retrieved infrastructure report');
+  assert.equal(articles[1].publishedAt, '2026-10-05T18:00:00.000Z');
+});
+
+test('preview: result count and byte limits trim trailing retrieval candidates without evicting other topics', async t => {
+  const parent = source();
+  const dependencies = { readInterests: () => [parent], ideate: async () => JSON.stringify({ topics: threeIdeas(parent) }) };
+  const probe = previewFixture(async () => [], dependencies); t.after(probe.close);
+  const { session: baseline } = await probe.service.generate();
+  const byteLimit = exploreBytes(baseline) + EXPLORE_GENERATION_BOOKKEEPING_BYTES + EXPLORE_SEARCH_BOOKKEEPING_BYTES + 110_000;
+  const f = previewFixture(async descriptor => Array.from({ length: 60 }, (_, i) => retrieved(descriptor,
+    { title: 'Candidate ' + i, url: `https://publisher.example/news/${descriptor.id}/${i}`, summary: '界'.repeat(16_000) })),
+  { ...dependencies, maxRetainedBytes: byteLimit }); t.after(f.close);
+  const { session } = await f.service.generate();
+  const first = await f.search(session);
+  if (first.preview.state !== 'successful') throw new Error('Expected success');
+  assert.equal(first.preview.result.articles.length, 2);
+  assert.deepEqual(first.preview.result.articles.map(article => article.title), ['Candidate 0', 'Candidate 1']);
+  await assert.rejects(f.search(session, 1), serviceCode('capacity'));
+  assert.equal(f.topic(1).preview.state, 'failed', 'Retrieved results that cannot fit must not be mislabeled as zero coverage');
+  assert.deepEqual(f.topic().preview, first.preview, 'Another topic cannot evict retained coverage');
+  assert.ok(exploreBytes(f.service.snapshot()) + EXPLORE_SEARCH_BOOKKEEPING_BYTES <= byteLimit);
+  const count = previewFixture(async descriptor => Array.from({ length: 80 }, (_, i) => retrieved(descriptor,
+    { url: `https://publisher.example/news/${i}` }))); t.after(count.close);
+  const result = await count.search((await count.service.generate()).session);
+  if (result.preview.state !== 'successful') throw new Error('Expected success');
+  assert.equal(result.preview.result.articles.length, EXPLORE_MAX_ARTICLES_PER_TOPIC);
+});
+
+test('preview: insufficient pending-state capacity rejects admission without retrieval or losing old state', async t => {
+  const parent = source(); const dependencies = { readInterests: () => [parent], ideate: async () => JSON.stringify({ topics: threeIdeas(parent) }) };
+  const probe = previewFixture(async () => [], dependencies); t.after(probe.close);
+  const baseline = await probe.service.generate();
+  const f = previewFixture(async () => [], { ...dependencies,
+    maxRetainedBytes: exploreBytes(baseline.session) + EXPLORE_GENERATION_BOOKKEEPING_BYTES }); t.after(f.close);
+  const { session } = await f.service.generate();
+  await assert.rejects(f.search(session), serviceCode('capacity'));
+  assert.equal(f.descriptors.length, 0); assert.equal(f.topic().preview.state, 'not-searched');
+});
+
+test('preview: resolver uses canonical server-known URLs, detached records and deterministic latest-success/gallery precedence', async t => {
+  const f = previewFixture(async descriptor => [retrieved(descriptor, { title: descriptor.name, url: 'https://publisher.example/news/shared?b=2&a=1' })]);
+  t.after(f.close); const { session } = await f.service.generate();
+  await f.search(session, 1); await f.search(session, 0);
+  const url = 'https://publisher.example/news/shared?a=1&utm_source=client&b=2#reading';
+  assert.equal(f.service.resolve(url)?.article.title, session.topics[0].title, 'Equal success timestamps prefer gallery order');
+  f.clock.advance(1); await f.search(session, 1);
+  const resolved = f.service.resolve(url)!;
+  assert.equal(resolved.article.title, session.topics[1].title); assert.equal(resolved.summaryKind, 'source');
+  resolved.article.title = 'Untrusted mutation';
+  assert.equal(f.service.resolve(url)?.article.title, session.topics[1].title);
+  for (const unknown of ['not a URL', 'javascript:alert(1)', 'https://publisher.example/news/unseen',
+    'https://user:secret@publisher.example/news/shared?a=1&b=2', 'https://publisher.example/news/shared?a=2&b=2']) {
+    assert.equal(f.service.resolve(unknown), undefined);
+  }
+  f.clock.advance(EXPLORE_SESSION_TTL_MS);
+  assert.equal(f.service.resolve(url), undefined); assert.equal(f.clock.size(), 0);
+  assert.equal(f.descriptors.length, 3, 'Expiry/resolution never performs a search');
+});
+
+test('preview: invalid requests, stale revisions and absent identities cannot retrieve', async t => {
+  const f = previewFixture(async () => []); t.after(f.close);
+  const absentRequest = { expectedSessionRevision: randomUUID(), search: { query: candidate(f.parent).query, language: 'en', region: 'US', days: 7 } };
+  await assert.rejects(f.service.search(randomUUID(), randomUUID(), absentRequest), serviceCode('session-gone'));
+  const { session } = await f.service.generate();
+  const valid = { expectedSessionRevision: session.revision, search: session.topics[0].proposedSearch };
+  for (const request of [{ ...valid, mode: 'ai' }, { ...valid, article: {} }, { ...valid, search: { ...valid.search, query: 'too short' } },
+    { ...valid, search: { ...valid.search, intent: 'opportunities' } }, { ...valid, search: { ...valid.search, requiredTerms: [] } }]) {
+    await assert.rejects(f.service.search(session.id, session.topics[0].id, request), serviceCode('invalid-input'));
+  }
+  await assert.rejects(f.service.search('bad', session.topics[0].id, valid), serviceCode('invalid-input'));
+  await assert.rejects(f.service.search(session.id, session.topics[0].id, { ...valid, expectedSessionRevision: randomUUID() }), serviceCode('stale-revision'));
+  await assert.rejects(f.service.search(session.id, randomUUID(), valid), serviceCode('session-gone'));
+  assert.equal(f.descriptors.length, 0);
+});
+
+test('preview: source edit/disable/delete revokes admission, completion and resolution without resurrecting restored revisions', async t => {
+  for (const mutation of ['edit', 'disable', 'delete'] as const) {
+    const waiting = deferred<DiscoveredArticle[]>(); let calls = 0;
+    const f = previewFixture(async descriptor => ++calls === 1 ? [retrieved(descriptor)] : waiting.promise); t.after(f.close);
+    const { session } = await f.service.generate(); await f.search(session);
+    const pending = f.search(session); const rejected = assert.rejects(pending, serviceCode('obsolete-source'));
+    await flush();
+    f.setInterests(mutation === 'delete' ? [] : [{ ...f.parent, ...(mutation === 'edit' ? { revision: randomUUID() } : { enabled: false }) }]);
+    assert.equal(f.service.resolve('https://publisher.example/news/infrastructure'), undefined);
+    await rejected;
+    await assert.rejects(f.search(session), serviceCode('obsolete-source'));
+    assert.equal(f.topic().preview.state, 'obsolete');
+    f.setInterests([f.parent]); waiting.resolve([retrieved(f.descriptors[1])]); await flush();
+    assert.equal(f.topic().preview.state, 'obsolete'); assert.equal(f.clock.size(), 1);
+  }
+});
+
+test('preview: epoch invalidation, replacement, expiry and disposal abort work and late completion cannot restore evidence', async t => {
+  for (const action of ['invalidate', 'replace', 'expire', 'dispose'] as const) {
+    const wait = deferred<DiscoveredArticle[]>(); let forwarded!: AbortSignal;
+    const f = previewFixture(async (_descriptor, cancellation) => { forwarded = cancellation!; return wait.promise; }); t.after(f.close);
+    const { session } = await f.service.generate();
+    const pending = f.search(session);
+    const rejected = assert.rejects(pending, serviceCode(action === 'invalidate' ? 'obsolete-source' : 'session-gone'));
+    await flush();
+    if (action === 'invalidate') f.service.invalidate();
+    if (action === 'replace') await f.service.generate();
+    if (action === 'expire') f.clock.jump(EXPLORE_SESSION_TTL_MS);
+    if (action === 'dispose') f.service.dispose();
+    if (action === 'expire') f.service.snapshot();
+    await rejected; assert.equal(forwarded.aborted, true);
+    const state = f.service.snapshot();
+    wait.resolve([retrieved(f.descriptors[0])]); await flush();
+    assert.deepEqual(f.service.snapshot(), state);
+    assert.equal(f.service.resolve('https://publisher.example/news/infrastructure'), undefined);
+    if (action !== 'replace') assert.equal(f.clock.size(), 0);
+  }
+});
+
+test('preview: deadline, external abort and late errors release gates without replacing retained coverage', async t => {
+  const wait = deferred<DiscoveredArticle[]>(); let mode: 'success' | 'stall' = 'success'; let forwarded!: AbortSignal;
+  const f = previewFixture(async (descriptor, cancellation) => {
+    forwarded = cancellation!; return mode === 'stall' ? wait.promise : [retrieved(descriptor)];
+  }); t.after(f.close); const { session } = await f.service.generate();
+  const first = await f.search(session); mode = 'stall';
+  const pending = f.search(session); const rejected = assert.rejects(pending, serviceCode('search-failed'));
+  await flush(); f.clock.advance(EXPLORE_SEARCH_DEADLINE_MS); await rejected;
+  assert.equal(forwarded.aborted, true); assert.equal(f.clock.size(), 1);
+  const retained = f.topic().preview;
+  if (retained.state !== 'failed-retained' || first.preview.state !== 'successful') throw new Error('Expected retained success');
+  assert.deepEqual(retained.previous, first.preview.result);
+  const controller = new AbortController();
+  const cancelled = f.search(session, 0, session.topics[0].proposedSearch, controller.signal);
+  const aborted = assert.rejects(cancelled, serviceCode('search-failed'));
+  await flush(); controller.abort(new Error('PRIVATE_CANCEL')); await aborted;
+  assert.equal(f.clock.size(), 1);
+  mode = 'success'; const replacement = await f.search(session);
+  wait.reject(new Error('PRIVATE_LATE_ERROR')); await flush();
+  assert.deepEqual(f.topic().preview, replacement.preview);
+  const pre = new AbortController(); pre.abort(); const calls = f.descriptors.length;
+  await assert.rejects(f.search(session, 0, session.topics[0].proposedSearch, pre.signal), serviceCode('search-failed'));
+  assert.equal(f.descriptors.length, calls);
+});
+
+test('preview: event-loop-delayed deadline checks reject publication and lower-bound policy forbids longer waits', async t => {
+  const wait = deferred<DiscoveredArticle[]>();
+  const f = previewFixture(async () => wait.promise); t.after(f.close);
+  const { session } = await f.service.generate(); const pending = f.search(session);
+  const rejected = assert.rejects(pending, serviceCode('search-failed'));
+  await flush(); f.clock.jump(EXPLORE_SEARCH_DEADLINE_MS);
+  wait.resolve([retrieved(f.descriptors[0])]); await rejected;
+  assert.equal(f.topic().preview.state, 'failed'); assert.equal(f.clock.size(), 1);
+  for (const searchDeadlineMs of [0, NaN, EXPLORE_SEARCH_DEADLINE_MS + 1]) {
+    assert.throws(() => createExploreService({ readInterests: () => [], searchDeadlineMs }), serviceCode('invalid-input'));
+  }
+});
+
+test('preview: revocation of another source terminates old-revision pending state but leaves unaffected topic recoverable', async t => {
+  const a = source(), b = source(), wait = deferred<DiscoveredArticle[]>(); let calls = 0;
+  const f = previewFixture(async descriptor => ++calls === 1 ? wait.promise : [retrieved(descriptor)], {
+    readInterests: () => [a, b], ideate: async () => JSON.stringify({ topics: [candidate(a),
+      candidate(b, { title: 'Other angle', query: 'Ecological restoration community infrastructure policy research' })] }),
+  }); t.after(f.close); const { session } = await f.service.generate();
+  const pending = f.search(session, 1); const rejected = assert.rejects(pending, serviceCode('obsolete-source'));
+  await flush(); f.service.invalidateSources([a.id]); await rejected;
+  assert.equal(f.topic(0).preview.state, 'obsolete'); assert.equal(f.topic(1).preview.state, 'failed');
+  const status = f.service.snapshot();
+  if (status.lifecycle.state !== 'available') throw new Error('Expected current session');
+  await f.search(status.lifecycle.session, 1);
+  wait.resolve([retrieved(f.descriptors[0])]); await flush();
+  assert.equal(f.topic(1).preview.state, 'successful');
+});
+
+test('preview: completion independently detects source changes without a snapshot or route hook', async t => {
+  const wait = deferred<DiscoveredArticle[]>();
+  const f = previewFixture(async () => wait.promise); t.after(f.close);
+  const { session } = await f.service.generate(); const pending = f.search(session);
+  const rejected = assert.rejects(pending, serviceCode('obsolete-source'));
+  await flush(); f.setInterests([{ ...f.parent, revision: randomUUID() }]);
+  wait.resolve([retrieved(f.descriptors[0])]); await rejected;
+  assert.equal(f.topic().preview.state, 'obsolete');
+  assert.equal(f.service.resolve('https://publisher.example/news/infrastructure'), undefined);
+  assert.equal(f.clock.size(), 1);
+});
+
+test('preview: reader failure cancels pending work safely and never leaves an orphan pending preview', async t => {
+  const parent = source(), wait = deferred<DiscoveredArticle[]>(); let failRead = false;
+  const f = previewFixture(async () => wait.promise, { readInterests: () => {
+    if (failRead) throw new Error('PRIVATE_READER_FAILURE'); return [parent];
+  }, ideate: async () => JSON.stringify({ topics: threeIdeas(parent) }) }); t.after(f.close);
+  const { session } = await f.service.generate(); const pending = f.search(session);
+  const rejected = assert.rejects(pending, serviceCode('invalid-input'));
+  await flush(); failRead = true;
+  assert.throws(() => f.service.resolve('https://publisher.example/news/infrastructure'), serviceCode('invalid-input'));
+  await rejected; failRead = false;
+  assert.equal(f.topic().preview.state, 'failed'); assert.equal(f.clock.size(), 1);
+  wait.resolve([retrieved(f.descriptors[0])]); await flush();
+  assert.equal(f.service.resolve('https://publisher.example/news/infrastructure'), undefined);
+});
+
+test('preview: input inspection and total retained counts are finite across all topics', async t => {
+  const f = previewFixture(async descriptor => Array.from({ length: 800 }, (_, i) => retrieved(descriptor,
+    { url: `https://publisher.example/news/${descriptor.id}/${i}`, title: i < 500 ? '' : 'Beyond parser ceiling' })));
+  t.after(f.close); const { session } = await f.service.generate();
+  assert.equal((await f.search(session)).preview.state, 'successful-empty', 'Candidates after the RSS input ceiling are ignored');
+  const count = previewFixture(async descriptor => Array.from({ length: 80 }, (_, i) => retrieved(descriptor,
+    { url: `https://publisher.example/news/${descriptor.id}/${i}` }))); t.after(count.close);
+  const { session: fullSession } = await count.service.generate();
+  for (let index = 0; index < 3; index++) await count.search(fullSession, index);
+  const status = count.service.snapshot();
+  if (status.lifecycle.state !== 'available') throw new Error('Expected session');
+  assert.equal(status.lifecycle.session.topics.reduce((sum, topic) => sum +
+    ('result' in topic.preview ? topic.preview.result.articles.length : 0), 0), 3 * EXPLORE_MAX_ARTICLES_PER_TOPIC);
+  assert.ok(exploreBytes(status) < EXPLORE_MAX_RETAINED_BYTES);
+});
+
+test('preview: oversized refresh and malformed adapter output retain trusted same-topic coverage and release the gate', async t => {
+  const parent = source(); const dependencies = { readInterests: () => [parent], ideate: async () => JSON.stringify({ topics: threeIdeas(parent) }) };
+  const probe = previewFixture(async () => [], dependencies); t.after(probe.close);
+  const baseline = await probe.service.generate();
+  let mode: 'small' | 'large' | 'malformed' = 'small';
+  const f = previewFixture(async descriptor => mode === 'malformed' ? null as unknown as DiscoveredArticle[] :
+    [retrieved(descriptor, { summary: mode === 'large' ? '界'.repeat(16_000) : 'Original excerpt' })], { ...dependencies,
+    maxRetainedBytes: exploreBytes(baseline.session) + EXPLORE_GENERATION_BOOKKEEPING_BYTES + EXPLORE_SEARCH_BOOKKEEPING_BYTES + 4000 });
+  t.after(f.close); const { session } = await f.service.generate();
+  const first = await f.search(session);
+  if (first.preview.state !== 'successful') throw new Error('Expected original result');
+  for (const failure of ['large', 'malformed'] as const) {
+    mode = failure;
+    await assert.rejects(f.search(session), serviceCode(failure === 'large' ? 'capacity' : 'search-failed'));
+    const retained = f.topic().preview;
+    if (retained.state !== 'failed-retained') throw new Error('Expected retained result');
+    assert.deepEqual(retained.previous, first.preview.result);
+    assert.equal(f.service.resolve(first.preview.result.articles[0].url)?.article.summary, 'Original excerpt');
+    assert.equal(f.clock.size(), 1);
+  }
+  mode = 'small'; assert.equal((await f.search(session)).preview.state, 'successful');
 });
