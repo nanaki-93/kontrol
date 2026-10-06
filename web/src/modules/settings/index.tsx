@@ -7,6 +7,7 @@ import { api, download, useCommand } from '../../lib/api';
 import { useSettings } from './api';
 import { PageHeader, ErrorMessage, Loading, Badge, Confirm } from '../../components/ui';
 import { ProfileSettings } from '../workspace/profile';
+import { clearExploreAfterImport } from '../news/explore-api';
 
 function PreferencesForm({ preferences }: { preferences: Preferences }) {
   const command = useCommand(['settings']);
@@ -42,7 +43,11 @@ export function SettingsPage() {
   async function importRecords() {
     if (!pendingImport) return;
     setBusy(true); setError(null);
-    try { await api('/settings/import', 'POST', pendingImport.source); await client.invalidateQueries(); setImport(null); setDone(true); }
+    try {
+      await api('/settings/import', 'POST', pendingImport.source);
+      clearExploreAfterImport(client);
+      await client.invalidateQueries(); setImport(null); setDone(true);
+    }
     catch (error) { setError(error as Error); } finally { setBusy(false); }
   }
   async function backup() {

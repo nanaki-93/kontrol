@@ -1,13 +1,23 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { MutationObserver, QueryClient, QueryObserver } from '@tanstack/react-query';
+import {
+  EXPLORE_CLIENT_RETENTION_MS, EXPLORE_GENERATION_CLIENT_DEADLINE_MS, EXPLORE_RECOVERY_CLIENT_DEADLINE_MS,
+  EXPLORE_SESSION_TTL_MS, exploreSessionSchema, type ExploreSession,
+} from '../shared/news-explore';
+import {
+  clearExploreAfterImport, ExploreCommandError, exploreGenerationOptions, exploreRecoveryOptions,
+  exploreStateKey, exploreStateOptions, readExploreState, reconcileExploreSources, selectExploreTopic, subscribeExploreMetadata,
+} from '../src/modules/news/explore-api';
+import type { ExploreClientState, ExploreStatus } from '../src/modules/news/explore-state';
 import { interestDraftSchema, type InterestDraft, type NewsInterest } from '../shared/news';
 import {
   createInterestEditorState, createInterestEditorSubmission, interestEditorIdentity,
   saveInterestEditor, validateInterestEditorDraft, type InterestEditorInput,
 } from '../src/modules/news/interest-editor';
 
-// Pure editor helpers only: no DOM, application, listener or external request.
+// Pure editor/cache fixtures only: no DOM, application, listener or external request.
 const draft: InterestDraft = {
   name: 'Computing infrastructure', query: 'AI data center power grid cooling infrastructure developments',
   language: 'ja', region: 'JP', days: 30, intent: 'news',
@@ -187,4 +197,360 @@ test('editor: rejected ordinary and follow saves preserve drafts, propagate erro
     assert.equal(ordinaryCalls, custom ? 0 : 1);
     assert.equal(customCalls, custom ? 1 : 0);
   }
+});
+
+function sessionFixture(source = interest(), at = Date.now()): ExploreSession {
+  return exploreSessionSchema.parse({ id: randomUUID(), revision: randomUUID(),
+    generatedAt: new Date(at).toISOString(), expiresAt: new Date(at + EXPLORE_SESSION_TTL_MS).toISOString(),
+    sources: [{ id: source.id, revision: source.revision }], topics: [
+      ['Cooling reuse', 'data center heat reuse district heating infrastructure news'],
+      ['Grid storage', 'grid battery storage community resilience technology news'],
+      ['Water stewardship', 'computing water stewardship community infrastructure policy news'],
+    ].map(([title, query]) => ({ id: randomUUID(), title, description: 'An adjacent direction to investigate, not a report.',
+      connection: 'Connected to computing infrastructure.', sourceInterestID: source.id, sourceInterestRevision: source.revision,
+      proposedSearch: { query, language: source.language, region: source.region, days: source.days }, status: 'available', preview: { state: 'not-searched' } })) });
+}
+function cacheMetadata(client: QueryClient, interests: NewsInterest[]) {
+  // The commands access only this local News metadata field, never workspace data.
+  client.setQueryData(['news'], { discovery: { preferences: { interests } } });
+}
+function sessionClient(context: { after: (run: () => void | Promise<void>) => void }) {
+  // Override hostile application defaults to prove our explicit options win.
+  const client = new QueryClient({ defaultOptions: { queries: { retry: 3, gcTime: 0 }, mutations: { retry: 3, gcTime: 0 } } });
+  context.after(async () => { await client.cancelQueries(); client.clear(); });
+  return client;
+}
+function generated(session: ExploreSession) { return { session, partial: session.topics.length < 3 }; }
+function status(session: ExploreSession): ExploreStatus { return { lifecycle: { state: 'available', session }, generation: { state: 'idle' } }; }
+
+// Non-DOM QueryClient/MutationObserver units: every fetch is an injected fixture.
+test('client-session: disabled subscriptions and navigation remounts restore selection and drafts with zero network work', async context => {
+  const client = sessionClient(context), session = sessionFixture();
+  let calls = 0;
+  context.mock.method(globalThis, 'fetch', async () => { calls++; throw new Error('No requests are allowed'); });
+  const first = new QueryObserver(client, exploreStateOptions(client));
+  const unsubscribe = first.subscribe(() => {});
+  assert.equal(first.getCurrentResult().data?.lifecycle.state, 'absent');
+  client.setQueryData<ExploreClientState>(exploreStateKey, { ...readExploreState(client), ...status(session),
+    drafts: { [session.topics[1].id]: { ...session.topics[1].proposedSearch, query: 'my reviewed grid battery community resilience news' } } });
+  selectExploreTopic(client, session.topics[1].id);
+  const before = structuredClone(readExploreState(client));
+  unsubscribe();
+  const second = new QueryObserver(client, exploreStateOptions(client)), stop = second.subscribe(() => {});
+  try {
+    client.getQueryCache().onFocus(); client.getQueryCache().onOnline();
+    await client.invalidateQueries();
+    await second.refetch(); // Even manually refetching the subscription is local-only.
+    assert.deepEqual(second.getCurrentResult().data, before);
+    assert.equal(calls, 0);
+    assert.equal(exploreStateOptions(client).gcTime, EXPLORE_CLIENT_RETENTION_MS);
+    assert.equal(exploreStateOptions(client).refetchInterval, false);
+  } finally { stop(); }
+});
+
+test('client-session: explicit generation makes one protected request, synchronously gates duplicates and never awaits broad refetches', async context => {
+  const client = sessionClient(context), source = interest(), session = sessionFixture(source), wait = deferred<Response>();
+  cacheMetadata(client, [source]);
+  let calls = 0;
+  context.mock.method(client, 'invalidateQueries', () => { throw new Error('No broad refetch allowed'); });
+  context.mock.method(globalThis, 'fetch', async (url: unknown, init: RequestInit) => {
+    calls++; assert.equal(url, '/api/news/explore/generate'); assert.equal(init.method, 'POST');
+    assert.deepEqual(init.headers, { 'X-Kontrol-Client': 'web', 'Content-Type': 'application/json' });
+    assert.equal(init.body, '{}'); return wait.promise;
+  });
+  const options = exploreGenerationOptions(client);
+  assert.equal(options.retry, false); assert.equal(options.networkMode, 'always');
+  const first = new MutationObserver(client, options), second = new MutationObserver(client, options);
+  const pending = first.mutate();
+  await assert.rejects(second.mutate(), error => error instanceof ExploreCommandError && error.outcome === 'busy');
+  assert.equal(readExploreState(client).generation.state, 'pending');
+  assert.equal(calls, 1);
+  wait.resolve(Response.json(generated(session)));
+  assert.deepEqual(await pending, generated(session));
+  assert.equal(first.getCurrentResult().status, 'success');
+  assert.equal(readExploreState(client).generation.state, 'idle');
+  assert.equal(readExploreState(client).selectedTopicID, session.topics[0].id);
+  assert.equal(client.isMutating(), 0);
+  assert.equal(calls, 1);
+});
+
+test('client-session: a confirmed server failure retains previous ideas and releases the gate without automatic retries', async context => {
+  const client = sessionClient(context), session = sessionFixture();
+  client.setQueryData(exploreStateKey, { ...readExploreState(client), ...status(session) });
+  let calls = 0;
+  context.mock.method(globalThis, 'fetch', async () => { calls++; return Response.json({ error: 'PI returned no usable topic ideas.' }, { status: 502 }); });
+  const mutation = new MutationObserver(client, exploreGenerationOptions(client));
+  await assert.rejects(mutation.mutate(), error => error instanceof ExploreCommandError && error.outcome === 'confirmed' && error.status === 502);
+  const state = readExploreState(client);
+  assert.deepEqual(state.lifecycle, status(session).lifecycle);
+  assert.equal(state.generation.state, 'failed');
+  assert.equal(state.generationRequestID, null);
+  assert.equal(calls, 1);
+});
+
+for (const stage of ['headers', 'body']) test(`client-session: ${stage} timeout is uncertain, retains ideas and requires explicit local recovery instead of another paid request`, async context => {
+  const client = sessionClient(context), session = sessionFixture(), wait = deferred<Response>();
+  client.setQueryData(exploreStateKey, { ...readExploreState(client), ...status(session) });
+  let posts = 0, gets = 0, requestSignal: AbortSignal | null = null;
+  context.mock.method(globalThis, 'fetch', async (_url: unknown, init: RequestInit) => {
+    if (init.method === 'GET') { gets++; return Response.json(status(session)); }
+    posts++; requestSignal = init.signal as AbortSignal;
+    if (stage === 'headers') return wait.promise; // Deliberately ignores abort; ownership must still hold.
+    const response = new Response(); response.json = () => wait.promise; return response;
+  });
+  const command = new MutationObserver(client, exploreGenerationOptions(client, { generationTimeoutMs: 15 }));
+  await assert.rejects(command.mutate(), error => error instanceof ExploreCommandError && error.outcome === 'uncertain');
+  assert.equal((requestSignal as AbortSignal | null)?.aborted, true);
+  assert.equal(readExploreState(client).generation.state, 'uncertain');
+  assert.deepEqual(readExploreState(client).lifecycle, status(session).lifecycle);
+  await assert.rejects(command.mutate(), /Check local status/);
+  assert.equal(posts, 1); assert.equal(gets, 0);
+  const recovered = await new MutationObserver(client, exploreRecoveryOptions(client)).mutate();
+  assert.deepEqual(recovered, status(session));
+  assert.equal(readExploreState(client).generation.state, 'idle');
+  assert.equal(gets, 1); assert.equal(posts, 1);
+  wait.resolve(Response.json(generated(sessionFixture())));
+  await Promise.resolve();
+  assert.deepEqual(readExploreState(client).lifecycle, status(session).lifecycle);
+});
+
+test('client-session: lost and malformed responses are sanitized uncertain outcomes, not confirmed server failures', async context => {
+  const client = sessionClient(context);
+  for (const response of ['lost', 'malformed']) {
+    clearExploreAfterImport(client);
+    let calls = 0;
+    context.mock.method(globalThis, 'fetch', async () => {
+      calls++;
+      if (response === 'lost') throw new Error('PRIVATE_PROVIDER_TOKEN');
+      return Response.json({ session: { title: 'untrusted data' } });
+    });
+    await assert.rejects(new MutationObserver(client, exploreGenerationOptions(client)).mutate(), error =>
+      error instanceof ExploreCommandError && error.outcome === 'uncertain' && !error.message.includes('PRIVATE'));
+    assert.equal(readExploreState(client).generation.state, 'uncertain');
+    assert.equal(calls, 1);
+    context.mock.restoreAll();
+  }
+});
+
+test('client-session: a stale status response cannot replace completed generation even when retrieval ignores cancellation', async context => {
+  const client = sessionClient(context), old = sessionFixture(), replacement = sessionFixture(), wait = deferred<Response>();
+  let gets = 0, posts = 0, signal: AbortSignal | null = null;
+  context.mock.method(globalThis, 'fetch', async (_url: unknown, init: RequestInit) => {
+    if (init.method === 'POST') { posts++; return Response.json(generated(replacement)); }
+    gets++; signal = init.signal as AbortSignal; return wait.promise;
+  });
+  const recovery = new MutationObserver(client, exploreRecoveryOptions(client));
+  const checking = recovery.mutate();
+  const rejected = assert.rejects(checking);
+  await Promise.resolve(); await Promise.resolve();
+  await new MutationObserver(client, exploreGenerationOptions(client)).mutate();
+  await rejected;
+  assert.equal((signal as AbortSignal | null)?.aborted, true);
+  wait.resolve(Response.json(status(old))); await Promise.resolve();
+  const state = readExploreState(client);
+  assert.deepEqual(state.lifecycle, status(replacement).lifecycle);
+  assert.equal(state.recovery.state, 'idle');
+  assert.equal(posts, 1); assert.equal(gets, 1);
+});
+
+test('client-session: a status admitted during generation cannot end activity or overwrite its eventual result', async context => {
+  const client = sessionClient(context), old = sessionFixture(), replacement = sessionFixture(), generation = deferred<Response>(), recovery = deferred<Response>();
+  context.mock.method(globalThis, 'fetch', async (_url: unknown, init: RequestInit) => init.method === 'POST' ? generation.promise : recovery.promise);
+  const generating = new MutationObserver(client, exploreGenerationOptions(client)).mutate();
+  await Promise.resolve(); await Promise.resolve();
+  const checking = new MutationObserver(client, exploreRecoveryOptions(client)).mutate();
+  recovery.resolve(Response.json(status(old))); await checking;
+  assert.equal(readExploreState(client).generation.state, 'pending');
+  generation.resolve(Response.json(generated(replacement))); await generating;
+  assert.deepEqual(readExploreState(client).lifecycle, status(replacement).lifecycle);
+});
+
+test('client-session: absolute expiry clears temporary data without network work and restart recovery is explicit', async context => {
+  const client = sessionClient(context), at = Date.now(), session = sessionFixture(interest(), at);
+  client.setQueryData(exploreStateKey, { ...readExploreState(client), ...status(session), selectedTopicID: session.topics[0].id,
+    drafts: { [session.topics[0].id]: session.topics[0].proposedSearch } });
+  let gets = 0;
+  context.mock.method(globalThis, 'fetch', async (_url: unknown, init: RequestInit) => {
+    gets++; assert.equal(init.method, 'GET'); return Response.json({ lifecycle: { state: 'absent' }, generation: { state: 'idle' } });
+  });
+  assert.equal(readExploreState(client, at + EXPLORE_SESSION_TTL_MS - 1).lifecycle.state, 'available');
+  const expired = readExploreState(client, at + EXPLORE_SESSION_TTL_MS);
+  assert.equal(expired.lifecycle.state, 'expired'); assert.deepEqual(expired.drafts, {}); assert.equal(expired.selectedTopicID, null);
+  assert.equal(gets, 0);
+  await new MutationObserver(client, exploreRecoveryOptions(client)).mutate();
+  assert.equal(readExploreState(client).lifecycle.state, 'expired');
+  assert.equal(gets, 1);
+  assert.ok(EXPLORE_CLIENT_RETENTION_MS <= EXPLORE_SESSION_TTL_MS);
+});
+
+test('client-session: metadata edit, disable or delete revokes cached topics and late generation cannot resurrect restored revisions', async context => {
+  const client = sessionClient(context), source = interest(), session = sessionFixture(source);
+  let calls = 0;
+  const wait = deferred<Response>(), started = deferred<void>();
+  context.mock.method(globalThis, 'fetch', async () => { calls++; started.resolve(); return wait.promise; });
+  for (const current of [[{ ...source, revision: randomUUID() }], [{ ...source, enabled: false }], []]) {
+    clearExploreAfterImport(client);
+    client.setQueryData(exploreStateKey, { ...readExploreState(client), ...status(session) });
+    reconcileExploreSources(client, current);
+    const state = readExploreState(client);
+    assert.equal(state.lifecycle.state, 'available');
+    if (state.lifecycle.state === 'available') assert.ok(state.lifecycle.session.topics.every(topic => topic.status === 'obsolete' && topic.preview.state === 'obsolete'));
+    reconcileExploreSources(client, [source]);
+    assert.deepEqual(readExploreState(client).lifecycle, state.lifecycle); // Sticky, no resurrection.
+  }
+  assert.equal(calls, 0);
+  cacheMetadata(client, [source]);
+  const pending = new MutationObserver(client, exploreGenerationOptions(client)).mutate();
+  await started.promise;
+  cacheMetadata(client, []); reconcileExploreSources(client, []);
+  cacheMetadata(client, [source]); reconcileExploreSources(client, [source]);
+  wait.resolve(Response.json(generated(session)));
+  await assert.rejects(pending, error => error instanceof ExploreCommandError && error.outcome === 'stale');
+  assert.equal(readExploreState(client).generation.state, 'failed');
+  const state = readExploreState(client);
+  if (state.lifecycle.state === 'available') assert.ok(state.lifecycle.session.topics.every(topic => topic.status === 'obsolete'));
+  assert.equal(calls, 1);
+});
+
+for (const operation of ['generate', 'recover']) test(`client-session: successful import advances ownership and rejects late ${operation} even with identical News revisions`, async context => {
+  const client = sessionClient(context), source = interest(), session = sessionFixture(source), wait = deferred<Response>();
+  cacheMetadata(client, [source]);
+  client.setQueryData(exploreStateKey, { ...readExploreState(client), ...status(session) });
+  context.mock.method(globalThis, 'fetch', async () => wait.promise);
+  const before = readExploreState(client);
+  const pending = operation === 'generate' ? new MutationObserver(client, exploreGenerationOptions(client)).mutate() :
+    new MutationObserver(client, exploreRecoveryOptions(client)).mutate();
+  const rejected = assert.rejects(pending);
+  await Promise.resolve(); await Promise.resolve();
+  clearExploreAfterImport(client);
+  const imported = structuredClone(readExploreState(client));
+  assert.notEqual(imported.owner, before.owner);
+  assert.equal(imported.lifecycle.state, 'obsolete'); assert.deepEqual(imported.drafts, {});
+  wait.resolve(Response.json(operation === 'generate' ? generated(session) : status(session)));
+  await rejected;
+  assert.deepEqual(readExploreState(client), imported);
+});
+
+test('client-session: recovery preserves dirty drafts and selection; failure retains state and never invokes generation', async context => {
+  const client = sessionClient(context), session = sessionFixture(), selectedTopicID = session.topics[2].id;
+  const dirty = { ...session.topics[2].proposedSearch, query: 'my adjusted water infrastructure policy local news' };
+  client.setQueryData(exploreStateKey, { ...readExploreState(client), ...status(session), selectedTopicID, drafts: { [selectedTopicID]: dirty } });
+  let gets = 0;
+  context.mock.method(globalThis, 'fetch', async (_url: unknown, init: RequestInit) => {
+    assert.equal(init.method, 'GET'); gets++;
+    if (gets === 2) throw new Error('PRIVATE server details');
+    return Response.json(status(session));
+  });
+  const recovery = new MutationObserver(client, exploreRecoveryOptions(client));
+  assert.equal(exploreRecoveryOptions(client).retry, false);
+  await recovery.mutate();
+  const before = readExploreState(client);
+  assert.deepEqual(before.drafts[selectedTopicID], dirty); assert.equal(before.selectedTopicID, selectedTopicID);
+  await assert.rejects(recovery.mutate(), /outcome is unknown/);
+  const after = readExploreState(client);
+  assert.deepEqual(after.lifecycle, before.lifecycle); assert.deepEqual(after.drafts, before.drafts);
+  assert.equal(after.recovery.state, 'failed'); assert.equal(after.selectedTopicID, selectedTopicID);
+  assert.equal(gets, 2);
+});
+
+test('client-session: named client deadlines cover server work and invalid higher bounds are rejected', context => {
+  const client = sessionClient(context);
+  assert.equal(EXPLORE_GENERATION_CLIENT_DEADLINE_MS, 75_000);
+  assert.equal(EXPLORE_RECOVERY_CLIENT_DEADLINE_MS, 10_000);
+  assert.throws(() => exploreGenerationOptions(client, { generationTimeoutMs: 75_001 }), /deadline/);
+  assert.throws(() => exploreRecoveryOptions(client, { recoveryTimeoutMs: 10_001 }), /deadline/);
+  assert.throws(() => exploreRecoveryOptions(client, { recoveryTimeoutMs: 0 }), /deadline/);
+});
+
+test('client-session: existing News metadata subscriptions revoke context without adding requests and unsubscribe cleanly', context => {
+  const client = sessionClient(context), source = interest(), session = sessionFixture(source);
+  cacheMetadata(client, [source]);
+  client.setQueryData(exploreStateKey, { ...readExploreState(client), ...status(session) });
+  let calls = 0;
+  context.mock.method(globalThis, 'fetch', async () => { calls++; throw new Error('No network work'); });
+  const unsubscribe = subscribeExploreMetadata(client);
+  try {
+    cacheMetadata(client, [{ ...source, revision: randomUUID() }]);
+    const state = readExploreState(client);
+    assert.equal(state.lifecycle.state, 'available');
+    if (state.lifecycle.state === 'available') assert.ok(state.lifecycle.session.topics.every(topic => topic.status === 'obsolete'));
+    assert.equal(calls, 0);
+  } finally { unsubscribe(); }
+  client.setQueryData(exploreStateKey, { ...readExploreState(client), ...status(session) });
+  cacheMetadata(client, []);
+  assert.deepEqual(readExploreState(client).lifecycle, status(session).lifecycle);
+});
+
+test('client-session: local recovery timeout retains ideas, releases its gate and issues no paid request or automatic retry', async context => {
+  const client = sessionClient(context), session = sessionFixture(), wait = deferred<Response>();
+  client.setQueryData(exploreStateKey, { ...readExploreState(client), ...status(session) });
+  let calls = 0, signal: AbortSignal | null = null;
+  context.mock.method(globalThis, 'fetch', async (_url: unknown, init: RequestInit) => {
+    calls++; assert.equal(init.method, 'GET'); signal = init.signal as AbortSignal; return wait.promise;
+  });
+  const recovery = new MutationObserver(client, exploreRecoveryOptions(client, { recoveryTimeoutMs: 15 }));
+  const pending = recovery.mutate();
+  await assert.rejects(new MutationObserver(client, exploreRecoveryOptions(client)).mutate(), /already running/);
+  await assert.rejects(pending, error => error instanceof ExploreCommandError && error.outcome === 'uncertain');
+  assert.equal((signal as AbortSignal | null)?.aborted, true);
+  const state = readExploreState(client);
+  assert.equal(state.recovery.state, 'failed'); assert.deepEqual(state.lifecycle, status(session).lifecycle);
+  assert.equal(calls, 1);
+  assert.equal(client.getQueryCache().findAll({ queryKey: ['news-explore-recovery'] }).length, 0);
+  wait.resolve(Response.json(status(session)));
+});
+
+test('client-session: obsolete recovery cleanup cannot abort a newer post-import local status check', async context => {
+  const client = sessionClient(context), session = sessionFixture(), old = deferred<Response>(), fresh = deferred<Response>(), started = deferred<void>();
+  let gets = 0, newSignal: AbortSignal | null = null;
+  context.mock.method(globalThis, 'fetch', async (_url: unknown, init: RequestInit) => {
+    if (++gets === 1) { started.resolve(); return old.promise; }
+    newSignal = init.signal as AbortSignal; return fresh.promise;
+  });
+  const first = new MutationObserver(client, exploreRecoveryOptions(client)).mutate();
+  const rejected = assert.rejects(first);
+  await started.promise;
+  clearExploreAfterImport(client);
+  const second = new MutationObserver(client, exploreRecoveryOptions(client)).mutate();
+  await rejected;
+  assert.equal((newSignal as AbortSignal | null)?.aborted, false);
+  fresh.resolve(Response.json(status(session))); await second;
+  old.resolve(Response.json({ lifecycle: { state: 'absent' }, generation: { state: 'idle' } }));
+  assert.deepEqual(readExploreState(client).lifecycle, status(session).lifecycle);
+});
+
+test('client-session: inactive navigation state is evicted at the named retention bound', context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const client = sessionClient(context), observer = new QueryObserver(client, exploreStateOptions(client));
+  const unsubscribe = observer.subscribe(() => {});
+  unsubscribe();
+  context.mock.timers.tick(EXPLORE_CLIENT_RETENTION_MS - 1);
+  assert.ok(client.getQueryData(exploreStateKey));
+  context.mock.timers.tick(1);
+  assert.equal(client.getQueryData(exploreStateKey), undefined);
+  context.mock.timers.reset();
+});
+
+test('client-session: metadata revocation cancels stale recovery and restoring a revision cannot revive its different-session response', async context => {
+  const client = sessionClient(context), source = interest(), session = sessionFixture(source), replacement = sessionFixture(source);
+  const wait = deferred<Response>(), started = deferred<void>();
+  cacheMetadata(client, [source]);
+  client.setQueryData(exploreStateKey, { ...readExploreState(client), ...status(session) });
+  const unsubscribe = subscribeExploreMetadata(client);
+  context.mock.method(globalThis, 'fetch', async () => { started.resolve(); return wait.promise; });
+  try {
+    const checking = new MutationObserver(client, exploreRecoveryOptions(client)).mutate();
+    const rejected = assert.rejects(checking);
+    await started.promise;
+    cacheMetadata(client, []);
+    cacheMetadata(client, [source]);
+    await rejected;
+    wait.resolve(Response.json(status(replacement))); await Promise.resolve();
+    const state = readExploreState(client);
+    assert.equal(state.lifecycle.state, 'available');
+    if (state.lifecycle.state === 'available') {
+      assert.equal(state.lifecycle.session.id, session.id);
+      assert.ok(state.lifecycle.session.topics.every(topic => topic.status === 'obsolete'));
+    }
+  } finally { unsubscribe(); }
 });
