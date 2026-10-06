@@ -4,16 +4,16 @@ import { randomUUID } from 'node:crypto';
 import { MutationObserver, QueryClient, QueryObserver } from '@tanstack/react-query';
 import {
   EXPLORE_CLIENT_RETENTION_MS, EXPLORE_GENERATION_CLIENT_DEADLINE_MS, EXPLORE_RECOVERY_CLIENT_DEADLINE_MS,
-  EXPLORE_SESSION_TTL_MS, EXPLORE_SEARCH_CLIENT_DEADLINE_MS, exploreSessionSchema,
+  EXPLORE_SESSION_TTL_MS, EXPLORE_SEARCH_CLIENT_DEADLINE_MS, EXPLORE_FOLLOW_CLIENT_DEADLINE_MS, exploreSessionSchema,
   exploreSearchResponseSchema, type ExploreSession, type ExplorePreview, type ExploreSearch,
 } from '../shared/news-explore';
 import {
   clearExploreAfterImport, ExploreCommandError, exploreGenerationOptions, exploreRecoveryOptions,
   exploreStateKey, exploreStateOptions, readExploreState, reconcileExploreSources, selectExploreTopic, subscribeExploreMetadata,
-  exploreSearchOptions, setExploreSearchDraft,
+  exploreSearchOptions, setExploreSearchDraft, beginExploreFollowReview, cancelExploreFollowReview, setExploreFollowDraft, exploreFollowOptions,
 } from '../src/modules/news/explore-api';
-import { acceptExploreSession, retainedExploreResult, type ExploreClientState, type ExploreStatus } from '../src/modules/news/explore-state';
-import { interestDraftSchema, type InterestDraft, type NewsInterest } from '../shared/news';
+import { acceptExploreSession, retainedExploreResult, exploreFollowNextAction, type ExploreClientState, type ExploreStatus } from '../src/modules/news/explore-state';
+import { interestDraftSchema, type InterestDraft, type NewsInterest, type NewsResponse } from '../shared/news';
 import {
   createInterestEditorState, createInterestEditorSubmission, interestEditorIdentity,
   saveInterestEditor, validateInterestEditorDraft, type InterestEditorInput,
@@ -877,4 +877,277 @@ test('client-preview: recovered server-pending search stays gated until a later 
   assert.deepEqual(retainedExploreResult(previewOf(client, topic.id))?.search, attempted);
   assert.notEqual(readExploreState(client).drafts[topic.id].query, attempted.query);
   assert.equal(gets, 2);
+});
+
+function followFixture(client: QueryClient, source = interest()) {
+  const session = sessionFixture(source), topic = session.topics[0];
+  topic.preview = searchResponse(session, topic.id).preview;
+  const news: NewsResponse = { preferences: { selectedTopicIDs: [], feeds: [] }, articles: [], lastRefreshAt: null, errors: {},
+    discovery: { preferences: { schemaVersion: 1, interests: [source] }, articles: [], runs: {} },
+    ai: { configured: true, provider: 'pi', model: 'fixture', message: 'Fixture only.' }, activity: { discovering: false, refreshingFeeds: false } };
+  client.setQueryData(['news'], news); seedSession(client, session);
+  const review = beginExploreFollowReview(client, topic.id);
+  return { source, session, topic, review };
+}
+function followOf(client: QueryClient, topicID: string) { return readExploreState(client).followReviews[topicID]; }
+
+test('client-follow: review prefill uses reviewed search, news intent and empty filters; opening and cancel are local-only', context => {
+  const client = sessionClient(context), source = interest(), session = sessionFixture(source), topic = session.topics[0];
+  seedSession(client, session); cacheMetadata(client, [source]);
+  const search: ExploreSearch = { query: 'my reviewed district heating policy community infrastructure news', language: 'en', region: 'GB', days: 7 };
+  setExploreSearchDraft(client, topic.id, search);
+  let calls = 0;
+  context.mock.method(globalThis, 'fetch', async () => { calls++; throw new Error('No work allowed'); });
+  const before = structuredClone(readExploreState(client).lifecycle), review = beginExploreFollowReview(client, topic.id);
+  assert.deepEqual(review.draft, { name: topic.title, ...search, intent: 'news', enabled: true, requiredTerms: [], excludedTerms: [] });
+  assert.equal(interestDraftSchema.safeParse(review.draft).success, true);
+  assert.equal(review.outcome.state, 'idle'); assert.equal(review.submittedDraft, null);
+  assert.notEqual(review.reviewID, review.submissionID);
+  assert.deepEqual(beginExploreFollowReview(client, topic.id), review);
+  assert.equal(cancelExploreFollowReview(client, review.reviewID), true);
+  assert.equal(readExploreState(client).activeFollowTopicID, null);
+  assert.deepEqual(readExploreState(client).lifecycle, before);
+  assert.deepEqual(beginExploreFollowReview(client, topic.id), review); assert.equal(calls, 0);
+});
+
+test('client-follow: dirty fields and identity survive topic switching, remount and explicit local recovery', async context => {
+  const client = sessionClient(context), { session, topic, review } = followFixture(client);
+  const dirty = { ...review.draft, name: 'My chosen direction', enabled: false, intent: 'opportunities' as const,
+    region: 'PH' as const, days: 1 as const, requiredTerms: ['reviewed|terms'], excludedTerms: ['unwanted'] };
+  setExploreFollowDraft(client, review.reviewID, dirty);
+  selectExploreTopic(client, session.topics[1].id); beginExploreFollowReview(client, session.topics[1].id);
+  setExploreSearchDraft(client, topic.id, { ...topic.proposedSearch, query: 'changed search does not replace the reviewed interest draft' });
+  let gets = 0;
+  context.mock.method(globalThis, 'fetch', async (_url: unknown, init: RequestInit) => {
+    gets++; assert.equal(init.method, 'GET'); return Response.json(status(session));
+  });
+  await new MutationObserver(client, exploreRecoveryOptions(client)).mutate();
+  const observer = new QueryObserver(client, exploreStateOptions(client)), stop = observer.subscribe(() => {});
+  try {
+    const reopened = beginExploreFollowReview(client, topic.id);
+    assert.equal(reopened.reviewID, review.reviewID); assert.equal(reopened.submissionID, review.submissionID);
+    assert.deepEqual(reopened.draft, dirty); assert.equal(gets, 1);
+  } finally { stop(); }
+});
+
+for (const created of [true, false]) test(`client-follow: ${created ? 'created' : 'already-followed'} success reconciles metadata and exposes Discover without searches or preview changes`, async context => {
+  const client = sessionClient(context), { session, topic, review } = followFixture(client);
+  const saved = interest({ ...review.draft, name: created ? review.draft.name : 'Existing equivalent name' });
+  const before = structuredClone(readExploreState(client).lifecycle), newsBefore = structuredClone(client.getQueryData<NewsResponse>(['news'])!);
+  if (!created) client.setQueryData<NewsResponse>(['news'], { ...newsBefore, discovery: { ...newsBefore.discovery,
+    preferences: { ...newsBefore.discovery.preferences, interests: [...newsBefore.discovery.preferences.interests, saved] } } });
+  const captured: unknown[] = [];
+  context.mock.method(client, 'invalidateQueries', () => { throw new Error('No automatic refetch'); });
+  context.mock.method(globalThis, 'fetch', async (url: unknown, init: RequestInit) => {
+    captured.push(url); assert.equal(url, `/api/news/explore/${session.id}/topics/${topic.id}/follow`);
+    assert.equal(init.method, 'POST'); assert.deepEqual(init.headers, { 'X-Kontrol-Client': 'web', 'Content-Type': 'application/json' });
+    assert.deepEqual(JSON.parse(init.body as string), { expectedSessionRevision: session.revision, submissionID: review.submissionID, draft: review.draft });
+    return Response.json({ interest: saved, created });
+  });
+  const options = exploreFollowOptions(client);
+  assert.equal(options.retry, false); assert.equal(options.gcTime, 0); assert.equal(options.networkMode, 'always');
+  const command = new MutationObserver(client, options), variables = { topicID: topic.id, reviewID: review.reviewID, draft: review.draft };
+  assert.deepEqual(await command.mutate(variables), { interest: saved, created });
+  assert.deepEqual(await command.mutate(variables), { interest: saved, created });
+  assert.equal(followOf(client, topic.id).outcome.state, 'successful');
+  assert.deepEqual(readExploreState(client).lifecycle, before);
+  const news = client.getQueryData<NewsResponse>(['news'])!;
+  assert.equal(news.discovery.preferences.interests.filter(item => item.id === saved.id).length, 1);
+  assert.deepEqual(news.discovery.articles, newsBefore.discovery.articles); assert.deepEqual(news.discovery.runs, newsBefore.discovery.runs);
+  assert.deepEqual(news.articles, newsBefore.articles); assert.deepEqual(news.preferences, newsBefore.preferences);
+  assert.deepEqual(exploreFollowNextAction, { href: '#/news?view=discover', label: 'Search this interest in Discover' });
+  await assert.rejects(command.mutate({ ...variables, draft: { ...review.draft, name: 'Changed after success' } }), /already followed/);
+  assert.equal(captured.length, 1); assert.equal(client.isMutating(), 0);
+});
+
+test('client-follow: synchronous admission gates observers and prevents cancel or draft changes during submission', async context => {
+  const client = sessionClient(context), { topic, review } = followFixture(client), wait = deferred<Response>(), started = deferred<void>();
+  let calls = 0;
+  context.mock.method(globalThis, 'fetch', async () => { calls++; started.resolve(); return wait.promise; });
+  const options = exploreFollowOptions(client), variables = { topicID: topic.id, reviewID: review.reviewID, draft: review.draft };
+  const pending = new MutationObserver(client, options).mutate(variables);
+  await assert.rejects(new MutationObserver(client, options).mutate(variables), /already running/);
+  assert.equal(cancelExploreFollowReview(client, review.reviewID), false);
+  setExploreFollowDraft(client, review.reviewID, { ...review.draft, name: 'Not approved yet' });
+  assert.deepEqual(followOf(client, topic.id).draft, review.draft);
+  await started.promise; assert.equal(calls, 1);
+  wait.resolve(Response.json({ interest: interest(review.draft), created: true })); await pending;
+  assert.equal(followOf(client, topic.id).outcome.state, 'successful'); assert.equal(calls, 1);
+});
+
+for (const statusCode of [400, 409, 410]) test(`client-follow: ${statusCode} capacity/conflict/expiry preserves approved draft without automatic retries`, async context => {
+  const client = sessionClient(context), { topic, review } = followFixture(client);
+  const dirty = { ...review.draft, name: 'My approved direction', requiredTerms: ['heat|district'] };
+  let calls = 0;
+  const before = structuredClone(client.getQueryData(['news']));
+  context.mock.method(globalThis, 'fetch', async () => { calls++; return Response.json({ error: 'Fixture follow capacity, conflict or expiry.' }, { status: statusCode }); });
+  await assert.rejects(new MutationObserver(client, exploreFollowOptions(client)).mutate({ topicID: topic.id, reviewID: review.reviewID, draft: dirty }),
+    error => error instanceof ExploreCommandError && error.status === statusCode);
+  const failed = followOf(client, topic.id);
+  assert.deepEqual(failed.draft, dirty); assert.deepEqual(failed.submittedDraft, dirty); assert.equal(failed.submissionID, review.submissionID);
+  assert.equal(failed.outcome.state, statusCode === 410 ? 'expired' : 'failed'); assert.equal(calls, 1);
+  assert.deepEqual(client.getQueryData(['news']), before);
+  if (statusCode === 410) {
+    assert.equal(readExploreState(client).lifecycle.state, 'expired');
+    await assert.rejects(new MutationObserver(client, exploreFollowOptions(client)).mutate({ topicID: topic.id, reviewID: review.reviewID, draft: dirty }), /superseded/);
+    assert.equal(calls, 1);
+  }
+});
+
+test('client-follow: corrected explicit retry after confirmed rejection changes token; unchanged retry keeps it', async context => {
+  const client = sessionClient(context), { topic, review } = followFixture(client);
+  const tokens: string[] = [], drafts: InterestDraft[] = [];
+  context.mock.method(globalThis, 'fetch', async (_url: unknown, init: RequestInit) => {
+    const body = JSON.parse(init.body as string); tokens.push(body.submissionID); drafts.push(body.draft);
+    return tokens.length < 3 ? Response.json({ error: 'At capacity.' }, { status: 400 }) : Response.json({ interest: interest(body.draft), created: true });
+  });
+  const command = new MutationObserver(client, exploreFollowOptions(client)), variables = { topicID: topic.id, reviewID: review.reviewID, draft: review.draft };
+  await assert.rejects(command.mutate(variables), /capacity/); await assert.rejects(command.mutate(variables), /capacity/);
+  const edited = { ...review.draft, name: 'Corrected', enabled: false };
+  await command.mutate({ ...variables, draft: edited });
+  assert.equal(tokens[0], review.submissionID); assert.equal(tokens[1], tokens[0]); assert.notEqual(tokens[2], tokens[0]);
+  assert.deepEqual(drafts, [review.draft, review.draft, edited]);
+});
+
+for (const failure of ['headers', 'body', 'lost', 'malformed', 'mismatch']) test(`client-follow: ${failure} uncertain outcome preserves receipt through cancel/recovery and explicit same-payload replay`, async context => {
+  const client = sessionClient(context), { session, topic, review } = followFixture(client), wait = deferred<Response>();
+  const saved = interest(review.draft), payloads: unknown[] = [];
+  let posts = 0, gets = 0, signal: AbortSignal | null = null;
+  context.mock.method(globalThis, 'fetch', async (_url: unknown, init: RequestInit) => {
+    if (init.method === 'GET') { gets++; return Response.json(status(session)); }
+    posts++; payloads.push(JSON.parse(init.body as string)); signal = init.signal as AbortSignal;
+    if (posts > 1) return Response.json({ interest: saved, created: true });
+    if (failure === 'lost') throw new Error('PRIVATE_PROVIDER_TOKEN');
+    if (failure === 'malformed') return Response.json({ interest: 'PRIVATE_PROVIDER_TOKEN' });
+    if (failure === 'mismatch') return Response.json({ interest: interest(draft), created: true });
+    if (failure === 'headers') return wait.promise;
+    const response = new Response(); response.json = () => wait.promise; return response;
+  });
+  const command = new MutationObserver(client, exploreFollowOptions(client, { followTimeoutMs: 15 }));
+  const variables = { topicID: topic.id, reviewID: review.reviewID, draft: review.draft };
+  await assert.rejects(command.mutate(variables), error => error instanceof ExploreCommandError && error.outcome === 'uncertain' && !error.message.includes('PRIVATE'));
+  assert.equal((signal as AbortSignal | null)?.aborted, true);
+  assert.equal(followOf(client, topic.id).outcome.state, 'uncertain');
+  assert.equal(cancelExploreFollowReview(client, review.reviewID), true);
+  assert.equal(beginExploreFollowReview(client, topic.id).submissionID, review.submissionID);
+  await new MutationObserver(client, exploreRecoveryOptions(client)).mutate();
+  // GET has no follow receipts: it cannot permit a new payload/token after response loss.
+  assert.equal(followOf(client, topic.id).outcome.state, 'uncertain');
+  await assert.rejects(command.mutate({ ...variables, draft: { ...review.draft, name: 'Changed' } }), /original approved draft/);
+  assert.equal(posts, 1); assert.equal(gets, 1);
+  await command.mutate(variables);
+  assert.deepEqual(payloads[1], payloads[0]); assert.equal(followOf(client, topic.id).outcome.state, 'successful');
+  const before = structuredClone(readExploreState(client));
+  wait.resolve(Response.json({ interest: interest(review.draft), created: true })); await Promise.resolve();
+  assert.deepEqual(readExploreState(client), before); assert.equal(posts, 2); assert.equal(gets, 1);
+});
+
+for (const change of ['replacement', 'revision', 'revocation', 'import', 'expiry', 'eviction']) test(`client-follow: ${change} rejects late follow without resurrecting metadata or preview context`, async context => {
+  const client = sessionClient(context), { source, session, topic, review } = followFixture(client), wait = deferred<Response>(), started = deferred<void>();
+  let now = Date.now();
+  context.mock.method(globalThis, 'fetch', async () => { started.resolve(); return wait.promise; });
+  const pending = new MutationObserver(client, exploreFollowOptions(client, { now: () => now })).mutate({ topicID: topic.id, reviewID: review.reviewID, draft: review.draft });
+  await started.promise;
+  if (change === 'replacement') seedSession(client, sessionFixture(source));
+  if (change === 'revision') seedSession(client, { ...session, revision: randomUUID() });
+  if (change === 'revocation') { reconcileExploreSources(client, []); reconcileExploreSources(client, [source]); }
+  if (change === 'import') clearExploreAfterImport(client);
+  if (change === 'expiry') now = Date.parse(session.expiresAt);
+  if (change === 'eviction') client.removeQueries({ queryKey: exploreStateKey, exact: true });
+  const before = structuredClone(readExploreState(client, now)), metadata = structuredClone(client.getQueryData(['news']));
+  wait.resolve(Response.json({ interest: interest(review.draft), created: true }));
+  await assert.rejects(pending, error => error instanceof ExploreCommandError && error.outcome === 'stale');
+  assert.deepEqual(readExploreState(client, now), before); assert.deepEqual(client.getQueryData(['news']), metadata);
+  if (change !== 'import' && change !== 'eviction') assert.deepEqual(followOf(client, topic.id).draft, review.draft);
+});
+
+test('client-follow: named bounds, invalid drafts and stale editor identities reject commands before fetching', async context => {
+  const client = sessionClient(context), { source, session, topic, review } = followFixture(client);
+  let calls = 0;
+  context.mock.method(globalThis, 'fetch', async () => { calls++; throw new Error('No work allowed'); });
+  assert.equal(EXPLORE_FOLLOW_CLIENT_DEADLINE_MS, 15_000);
+  assert.throws(() => exploreFollowOptions(client, { followTimeoutMs: 15_001 }), /deadline/);
+  assert.throws(() => exploreFollowOptions(client, { followTimeoutMs: 0 }), /deadline/);
+  const command = new MutationObserver(client, exploreFollowOptions(client));
+  await assert.rejects(command.mutate({ topicID: topic.id, reviewID: review.reviewID, draft: { ...review.draft, language: 'en', query: 'too short' } }), /at least 5 words/);
+  await assert.rejects(command.mutate({ topicID: topic.id, reviewID: randomUUID(), draft: review.draft }), /superseded/);
+  for (const item of session.topics) beginExploreFollowReview(client, item.id);
+  assert.equal(Object.keys(readExploreState(client).followReviews).length, 3);
+  const replacement = sessionFixture(source); seedSession(client, replacement);
+  beginExploreFollowReview(client, replacement.topics[0].id);
+  assert.equal(Object.keys(readExploreState(client).followReviews).length, 1); assert.equal(calls, 0);
+});
+
+test('client-follow: a rejected uncertainty replay cannot unlock a new payload or erase the original receipt', async context => {
+  const client = sessionClient(context), { topic, review } = followFixture(client);
+  const payloads: unknown[] = [];
+  context.mock.method(globalThis, 'fetch', async (_url: unknown, init: RequestInit) => {
+    payloads.push(JSON.parse(init.body as string));
+    if (payloads.length === 1) throw new Error('Lost response');
+    if (payloads.length === 2) return Response.json({ error: 'Fixture conflict.' }, { status: 409 });
+    if (payloads.length === 3) return Response.json({ error: 'Fixture capacity.' }, { status: 400 });
+    return Response.json({ interest: interest(review.draft), created: true });
+  });
+  const command = new MutationObserver(client, exploreFollowOptions(client));
+  const variables = { topicID: topic.id, reviewID: review.reviewID, draft: review.draft };
+  await assert.rejects(command.mutate(variables), /original approved submission/);
+  await assert.rejects(command.mutate(variables), error => error instanceof ExploreCommandError && error.outcome === 'uncertain' && error.status === 409);
+  assert.equal(followOf(client, topic.id).outcome.state, 'uncertain');
+  const edited = { ...review.draft, name: 'Unsent new draft' };
+  setExploreFollowDraft(client, review.reviewID, edited);
+  await assert.rejects(command.mutate({ ...variables, draft: edited }), /original approved draft/);
+  assert.deepEqual(followOf(client, topic.id).draft, edited);
+  assert.equal(payloads.length, 2);
+  await assert.rejects(command.mutate(variables), error => error instanceof ExploreCommandError && error.outcome === 'uncertain' && error.status === 400);
+  assert.deepEqual(followOf(client, topic.id).draft, edited);
+  assert.equal(followOf(client, topic.id).submissionID, review.submissionID);
+  await command.mutate(variables);
+  assert.deepEqual(payloads, [payloads[0], payloads[0], payloads[0], payloads[0]]);
+});
+
+test('client-follow: recovery of an unaffected topic under a new session revision retains its uncertain receipt and dirty draft', async context => {
+  const client = sessionClient(context), { session, topic, review } = followFixture(client), old = deferred<Response>(), started = deferred<void>();
+  const recovered = { ...session, revision: randomUUID() }, saved = interest(review.draft);
+  const requests: { submissionID: string; expectedSessionRevision: string }[] = [];
+  context.mock.method(globalThis, 'fetch', async (_url: unknown, init: RequestInit) => {
+    if (init.method === 'GET') return Response.json(status(recovered));
+    requests.push(JSON.parse(init.body as string));
+    if (requests.length === 1) { started.resolve(); return old.promise; }
+    return Response.json({ interest: saved, created: true });
+  });
+  const command = new MutationObserver(client, exploreFollowOptions(client)), variables = { topicID: topic.id, reviewID: review.reviewID, draft: review.draft };
+  const pending = command.mutate(variables); await started.promise;
+  await new MutationObserver(client, exploreRecoveryOptions(client)).mutate();
+  const kept = beginExploreFollowReview(client, topic.id);
+  assert.equal(kept.outcome.state, 'uncertain'); assert.equal(kept.reviewID, review.reviewID);
+  assert.equal(kept.submissionID, review.submissionID); assert.deepEqual(kept.draft, review.draft);
+  assert.equal(kept.sessionRevision, recovered.revision);
+  old.resolve(Response.json({ interest: saved, created: true }));
+  await assert.rejects(pending, error => error instanceof ExploreCommandError && error.outcome === 'stale');
+  assert.equal(followOf(client, topic.id).outcome.state, 'uncertain');
+  await command.mutate(variables);
+  assert.equal(requests[0].submissionID, requests[1].submissionID);
+  assert.equal(requests[1].expectedSessionRevision, recovered.revision);
+});
+
+test('client-follow: expiry learned from a preview command also revokes reviews while preserving drafts', async context => {
+  const client = sessionClient(context), { topic, review } = followFixture(client);
+  context.mock.method(globalThis, 'fetch', async () => Response.json({ error: 'Session gone.' }, { status: 410 }));
+  await assert.rejects(new MutationObserver(client, exploreSearchOptions(client)).mutate({ topicID: topic.id }), /Session gone/);
+  assert.equal(followOf(client, topic.id).outcome.state, 'expired');
+  assert.deepEqual(followOf(client, topic.id).draft, review.draft);
+});
+
+test('client-follow: an old News poll is cancelled so it cannot roll back the returned interest', async context => {
+  const client = sessionClient(context), { source, topic, review } = followFixture(client), staleNews = deferred<NewsResponse>();
+  const old = structuredClone(client.getQueryData<NewsResponse>(['news'])!), saved = interest(review.draft);
+  let pollSignal: AbortSignal | null = null;
+  const polling = client.fetchQuery({ queryKey: ['news'], queryFn: ({ signal }) => { pollSignal = signal; return staleNews.promise; } });
+  assert.equal(client.getQueryState(['news'])?.fetchStatus, 'fetching');
+  context.mock.method(globalThis, 'fetch', async () => Response.json({ interest: saved, created: true }));
+  await new MutationObserver(client, exploreFollowOptions(client)).mutate({ topicID: topic.id, reviewID: review.reviewID, draft: review.draft });
+  await polling; // Silent query cancellation resolves cached data, not a mutation failure.
+  assert.equal((pollSignal as AbortSignal | null)?.aborted, true);
+  staleNews.resolve(old); await Promise.resolve();
+  assert.deepEqual(client.getQueryData<NewsResponse>(['news'])!.discovery.preferences.interests, [source, saved]);
 });

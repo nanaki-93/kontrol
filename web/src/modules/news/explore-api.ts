@@ -3,17 +3,18 @@ import {
   mutationOptions, queryOptions, useMutation, useQuery, useQueryClient, type QueryClient,
 } from '@tanstack/react-query';
 import type { z } from 'zod';
-import type { NewsInterest, NewsResponse } from '../../../shared/news';
+import { interestDraftSchema, type InterestDraft, type NewsInterest, type NewsResponse } from '../../../shared/news';
 import {
   EXPLORE_CLIENT_RETENTION_MS, EXPLORE_GENERATION_CLIENT_DEADLINE_MS, EXPLORE_RECOVERY_CLIENT_DEADLINE_MS,
-  EXPLORE_SEARCH_CLIENT_DEADLINE_MS, EXPLORE_MAX_CONCURRENT_SEARCHES, EXPLORE_MAX_QUERY_CHARS,
+  EXPLORE_SEARCH_CLIENT_DEADLINE_MS, EXPLORE_FOLLOW_CLIENT_DEADLINE_MS, EXPLORE_MAX_CONCURRENT_SEARCHES, EXPLORE_MAX_QUERY_CHARS,
   exploreGenerateResponseSchema, exploreStatusResponseSchema, exploreSearchRequestSchema, exploreSearchResponseSchema,
+  exploreFollowRequestSchema, exploreFollowResponseSchema, equivalentExploreInterest,
   type ExploreSearch, type ExplorePreview,
 } from '../../../shared/news-explore';
 import {
   acceptExploreSession, acceptExploreStatus, emptyExploreState, expireExploreState, reconcileExploreState,
-  retainedExploreResult, updateExplorePreview,
-  type ExploreClientState, type ExploreStatus,
+  retainedExploreResult, updateExplorePreview, initialExploreFollowDraft, revokeExploreFollowReviews,
+  type ExploreClientState, type ExploreStatus, type ExploreFollowReview, type ExploreFollowResult,
 } from './explore-state';
 
 export const exploreStateKey = ['news-explore'] as const;
@@ -147,6 +148,7 @@ interface ExploreCommandDependencies {
   generationTimeoutMs?: number;
   recoveryTimeoutMs?: number;
   searchTimeoutMs?: number;
+  followTimeoutMs?: number;
 }
 function deadline(override: number | undefined, maximum: number): number {
   if (override === undefined) return maximum;
@@ -295,7 +297,7 @@ export function exploreSearchOptions(client: QueryClient, dependencies: ExploreC
           const failure = error instanceof ExploreCommandError ? error : new ExploreCommandError('uncertain', 'The search outcome is unknown. Check local status.');
           const current = readExploreState(client, now());
           if (failure.status === 410) {
-            client.setQueryData<ExploreClientState>(exploreStateKey, { ...current, lifecycle: { state: 'expired' },
+            client.setQueryData<ExploreClientState>(exploreStateKey, { ...revokeExploreFollowReviews(current, 'expired'), lifecycle: { state: 'expired' },
               drafts: {}, selectedTopicID: null, searchRequestIDs: {} });
           } else {
             // A 409 may mean revoked context, revision conflict or an earlier
@@ -312,6 +314,133 @@ export function exploreSearchOptions(client: QueryClient, dependencies: ExploreC
     },
   });
 }
+/** Opening/reopening a review is local-only. Dirty fields and receipt identity
+ * survive navigation and metadata refresh; obsolete galleries are pruned only
+ * when the user deliberately opens a review in a replacement session.
+ */
+export function beginExploreFollowReview(client: QueryClient, topicID: string, now = Date.now()): ExploreFollowReview {
+  reconcileCachedNews(client, now);
+  const state = readExploreState(client, now);
+  if (state.lifecycle.state !== 'available') throw staleResponse();
+  const session = state.lifecycle.session, topic = session.topics.find(topic => topic.id === topicID && topic.status === 'available');
+  if (!topic) throw staleResponse();
+  const existing = state.followReviews[topicID];
+  const review: ExploreFollowReview = existing?.sessionID === session.id && existing.sessionRevision === session.revision ? existing : {
+    reviewID: crypto.randomUUID(), sessionID: session.id, sessionRevision: session.revision, topicID,
+    submissionID: crypto.randomUUID(), draft: initialExploreFollowDraft(topic, state.drafts[topicID] ?? topic.proposedSearch),
+    submittedDraft: null, outcome: { state: 'idle' },
+  };
+  const followReviews = Object.fromEntries(Object.entries(state.followReviews).filter(([, item]) => item.sessionID === session.id));
+  client.setQueryData<ExploreClientState>(exploreStateKey, { ...state, followReviews: { ...followReviews, [topicID]: review }, activeFollowTopicID: topicID });
+  return review;
+}
+/** The editor owns invalid in-progress input; cache approved, validated drafts.
+ * No metadata or search-draft update can overwrite these reviewed fields.
+ */
+export function setExploreFollowDraft(client: QueryClient, reviewID: string, draft: InterestDraft): void {
+  const state = readExploreState(client), review = Object.values(state.followReviews).find(item => item.reviewID === reviewID);
+  if (!review || review.outcome.state === 'pending' || review.outcome.state === 'successful') return;
+  const validated = interestDraftSchema.strict().parse(draft);
+  client.setQueryData<ExploreClientState>(exploreStateKey, { ...state, followReviews: { ...state.followReviews,
+    [review.topicID]: { ...review, draft: validated } } });
+}
+/** Cancel never sends a command or discards an uncertain receipt. Reopening
+ * the same topic can still explicitly retry its exact approved submission.
+ */
+export function cancelExploreFollowReview(client: QueryClient, reviewID: string): boolean {
+  const state = readExploreState(client), review = Object.values(state.followReviews).find(item => item.reviewID === reviewID);
+  if (!review || review.outcome.state === 'pending') return false;
+  if (state.activeFollowTopicID === review.topicID) client.setQueryData(exploreStateKey, { ...state, activeFollowTopicID: null });
+  return true;
+}
+export function exploreFollowOptions(client: QueryClient, dependencies: ExploreCommandDependencies = {}) {
+  const now = dependencies.now ?? Date.now;
+  const timeoutMs = deadline(dependencies.followTimeoutMs, EXPLORE_FOLLOW_CLIENT_DEADLINE_MS);
+  return mutationOptions<ExploreFollowResult, Error, { topicID: string; reviewID: string; draft: InterestDraft }>({
+    mutationKey: ['news-explore-follow'], retry: false, networkMode: 'always', gcTime: 0,
+    mutationFn: async ({ topicID, reviewID, draft }) => {
+      reconcileCachedNews(client, now());
+      const state = readExploreState(client, now()), review = state.followReviews[topicID];
+      if (!review || review.reviewID !== reviewID) throw staleResponse();
+      if (review.outcome.state === 'successful') {
+        const approved = interestDraftSchema.strict().safeParse(draft);
+        if (!approved.success || JSON.stringify(approved.data) !== JSON.stringify(review.submittedDraft)) {
+          throw new ExploreCommandError('confirmed', 'This review is already followed. Edit the saved interest in Discover to change it.');
+        }
+        return review.outcome.result;
+      }
+      if (state.lifecycle.state !== 'available' || state.lifecycle.session.id !== review.sessionID ||
+        state.lifecycle.session.revision !== review.sessionRevision || !state.lifecycle.session.topics.some(topic => topic.id === topicID && topic.status === 'available') ||
+        review.outcome.state === 'expired' || review.outcome.state === 'obsolete') throw staleResponse();
+      if (review.outcome.state === 'pending') throw new ExploreCommandError('busy', 'This follow submission is already running.');
+      const validated = exploreFollowRequestSchema.safeParse({ expectedSessionRevision: review.sessionRevision, submissionID: review.submissionID, draft });
+      if (!validated.success) throw new ExploreCommandError('confirmed', validated.error.issues[0]?.message ?? 'Review the interest draft.');
+      const approved = validated.data.draft;
+      const changed = review.submittedDraft !== null && JSON.stringify(review.submittedDraft) !== JSON.stringify(approved);
+      if (changed && review.outcome.state === 'uncertain') {
+        throw new ExploreCommandError('busy', 'The earlier follow outcome is unknown. Explicitly retry its original approved draft before submitting changes.');
+      }
+      // A confirmed rejection permits an edited payload under a NEW receipt.
+      // Unknown outcomes always replay the SAME payload/token, never auto-retry.
+      const submissionID = changed ? crypto.randomUUID() : review.submissionID;
+      const request = { ...validated.data, submissionID }, requestID = crypto.randomUUID();
+      const reserved: ExploreFollowReview = { ...review, submissionID, submittedDraft: approved,
+        draft: review.outcome.state === 'uncertain' ? review.draft : approved, outcome: { state: 'pending', requestID } };
+      client.setQueryData<ExploreClientState>(exploreStateKey, { ...state, followReviews: { ...state.followReviews, [topicID]: reserved } });
+      const owns = () => {
+        reconcileCachedNews(client, now());
+        const current = readExploreState(client, now()), item = current.followReviews[topicID];
+        return current.lifecycle.state === 'available' && current.lifecycle.session.id === review.sessionID && current.lifecycle.session.revision === review.sessionRevision &&
+          item?.reviewID === reviewID && item.outcome.state === 'pending' && item.outcome.requestID === requestID &&
+          current.lifecycle.session.topics.some(topic => topic.id === topicID && topic.status === 'available');
+      };
+      try {
+        // News polling remains unchanged, but old reads cannot roll back a
+        // completed follow. No invalidation or coverage request is introduced.
+        await client.cancelQueries({ queryKey: ['news'], exact: true });
+        if (!owns()) throw staleResponse();
+        const result = await exploreRequest(`/news/explore/${review.sessionID}/topics/${topicID}/follow`, 'POST',
+          exploreFollowResponseSchema, timeoutMs, undefined, request);
+        if (!owns()) throw staleResponse();
+        if (!equivalentExploreInterest(approved, result.interest)) {
+          throw new ExploreCommandError('uncertain', 'The follow response did not match the approved interest. Explicitly retry the same submission to recover its outcome.');
+        }
+        await client.cancelQueries({ queryKey: ['news'], exact: true });
+        if (!owns()) throw staleResponse();
+        const current = readExploreState(client, now());
+        client.setQueryData<ExploreClientState>(exploreStateKey, { ...current, followReviews: { ...current.followReviews,
+          [topicID]: { ...current.followReviews[topicID], outcome: { state: 'successful', result } } } });
+        client.setQueryData<NewsResponse>(['news'], news => news ? { ...news, discovery: { ...news.discovery,
+          preferences: { ...news.discovery.preferences, interests: news.discovery.preferences.interests.some(item => item.id === result.interest.id) ?
+            news.discovery.preferences.interests.map(item => item.id === result.interest.id ? result.interest : item) :
+            [...news.discovery.preferences.interests, result.interest] } } } : news);
+        return result;
+      } catch (error) {
+        const uncertain = !(error instanceof ExploreCommandError) || error.outcome === 'uncertain' || review.outcome.state === 'uncertain';
+        // Local status contains no follow receipts. Even a confirmed rejection
+        // of a REPLAY cannot prove the original lost-response save failed.
+        const failure = uncertain && (!(error instanceof ExploreCommandError) || error.outcome !== 'stale') ?
+          new ExploreCommandError('uncertain', 'The follow outcome is unknown. Your draft is kept. Explicitly retry the original approved submission to recover it.',
+            error instanceof ExploreCommandError ? error.status : undefined) : error;
+        if (owns()) {
+          const message = failure instanceof ExploreCommandError ? failure.message : 'Could not follow this interest.';
+          const current = readExploreState(client, now());
+          if (failure instanceof ExploreCommandError && failure.status === 410) {
+            client.setQueryData<ExploreClientState>(exploreStateKey, { ...revokeExploreFollowReviews(current, 'expired'), lifecycle: { state: 'expired' },
+              drafts: {}, selectedTopicID: null, searchRequestIDs: {} });
+          } else {
+            client.setQueryData<ExploreClientState>(exploreStateKey, { ...current, followReviews: { ...current.followReviews, [topicID]: {
+              ...current.followReviews[topicID], outcome: uncertain ? { state: 'uncertain', error: message } :
+                { state: 'failed', error: message, status: failure instanceof ExploreCommandError ? failure.status : undefined },
+            } } });
+          }
+        }
+        throw failure;
+      }
+    },
+  });
+}
+export function useExploreFollow() { return useMutation(exploreFollowOptions(useQueryClient())); }
 export function useExploreSearch() { return useMutation(exploreSearchOptions(useQueryClient())); }
 export function useExploreGeneration() { return useMutation(exploreGenerationOptions(useQueryClient())); }
 export function useExploreRecovery() { return useMutation(exploreRecoveryOptions(useQueryClient())); }
