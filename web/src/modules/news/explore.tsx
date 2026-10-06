@@ -5,6 +5,7 @@ import type { NewsResponse } from '../../../shared/news';
 import { useNews } from './api';
 import { selectExploreTopic, useExploreGeneration, useExploreRecovery, useExploreState } from './explore-api';
 import type { ExploreClientState } from './explore-state';
+import { ExploreReadingPreview } from './explore-preview';
 
 /** Pure presentation only. Selection and every network command remain separate. */
 export function exploreGalleryModel(state: ExploreClientState, news?: NewsResponse) {
@@ -79,7 +80,7 @@ export function ExplorePage() {
         <span className="footnote">Local recovery only — no generation or news search.</span></div>
     </div>
     {model.cards.length > 0 ? <section aria-labelledby="explore-ideas-title">
-      <div className="section-title"><h2 id="explore-ideas-title">Directions to try</h2><Badge>{model.cards.length} AI-suggested topics</Badge></div>
+      <div className="section-title"><h2 id="explore-ideas-title" tabIndex={-1}>Directions to try</h2><Badge>{model.cards.length} AI-suggested topics</Badge></div>
       <p className="muted">Selecting a topic does not search, follow it or change your daily briefing.</p>
       <div className="explore-topic-grid">{model.cards.map(card => <article
         className={'panel explore-topic-card' + (card.selected ? ' selected' : '')} key={card.id}>
@@ -94,5 +95,6 @@ export function ExplorePage() {
       title={state.lifecycle.state === 'expired' ? 'Temporary session unavailable' : state.lifecycle.state === 'obsolete' ? 'Request a fresh direction' : 'No topic ideas yet'}>
       {state.generation.state === 'pending' ? 'PI is suggesting directions. Nothing is searched automatically.' : 'Request ideas when you’re ready, or check local status to recover a temporary session. Ideas are not guaranteed after a server restart.'}
     </Empty></div>}
+    <ExploreReadingPreview state={state} news={news.data} />
   </section>;
 }

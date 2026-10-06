@@ -12,7 +12,7 @@ import {
   exploreStateKey, exploreStateOptions, readExploreState, reconcileExploreSources, selectExploreTopic, subscribeExploreMetadata,
   exploreSearchOptions, setExploreSearchDraft, beginExploreFollowReview, cancelExploreFollowReview, setExploreFollowDraft, exploreFollowOptions,
 } from '../src/modules/news/explore-api';
-import { acceptExploreSession, retainedExploreResult, exploreFollowNextAction, type ExploreClientState, type ExploreStatus } from '../src/modules/news/explore-state';
+import { acceptExploreSession, emptyExploreState, updateExplorePreview, retainedExploreResult, exploreFollowNextAction, type ExploreClientState, type ExploreStatus } from '../src/modules/news/explore-state';
 import { interestDraftSchema, type InterestDraft, type NewsInterest, type NewsResponse } from '../shared/news';
 import {
   createInterestEditorState, createInterestEditorSubmission, interestEditorIdentity,
@@ -21,6 +21,7 @@ import {
 
 import { navigateNewsView, newsViewFromHash } from '../src/modules/news';
 import { exploreGalleryModel } from '../src/modules/news/explore';
+import { exploreReadingPreviewModel } from '../src/modules/news/explore-preview';
 
 // Pure editor/cache fixtures only: no DOM, application, listener or external request.
 const draft: InterestDraft = {
@@ -1274,4 +1275,154 @@ test('gallery: obsolete source labels never borrow edited interest context; expi
     assert.equal(model.cards.length, 0); assert.equal(model.canRecover, true); assert.equal(model.canGenerate, true);
     assert.ok(model.notices.some(notice => /explicitly/.test(notice)));
   }
+});
+
+function readingFixture() {
+  const source = interest(), session = sessionFixture(source);
+  const state = acceptExploreSession(emptyExploreState(), session, Date.now());
+  const topic = session.topics[0];
+  const preview = searchResponse(session, topic.id).preview;
+  const result = retainedExploreResult(preview)!;
+  const attempt = { requestID: randomUUID(), startedAt: new Date(Date.parse(result.succeededAt) + 1_000).toISOString(),
+    search: { query: 'regional water cooling infrastructure policy coverage developments', language: 'en' as const, region: 'US' as const, days: 7 as const } };
+  return { source, session, state, topic, result, attempt, news: galleryNews([source]) };
+}
+
+test('reading-preview: never searched shows reviewable defaults without PI requirements or any requests', context => {
+  const { state, topic, news } = readingFixture();
+  context.mock.method(globalThis, 'fetch', () => { throw new Error('Presentation must not request anything'); });
+  const model = exploreReadingPreviewModel(state, { ...news, ai: { ...news.ai, configured: false } });
+  assert.equal(model.topic?.id, topic.id);
+  assert.deepEqual(model.search, topic.proposedSearch);
+  assert.equal(model.previewState, 'not-searched');
+  assert.match(model.message!, /No search yet/);
+  assert.equal(model.canSearch, true); assert.equal(model.editable, true);
+  assert.equal(model.result, null); assert.equal(model.attempt, null);
+  assert.deepEqual(model.groups, []);
+  assert.match(model.searchLabel, /Standard/);
+  assert.equal(model.sourceLabel, news.discovery.preferences.interests[0].name);
+});
+
+test('reading-preview: producing query, locale and exact last-success time stay separate from edited draft and failed attempt', () => {
+  const { state, topic, result, attempt, news } = readingFixture();
+  const failed = updateExplorePreview({ ...state, drafts: { ...state.drafts, [topic.id]: { ...attempt.search, days: 1 } } }, topic.id,
+    { state: 'failed-retained', previous: result, attempt, error: { code: 'search-failed', error: 'Standard search failed.' } }, null);
+  const model = exploreReadingPreviewModel(failed, news);
+  assert.equal(model.previewState, 'failed-retained');
+  assert.equal(model.retained, true); assert.equal(model.canSearch, true);
+  assert.equal(model.result, result); assert.equal(model.result?.succeededAt, result.succeededAt);
+  assert.deepEqual(model.result?.search, topic.proposedSearch);
+  assert.deepEqual(model.attempt?.search, attempt.search);
+  assert.equal(model.attempt?.startedAt, attempt.startedAt);
+  assert.equal(model.search?.days, 1); assert.equal(model.draftDiffers, true);
+  assert.equal(model.error, 'Standard search failed.');
+  assert.match(model.message!, /Previous same-topic coverage is retained/);
+  assert.match(model.message!, /not the failed attempt/);
+});
+
+test('reading-preview: pending, failed and uncertain searches are distinct and recovery never silently retries', () => {
+  const { state, topic, result, attempt, news } = readingFixture();
+  for (const preview of [
+    { state: 'pending', attempt, previous: result },
+    { state: 'failed', attempt, error: { code: 'search-failed', error: 'No connection.' } },
+    { state: 'uncertain', attempt, previous: result },
+  ] satisfies ExplorePreview[]) {
+    const model = exploreReadingPreviewModel(updateExplorePreview(state, topic.id, preview, null), news);
+    assert.equal(model.previewState, preview.state);
+    assert.equal(model.canSearch, preview.state === 'failed');
+    assert.equal(model.canRecover, true);
+    assert.equal(model.result, preview.state === 'failed' ? null : result);
+    assert.equal(model.retained, preview.state !== 'failed');
+    assert.equal(model.error, preview.state === 'failed' ? 'No connection.' : null);
+    assert.match(model.message!, preview.state === 'pending' ? /Searching this topic/ : preview.state === 'failed' ? /No coverage has been retrieved/ : /outcome is unknown/);
+    const recovery = exploreReadingPreviewModel({ ...updateExplorePreview(state, topic.id, preview, null),
+      recovery: { state: 'pending', requestID: randomUUID() } }, news);
+    assert.equal(recovery.canRecover, false); assert.equal(recovery.canSearch, false);
+  }
+});
+
+test('reading-preview: successful-empty replaces old coverage and retained empty success is not mislabeled as current', () => {
+  const { state, topic, result, attempt, news } = readingFixture();
+  const empty = { ...result, articles: [], search: attempt.search, succeededAt: attempt.startedAt };
+  const populated = updateExplorePreview(state, topic.id, { state: 'successful', result }, null);
+  const model = exploreReadingPreviewModel(updateExplorePreview(populated, topic.id, { state: 'successful-empty', result: empty }, null), news);
+  assert.equal(model.previewState, 'successful-empty'); assert.equal(model.retained, false);
+  assert.equal(model.result, empty); assert.deepEqual(model.groups, []);
+  assert.equal(model.error, null); assert.equal(model.attempt, null);
+  assert.match(model.message!, /succeeded with zero results/);
+  const retained = exploreReadingPreviewModel(updateExplorePreview(state, topic.id,
+    { state: 'failed-retained', previous: { ...result, articles: [] }, attempt, error: { code: 'search-failed', error: 'Search failed.' } }, null), news);
+  assert.equal(retained.retained, true); assert.deepEqual(retained.groups, []);
+  assert.equal(retained.previewState, 'failed-retained'); assert.equal(retained.result?.succeededAt, result.succeededAt);
+});
+
+test('reading-preview: only selected-topic coverage is grouped; switching cannot relabel another result or attempt', () => {
+  const { state, session, topic, result, attempt, news } = readingFixture();
+  const first = updateExplorePreview(state, topic.id, { state: 'failed-retained', previous: result, attempt,
+    error: { code: 'search-failed', error: 'First topic failed.' } }, null);
+  const second = session.topics[1], secondPreview = searchResponse(session, second.id).preview;
+  const selected = { ...updateExplorePreview(first, second.id, secondPreview, null), selectedTopicID: second.id };
+  const model = exploreReadingPreviewModel(selected, news);
+  assert.equal(model.topic?.id, second.id); assert.equal(model.previewState, 'successful');
+  assert.deepEqual(model.result, retainedExploreResult(secondPreview));
+  assert.equal(model.attempt, null); assert.equal(model.error, null);
+  assert.equal(model.groups[0].lead.title, second.title + ' source report');
+  assert.equal(exploreReadingPreviewModel({ ...selected, selectedTopicID: session.topics[2].id }, news).result, null);
+  assert.equal(exploreReadingPreviewModel({ ...selected, selectedTopicID: randomUUID() }, news).previewState, null);
+});
+
+test('reading-preview: retrieved excerpts stay source-labeled, unknown dates remain unknown and heuristic groups have no five-story cap', () => {
+  const { state, topic, result, news } = readingFixture();
+  const article = result.articles[0];
+  const articles = [
+    { ...article, title: 'Regional cooling infrastructure district heating energy policy', url: 'https://example.org/news/lead', publishedAt: result.succeededAt },
+    { ...article, title: 'Regional cooling infrastructure district heating energy policy update', url: 'https://other.example/news/related', publishedAt: result.succeededAt },
+    ...Array.from({ length: 7 }, (_, i) => ({ ...article, url: 'https://example.org/news/unknown-' + i,
+      title: 'Source report ' + i, publishedAt: null })),
+  ];
+  const model = exploreReadingPreviewModel(updateExplorePreview(state, topic.id, { state: 'successful', result: { ...result, articles } }, null), news);
+  assert.equal(model.groups.length, 8);
+  assert.equal(model.groups[0].lead, articles[0]); assert.deepEqual(model.groups[0].related, [articles[1]]);
+  assert.equal(model.groups.flatMap(group => [group.lead, ...group.related]).length, articles.length);
+  assert.equal(model.groups[1].lead.publishedAt, null);
+  // ArticleList already labels these as source excerpts: no AI-summary kind
+  // or saved-interest matches. Assert the contract without refactor-only helpers.
+  assert.ok(model.groups.every(group => [group.lead, ...group.related].every(item => item.summaryKind === 'source' &&
+    !('matches' in item) && item.summary === 'Retrieved source excerpt.')));
+  assert.match(model.message!, /source excerpts, not AI-written/);
+});
+
+test('reading-preview: expired, imported or revoked context hides evidence and disables editing while retaining explicit recovery', () => {
+  const { state, session, topic, result, news, source } = readingFixture();
+  const populated = updateExplorePreview(state, topic.id, { state: 'successful', result }, null);
+  const cases: [ExploreClientState, NewsResponse, number, 'expired' | 'obsolete'][] = [
+    [populated, news, Date.parse(session.expiresAt), 'expired'],
+    [{ ...populated, lifecycle: { state: 'expired' } }, news, Date.now(), 'expired'],
+    [{ ...populated, lifecycle: { state: 'obsolete' } }, news, Date.now(), 'obsolete'],
+    [updateExplorePreview(populated, topic.id, { state: 'obsolete' }, null), news, Date.now(), 'obsolete'],
+    [populated, galleryNews([{ ...source, revision: randomUUID(), name: 'Replacement context' }]), Date.now(), 'obsolete'],
+    [populated, galleryNews([{ ...source, enabled: false }]), Date.now(), 'obsolete'],
+    [populated, galleryNews([]), Date.now(), 'obsolete'],
+  ];
+  for (const [supplied, metadata, now, expected] of cases) {
+    const model = exploreReadingPreviewModel(supplied, metadata, now);
+    assert.equal(model.previewState, expected); assert.equal(model.result, null); assert.equal(model.attempt, null);
+    assert.deepEqual(model.groups, []); assert.equal(model.editable, false); assert.equal(model.canSearch, false);
+    assert.equal(model.canRecover, true); assert.match(model.message!, /Saved reading is unaffected|Nothing reruns automatically/);
+    assert.doesNotMatch(model.sourceLabel, /Replacement/);
+  }
+  assert.equal(exploreReadingPreviewModel(emptyExploreState(), news).previewState, null);
+});
+
+test('reading-preview: invalid drafts and concurrency disable submission without altering original coverage', () => {
+  const { state, session, topic, result, attempt, news } = readingFixture();
+  const populated = updateExplorePreview(state, topic.id, { state: 'successful', result }, null);
+  const invalid = exploreReadingPreviewModel({ ...populated, drafts: { ...state.drafts, [topic.id]: { ...attempt.search, query: 'short query' } } }, news);
+  assert.equal(invalid.canSearch, false); assert.match(invalid.validationError!, /at least 5 words/);
+  assert.equal(invalid.result, result); assert.equal(invalid.draftDiffers, true);
+  const concurrent = session.topics.slice(1).reduce((current, other) => updateExplorePreview(current, other.id,
+    { state: 'pending', attempt: { ...attempt, search: other.proposedSearch }, previous: null }, randomUUID()), populated);
+  const capacity = exploreReadingPreviewModel(concurrent, news);
+  assert.equal(capacity.atSearchCapacity, true); assert.equal(capacity.canSearch, false);
+  assert.equal(capacity.result, result); assert.equal(capacity.editable, true);
 });
