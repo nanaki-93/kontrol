@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { feedSchema, type Feed, type Article, type NewsState } from '../../shared/schema';
-import { interestDraftSchema, interestSchema, type NewsResponse } from '../../shared/news';
+import { interestDraftSchema, interestSchema, interestWordCount, MIN_INTEREST_WORDS, type NewsResponse } from '../../shared/news';
 import { Store } from '../store';
 import { HttpError, requireFound } from '../errors';
 import { fetchFeed, safeWebURL, newsErrorMessage } from '../news/transport';
@@ -33,7 +33,7 @@ export function newsModule(store: Store, fetcher = fetchFeed, options: NewsOptio
   const aiStatus = options.aiStatus ?? (() => piStatus(options.pi));
   store.init('news', initialNews());
   getDiscovery(store);
-  if (explore) router.use('/explore', newsExploreModule(explore));
+  if (explore) router.use('/explore', newsExploreModule(explore, store));
   async function snapshot(): Promise<NewsResponse> {
     return { ...store.get<NewsState>('news'), discovery: getDiscovery(store),
       ai: await aiStatus(),
@@ -92,6 +92,8 @@ export function newsModule(store: Store, fetcher = fetchFeed, options: NewsOptio
     }
     const interests = getDiscovery(store).preferences.interests.filter(i => i.enabled && (!input.interestID || i.id === input.interestID));
     if (!interests.length) throw new HttpError(400, 'Enable at least one interest to search.');
+    const shortInterests = interests.filter(i => interestWordCount(i.query, i.language) < MIN_INTEREST_WORDS);
+    if (shortInterests.length > 0) throw new HttpError(400, 'Please edit your interests to use at least 5 search words.');
     discovering = true;
     try {
       let cursor = 0;

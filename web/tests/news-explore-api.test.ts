@@ -6,11 +6,12 @@ import { getDiscovery } from '../server/news/discovery';
 import { exportData } from '../server/modules/settings';
 import { ExploreServiceError, type ExploreService } from '../server/news/explore';
 import type { AppOptions } from '../server/app';
-import type { NewsInterest, DiscoveredArticle, NewsResponse } from '../shared/news';
+import type { InterestDraft, NewsInterest, DiscoveredArticle, NewsResponse } from '../shared/news';
 import type { NewsState } from '../shared/schema';
 import { briefingStories } from '../shared/briefing';
 import {
-  EXPLORE_SESSION_TTL_MS, exploreGenerateResponseSchema, exploreSearchResponseSchema, exploreStatusResponseSchema,
+  EXPLORE_SESSION_TTL_MS, EXPLORE_MAX_FOLLOW_SUBMISSIONS,
+  exploreGenerateResponseSchema, exploreSearchResponseSchema, exploreStatusResponseSchema, exploreFollowResponseSchema,
 } from '../shared/news-explore';
 import type { Store } from '../server/store';
 import { getWorkspace } from '../server/modules/workspace';
@@ -674,4 +675,154 @@ test('explore HTTP: failed generation and changed-query refresh retain owned res
   } }, news: { search: async interest => {
     if (failSearch) throw new Error('private-transport-secret'); return empty ? [] : retrieved(interest);
   } } });
+});
+
+const topicFollowPath = (sessionID: string, topicID: string) => '/news/explore/' + sessionID + '/topics/' + topicID + '/follow';
+function followDraft(topic: Awaited<ReturnType<ExploreService['generate']>>['session']['topics'][number]): InterestDraft {
+  return { name: topic.title, ...topic.proposedSearch, enabled: true, intent: 'news', requiredTerms: [], excludedTerms: [] };
+}
+
+test('follow HTTP: concurrent, repeated and response-loss retries persist once without searching or replacing previews', async () => {
+  let searches = 0, ideations = 0;
+  await withAPI(async ({ request, store, explore }) => {
+    const news = store.get<NewsState>('news'), feed = news.preferences.feeds.find(f => f.isEnabled)!;
+    news.articles = [{ ...retrieved(parent(store))[0], id: 'briefing-fixture', feedIDs: [feed.id], topicIDs: feed.topicIDs }];
+    store.set('news', news);
+    const session = await preview(explore), topic = session.topics[0];
+    const path = topicFollowPath(session.id, topic.id);
+    const body = { expectedSessionRevision: session.revision, submissionID: randomUUID(), draft: followDraft(topic) };
+    const before = getDiscovery(store), cached = explore.snapshot(), newsBefore = store.get('news');
+    const initial: NewsResponse = await (await request('/news')).json(), at = Date.now();
+    const edition = briefingStories(initial, undefined, at);
+    assert.ok(edition.length > 0);
+    const [a, b] = await Promise.all([request(path, 'POST', body), request(path, 'POST', body)]);
+    assert.equal(a.status, 200); assert.equal(b.status, 200);
+    // Ignore the first response until retry succeeds: server completion does not
+    // depend on the client receiving/parsing its result.
+    const replay = exploreFollowResponseSchema.parse(await b.json());
+    assert.equal(replay.created, true);
+    assert.deepEqual(exploreFollowResponseSchema.parse(await a.json()), replay);
+    assert.deepEqual(await (await request(path, 'POST', body)).json(), replay);
+    const equivalent = exploreFollowResponseSchema.parse(await (await request(path, 'POST', {
+      ...body, submissionID: randomUUID(), draft: { ...body.draft, name: 'Cosmetic name difference' },
+    })).json());
+    assert.equal(equivalent.created, false); assert.equal(equivalent.interest.id, replay.interest.id);
+    await assertPublicError(await request(path, 'POST', { ...body, draft: { ...body.draft, name: 'Different approved payload' } }), 409, /submission/);
+    const after = getDiscovery(store);
+    assert.equal(after.preferences.interests.length, before.preferences.interests.length + 1);
+    assert.deepEqual(after.articles, before.articles); assert.deepEqual(after.runs, before.runs);
+    assert.deepEqual(store.get('news'), newsBefore); assert.deepEqual(explore.snapshot(), cached);
+    const current: NewsResponse = await (await request('/news')).json();
+    assert.deepEqual(briefingStories(current, undefined, at), edition);
+    assert.equal(searches, 1, 'Only the explicit preview search runs'); assert.equal(ideations, 1);
+    // Receipt eviction cannot create another equivalent normal interest.
+    for (let i = 0; i < EXPLORE_MAX_FOLLOW_SUBMISSIONS; i++) {
+      assert.equal((await request(path, 'POST', { ...body, submissionID: randomUUID() })).status, 200);
+    }
+    const evicted = exploreFollowResponseSchema.parse(await (await request(path, 'POST', body)).json());
+    assert.equal(evicted.created, false); assert.equal(evicted.interest.id, replay.interest.id);
+    assert.equal(getDiscovery(store).preferences.interests.length, before.preferences.interests.length + 1);
+    assert.equal(searches, 1); assert.deepEqual(explore.snapshot(), cached);
+  }, { explore: { available: async () => true, ideate: async sources => { ideations++; return ideas(sources); } },
+    news: { search: async interest => { searches++; return retrieved(interest); }, aiSearch: async () => { assert.fail('Follow never uses AI search'); } } });
+});
+
+test('follow HTTP: equivalence precedes capacity, while locale, filters, enabled state, freshness and intent remain significant', async () => {
+  await withAPI(async ({ request, store, explore }) => {
+    const { session } = await explore.generate(), topic = session.topics[0];
+    const draft = { ...followDraft(topic), requiredTerms: ['Grid', 'Cooling'], excludedTerms: ['Stock', 'Jobs'] };
+    const state = getDiscovery(store);
+    const existing = { ...draft, name: 'Existing matching interest', id: randomUUID(), revision: randomUUID(),
+      requiredTerms: ['cooling', 'grid'], excludedTerms: ['jobs', 'stock'] };
+    state.preferences.interests.push(existing);
+    while (state.preferences.interests.length < 12) state.preferences.interests.push({ ...parent(store), id: randomUUID(), revision: randomUUID(),
+      name: 'Capacity fixture ' + state.preferences.interests.length, query: 'Different public research interest number ' + state.preferences.interests.length, enabled: false });
+    store.set('newsDiscovery', state);
+    const path = topicFollowPath(session.id, topic.id), body = { expectedSessionRevision: session.revision, submissionID: randomUUID(), draft };
+    const same = exploreFollowResponseSchema.parse(await (await request(path, 'POST', body)).json());
+    assert.equal(same.created, false); assert.equal(same.interest.id, existing.id);
+    for (const difference of [{ language: 'ja' }, { region: 'JP' }, { days: 30 }, { intent: 'opportunities' },
+      { enabled: false }, { requiredTerms: ['different'] }, { excludedTerms: [] }]) {
+      await assertPublicError(await request(path, 'POST', { ...body, submissionID: randomUUID(), draft: { ...draft, ...difference } }), 400, /12/);
+    }
+    assert.deepEqual(getDiscovery(store), state);
+    // Failed capacity attempts do not bind tokens. Once room exists, the same
+    // token can approve a corrected draft and create an ordinary interest.
+    const failed = { ...body, submissionID: randomUUID(), draft: { ...draft, region: 'JP' } };
+    await assertPublicError(await request(path, 'POST', failed), 400);
+    state.preferences.interests.pop(); store.set('newsDiscovery', state);
+    const result = exploreFollowResponseSchema.parse(await (await request(path, 'POST', failed)).json());
+    assert.equal(result.created, true); assert.equal(result.interest.region, 'JP');
+    assert.equal(getDiscovery(store).preferences.interests.length, 12);
+  }, fixtures);
+});
+
+test('follow HTTP: failed transaction rolls back and leaves submission reusable; responses are sanitized', async () => {
+  await withAPI(async ({ request, store, explore }) => {
+    const { session } = await explore.generate(), topic = session.topics[0];
+    const body = { expectedSessionRevision: session.revision, submissionID: randomUUID(), draft: followDraft(topic) };
+    const path = topicFollowPath(session.id, topic.id), before = getDiscovery(store), cached = explore.snapshot();
+    const set = store.set.bind(store);
+    store.set = (key, value) => { set(key, value); if (key === 'newsDiscovery') throw new Error('private-provider-secret injected write failure'); };
+    try { await assertPublicError(await request(path, 'POST', body), 500); }
+    finally { store.set = set; }
+    assert.deepEqual(getDiscovery(store), before); assert.deepEqual(explore.snapshot(), cached);
+    const corrected = { ...body, draft: { ...body.draft, name: 'Corrected review after rollback' } };
+    const response = await request(path, 'POST', corrected); assert.equal(response.status, 200);
+    const result = exploreFollowResponseSchema.parse(await response.json());
+    assert.equal(result.created, true); assert.equal(result.interest.name, corrected.draft.name);
+    assert.equal(getDiscovery(store).preferences.interests.length, before.preferences.interests.length + 1);
+  }, fixtures);
+});
+
+for (const loss of ['edit', 'disable', 'delete', 'expiry', 'replacement', 'import', 'restart'] as const) {
+  test('follow HTTP: ' + loss + ' rejects old reviews and receipt replay without undoing followed interests', async () => {
+    let at = Date.parse('2026-10-06T12:00:00Z');
+    let oldPath = '', oldBody: Record<string, unknown> = {};
+    await withAPI(async ({ request, store, explore }) => {
+      const { session } = await explore.generate(), topic = session.topics[0];
+      oldPath = topicFollowPath(session.id, topic.id);
+      oldBody = { expectedSessionRevision: session.revision, submissionID: randomUUID(), draft: followDraft(topic) };
+      const response = await request(oldPath, 'POST', oldBody); assert.equal(response.status, 200);
+      const result = exploreFollowResponseSchema.parse(await response.json());
+      const source = parent(store);
+      if (loss === 'edit' || loss === 'disable') {
+        assert.equal((await request('/news/interests/' + source.id, 'PUT', { ...source, expectedRevision: source.revision,
+          ...(loss === 'edit' ? { name: 'Edited source' } : { enabled: false }) })).status, 200);
+      } else if (loss === 'delete') assert.equal((await request('/news/interests/' + source.id, 'DELETE', { expectedRevision: source.revision })).status, 204);
+      else if (loss === 'expiry') at += EXPLORE_SESSION_TTL_MS;
+      else if (loss === 'replacement') await explore.generate();
+      else if (loss === 'import') assert.equal((await request('/settings/import', 'POST', exportData(store))).status, 200);
+      if (loss !== 'restart') {
+        const before = getDiscovery(store);
+        await assertPublicError(await request(oldPath, 'POST', oldBody), ['edit', 'disable', 'delete', 'import'].includes(loss) ? 409 : 410);
+        await assertPublicError(await request(oldPath, 'POST', { ...oldBody, submissionID: randomUUID() }), ['edit', 'disable', 'delete', 'import'].includes(loss) ? 409 : 410);
+        assert.deepEqual(getDiscovery(store), before);
+      }
+      assert.ok(getDiscovery(store).preferences.interests.some(i => i.id === result.interest.id));
+    }, { ...fixtures, clock: () => at });
+    if (loss === 'restart') await withAPI(async ({ request, store }) => {
+      const before = getDiscovery(store);
+      await assertPublicError(await request(oldPath, 'POST', oldBody), 410);
+      assert.deepEqual(getDiscovery(store), before);
+    }, fixtures);
+  });
+}
+
+test('follow HTTP: strict drafts, IDs, revision and existing API protections reject unsafe requests without writes', async () => {
+  await withAPI(async ({ request, store, explore, origin }) => {
+    const { session } = await explore.generate(), topic = session.topics[0];
+    const path = topicFollowPath(session.id, topic.id), body = { expectedSessionRevision: session.revision, submissionID: randomUUID(), draft: followDraft(topic) };
+    const before = getDiscovery(store);
+    for (const invalid of [{ ...body, article: {} }, { ...body, mode: 'ai' }, { ...body, submissionID: 'bad' },
+      { ...body, draft: { ...body.draft, query: 'too short' } }, { ...body, draft: { ...body.draft, evidence: [] } }]) {
+      await assertPublicError(await request(path, 'POST', invalid), 400);
+    }
+    await assertPublicError(await request(topicFollowPath('bad', topic.id), 'POST', body), 400);
+    await assertPublicError(await request(path, 'POST', { ...body, expectedSessionRevision: randomUUID() }), 409);
+    await assertPublicError(await request(path, 'POST', body, { Origin: 'https://untrusted.example' }), 403);
+    await assertPublicError(await request(path, 'POST', body, { Host: 'untrusted.example' }), 403);
+    await assertPublicError(await fetch(origin + '/api' + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }), 403);
+    assert.deepEqual(getDiscovery(store), before);
+  }, fixtures);
 });

@@ -1,5 +1,5 @@
-import { randomUUID } from 'node:crypto';
-import { discoveryPreferencesSchema, type DiscoveredArticle, type NewsInterest } from '../../shared/news';
+import { createHash, randomUUID } from 'node:crypto';
+import { discoveryPreferencesSchema, type DiscoveredArticle, type InterestDraft, type NewsInterest } from '../../shared/news';
 import { articleSnapshotSchema, canonicalURL, safeURL } from '../../shared/workspace';
 import {
   EXPLORE_AVAILABILITY_DEADLINE_MS, EXPLORE_GENERATION_DEADLINE_MS,
@@ -7,6 +7,7 @@ import {
   exploreBytes, exploreExpired, exploreSessionSchema, exploreSourceCurrent,
   exploreStatusResponseSchema, exploreArticleSchema, exploreSearchDescriptor, exploreSearchRequestSchema,
   exploreTopicParamsSchema, exploreSearchResponseSchema, EXPLORE_SEARCH_DEADLINE_MS,
+  exploreFollowRequestSchema, exploreFollowResponseSchema, EXPLORE_MAX_FOLLOW_SUBMISSIONS,
   EXPLORE_MAX_CONCURRENT_SEARCHES, EXPLORE_MAX_ARTICLES_PER_TOPIC,
   type ExploreArticle, type ExplorePreview, type ExploreTopic,
   type ExploreErrorCode, type ExploreSession, type IdeateExploreTopics,
@@ -27,6 +28,8 @@ const messages = {
   'obsolete-source': 'The saved interests changed. Request new topic ideas explicitly.',
   'session-gone': 'This exploration has expired or is unavailable. Request new topic ideas explicitly.',
   capacity: 'This request exceeded the temporary memory limit. Previous valid exploration is retained.',
+  'follow-capacity': 'Keep up to 12 specific interests. Remove an interest in Discover before following another topic.',
+  'submission-conflict': 'This follow submission was already used for a different review. Recover the previous outcome or start a new review.',
 } satisfies Partial<Record<ExploreErrorCode, string>>;
 export class ExploreServiceError extends Error {
   constructor(readonly code: keyof typeof messages) { super(messages[code]); }
@@ -52,6 +55,17 @@ export const EXPLORE_GENERATION_BOOKKEEPING_BYTES = 2048;
 export const EXPLORE_SEARCH_BOOKKEEPING_BYTES = 8192;
 // Same input ceiling as the shared RSS parser, even for an injected adapter.
 export const EXPLORE_MAX_RETRIEVED_CANDIDATES = 500;
+// One validated interest contains at most 2,860 text code units. Even JSON's
+// worst-case six-byte escaping plus identities/keys fits this reservation.
+// Reserve BEFORE persistence, so successful commits never fail bookkeeping.
+export const EXPLORE_FOLLOW_RECORD_BYTES = 32 * 1024;
+type FollowResult = ReturnType<typeof exploreFollowResponseSchema.parse>;
+interface FollowSubmission {
+  submissionID: string;
+  topicID: string;
+  draftHash: string;
+  result: FollowResult;
+}
 export interface ExploreDependencies {
   readInterests: () => readonly NewsInterest[];
   ideate?: IdeateExploreTopics;
@@ -153,6 +167,7 @@ export function createExploreService(dependencies: ExploreDependencies) {
   let generation: Generation = { state: 'idle' };
   let operation: GenerationOperation | undefined;
   const searches = new Map<string, SearchOperation>();
+  let submissions: FollowSubmission[] = []; // FIFO; never renewed by retries.
   let epoch = 0;
   let disposed = false;
   let cancelExpiry: (() => void) | undefined;
@@ -192,6 +207,7 @@ export function createExploreService(dependencies: ExploreDependencies) {
     abortSearches(state === 'obsolete' ? 'obsolete-source' : 'session-gone');
     cancelExpiry?.(); cancelExpiry = undefined;
     lifecycle = { state };
+    submissions = [];
   }
   function revokeTopics(ids: ReadonlySet<string>) {
     if (lifecycle.state !== 'available') return;
@@ -203,6 +219,8 @@ export function createExploreService(dependencies: ExploreDependencies) {
     }
     // Revocation is sticky, even if a caller later restores the same revision.
     if (changed) {
+      const revokedTopics = new Set(lifecycle.session.topics.filter(topic => topic.status === 'obsolete').map(topic => topic.id));
+      submissions = submissions.filter(record => !revokedTopics.has(record.topicID));
       lifecycle.session.revision = randomUUID();
       // Revision is lifecycle identity. Unrelated topics remain usable, but an
       // already admitted request must recover before using the new revision.
@@ -299,6 +317,7 @@ export function createExploreService(dependencies: ExploreDependencies) {
       cancelExpiry?.(); cancelExpiry = nextExpiry;
       abortSearches('session-gone');
       lifecycle = { state: 'available', session };
+      submissions = [];
       generation = { state: 'idle' };
       return { session: exploreSessionSchema.parse(session), partial: session.topics.length < EXPLORE_MAX_TOPICS };
     } catch (error) {
@@ -329,7 +348,8 @@ export function createExploreService(dependencies: ExploreDependencies) {
   }
   function previewFits(session: ExploreSession, topicID: string, preview: ExplorePreview): boolean {
     const replacement = { ...session, topics: session.topics.map(topic => topic.id === topicID ? { ...topic, preview } : topic) };
-    return exploreBytes(replacement) + EXPLORE_GENERATION_BOOKKEEPING_BYTES + EXPLORE_SEARCH_BOOKKEEPING_BYTES <= byteLimit;
+    return exploreBytes(replacement) + exploreBytes(submissions) +
+      EXPLORE_GENERATION_BOOKKEEPING_BYTES + EXPLORE_SEARCH_BOOKKEEPING_BYTES <= byteLimit;
   }
   async function search(sessionID: string, topicID: string, request: unknown, externalSignal?: AbortSignal) {
     const params = exploreTopicParamsSchema.safeParse({ sessionID, topicID });
@@ -405,6 +425,35 @@ export function createExploreService(dependencies: ExploreDependencies) {
       if (searches.get(topicID) === op) searches.delete(topicID);
     }
   }
+  /** Synchronous admission AND persistence: no await/queue can split source
+   * checks from the store transaction. The callback validates its result inside
+   * that transaction. Only after COMMIT do we publish completed bookkeeping.
+   * Tokens bind the exact validated draft (including cosmetic name) and topic;
+   * search equivalence is a separate concern owned by the persistence callback.
+   */
+  function follow(sessionID: string, topicID: string, request: unknown,
+    persist: (draft: InterestDraft) => FollowResult): FollowResult {
+    const params = exploreTopicParamsSchema.safeParse({ sessionID, topicID });
+    const validated = exploreFollowRequestSchema.safeParse(request);
+    if (!params.success || !validated.success) throw new ExploreServiceError('invalid-input');
+    const { expectedSessionRevision, submissionID, draft } = validated.data;
+    const { session } = requireTopic(sessionID, topicID, expectedSessionRevision);
+    const draftHash = createHash('sha256').update(JSON.stringify(draft)).digest('hex');
+    const completed = submissions.find(record => record.submissionID === submissionID);
+    if (completed) {
+      if (completed.topicID !== topicID || completed.draftHash !== draftHash) throw new ExploreServiceError('submission-conflict');
+      return exploreFollowResponseSchema.parse(completed.result);
+    }
+    // Plan FIFO eviction without changing old receipts on persistence failure.
+    // Existing-interest equivalence still prevents duplicates after eviction.
+    const retained = submissions.slice(-(EXPLORE_MAX_FOLLOW_SUBMISSIONS - 1));
+    const baseBytes = exploreBytes(session) + EXPLORE_GENERATION_BOOKKEEPING_BYTES + EXPLORE_SEARCH_BOOKKEEPING_BYTES;
+    while (retained.length && baseBytes + exploreBytes(retained) + EXPLORE_FOLLOW_RECORD_BYTES > byteLimit) retained.shift();
+    if (baseBytes + exploreBytes(retained) + EXPLORE_FOLLOW_RECORD_BYTES > byteLimit) throw new ExploreServiceError('capacity');
+    const result = exploreFollowResponseSchema.parse(persist(draft));
+    submissions = [...retained, { submissionID, topicID, draftHash, result }];
+    return exploreFollowResponseSchema.parse(result);
+  }
   /** Current validated evidence only. Newest successful preview wins; ties use
    * stable gallery order, then retrieval order. Pending/failed refreshes resolve
    * their ORIGINAL retained result, never the attempted search's identity. */
@@ -423,6 +472,6 @@ export function createExploreService(dependencies: ExploreDependencies) {
     }
     return undefined;
   }
-  return { snapshot, generate, search, resolve, invalidate, invalidateSources, dispose };
+  return { snapshot, generate, search, follow, resolve, invalidate, invalidateSources, dispose };
 }
 export type ExploreService = ReturnType<typeof createExploreService>;

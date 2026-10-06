@@ -1,18 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import type { DiscoveredArticle, NewsInterest } from '../shared/news';
+import type { DiscoveredArticle, InterestDraft, NewsInterest } from '../shared/news';
 import type { Discover } from '../server/news/discovery';
 import {
   EXPLORE_IDEATION_DEADLINE_MS, EXPLORE_MAX_MODEL_BYTES, EXPLORE_MAX_MODEL_CANDIDATES,
   EXPLORE_SESSION_TTL_MS, EXPLORE_GENERATION_DEADLINE_MS, EXPLORE_AVAILABILITY_DEADLINE_MS,
   EXPLORE_MAX_RETAINED_BYTES, exploreBytes, exploreStatusResponseSchema,
   EXPLORE_SEARCH_DEADLINE_MS, EXPLORE_MAX_ARTICLES_PER_TOPIC, exploreArticleSchema,
-  type ExploreSession,
+  EXPLORE_MAX_FOLLOW_SUBMISSIONS, type ExploreSession,
 } from '../shared/news-explore';
 import {
   createExploreService, ExploreServiceError, EXPLORE_GENERATION_BOOKKEEPING_BYTES,
-  EXPLORE_SEARCH_BOOKKEEPING_BYTES,
+  EXPLORE_SEARCH_BOOKKEEPING_BYTES, EXPLORE_FOLLOW_RECORD_BYTES,
   type ExploreDependencies, type ExploreSchedule,
 } from '../server/news/explore';
 import {
@@ -886,4 +886,112 @@ test('preview: oversized refresh and malformed adapter output retain trusted sam
     assert.equal(f.clock.size(), 1);
   }
   mode = 'small'; assert.equal((await f.search(session)).preview.state, 'successful');
+});
+
+function followRequest(session: ExploreSession, submissionID = randomUUID()) {
+  const topic = session.topics[0];
+  return { expectedSessionRevision: session.revision, submissionID, draft: {
+    name: topic.title, ...topic.proposedSearch, intent: 'news' as const, enabled: true, requiredTerms: [], excludedTerms: [],
+  } };
+}
+const persistFollow = (draft: InterestDraft) => ({ interest: { ...draft, id: randomUUID(), revision: randomUUID() }, created: true });
+
+test('follow: stable receipt replays a detached result without persistence or network work', async t => {
+  let searches = 0, commits = 0;
+  const f = sessionFixture({ discover: async () => { searches++; return []; } }); t.after(f.close);
+  const { session } = await f.service.generate(), body = followRequest(session);
+  const before = f.service.snapshot();
+  const save = (draft: InterestDraft) => { commits++; return persistFollow(draft); };
+  const result = f.service.follow(session.id, session.topics[0].id, body, save);
+  const retry = f.service.follow(session.id, session.topics[0].id, body, save);
+  assert.deepEqual(retry, result); assert.equal(commits, 1); assert.equal(searches, 0);
+  result.interest.name = 'Caller mutation'; retry.interest.requiredTerms.push('Caller filter');
+  assert.equal(f.service.follow(session.id, session.topics[0].id, body, save).interest.name, body.draft.name);
+  assert.deepEqual(f.service.snapshot(), before);
+  assert.deepEqual(f.calls(), { availabilityCalls: 1, ideationCalls: 1 });
+});
+
+test('follow: tokens bind exact validated drafts and topic, not cosmetic/search equivalence', async t => {
+  const f = sessionFixture(); t.after(f.close); const { session } = await f.service.generate();
+  const body = followRequest(session); let commits = 0;
+  const save = (draft: InterestDraft) => { commits++; return persistFollow(draft); };
+  f.service.follow(session.id, session.topics[0].id, body, save);
+  for (const draft of [{ ...body.draft, name: 'Renamed review' }, { ...body.draft, region: 'JP' },
+    { ...body.draft, requiredTerms: ['infrastructure'] }]) {
+    assert.throws(() => f.service.follow(session.id, session.topics[0].id, { ...body, draft }, save), serviceCode('submission-conflict'));
+  }
+  assert.throws(() => f.service.follow(session.id, session.topics[1].id, body, save), serviceCode('submission-conflict'));
+  assert.equal(commits, 1);
+  // Trim/default schema normalization is applied before fingerprinting.
+  assert.equal(f.service.follow(session.id, session.topics[0].id, { ...body, draft: { ...body.draft, name: '  ' + body.draft.name + '  ' } }, save).created, true);
+});
+
+test('follow: failed persistence records nothing and preserves older completed submissions', async t => {
+  const f = sessionFixture(); t.after(f.close); const { session } = await f.service.generate();
+  const body = followRequest(session), path = session.topics[0].id;
+  const original = f.service.follow(session.id, path, body, persistFollow);
+  const failing = followRequest(session);
+  assert.throws(() => f.service.follow(session.id, path, failing, () => { throw new ExploreServiceError('follow-capacity'); }), serviceCode('follow-capacity'));
+  const mustNotPersist = () => { throw new Error('Completed receipt must not commit again'); };
+  assert.deepEqual(f.service.follow(session.id, path, body, mustNotPersist), original);
+  const changed = { ...failing, draft: { ...failing.draft, name: 'Corrected review' } };
+  assert.equal(f.service.follow(session.id, path, changed, persistFollow).interest.name, 'Corrected review');
+});
+
+test('follow: bounded FIFO receipts evict oldest without extending lifetime or retaining failed attempts', async t => {
+  const f = sessionFixture(); t.after(f.close); const { session } = await f.service.generate();
+  const path = session.topics[0].id, first = followRequest(session); let commits = 0;
+  const save = (draft: InterestDraft) => { commits++; return persistFollow(draft); };
+  f.service.follow(session.id, path, first, save);
+  for (let i = 1; i < EXPLORE_MAX_FOLLOW_SUBMISSIONS; i++) f.service.follow(session.id, path, followRequest(session), save);
+  // A retry must not renew FIFO priority.
+  f.service.follow(session.id, path, first, save); assert.equal(commits, EXPLORE_MAX_FOLLOW_SUBMISSIONS);
+  assert.throws(() => f.service.follow(session.id, path, followRequest(session), () => { throw new Error('Rollback'); }), /Rollback/);
+  f.service.follow(session.id, path, first, save); assert.equal(commits, EXPLORE_MAX_FOLLOW_SUBMISSIONS);
+  f.service.follow(session.id, path, followRequest(session), save);
+  f.service.follow(session.id, path, first, save); assert.equal(commits, EXPLORE_MAX_FOLLOW_SUBMISSIONS + 2);
+  f.clock.advance(EXPLORE_SESSION_TTL_MS);
+  assert.throws(() => f.service.follow(session.id, path, first, save), serviceCode('session-gone'));
+});
+
+test('follow: byte reservation precedes persistence and FIFO eviction shares the preview budget', async t => {
+  const parent = source(), deps = { readInterests: () => [parent], ideate: async () => JSON.stringify({ topics: threeIdeas(parent) }) };
+  const probe = sessionFixture(deps); t.after(probe.close); const baseline = await probe.service.generate();
+  const budget = exploreBytes(baseline.session) + EXPLORE_GENERATION_BOOKKEEPING_BYTES + EXPLORE_SEARCH_BOOKKEEPING_BYTES;
+  const tooSmall = sessionFixture({ ...deps, maxRetainedBytes: budget + EXPLORE_FOLLOW_RECORD_BYTES - 1 }); t.after(tooSmall.close);
+  const { session: small } = await tooSmall.service.generate();
+  assert.throws(() => tooSmall.service.follow(small.id, small.topics[0].id, followRequest(small),
+    () => { assert.fail('Must not persist without a reserved receipt'); }), serviceCode('capacity'));
+  const f = sessionFixture({ ...deps, maxRetainedBytes: budget + EXPLORE_FOLLOW_RECORD_BYTES + 3 }); t.after(f.close);
+  const { session } = await f.service.generate(); let commits = 0;
+  const first = followRequest(session), save = (draft: InterestDraft) => { commits++; return persistFollow(draft); };
+  f.service.follow(session.id, session.topics[0].id, first, save);
+  f.service.follow(session.id, session.topics[0].id, followRequest(session), save);
+  f.service.follow(session.id, session.topics[0].id, first, save);
+  assert.equal(commits, 3, 'Oldest receipt is evicted to reserve bytes');
+});
+
+test('follow: source, revision, replacement, import epoch and disposal are checked before receipt replay', async t => {
+  for (const loss of ['source', 'revision', 'replacement', 'import', 'disposal'] as const) {
+    const f = sessionFixture(); t.after(f.close); const { session } = await f.service.generate();
+    const body = followRequest(session), path = session.topics[0].id;
+    f.service.follow(session.id, path, body, persistFollow);
+    if (loss === 'source') f.setInterests([{ ...f.parent, enabled: false }]);
+    else if (loss === 'replacement') await f.service.generate();
+    else if (loss === 'import') f.service.invalidate();
+    else if (loss === 'disposal') f.service.dispose();
+    const attempted = loss === 'revision' ? { ...body, expectedSessionRevision: randomUUID() } : body;
+    const code = loss === 'source' || loss === 'import' ? 'obsolete-source' : loss === 'revision' ? 'stale-revision' : 'session-gone';
+    assert.throws(() => f.service.follow(session.id, path, attempted, () => { assert.fail('Must not persist revoked context'); }), serviceCode(code));
+  }
+});
+
+test('follow: strict ordinary draft and identity validation reject evidence and unsupported fields', async t => {
+  const f = sessionFixture(); t.after(f.close); const { session } = await f.service.generate();
+  const body = followRequest(session), fail = () => { assert.fail('Invalid admission must not persist'); };
+  for (const invalid of [{ ...body, article: {} }, { ...body, submissionID: 'invalid' },
+    { ...body, draft: { ...body.draft, query: 'too short' } }, { ...body, draft: { ...body.draft, unknown: 'evidence' } }]) {
+    assert.throws(() => f.service.follow(session.id, session.topics[0].id, invalid, fail), serviceCode('invalid-input'));
+  }
+  assert.throws(() => f.service.follow('invalid', session.topics[0].id, body, fail), serviceCode('invalid-input'));
 });
