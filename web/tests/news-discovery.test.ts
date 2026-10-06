@@ -1,14 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { createServer, request, type RequestOptions } from 'node:http';
+import http, { createServer, request, type RequestOptions } from 'node:http';
+import dns from 'node:dns/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import type { AddressInfo } from 'node:net';
 import { Readable, Transform } from 'node:stream';
 import { createGunzip, gzipSync } from 'node:zlib';
 import { interestPresets, matchesInterest, visibleDiscoveries, type NewsInterest, type DiscoveredArticle } from '../shared/news';
 import { pinnedLookup, fetchFeed, newsErrorMessage, requestHeaders, pageRequestOptions, collectBody, redirectLimit, PAGE_USER_AGENT } from '../server/news/transport';
 import { parseFeed } from '../server/news/feeds';
-import { initialDiscovery, mergeDiscovery, searchDiscovery, searchURL } from '../server/news/discovery';
+import { initialDiscovery, mergeDiscovery, searchDiscovery, searchURL, STANDARD_SEARCH_TIMEOUT_MS } from '../server/news/discovery';
 
 const now = Date.parse('2026-10-02T12:00:00Z');
 const interest = (overrides: Partial<NewsInterest> = {}): NewsInterest => ({ ...interestPresets[1], id: randomUUID(), revision: randomUUID(), ...overrides });
@@ -193,4 +195,165 @@ test('standard news search and result merging exclude obvious homepages and job 
   assert.equal(results[0].contentKind, 'article');
   const merged = mergeDiscovery([], urls.map(url => result(i, { url })), i, 'search', now);
   assert.deepEqual(merged.map(item => item.url), [urls[2]]);
+});
+
+test('standard discovery keeps unknown dates, rejects future dates and unsafe URLs, and preserves ranking and caps', async () => {
+  const i = interest();
+  const current = Date.now();
+  const item = (url: string, title: string, date?: string) => '<item><title>' + title + '</title><link>' + url + '</link>' +
+    (date ? '<pubDate>' + date + '</pubDate>' : '') + '</item>';
+  const xml = '<rss><channel>' + [
+    item('https://example.com/unknown?utm_source=rss#section', 'AI model release with benchmark and open weights'),
+    item('https://example.com/malformed-date', 'AI model release', 'not a date'),
+    item('https://example.com/future', 'AI model release', new Date(current + 3 * 86_400_000).toUTCString()),
+    item('https://example.com/expired', 'AI model release', new Date(current - 8 * 86_400_000).toUTCString()),
+    ...['https://example.com/', 'https://example.com/news', 'https://example.com/jobs/engineer',
+      'https://example.com/category/models', 'ftp://example.com/article', 'https://user:secret@example.com/article',
+      'https://example.com:1234/article'].map(url => item(url, 'AI model release')),
+    ...Array.from({ length: 45 }, (_, index) => item('https://example.com/story-' + index, 'AI model release', new Date(current).toUTCString())),
+  ].join('') + '</channel></rss>';
+  const rows = await searchDiscovery(async () => xml)(i);
+  assert.equal(rows.length, 40);
+  assert.equal(rows[0].url, 'https://example.com/unknown');
+  assert.equal(rows[0].publishedAt, null);
+  // RSS parsing already treats malformed dates as unknown, not as invented dates.
+  assert.equal(rows.find(row => row.url.endsWith('/malformed-date'))?.publishedAt, null);
+  assert.ok(rows.every(row => row.contentKind === 'article' && row.feedIDs.length === 0));
+  assert.ok(rows.every((row, index) => !index || rows[index - 1].matches[0].score >= row.matches[0].score));
+  assert.ok(rows.every(row => /\/(?:unknown|malformed-date|story-\d+)$/.test(row.url)));
+});
+
+test('discovery rejects ineligible incoming URL and content types without replacing other-interest evidence', () => {
+  const first = interest(), second = interest();
+  const original = mergeDiscovery([], [result(first)], first, 'search', now);
+  for (const mode of ['search', 'ai'] as const) {
+    for (const candidate of [
+      ...['not a URL', 'ftp://example.com/release', 'https://example.com/', 'https://example.com/blog',
+        'https://example.com/jobs/engineer', 'https://example.com:1234/release', 'https://user:secret@example.com/release']
+        .map(url => result(second, { url })),
+      result(second, { contentKind: 'job' }), result(second, { contentKind: 'generic' }),
+      result(second, { publishedAt: 'not a date' }),
+    ]) {
+      candidate.matches[0].mode = mode;
+      assert.deepEqual(mergeDiscovery(original, [candidate], second, mode, now), original);
+    }
+  }
+  const both = mergeDiscovery(original, [result(second)], second, 'search', now);
+  const invalidReplacement = mergeDiscovery(both, [result(first, { contentKind: 'job' })], first, 'search', now);
+  assert.deepEqual(invalidReplacement[0].matches.map(match => match.interestID), [second.id]);
+});
+
+test('discovery rejects dates outside boundaries but retains unknown dates and the merge cap', () => {
+  const i = interest();
+  const rows = mergeDiscovery([], [
+    result(i, { url: 'https://example.com/lower', publishedAt: new Date(now - i.days * 86_400_000).toISOString() }),
+    result(i, { url: 'https://example.com/upper', publishedAt: new Date(now + 86_400_000).toISOString() }),
+    result(i, { url: 'https://example.com/unknown', publishedAt: null }),
+  ], i, 'search', now);
+  assert.equal(rows.length, 3);
+  assert.equal(rows.find(row => row.url.endsWith('/unknown'))?.publishedAt, null);
+  const capped = mergeDiscovery([], Array.from({ length: 501 }, (_, index) => result(i, { url: 'https://example.com/item-' + index })), i, 'search', now);
+  assert.equal(capped.length, 500);
+});
+
+test('standard cancellation forwards an abortable signal and rejects stalled injected retrieval', async () => {
+  const controller = new AbortController();
+  let received: AbortSignal | undefined;
+  let complete!: (xml: string) => void;
+  let started!: () => void;
+  const admitted = new Promise<void>(resolve => started = resolve);
+  const pending = searchDiscovery(async (_url, redirects, signal) => {
+    assert.equal(redirects, 0);
+    received = signal;
+    started();
+    return new Promise<string>(resolve => complete = resolve);
+  })(interest(), controller.signal);
+  const rejected = assert.rejects(pending, /took too long/);
+  try {
+    await admitted;
+    assert.equal(received?.aborted, false);
+    controller.abort();
+    await rejected;
+    assert.equal(received?.aborted, true);
+    // Late success cannot trigger parsing or publication after cancellation.
+    complete('not valid RSS');
+    await Promise.resolve();
+  } finally { controller.abort(); }
+});
+
+test('standard cancellation rejects already-aborted calls without invoking the fetcher', async () => {
+  let calls = 0;
+  await assert.rejects(searchDiscovery(async () => { calls++; return ''; })(interest(), AbortSignal.abort()), /took too long/);
+  assert.equal(calls, 0);
+});
+
+test('standard cancellation keeps the default deadline even with a longer caller lifetime', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const controller = new AbortController();
+  let received: AbortSignal | undefined;
+  const pending = searchDiscovery(async (_url, _redirects, signal) => {
+    received = signal;
+    return new Promise<string>(() => {});
+  })(interest(), controller.signal);
+  const rejected = assert.rejects(pending, /took too long/);
+  try {
+    await Promise.resolve();
+    t.mock.timers.tick(STANDARD_SEARCH_TIMEOUT_MS - 1);
+    assert.equal(received?.aborted, false);
+    t.mock.timers.tick(1);
+    await rejected;
+    assert.equal(received?.aborted, true);
+    assert.equal(controller.signal.aborted, false);
+  } finally { controller.abort(); t.mock.timers.reset(); }
+});
+
+// Real socket/transport integration is intentionally selected only at the final gate.
+test('transport integration: Standard cancellation reaches production fetchFeed during stalled headers and bodies', async t => {
+  const realRequest = http.request;
+  // Only this fixture's built-in adapters are redirected to loopback. Production
+  // URL, DNS policy, request signal and body collection still run in fetchFeed;
+  // no real public-network request is made and no production policy is changed.
+  for (const phase of ['headers', 'body']) {
+    let opened!: () => void;
+    const receiving = new Promise<void>(resolve => opened = resolve);
+    const server = createServer((_req, res) => {
+      if (phase === 'body') { res.writeHead(200); res.write('<rss>'); }
+      opened();
+    });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const controller = new AbortController();
+    let closed: Promise<void> | undefined;
+    try {
+      t.mock.method(dns, 'lookup', async () => [{ address: '8.8.8.8', family: 4 }]);
+      t.mock.method(http, 'request', (_url: string | URL, options: RequestOptions, callback: Parameters<typeof http.request>[2]) => {
+        const req = realRequest('http://127.0.0.1:' + (server.address() as AddressInfo).port + '/feed', {
+          ...options, lookup: pinnedLookup([{ address: '127.0.0.1', family: 4 }]), agent: false,
+        }, callback);
+        closed = new Promise<void>(resolve => req.once('close', resolve));
+        return req;
+      });
+      syncBuiltinESMExports();
+      const pending = searchDiscovery((_url, redirects, signal) => fetchFeed('http://isolated-fixture.test/feed', redirects, signal))(
+        interest(), controller.signal);
+      // Retrieval failure (including its bounded timeout) must also reach finally
+      // if the fixture never receives a request.
+      await Promise.race([receiving, pending.then(() => { throw new Error('The stalled fixture unexpectedly completed.'); })]);
+      controller.abort();
+      await assert.rejects(pending, /took too long/);
+      assert.ok(closed);
+      await closed;
+    } finally {
+      controller.abort();
+      t.mock.restoreAll(); syncBuiltinESMExports();
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    }
+  }
+});
+
+test('transport integration: Standard forwarding retains production public-network restrictions', async () => {
+  await assert.rejects(searchDiscovery((_url, redirects, signal) => fetchFeed('http://127.0.0.1/feed', redirects, signal))(interest()),
+    /public internet addresses/);
+  await assert.rejects(searchDiscovery((_url, redirects, signal) => fetchFeed('http://127.0.0.1/feed', redirects, signal))(
+    interest(), AbortSignal.abort()), /took too long/);
 });

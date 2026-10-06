@@ -4,12 +4,13 @@ import { Store } from '../server/store';
 import { createApp } from '../server/app';
 import type { NewsOptions } from '../server/modules/news';
 import type { JobsOptions } from '../server/modules/jobs';
+import type { fetchFeed } from '../server/news/transport';
 
 export async function withAPI(run: (fixture: {
   store: Store;
   request: (path: string, method?: string, body?: unknown, headers?: Record<string, string>) => Promise<Response>;
   origin: string;
-}) => Promise<void>, options: { clock?: () => number; feedFetcher?: (url: string) => Promise<string>; news?: NewsOptions; jobs?: JobsOptions } = {}) {
+}) => Promise<void>, options: { clock?: () => number; feedFetcher?: typeof fetchFeed; news?: NewsOptions; jobs?: JobsOptions } = {}) {
   const store = new Store(':memory:');
   const server = createServer();
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));

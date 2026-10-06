@@ -10,8 +10,9 @@ import { settingsModule } from './modules/settings';
 import { jobsModule, type JobsOptions } from './modules/jobs';
 import { workspaceModule } from './modules/workspace';
 import { MAX_BACKUP_BYTES, BACKUP_LIMIT_LABEL } from '../shared/backup';
+import type { fetchFeed } from './news/transport';
 
-export function createApp(store: Store, options: { origin: string; clock?: () => number; feedFetcher?: (url: string) => Promise<string>; news?: NewsOptions; jobs?: JobsOptions }) {
+export function createApp(store: Store, options: { origin: string; clock?: () => number; feedFetcher?: typeof fetchFeed; news?: NewsOptions; jobs?: JobsOptions }) {
   const app = express();
   app.disable('x-powered-by');
   const expected = new URL(options.origin);
