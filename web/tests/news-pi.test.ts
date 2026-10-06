@@ -5,6 +5,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parsePIOutput, piStatus, runPI, runPIWebSearch } from '../server/news/pi';
 import webSearchExtension from '../server/news/pi-web-search-extension';
+import { randomUUID } from 'node:crypto';
+import { createExploreIdeation, requestExploreIdeas, EXPLORE_IDEATION_SYSTEM_PROMPT } from '../server/news/explore-ideation';
+import type { NewsInterest } from '../shared/news';
 
 function events(text = '{"articles":[]}', stopReason = 'stop') {
   return [
@@ -112,6 +115,92 @@ test('PI honors an explicit deadline even when its caller has no deadline, then 
     assert.throws(() => process.kill(report.pid, 0), { code: 'ESRCH' });
   }, `require('node:fs').writeFileSync(require('node:path').join(process.env.PI_CODING_AGENT_DIR, 'started.json'), JSON.stringify({ cwd: process.cwd(), pid: process.pid })); setInterval(() => {}, 1000);`);
 });
+// Explore process integration is written here, but executed only at the final gate.
+const exploreParent = (): NewsInterest => ({
+  id: randomUUID(), revision: randomUUID(), name: '@private-file --model injected $(touch unsafe)',
+  query: 'AI models releases benchmarks open weights', language: 'en', region: 'US', days: 7,
+  intent: 'news', requiredTerms: [], excludedTerms: [], enabled: true,
+});
+test('Explore PI ideation uses one isolated tool-free executable and literal whitelisted context', async () => {
+  await fixture(async (directory, command) => {
+    const parent = { ...exploreParent(), cv: 'FORBIDDEN_CV', notes: 'FORBIDDEN_NOTES', readingHistory: 'FORBIDDEN_HISTORY' };
+    const disabled = { ...exploreParent(), enabled: false, query: 'FORBIDDEN_DISABLED_QUERY' };
+    const result = await requestExploreIdeas([parent, disabled], new AbortController().signal,
+      createExploreIdeation({ command, agentDir: directory }));
+    assert.equal(result.ideas.length, 3); assert.equal(result.partial, false);
+    const report = JSON.parse(await readFile(join(directory, 'report.json'), 'utf8'));
+    assert.equal(report.invocations, 1);
+    assert.deepEqual(JSON.parse(report.input), { requestedTopicCount: 3, enabledNewsInterests: [{
+      id: parent.id, name: parent.name, query: parent.query, language: parent.language,
+      region: parent.region, days: parent.days, intent: parent.intent,
+    }] });
+    assert.doesNotMatch(report.input, /FORBIDDEN_/);
+    for (const flag of ['--no-tools', '--no-extensions', '--no-skills', '--no-context-files', '--no-session', '--offline']) assert.ok(report.args.includes(flag));
+    assert.equal(report.args.includes('--extension'), false);
+    assert.equal(report.args[report.args.indexOf('--system-prompt') + 1], EXPLORE_IDEATION_SYSTEM_PROMPT);
+    assert.equal(report.args.includes(parent.name), false);
+    assert.equal(report.settings.retry.enabled, false);
+    assert.equal(report.settings.retry.provider.maxRetries, 0);
+    assert.equal(report.settings.compaction.enabled, false);
+    assert.notEqual(report.cwd, process.cwd());
+    await assert.rejects(access(report.cwd), { code: 'ENOENT' });
+    assert.throws(() => process.kill(report.pid, 0), { code: 'ESRCH' });
+  }, `const fs = require('node:fs'), path = require('node:path'); let input = '';
+    process.stdin.setEncoding('utf8'); process.stdin.on('data', chunk => input += chunk);
+    process.stdin.on('end', () => {
+      const reportPath = path.join(process.env.PI_CODING_AGENT_DIR, 'report.json');
+      let invocations = 0; try { invocations = JSON.parse(fs.readFileSync(reportPath, 'utf8')).invocations; } catch {}
+      fs.writeFileSync(reportPath, JSON.stringify({ input, cwd: process.cwd(), pid: process.pid, args: process.argv.slice(2),
+        invocations: invocations + 1, settings: JSON.parse(fs.readFileSync('.pi/settings.json', 'utf8')) }));
+      const source = JSON.parse(input).enabledNewsInterests[0];
+      const topics = [
+        ['Computing infrastructure', 'Data center power grid cooling infrastructure'],
+        ['Public archives', 'Public archives language preservation research tools'],
+        ['Urban cooling', 'Urban cooling district heating infrastructure research'],
+      ].map(([title, query]) => ({ sourceInterestID: source.id, title, query,
+        description: 'An adjacent direction to explore.', connection: 'Connected to computing and its supporting systems.' }));
+      console.log(JSON.stringify({ type: 'message_end', message: { role: 'assistant', stopReason: 'stop',
+        content: [{ type: 'text', text: JSON.stringify({ topics }) }] } }));
+      console.log(JSON.stringify({ type: 'agent_settled' }));
+    });`);
+});
+const stalledExploreScript = `const fs = require('node:fs'), path = require('node:path');
+  fs.writeFileSync(path.join(process.env.PI_CODING_AGENT_DIR, 'started.json'), JSON.stringify({ cwd: process.cwd(), pid: process.pid }));
+  setInterval(() => {}, 1000);`;
+test('Explore PI ideation deadline reaps its only child and removes isolated configuration', async () => {
+  await fixture(async (directory, command) => {
+    const started = Date.now();
+    await assert.rejects(requestExploreIdeas([exploreParent()], new AbortController().signal,
+      createExploreIdeation({ command, agentDir: directory, timeoutMs: 1000 })), /could not complete|interrupted/);
+    assert.ok(Date.now() - started < 5000);
+    const report = JSON.parse(await readFile(join(directory, 'started.json'), 'utf8'));
+    await assert.rejects(access(report.cwd), { code: 'ENOENT' });
+    assert.throws(() => process.kill(report.pid, 0), { code: 'ESRCH' });
+  }, stalledExploreScript);
+});
+test('Explore PI ideation cancellation waits for child closure and tears down on every path', async () => {
+  await fixture(async (directory, command) => {
+    const controller = new AbortController();
+    const pending = requestExploreIdeas([exploreParent()], controller.signal,
+      createExploreIdeation({ command, agentDir: directory, timeoutMs: 5000 }));
+    // Observe rejection immediately; always abort/reap even if a fixture assertion fails.
+    void pending.catch(() => {});
+    let report: { cwd: string; pid: number } | undefined;
+    try {
+      for (let attempt = 0; attempt < 100 && !report; attempt++) {
+        try { report = JSON.parse(await readFile(join(directory, 'started.json'), 'utf8')); }
+        catch { await new Promise(resolve => setTimeout(resolve, 10)); }
+      }
+      assert.ok(report, 'Explore fixture must have started');
+      controller.abort();
+      await assert.rejects(pending, /could not complete|interrupted/);
+      await assert.rejects(access(report.cwd), { code: 'ENOENT' });
+      const pid = report.pid;
+      assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+    } finally { controller.abort(); await pending.catch(() => {}); }
+  }, stalledExploreScript);
+});
+
 test('native search enables only the hosted tool and records provider evidence rather than assistant URLs', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'kontrol-search-extension-'));
   // The same two callbacks are exercised by the installed-CLI fixture below.
