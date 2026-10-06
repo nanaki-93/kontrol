@@ -10,6 +10,7 @@ import { parseFeed, mergeArticles, initialNews } from '../news/feeds';
 import { getDiscovery, mergeDiscovery, searchDiscovery, type Discover } from '../news/discovery';
 import { aiDiscovery, aiSources } from '../news/ai';
 import { piStatus, type PIOptions } from '../news/pi';
+import type { ExploreService } from '../news/explore';
 
 // Kept as exports for existing consumers of the original news module.
 export { fetchFeed, safeWebURL, isPublicIP } from '../news/transport';
@@ -21,7 +22,8 @@ export interface NewsOptions {
   aiStatus?: () => Promise<NewsResponse['ai']>;
   pi?: PIOptions;
 }
-export function newsModule(store: Store, fetcher = fetchFeed, options: NewsOptions = {}): Router {
+export function newsModule(store: Store, fetcher = fetchFeed, options: NewsOptions = {},
+  explore?: Pick<ExploreService, 'invalidateSources'>): Router {
   const router = Router();
   let refreshing = false, discovering = false;
   const search = options.search ?? searchDiscovery(fetcher);
@@ -59,6 +61,9 @@ export function newsModule(store: Store, fetcher = fetchFeed, options: NewsOptio
       store.set('newsDiscovery', state);
       return next;
     });
+    // Revoke only after COMMIT; failed validation/conflicts/rollback leave the
+    // previous valid exploration untouched, including in-flight requests.
+    explore?.invalidateSources([interest.id]);
     res.json(interest);
   });
   router.delete('/interests/:id', (req, res) => {
@@ -72,6 +77,7 @@ export function newsModule(store: Store, fetcher = fetchFeed, options: NewsOptio
       delete state.runs[interest.id];
       store.set('newsDiscovery', state);
     });
+    explore?.invalidateSources([String(req.params.id)]);
     res.status(204).end();
   });
   router.post('/discover', async (req, res) => {

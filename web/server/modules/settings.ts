@@ -15,6 +15,7 @@ import { getJobs } from './jobs';
 import { workspaceSchema, hasWorkspaceWork, type Workspace } from '../../shared/workspace';
 import { getWorkspace } from './workspace';
 import { MAX_BACKUP_BYTES, BACKUP_LIMIT_LABEL } from '../../shared/backup';
+import type { ExploreService } from '../news/explore';
 
 export function exportData(store: Store): NativeExport {
   return nativeExportSchema.parse({
@@ -75,7 +76,7 @@ export function importData(store: Store, input: unknown): void {
     store.set('imported', { at: new Date().toISOString(), sourceVersion: data.appVersion });
   });
 }
-export function settingsModule(store: Store): Router {
+export function settingsModule(store: Store, explore?: Pick<ExploreService, 'invalidate'>): Router {
   const router = Router();
   // Retired modules have no routes. Keep their saved records available to backup
   // and import so removing sections never deletes personal data.
@@ -117,6 +118,11 @@ export function settingsModule(store: Store): Router {
   });
   router.post('/import', (req, res) => {
     importData(store, req.body);
+    // importData returns only after its transaction commits. Revoke even for
+    // legacy imports that retain the same saved-interest IDs and revisions.
+    // Preview, invalid input, fresh-database rejection and rollback never reach
+    // this hook; temporary exploration is not part of either backup schema.
+    explore?.invalidate();
     res.json({ imported: true });
   });
   return router;

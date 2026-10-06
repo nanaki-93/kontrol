@@ -36,8 +36,8 @@ if (production) {
     } catch (error) { next(error); }
   });
 }
-server.on('error', error => { console.error(error.message); store.close(); process.exitCode = 1; });
+server.on('error', error => { console.error(error.message); app.dispose(); store.close(); process.exitCode = 1; });
 server.listen(port, '127.0.0.1', () => console.log('Kontrol is available at ' + origin));
-function shutdown() { server.close(() => { store.close(); process.exit(0); }); }
+function shutdown() { app.dispose(); server.close(() => { store.close(); process.exit(0); }); }
 process.once('SIGINT', shutdown);
 process.once('SIGTERM', shutdown);

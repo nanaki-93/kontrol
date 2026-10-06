@@ -11,9 +11,31 @@ import { jobsModule, type JobsOptions } from './modules/jobs';
 import { workspaceModule } from './modules/workspace';
 import { MAX_BACKUP_BYTES, BACKUP_LIMIT_LABEL } from '../shared/backup';
 import type { fetchFeed } from './news/transport';
+import { createExploreService, type ExploreDependencies } from './news/explore';
+import { createExploreIdeation } from './news/explore-ideation';
+import { getDiscovery, searchDiscovery } from './news/discovery';
+import { piStatus } from './news/pi';
 
-export function createApp(store: Store, options: { origin: string; clock?: () => number; feedFetcher?: typeof fetchFeed; news?: NewsOptions; jobs?: JobsOptions }) {
-  const app = express();
+export interface AppOptions {
+  origin: string;
+  clock?: () => number;
+  feedFetcher?: typeof fetchFeed;
+  news?: NewsOptions;
+  jobs?: JobsOptions;
+  explore?: Omit<ExploreDependencies, 'readInterests' | 'discover'>;
+}
+export function createApp(store: Store, options: AppOptions) {
+  // One process-local owner. Construction does not read context, invoke PI or
+  // retrieve news. Modules receive only the capabilities they currently need.
+  const explore = createExploreService({
+    now: options.clock,
+    ideate: createExploreIdeation(options.news?.pi),
+    available: async () => (await (options.news?.aiStatus?.() ?? piStatus(options.news?.pi))).configured,
+    ...options.explore,
+    readInterests: () => getDiscovery(store).preferences.interests,
+    discover: options.news?.search ?? searchDiscovery(options.feedFetcher),
+  });
+  const app = Object.assign(express(), { explore, dispose: () => explore.dispose() });
   app.disable('x-powered-by');
   const expected = new URL(options.origin);
   app.use((req, res, next) => {
@@ -42,10 +64,10 @@ export function createApp(store: Store, options: { origin: string; clock?: () =>
   app.use('/api/focus', focusModule(store, options.clock));
   app.use('/api/learning', learningModule(store));
   app.use('/api/projects', projectsModule(store));
-  app.use('/api/news', newsModule(store, options.feedFetcher, options.news));
+  app.use('/api/news', newsModule(store, options.feedFetcher, options.news, explore));
   app.use('/api/jobs', jobsModule(store, options.jobs));
   app.use('/api/workspace', workspaceModule(store, options.clock));
-  app.use('/api/settings', settingsModule(store));
+  app.use('/api/settings', settingsModule(store, explore));
   app.use('/api', (_req, res) => res.status(404).json({ error: 'Unknown API route.' }));
   const errors: ErrorRequestHandler = (error: unknown, req, res, _next) => {
     if (error instanceof z.ZodError) {
