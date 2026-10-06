@@ -20,7 +20,7 @@ type SubmitFollow = (variables: FollowSubmission) => Promise<ExploreFollowResult
 
 /** Creation-only editor wiring. No ordinary interest POST/PUT or search path. */
 export function exploreFollowEditorProps(client: QueryClient, review: ExploreFollowReview, submit: SubmitFollow): InterestEditorProps {
-  return { editorID: review.reviewID, initialDraft: review.draft,
+  return { editorID: review.reviewID, initialDraft: review.draft, headingLevel: 3,
     onCreate: async draft => {
       setExploreFollowDraft(client, review.reviewID, draft);
       return submit({ topicID: review.topicID, reviewID: review.reviewID, draft });
@@ -138,6 +138,7 @@ export function ExplorePage() {
   const generate = useExploreGeneration(), recover = useExploreRecovery();
   const [reviewError, setReviewError] = useState<Error | null>(null);
   const model = exploreGalleryModel(state, news.data);
+  const selectedCard = model.cards.find(card => card.selected);
   return <section className="news-explore" aria-labelledby="explore-title">
     <div className="panel">
       <header className="explore-intro">
@@ -176,13 +177,18 @@ export function ExplorePage() {
     {model.cards.length > 0 ? <section aria-labelledby="explore-ideas-title">
       <div className="section-title"><h2 id="explore-ideas-title" tabIndex={-1}>Directions to try</h2><Badge>{model.cards.length} AI-suggested topics</Badge></div>
       <p className="muted">Selecting a topic does not search, follow it or change your daily briefing.</p>
+      <p className="sr-only" role="status" aria-live="polite">{selectedCard ?
+        `Selected topic: ${selectedCard.title}. Review its search below; no news has been fetched by selecting it.` :
+        'Choose a topic to review its search. Selecting does not fetch news.'}</p>
       <div className="explore-topic-grid">{model.cards.map(card => <article
-        className={'panel explore-topic-card' + (card.selected ? ' selected' : '')} key={card.id}>
+        className={'panel explore-topic-card' + (card.selected ? ' selected' : '')} key={card.id}
+        aria-labelledby={'explore-topic-' + card.id}>
         <Badge tone={card.selectable ? '' : 'warning'}>{card.selectable ? 'AI-suggested topic' : 'Obsolete topic'}</Badge>
-        <h3>{card.title}</h3><p>{card.description}</p>
+        <h3 id={'explore-topic-' + card.id}>{card.title}</h3><p>{card.description}</p>
         <p className="explore-connection"><strong>Connected to: {card.sourceLabel}</strong><br />Suggested connection: {card.connection}</p>
         <button type="button" className={'button ' + (card.selected ? 'primary' : 'secondary')}
-          aria-pressed={card.selected} aria-label={'Select topic: ' + card.title} disabled={!card.selectable}
+          aria-pressed={card.selected} aria-label={'Select topic: ' + card.title}
+          aria-controls={state.selectedTopicID ? 'explore-preview' : undefined} disabled={!card.selectable}
           onClick={() => selectExploreTopic(client, card.id)}>{card.selected ? 'Selected topic' : 'Select topic'}</button>
       </article>)}</div>
     </section> : !model.needsInterests && <div className="panel"><Empty

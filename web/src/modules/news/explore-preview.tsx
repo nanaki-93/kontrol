@@ -79,21 +79,21 @@ export function ExploreReadingPreview({ state, news, onReview }: {
   const recovery = <div className="actions"><button type="button" className="button secondary" disabled={!model.canRecover}
     onClick={() => recover.mutate()}>{model.canRecover ? 'Check local status' : 'Checking local status…'}</button>
     <span className="footnote">Local recovery only — no PI or news search.</span></div>;
-  return <section className="panel explore-reading" aria-labelledby="explore-preview-title">
+  return <section id="explore-preview" className="panel explore-reading" aria-labelledby="explore-preview-title">
     <header className="explore-preview-head">
       <Badge>Temporary Standard preview</Badge>
       <h2 id="explore-preview-title">{topic?.title ?? 'Temporary preview unavailable'}</h2>
       {topic && <p className="explore-connection"><strong>Connected to: {model.sourceLabel}</strong><br />Suggested connection: {topic.connection}</p>}
       <p className="muted">Search real coverage without following this topic or changing your briefing. PI suggests the direction; Standard search retrieves the sources.</p>
     </header>
-    {topic && search && <form className="editor explore-search-editor" onSubmit={event => {
+    {topic && search && <form className="editor explore-search-editor" aria-label={'Standard search for ' + topic.title} onSubmit={event => {
       event.preventDefault();
       if (model.canSearch) command.mutate({ topicID: topic.id });
     }}>
       <fieldset disabled={!model.editable}>
         <legend>Review the search</legend>
-        <label>News search query<textarea rows={3} maxLength={EXPLORE_MAX_QUERY_CHARS} value={search.query}
-          aria-describedby="explore-query-help" aria-invalid={!!model.validationError}
+        <label>News search query<textarea required rows={3} maxLength={EXPLORE_MAX_QUERY_CHARS} value={search.query}
+          aria-describedby={'explore-query-help' + (model.validationError ? ' explore-query-error' : '')} aria-invalid={!!model.validationError}
           onChange={event => setExploreSearchDraft(client, topic.id, { ...search, query: event.target.value })} /></label>
         <p className="footnote" id="explore-query-help">Use at least 5 search words. Proposed locale and freshness come from the source interest; its required/excluded keyword filters are not carried over. Editing does not search.</p>
         <div className="explore-search-locales">
@@ -105,12 +105,14 @@ export function ExploreReadingPreview({ state, news, onReview }: {
             <option value={1}>Past day</option><option value={7}>Past 7 days</option><option value={30}>Past 30 days</option></select></label>
         </div>
       </fieldset>
-      <ErrorMessage error={model.validationError} />
+      {model.validationError && <div id="explore-query-error"><ErrorMessage error={model.validationError} /></div>}
       <div className="actions"><button type="submit" className="button primary" disabled={!model.canSearch}>{model.searchLabel}</button>
         <span className="footnote">Standard only · No PI call · No automatic retry</span></div>
       {model.atSearchCapacity && model.previewState !== 'pending' && <p className="footnote" role="status">Two topic searches are already running. Wait or check local status.</p>}
     </form>}
-    <p className="explore-preview-status" role="status" aria-live="polite">{model.message}</p>
+    <p className="explore-preview-status" role="status" aria-live="polite">
+      {topic && <span className="sr-only">{topic.title}: </span>}{model.message}
+    </p>
     {/* Errors belong to the cached topic, not the mutation observer's latest
         request (which may be a duplicate or a different topic). */}
     <ErrorMessage error={model.error} />

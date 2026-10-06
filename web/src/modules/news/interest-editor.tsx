@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useId, useState, type FormEvent } from 'react';
 import { Plus } from 'lucide-react';
 import { interestDraftSchema, type InterestDraft, type NewsInterest } from '../../../shared/news';
 import { useCommand } from '../../lib/api';
@@ -16,6 +16,7 @@ export type InterestEditorInput =
 export type InterestEditorProps = InterestEditorInput & {
   // A new suggestion/review identity remounts creation; refreshed metadata does not.
   editorID?: string;
+  headingLevel?: 2 | 3;
   onClose: () => void;
   onSaved?: (result: InterestEditorSaveResult) => void;
 };
@@ -78,6 +79,7 @@ function InterestEditorForm(props: InterestEditorProps) {
   const [saving, setSaving] = useState(false);
   const command = useCommand<NewsInterest>(['news']);
   const editing = !!initial.existing;
+  const headingID = useId(), Heading = props.headingLevel === 3 ? 'h3' : 'h2';
   function change<K extends keyof InterestDraft>(key: K, value: InterestDraft[K]) { setDraft(d => ({ ...d, [key]: value })); }
   async function save(e: FormEvent) {
     e.preventDefault();
@@ -95,8 +97,8 @@ function InterestEditorForm(props: InterestEditorProps) {
       } finally { setSaving(false); }
     });
   }
-  return <form className="panel editor interest-editor" onSubmit={save}>
-    <h2>{editing ? 'Refine your interest' : 'What would you like to follow?'}</h2>
+  return <form className="panel editor interest-editor" aria-labelledby={headingID} onSubmit={save}>
+    <Heading id={headingID}>{editing ? 'Refine your interest' : 'What would you like to follow?'}</Heading>
     <label>Name<input required maxLength={100} value={draft.name} onChange={e => change('name', e.target.value)} placeholder="Developer jobs in Japan" /></label>
     <label>What should we look for?<textarea required minLength={3} maxLength={600} rows={3} value={draft.query} onChange={e => change('query', e.target.value)} placeholder="Software developer jobs in Japan with English-speaking teams and visa sponsorship" /></label>
     <div className="form-grid">
