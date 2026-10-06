@@ -1,12 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { withAPI } from './helpers';
 import { Store } from '../server/store';
-import { createApp } from '../server/app';
+import { createApp, type AppOptions } from '../server/app';
 import { getWorkspace } from '../server/modules/workspace';
 import { emptyWorkspace, type Workspace } from '../shared/workspace';
 import { type NewsState, type Learning } from '../shared/schema';
@@ -175,6 +177,68 @@ test('version-5 backups round-trip saved work and reject malformed or destructiv
     assert.equal((await request('/settings/import', 'POST', legacy)).status, 409);
   });
 });
+test('preview reading survives SQLite reopen with no temporary cache or automatic network work', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'kontrol-explore-reading-'));
+  const path = join(directory, 'fixture.sqlite');
+  let saved: Workspace['articles'] = [], ideations = 0, searches = 0;
+  // Each listener, app owner and database belongs to this fixture only. Close
+  // them even on assertion failures before reopening/removing its directory.
+  async function diskAPI(options: Omit<AppOptions, 'origin'>, run: (fixture: {
+    app: ReturnType<typeof createApp>; store: Store; request: Request;
+  }) => Promise<void>) {
+    const store = new Store(path), server = createServer();
+    let app: ReturnType<typeof createApp> | undefined;
+    try {
+      await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+      const origin = 'http://127.0.0.1:' + (server.address() as AddressInfo).port;
+      app = createApp(store, { origin, ...options }); server.on('request', app);
+      await run({ app, store, request: (route, method = 'GET', body, headers = {}) => fetch(origin + '/api' + route, {
+        method, headers: { 'X-Kontrol-Client': 'web', 'Content-Type': 'application/json', ...headers },
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      }) });
+    } finally {
+      app?.dispose(); server.closeAllConnections();
+      try { if (server.listening) await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+      finally { store.close(); }
+    }
+  }
+  try {
+    await diskAPI({ clock: () => Date.parse(at), explore: { available: async () => true, ideate: async sources => {
+      ideations++; return JSON.stringify({ topics: [{ sourceInterestID: sources[0].id, title: 'Public infrastructure research',
+        description: 'An adjacent topic idea.', connection: 'Related to infrastructure.', query: 'Public infrastructure research community collaborative projects' }] });
+    } }, news: { search: async interest => {
+      searches++; return ['bookmark', 'notes', 'read', 'unsaved'].map(kind => ({
+        id: kind, title: 'Retrieved ' + kind, url: 'https://example.com/articles/' + kind, source: 'Fixture', summary: 'Retrieved source excerpt.',
+        publishedAt: null, fetchedAt: at, contentKind: 'article' as const, feedIDs: [], topicIDs: [],
+        matches: [{ interestID: interest.id, interestRevision: interest.revision, mode: 'search' as const, score: 80, reason: 'Fixture' }],
+      }));
+    } } }, async ({ app, store, request }) => {
+      const { session } = await app.explore.generate(), topic = session.topics[0];
+      await app.explore.search(session.id, topic.id, { expectedSessionRevision: session.revision, search: topic.proposedSearch });
+      for (const [kind, command] of [['bookmark', { saved: true }], ['notes', { notes: 'Persistent authored reading' }], ['read', { read: true }]] as const) {
+        assert.equal((await action(request, '/articles', { url: 'https://example.com/articles/' + kind, ...command }, 'PUT')).status, 200);
+      }
+      saved = getWorkspace(store).articles;
+      assert.equal(saved.length, 3); assert.equal(saved[2].savedAt, null, 'Read-only markers remain disposable, not bookmarks');
+      assert.deepEqual([ideations, searches], [1, 1]);
+    });
+    await diskAPI({ explore: { available: async () => { throw new Error('Unexpected automatic availability'); },
+      ideate: async () => { ideations++; throw new Error('Unexpected automatic PI'); } },
+      news: { search: async () => { searches++; throw new Error('Unexpected automatic search'); } } }, async ({ app, store, request }) => {
+      assert.equal(app.explore.snapshot().lifecycle.state, 'absent');
+      assert.deepEqual(getWorkspace(store).articles, saved);
+      assert.deepEqual((await (await request('/workspace')).json()).articles, saved);
+      const before = getWorkspace(store);
+      const missing = await action(request, '/articles', { url: 'https://example.com/articles/unsaved', saved: true }, 'PUT');
+      assert.equal(missing.status, 404); assert.match((await missing.json()).error, /search|refresh/);
+      assert.deepEqual(getWorkspace(store), before);
+      assert.equal((await action(request, '/articles', { url: 'https://example.com/articles/notes', read: true }, 'PUT')).status, 200);
+      assert.equal(getWorkspace(store).articles[1].notes, 'Persistent authored reading');
+      assert.deepEqual([ideations, searches], [1, 1]);
+    });
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 test('saved workspace survives reopening an isolated SQLite database and rejects unsupported document versions', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'kontrol-workspace-'));
   try {

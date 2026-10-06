@@ -5,15 +5,16 @@ import { type Learning, type NewsState } from '../../shared/schema';
 import { type DiscoveryState } from '../../shared/news';
 import { jobSourceSchema, type JobsState } from '../../shared/jobs';
 import {
-  workspaceSchema, workspaceProfileSchema, emptyWorkspace, canonicalURL, safeURL, noteDraftSchema, calendarDay,
+  workspaceSchema, workspaceProfileSchema, articleSnapshotSchema, emptyWorkspace, canonicalURL, safeURL, noteDraftSchema, calendarDay,
   stages, skillDecisionSchema, reviewRating, lessonDefinition, type Workspace,
 } from '../../shared/workspace';
 import { Store } from '../store';
 import { HttpError, requireFound } from '../errors';
+import type { ExploreService } from '../news/explore';
 
 export function getWorkspace(store: Store): Workspace { return workspaceSchema.parse(store.get('workspace')); }
 const revisionSchema = z.object({ expectedRevision: z.uuid() });
-export function workspaceModule(store: Store, clock = Date.now): Router {
+export function workspaceModule(store: Store, clock = Date.now, temporary?: Pick<ExploreService, 'resolve'>): Router {
   const router = Router();
   const initial = emptyWorkspace(randomUUID());
   const jobs = store.get<JobsState>('jobs');
@@ -57,10 +58,16 @@ export function workspaceModule(store: Store, clock = Date.now): Router {
       if (record && req.body.expectedNotes !== undefined && req.body.expectedNotes !== record.notes) throw new HttpError(409, 'These reading notes changed in another tab. Your draft is kept.');
       if (!record) {
         const discovered = store.get<DiscoveryState>('newsDiscovery').articles.find(a => canonicalURL(a.url) === url);
-        const source = requireFound(discovered ?? store.get<NewsState>('news').articles.find(a => canonicalURL(a.url) === url));
-        record = { id: randomUUID(), article: { title: source.title, url: source.url, source: source.source, summary: source.summary,
+        const persisted = discovered ?? store.get<NewsState>('news').articles.find(a => canonicalURL(a.url) === url);
+        // Resolve only as a last resort, synchronously inside the revision-checked
+        // transaction. Client snapshots never establish retrieval evidence.
+        const resolved = persisted ? undefined : temporary?.resolve(url);
+        const source = persisted ?? resolved?.article;
+        if (!source) throw new HttpError(404, 'This article is no longer available. Explicitly search or refresh its coverage, then try saving again.');
+        const article = articleSnapshotSchema.parse({ title: source.title, url: source.url, source: source.source, summary: source.summary,
           publishedAt: source.publishedAt, fetchedAt: source.fetchedAt,
-          summaryKind: discovered?.matches.some(m => m.mode === 'ai') ? 'ai-snippet' : 'source' }, savedAt: null, readAt: null, notes: '', updatedAt: at };
+          summaryKind: discovered?.matches.some(m => m.mode === 'ai') ? 'ai-snippet' : resolved?.summaryKind ?? 'source' });
+        record = { id: randomUUID(), article, savedAt: null, readAt: null, notes: '', updatedAt: at };
         state.articles.push(record);
       }
       if (input.saved !== undefined) record.savedAt = input.saved ? record.savedAt ?? at : null;

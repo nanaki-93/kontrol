@@ -66,7 +66,7 @@ export function createApp(store: Store, options: AppOptions) {
   app.use('/api/projects', projectsModule(store));
   app.use('/api/news', newsModule(store, options.feedFetcher, options.news, explore));
   app.use('/api/jobs', jobsModule(store, options.jobs));
-  app.use('/api/workspace', workspaceModule(store, options.clock));
+  app.use('/api/workspace', workspaceModule(store, options.clock, explore));
   app.use('/api/settings', settingsModule(store, explore));
   app.use('/api', (_req, res) => res.status(404).json({ error: 'Unknown API route.' }));
   const errors: ErrorRequestHandler = (error: unknown, req, res, _next) => {

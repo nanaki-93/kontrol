@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { canonicalURL, safeURL, calendarDay, emptyWorkspace, workspaceSchema, groupStories, layoutPresets,
+import { canonicalURL, safeURL, calendarDay, articleSnapshotSchema, emptyWorkspace, workspaceSchema, groupStories, layoutPresets,
   learningPaths, nextLesson, relatedLessons, dueReviews, lessonDefinition } from '../shared/workspace';
 import { layoutSchema } from '../shared/schema';
 import { initialLearning } from '../server/modules/learning';
@@ -12,6 +12,21 @@ test('saved links remove tracking without merging different offers or accepting 
   for (const url of ['javascript:alert(1)', 'file:///tmp/example', 'https://user:secret@example.com']) assert.equal(safeURL.safeParse(url).success, false);
   for (const date of ['2026-02-30', '2026-13-01', '2026-1-1']) assert.equal(calendarDay.safeParse(date).success, false);
   assert.equal(calendarDay.parse('2028-02-29'), '2028-02-29');
+});
+test('article snapshots validate source fields and workspace rejects canonical duplicates', () => {
+  const at = '2026-10-03T00:00:00.000Z';
+  const article = articleSnapshotSchema.parse({ title: 'Retrieved coverage', url: 'https://example.com/articles/story?a=1&b=2',
+    source: 'Publisher', summary: 'Source excerpt.', publishedAt: null, fetchedAt: at });
+  assert.equal(article.summaryKind, 'source'); assert.equal(article.publishedAt, null);
+  for (const invalid of [{ title: '' }, { summaryKind: 'invented' }, { fetchedAt: 'invalid' },
+    { url: 'https://user:secret@example.com/story' }, { summary: 'x'.repeat(50_001) }]) {
+    assert.equal(articleSnapshotSchema.safeParse({ ...article, ...invalid }).success, false);
+  }
+  const state = emptyWorkspace(randomUUID());
+  const record = { id: randomUUID(), article, savedAt: at, readAt: null, notes: 'Authored', updatedAt: at };
+  state.articles = [record]; assert.equal(workspaceSchema.safeParse(state).success, true);
+  state.articles.push({ ...record, id: randomUUID(), article: { ...article, url: 'https://example.com/articles/story?b=2&utm_source=fixture&a=1#top' } });
+  assert.equal(workspaceSchema.safeParse(state).success, false);
 });
 test('briefing groups similar dated coverage but does not invent events for undated or unrelated stories', () => {
   const article = (title: string, url: string, publishedAt: string | null = '2026-10-03T00:00:00.000Z') => ({ title, url, publishedAt });

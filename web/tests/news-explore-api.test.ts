@@ -13,6 +13,8 @@ import {
   EXPLORE_SESSION_TTL_MS, exploreGenerateResponseSchema, exploreSearchResponseSchema, exploreStatusResponseSchema,
 } from '../shared/news-explore';
 import type { Store } from '../server/store';
+import { getWorkspace } from '../server/modules/workspace';
+import { canonicalURL } from '../shared/workspace';
 
 // Composition/import fixtures use the service directly; endpoint fixtures below
 // exercise the protected HTTP contracts with injected providers and retrieval.
@@ -46,6 +48,179 @@ async function preview(explore: ExploreService) {
   return session;
 }
 const obsolete = (error: unknown) => error instanceof ExploreServiceError && error.code === 'obsolete-source';
+
+type Request = Parameters<Parameters<typeof withAPI>[0]>[0]['request'];
+const previewURL = 'https://example.com/articles/community';
+async function reading(request: Request, store: Store, body: Record<string, unknown>) {
+  return request('/workspace/articles', 'PUT', { expectedRevision: getWorkspace(store).revision, ...body });
+}
+
+for (const command of [{ saved: true }, { read: true }, { notes: 'Authored preview note', expectedNotes: '' }]) {
+  test('explore reading: trusted preview supports ' + Object.keys(command)[0] + ' without persistent discovery', async () => {
+    await withAPI(async ({ request, store, explore }) => {
+      await preview(explore);
+      const news = store.get('news'), discovery = store.get('newsDiscovery');
+      const trusted = explore.resolve(previewURL)!.article;
+      assert.equal((await reading(request, store, { url: previewURL, ...command,
+        article: { title: 'Forged headline', summaryKind: 'ai-snippet', summary: 'Untrusted client text' },
+      })).status, 200);
+      const record = getWorkspace(store).articles[0];
+      assert.deepEqual(record.article, { title: trusted.title, url: trusted.url, source: trusted.source,
+        summary: trusted.summary, publishedAt: trusted.publishedAt, fetchedAt: trusted.fetchedAt, summaryKind: 'source' });
+      assert.equal(record.savedAt !== null, 'saved' in command || 'notes' in command);
+      assert.equal(record.readAt !== null, 'read' in command);
+      assert.equal(record.notes, 'notes' in command ? command.notes : '');
+      assert.deepEqual(store.get('news'), news); assert.deepEqual(store.get('newsDiscovery'), discovery);
+      explore.dispose();
+      assert.equal((await reading(request, store, { url: previewURL, read: false })).status, 200);
+      assert.deepEqual(getWorkspace(store).articles[0].article, record.article);
+      assert.equal(getWorkspace(store).articles[0].notes, record.notes);
+    }, fixtures);
+  });
+}
+
+test('explore reading: arbitrary snapshots and unknown URLs cannot establish evidence', async () => {
+  await withAPI(async ({ request, store, explore }) => {
+    await preview(explore);
+    const before = getWorkspace(store), article = explore.resolve(previewURL)!.article;
+    await assertPublicError(await reading(request, store, { url: 'https://example.com/articles/not-retrieved', saved: true, article }), 404, /search|refresh/);
+    await assertPublicError(await reading(request, store, { article, saved: true }), 400);
+    await assertPublicError(await reading(request, store, { url: 'javascript:alert(1)', article, saved: true }), 400);
+    assert.deepEqual(getWorkspace(store), before);
+  }, fixtures);
+});
+
+test('explore reading: canonical duplicates, workspace revisions and note baselines protect authored snapshots', async () => {
+  await withAPI(async ({ request, store, explore }) => {
+    await preview(explore);
+    const initial = getWorkspace(store);
+    assert.equal((await reading(request, store, { url: previewURL + '?utm_source=fixture#top', notes: 'First note', read: true })).status, 200);
+    const saved = getWorkspace(store);
+    await assertPublicError(await request('/workspace/articles', 'PUT', {
+      url: previewURL, saved: true, notes: 'Stale overwrite', expectedRevision: initial.revision,
+    }), 409, /workspace changed/);
+    await assertPublicError(await reading(request, store, { url: previewURL, notes: 'Stale overwrite', saved: false, expectedNotes: '' }), 409, /notes changed/);
+    assert.deepEqual(getWorkspace(store), saved);
+    assert.equal((await reading(request, store, { url: previewURL, notes: 'Approved edit', expectedNotes: 'First note' })).status, 200);
+    const after = getWorkspace(store);
+    assert.equal(after.articles.length, 1); assert.deepEqual(after.articles[0].article, saved.articles[0].article);
+    assert.equal(after.articles[0].notes, 'Approved edit'); assert.equal(after.articles[0].savedAt, saved.articles[0].savedAt);
+    assert.equal(canonicalURL(after.articles[0].article.url), previewURL);
+  }, fixtures);
+});
+
+test('explore reading: existing AI workspace, persisted discovery and feed snapshots precede temporary evidence', async () => {
+  await withAPI(async ({ request, store, explore }) => {
+    await preview(explore);
+    const source = retrieved(parent(store))[0], discovery = getDiscovery(store), news = store.get<NewsState>('news');
+    discovery.articles = [{ ...source, summary: 'Persisted AI excerpt.', matches: [{ ...source.matches[0], mode: 'ai' }] }];
+    news.articles = [{ ...source, summary: 'Persisted feed excerpt.' }];
+    store.set('newsDiscovery', discovery); store.set('news', news);
+    assert.equal((await reading(request, store, { url: previewURL, notes: 'Keep authored text' })).status, 200);
+    const saved = getWorkspace(store).articles[0];
+    assert.equal(saved.article.summary, 'Persisted AI excerpt.'); assert.equal(saved.article.summaryKind, 'ai-snippet');
+    store.set('newsDiscovery', { ...discovery, articles: [] });
+    assert.equal((await reading(request, store, { url: previewURL, read: true })).status, 200);
+    assert.deepEqual(getWorkspace(store).articles[0].article, saved.article);
+    assert.equal(getWorkspace(store).articles[0].notes, 'Keep authored text');
+    // Remove only the test record to exercise the next precedence tier.
+    const workspace = getWorkspace(store); store.set('workspace', { ...workspace, articles: [] });
+    assert.equal((await reading(request, store, { url: previewURL, saved: true })).status, 200);
+    assert.equal(getWorkspace(store).articles[0].article.summary, 'Persisted feed excerpt.');
+    assert.equal(getWorkspace(store).articles[0].article.summaryKind, 'source');
+  }, fixtures);
+});
+
+test('explore reading: bookmark capacity failures roll back without evicting authored records', async () => {
+  await withAPI(async ({ request, store, explore }) => {
+    await preview(explore);
+    const state = getWorkspace(store), at = new Date().toISOString();
+    state.articles = Array.from({ length: 1000 }, (_, i) => ({ id: randomUUID(), article: {
+      title: 'Saved fixture ' + i, url: 'https://example.com/articles/saved/' + i, source: 'Fixture', summary: '',
+      publishedAt: null, fetchedAt: at, summaryKind: 'source' as const,
+    }, savedAt: at, readAt: null, notes: i === 0 ? 'Authored note' : '', updatedAt: at }));
+    store.set('workspace', state);
+    await assertPublicError(await reading(request, store, { url: previewURL, saved: true }), 400);
+    assert.deepEqual(getWorkspace(store), state);
+    assert.ok(explore.resolve(previewURL), 'Rejected persistence does not destroy trusted preview');
+    state.articles[1].savedAt = null; state.articles[1].readAt = at;
+    state.articles[2].savedAt = null; state.articles[2].notes = 'Protected authored note';
+    store.set('workspace', state);
+    assert.equal((await reading(request, store, { url: previewURL, read: true })).status, 200);
+    const after = getWorkspace(store);
+    assert.equal(after.articles.length, 1000);
+    assert.equal(after.articles.some(a => a.id === state.articles[1].id), false, 'Only disposable read marker is evicted');
+    assert.equal(after.articles.find(a => a.id === state.articles[2].id)?.notes, 'Protected authored note');
+    assert.equal(after.articles.find(a => a.article.url === previewURL)?.savedAt, null);
+  }, fixtures);
+});
+
+test('explore reading: byte capacity failures are atomic even below the article count bound', async () => {
+  await withAPI(async ({ request, store, explore }) => {
+    await preview(explore);
+    const state = getWorkspace(store), at = new Date().toISOString();
+    state.articles = Array.from({ length: 170 }, (_, i) => ({ id: randomUUID(), article: {
+      title: 'Saved fixture ' + i, url: 'https://example.com/articles/saved/' + i, source: 'Fixture', summary: '',
+      publishedAt: null, fetchedAt: at, summaryKind: 'source' as const,
+    }, savedAt: at, readAt: null, notes: '', updatedAt: at }));
+    let remaining = 8 * 1024 * 1024 - 1024 - Buffer.byteLength(JSON.stringify(state));
+    for (const record of state.articles) {
+      const length = Math.min(50_000, remaining); record.article.summary = 'x'.repeat(length); remaining -= length;
+    }
+    assert.equal(remaining, 0); store.set('workspace', state);
+    await assertPublicError(await reading(request, store, { url: previewURL, saved: true, notes: 'x'.repeat(2000) }), 400, /8 MB/);
+    assert.deepEqual(getWorkspace(store), state);
+  }, fixtures);
+});
+
+for (const loss of ['expiry', 'source-revocation', 'replacement', 'disposal'] as const) {
+  test('explore reading: ' + loss + ' requires explicit refresh for unsaved sources but preserves bookmarks and notes', async () => {
+    let now = Date.parse('2026-10-06T12:00:00Z');
+    await withAPI(async ({ request, store, explore }) => {
+      // A second retrieved fixture provides an independently unsaved URL.
+      const { session } = await explore.generate();
+      const topic = session.topics[0];
+      await explore.search(session.id, topic.id, { expectedSessionRevision: session.revision, search: topic.proposedSearch });
+      assert.equal((await reading(request, store, { url: previewURL, saved: true, notes: 'Durable note' })).status, 200);
+      const before = getWorkspace(store), unsaved = previewURL + '-unsaved';
+      assert.ok(explore.resolve(unsaved));
+      if (loss === 'expiry') now += EXPLORE_SESSION_TTL_MS;
+      else if (loss === 'source-revocation') {
+        const source = parent(store);
+        assert.equal((await request('/news/interests/' + source.id, 'PUT', { ...source, enabled: false, expectedRevision: source.revision })).status, 200);
+      } else if (loss === 'replacement') await explore.generate();
+      else explore.dispose();
+      await assertPublicError(await reading(request, store, { url: unsaved, notes: 'Cannot save stale coverage' }), 404, /search|refresh/);
+      assert.deepEqual(getWorkspace(store), before);
+      assert.equal((await reading(request, store, { url: previewURL, read: true })).status, 200);
+      const after = getWorkspace(store).articles[0];
+      assert.deepEqual(after.article, before.articles[0].article); assert.equal(after.notes, 'Durable note');
+    }, { ...fixtures, clock: () => now, news: { search: async interest => {
+      const source = retrieved(interest)[0]; return [source, { ...source, id: 'unsaved', url: source.url + '-unsaved' }];
+    } } });
+  });
+}
+
+test('explore reading: version-5 backup/import retains saved reading but excludes temporary ideas and unsaved coverage', async () => {
+  let backup: Record<string, unknown> = {}, saved: ReturnType<typeof getWorkspace>['articles'] = [];
+  await withAPI(async ({ request, store, explore }) => {
+    await preview(explore);
+    assert.equal((await reading(request, store, { url: previewURL, notes: 'Backup reading note', read: true })).status, 200);
+    saved = getWorkspace(store).articles;
+    backup = await (await request('/settings/export')).json();
+    assert.equal(backup.schemaVersion, 5);
+    assert.deepEqual(Object.keys(backup).sort(), ['format', 'schemaVersion', 'data', 'layout', 'newsDiscovery', 'jobs', 'workspace'].sort());
+    assert.doesNotMatch(JSON.stringify(backup), /Community infrastructure|sourceInterestID/);
+    explore.dispose();
+  }, fixtures);
+  await withAPI(async ({ request, store, explore }) => {
+    assert.equal((await request('/settings/import', 'POST', backup)).status, 200);
+    assert.deepEqual(getWorkspace(store).articles, saved);
+    assert.equal(explore.resolve(previewURL), undefined);
+    assert.equal((await reading(request, store, { url: previewURL, read: false })).status, 200);
+    assert.equal(getWorkspace(store).articles[0].notes, 'Backup reading note');
+  }, fixtures);
+});
 
 test('explore composition: apps own isolated caches and local reads invoke no external work', async () => {
   let ideations = 0, searches = 0;
