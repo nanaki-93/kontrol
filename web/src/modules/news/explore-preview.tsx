@@ -49,6 +49,7 @@ export function exploreReadingPreviewModel(supplied: ExploreClientState, news?: 
     error: preview && 'error' in preview ? preview.error.error : null,
     validationError: validation && !validation.success ? validation.error.issues[0]?.message ?? 'Review the search.' : null,
     editable: searchable,
+    canReview: searchable && !!validation?.success,
     canSearch: searchable && !!validation?.success && !busy && !atSearchCapacity && state.recovery.state !== 'pending',
     atSearchCapacity, canRecover: state.recovery.state !== 'pending',
     searchLabel: preview?.state === 'pending' ? 'Searching · Standard…' : result ? 'Search again · Standard' : 'Search this topic · Standard',
@@ -68,7 +69,9 @@ function SearchTime({ value }: { value: string }) {
   return <time dateTime={value} title={value}>{new Date(value).toLocaleString()}</time>;
 }
 
-export function ExploreReadingPreview({ state, news }: { state: ExploreClientState; news?: NewsResponse }) {
+export function ExploreReadingPreview({ state, news, onReview }: {
+  state: ExploreClientState; news?: NewsResponse; onReview: (topicID: string) => void;
+}) {
   const client = useQueryClient(), command = useExploreSearch(), recover = useExploreRecovery();
   const model = exploreReadingPreviewModel(state, news);
   if (!model.previewState) return null;
@@ -138,8 +141,10 @@ export function ExploreReadingPreview({ state, news }: { state: ExploreClientSta
       </Empty>}
     </div>}
     <footer className="explore-preview-end">
-      <p>{model.result ? 'That’s this preview. Keep a story or try another direction.' : 'Explore at your own pace. Nothing is followed automatically.'}</p>
-      <p className="footnote">Saved articles and authored notes remain available independently of this temporary preview.</p>
+      <p>{model.result ? 'That’s this preview. Keep a story, follow the topic or try another direction.' : 'Explore at your own pace. Nothing is followed automatically.'}</p>
+      {topic && <button type="button" className="button primary" disabled={!model.canReview}
+        onClick={() => onReview(topic.id)}>Review &amp; follow topic</button>}
+      <p className="footnote">Review opens an editable new-interest draft using the search above; it does not save or search. Saved articles and authored notes remain available independently of this temporary preview.</p>
       {topic && <button type="button" className="text-link" aria-controls="explore-ideas-title" onClick={() => {
         // Keep the app's News hash route intact while returning to the gallery.
         const ideas = document.getElementById('explore-ideas-title');

@@ -20,7 +20,7 @@ import {
 } from '../src/modules/news/interest-editor';
 
 import { navigateNewsView, newsViewFromHash } from '../src/modules/news';
-import { exploreGalleryModel } from '../src/modules/news/explore';
+import { exploreGalleryModel, exploreFollowEditorProps, exploreFollowPresentationModel } from '../src/modules/news/explore';
 import { exploreReadingPreviewModel } from '../src/modules/news/explore-preview';
 
 // Pure editor/cache fixtures only: no DOM, application, listener or external request.
@@ -1425,4 +1425,146 @@ test('reading-preview: invalid drafts and concurrency disable submission without
   const capacity = exploreReadingPreviewModel(concurrent, news);
   assert.equal(capacity.atSearchCapacity, true); assert.equal(capacity.canSearch, false);
   assert.equal(capacity.result, result); assert.equal(capacity.editable, true);
+});
+
+test('follow-presentation: selected search opens a keyed creation editor with all ordinary fields and no network work', context => {
+  const client = sessionClient(context), source = interest(), session = sessionFixture(source), topic = session.topics[0];
+  seedSession(client, session); cacheMetadata(client, [source]);
+  context.mock.method(globalThis, 'fetch', () => { throw new Error('Opening must not request work'); });
+  const search: ExploreSearch = { query: 'regional renewable energy district cooling infrastructure news', language: 'en', region: 'GB', days: 1 };
+  setExploreSearchDraft(client, topic.id, search);
+  assert.equal(exploreReadingPreviewModel(readExploreState(client)).canReview, true);
+  const review = beginExploreFollowReview(client, topic.id);
+  const props = exploreFollowEditorProps(client, review, async () => { throw new Error('No submit on opening'); });
+  assert.equal(props.interest, undefined);
+  assert.equal(props.editorID, review.reviewID);
+  assert.equal(interestEditorIdentity(props, props.editorID), 'create:' + review.reviewID);
+  const editor = createInterestEditorState(props);
+  assert.equal(editor.existing, null);
+  assert.deepEqual(editor.draft, { name: topic.title, ...search, intent: 'news', enabled: true, requiredTerms: [], excludedTerms: [] });
+  assert.equal(exploreFollowPresentationModel(readExploreState(client))?.showEditor, true);
+  setExploreSearchDraft(client, topic.id, { ...search, query: 'short query' });
+  assert.equal(exploreReadingPreviewModel(readExploreState(client)).canReview, false);
+  assert.deepEqual(beginExploreFollowReview(client, topic.id), review); // Existing dirty review is not reset.
+});
+
+test('follow-presentation: editor cancel is local-only and leaves metadata, previews and search drafts unchanged', context => {
+  const client = sessionClient(context), { review } = followFixture(client);
+  context.mock.method(globalThis, 'fetch', () => { throw new Error('Cancel must not request work'); });
+  const before = structuredClone(readExploreState(client)), metadata = structuredClone(client.getQueryData(['news']));
+  const props = exploreFollowEditorProps(client, review, async () => { throw new Error('No save on cancel'); });
+  props.onClose();
+  const after = readExploreState(client);
+  assert.equal(after.activeFollowTopicID, null);
+  assert.deepEqual(after, { ...before, activeFollowTopicID: null });
+  assert.deepEqual(client.getQueryData(['news']), metadata);
+  assert.equal(exploreFollowPresentationModel(after), null);
+});
+
+for (const created of [true, false]) test(`follow-presentation: ${created ? 'saved' : 'existing-equivalent'} receipt stays visible with a plain Discover handoff and preserved preview`, async context => {
+  const client = sessionClient(context), { session, topic, review } = followFixture(client);
+  const saved = interest({ ...review.draft, name: created ? 'My reviewed direction' : 'Existing equivalent interest' });
+  if (!created) {
+    const metadata = client.getQueryData<NewsResponse>(['news'])!;
+    client.setQueryData(['news'], { ...metadata, discovery: { ...metadata.discovery, preferences: {
+      ...metadata.discovery.preferences, interests: [...metadata.discovery.preferences.interests, saved] } } });
+  }
+  const before = structuredClone(readExploreState(client).lifecycle);
+  let followCalls = 0, ordinaryCalls = 0;
+  context.mock.method(globalThis, 'fetch', async (url: unknown) => {
+    followCalls++;
+    assert.equal(url, `/api/news/explore/${session.id}/topics/${topic.id}/follow`);
+    return Response.json({ interest: saved, created });
+  });
+  context.mock.method(client, 'invalidateQueries', () => { throw new Error('Handoff must not start refetches'); });
+  const command = new MutationObserver(client, exploreFollowOptions(client));
+  const props = exploreFollowEditorProps(client, review, variables => command.mutate(variables));
+  const editor = createInterestEditorState(props), approved = { ...editor.draft, name: created ? saved.name : editor.draft.name };
+  await saveInterestEditor(editor, approved, async () => { ordinaryCalls++; throw new Error('No ordinary save'); }, props.onCreate);
+  // InterestEditor closes on save. Success must survive a changed selection.
+  selectExploreTopic(client, session.topics[1].id); props.onClose();
+  const model = exploreFollowPresentationModel(readExploreState(client))!;
+  assert.equal(model.review.reviewID, review.reviewID);
+  assert.equal(model.showEditor, false);
+  assert.match(model.message, created ? /Now following/ : /Already following.*existing equivalent interest was kept/);
+  assert.match(model.message, new RegExp(saved.name));
+  assert.deepEqual(model.nextAction, { href: '#/news?view=discover', label: 'Search this interest in Discover' });
+  assert.deepEqual(readExploreState(client).lifecycle, before);
+  assert.equal(ordinaryCalls, 0); assert.equal(followCalls, 1);
+  assert.equal(client.getQueryData<NewsResponse>(['news'])!.discovery.preferences.interests.filter(item => item.id === saved.id).length, 1);
+  // Even an immediate repeated editor save returns the same receipt locally.
+  await saveInterestEditor(editor, approved, async () => { throw new Error('No ordinary save'); }, props.onCreate);
+  assert.equal(followCalls, 1);
+});
+
+test('follow-presentation: pending review blocks close and duplicate creation; confirmed capacity failure retains editable approved fields', async context => {
+  const client = sessionClient(context), { review, topic } = followFixture(client), wait = deferred<Response>(), started = deferred<void>();
+  const metadata = client.getQueryData<NewsResponse>(['news'])!;
+  client.setQueryData(['news'], { ...metadata, discovery: { ...metadata.discovery, preferences: {
+    ...metadata.discovery.preferences, interests: [metadata.discovery.preferences.interests[0], ...Array.from({ length: 11 }, () => interest())] } } });
+  let calls = 0;
+  context.mock.method(globalThis, 'fetch', async () => { calls++; started.resolve(); return wait.promise; });
+  const command = new MutationObserver(client, exploreFollowOptions(client));
+  const props = exploreFollowEditorProps(client, review, variables => command.mutate(variables));
+  const editor = createInterestEditorState(props), dirty = { ...review.draft, name: 'My edited draft', intent: 'opportunities' as const,
+    language: 'en' as const, region: 'PH' as const, days: 7 as const, requiredTerms: ['heat|cooling'], excludedTerms: ['stocks'], enabled: false };
+  const pending = saveInterestEditor(editor, dirty, async () => { throw new Error('No ordinary save'); }, props.onCreate);
+  await started.promise;
+  const model = exploreFollowPresentationModel(readExploreState(client), client.getQueryData(['news']))!;
+  assert.equal(model.editorDisabled, true); assert.equal(model.canClose, false); assert.match(model.message, /Saving.*No search/);
+  props.onClose(); assert.equal(readExploreState(client).activeFollowTopicID, topic.id);
+  await assert.rejects(props.onCreate!(dirty), /already running/);
+  assert.equal(calls, 1);
+  wait.resolve(Response.json({ error: 'At the 12-interest capacity. Remove an interest first.' }, { status: 400 }));
+  await assert.rejects(pending, /capacity/);
+  const failed = exploreFollowPresentationModel(readExploreState(client), client.getQueryData(['news']))!;
+  assert.equal(failed.atCapacity, true); assert.equal(failed.editorDisabled, false); assert.equal(failed.canClose, true);
+  assert.match(failed.error!, /capacity/);
+  assert.deepEqual(failed.review.draft, dirty);
+  const reopened = exploreFollowEditorProps(client, failed.review, variables => command.mutate(variables));
+  assert.equal(reopened.editorID, props.editorID);
+  assert.deepEqual(createInterestEditorState(reopened).draft, dirty);
+});
+
+test('follow-presentation: conflicts and revoked/expired reviews keep the creation draft and offer deliberate recovery', context => {
+  const client = sessionClient(context), { review, topic, session, source } = followFixture(client);
+  context.mock.method(globalThis, 'fetch', () => { throw new Error('Presentation cannot request recovery'); });
+  const state = readExploreState(client);
+  const conflict: ExploreClientState = { ...state, followReviews: { ...state.followReviews, [topic.id]: { ...review,
+    outcome: { state: 'failed', status: 409, error: 'Follow submission conflicted.' } } } };
+  const failed = exploreFollowPresentationModel(conflict)!;
+  assert.equal(failed.needsRecovery, true); assert.equal(failed.editorDisabled, false); assert.match(failed.message, /conflicted.*draft is kept/);
+  const cases = [
+    exploreFollowPresentationModel(state, undefined, Date.parse(session.expiresAt)),
+    exploreFollowPresentationModel(state, galleryNews([{ ...source, revision: randomUUID() }])),
+    exploreFollowPresentationModel(state, galleryNews([{ ...source, enabled: false }])),
+    exploreFollowPresentationModel(state, galleryNews([])),
+  ];
+  for (const model of cases) {
+    assert.ok(model); assert.equal(model.editorDisabled, true); assert.equal(model.showEditor, true);
+    assert.equal(model.needsRecovery, true); assert.equal(model.canClose, true); assert.equal(model.nextAction, null);
+    assert.deepEqual(model.review.draft, review.draft); assert.match(model.message, /draft is kept/);
+    assert.equal(createInterestEditorState(exploreFollowEditorProps(client, model.review, async () => { throw new Error('No stale submit'); })).existing, null);
+  }
+});
+
+test('follow-presentation: uncertain save exposes only deliberate original-payload retry, not an automatic local-status replay', async context => {
+  const client = sessionClient(context), { review, topic } = followFixture(client);
+  const payloads: unknown[] = [];
+  context.mock.method(globalThis, 'fetch', async (_url: unknown, init: RequestInit) => {
+    payloads.push(JSON.parse(init.body as string));
+    if (payloads.length === 1) throw new Error('Lost response');
+    return Response.json({ interest: interest(review.draft), created: false });
+  });
+  const command = new MutationObserver(client, exploreFollowOptions(client));
+  const props = exploreFollowEditorProps(client, review, variables => command.mutate(variables));
+  await assert.rejects(props.onCreate!(review.draft), /outcome is unknown/);
+  setExploreFollowDraft(client, review.reviewID, { ...review.draft, name: 'Later unsent edit' });
+  const model = exploreFollowPresentationModel(readExploreState(client))!;
+  assert.equal(model.editorDisabled, true); assert.match(model.message, /Local status cannot recover follow receipts/);
+  assert.deepEqual(model.retry, { topicID: topic.id, reviewID: review.reviewID, draft: review.draft });
+  assert.equal(payloads.length, 1); // Pure presentation does not submit.
+  await command.mutate(model.retry!);
+  assert.deepEqual(payloads[1], payloads[0]);
+  assert.equal(exploreFollowPresentationModel(readExploreState(client))?.showEditor, false);
 });
