@@ -6,10 +6,13 @@ import type { z } from 'zod';
 import type { NewsInterest, NewsResponse } from '../../../shared/news';
 import {
   EXPLORE_CLIENT_RETENTION_MS, EXPLORE_GENERATION_CLIENT_DEADLINE_MS, EXPLORE_RECOVERY_CLIENT_DEADLINE_MS,
-  exploreGenerateResponseSchema, exploreStatusResponseSchema,
+  EXPLORE_SEARCH_CLIENT_DEADLINE_MS, EXPLORE_MAX_CONCURRENT_SEARCHES, EXPLORE_MAX_QUERY_CHARS,
+  exploreGenerateResponseSchema, exploreStatusResponseSchema, exploreSearchRequestSchema, exploreSearchResponseSchema,
+  type ExploreSearch, type ExplorePreview,
 } from '../../../shared/news-explore';
 import {
   acceptExploreSession, acceptExploreStatus, emptyExploreState, expireExploreState, reconcileExploreState,
+  retainedExploreResult, updateExplorePreview,
   type ExploreClientState, type ExploreStatus,
 } from './explore-state';
 
@@ -71,6 +74,15 @@ export function selectExploreTopic(client: QueryClient, topicID: string): void {
     client.setQueryData(exploreStateKey, { ...state, selectedTopicID: topicID });
   }
 }
+/** Editing and selection are local-only. Invalid short/empty queries can remain
+ * drafts; the full shared search contract applies before command admission.
+ */
+export function setExploreSearchDraft(client: QueryClient, topicID: string, search: ExploreSearch): void {
+  const state = readExploreState(client);
+  if (state.lifecycle.state !== 'available' || !state.lifecycle.session.topics.some(topic => topic.id === topicID && topic.status === 'available')) return;
+  if (search.query.length > EXPLORE_MAX_QUERY_CHARS) return;
+  client.setQueryData<ExploreClientState>(exploreStateKey, { ...state, drafts: { ...state.drafts, [topicID]: { ...search } } });
+}
 /** Call only after the import has committed, before broad metadata invalidation.
  * A fresh owner also rejects late responses if metadata revisions are unchanged.
  */
@@ -90,7 +102,7 @@ export class ExploreCommandError extends Error {
  * surface raw fetch exceptions, malformed responses or provider output.
  */
 export async function exploreRequest<T>(path: string, method: 'GET' | 'POST', schema: z.ZodType<T>,
-  timeoutMs: number, signal?: AbortSignal): Promise<T> {
+  timeoutMs: number, signal?: AbortSignal, body?: unknown): Promise<T> {
   const controller = new AbortController();
   let rejectAbort!: (error: Error) => void;
   const interrupted = new Promise<never>((_, reject) => { rejectAbort = reject; });
@@ -101,7 +113,7 @@ export async function exploreRequest<T>(path: string, method: 'GET' | 'POST', sc
   signal?.addEventListener('abort', abort, { once: true });
   const timer = setTimeout(() => {
     // Reject with the deliberate uncertainty message, before fetch's AbortError.
-    rejectAbort(new ExploreCommandError('uncertain', 'Kontrol took too long to respond. The outcome is unknown; check local status before requesting ideas again.'));
+    rejectAbort(new ExploreCommandError('uncertain', 'Kontrol took too long to respond. The outcome is unknown; check local status before trying again.'));
     controller.abort();
   }, timeoutMs);
   try {
@@ -111,7 +123,7 @@ export async function exploreRequest<T>(path: string, method: 'GET' | 'POST', sc
         controller.signal.throwIfAborted();
         const response = await fetch('/api' + path, { method, signal: controller.signal,
           headers: { 'X-Kontrol-Client': 'web', ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}) },
-          ...(method === 'POST' ? { body: '{}' } : {}) });
+          ...(method === 'POST' ? { body: JSON.stringify(body ?? {}) } : {}) });
         const raw: unknown = await response.json();
         if (!response.ok) {
           // Our protected server returns public { error } messages, not raw errors.
@@ -120,11 +132,11 @@ export async function exploreRequest<T>(path: string, method: 'GET' | 'POST', sc
           throw new ExploreCommandError('confirmed', error, response.status);
         }
         const parsed = schema.safeParse(raw);
-        if (!parsed.success) throw new ExploreCommandError('uncertain', 'Kontrol returned an unreadable exploration response. Check local status before requesting ideas again.');
+        if (!parsed.success) throw new ExploreCommandError('uncertain', 'Kontrol returned an unreadable exploration response. Check local status before trying again.');
         return parsed.data;
       } catch (error) {
         if (error instanceof ExploreCommandError) throw error;
-        throw new ExploreCommandError('uncertain', 'Cannot read Kontrol’s response. The outcome is unknown; check local status before requesting ideas again.');
+        throw new ExploreCommandError('uncertain', 'Cannot read Kontrol’s response. The outcome is unknown; check local status before trying again.');
       }
     })()]);
   } finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); controller.abort(); }
@@ -134,6 +146,7 @@ interface ExploreCommandDependencies {
   // Only lower fixture deadlines are permitted; production retains named bounds.
   generationTimeoutMs?: number;
   recoveryTimeoutMs?: number;
+  searchTimeoutMs?: number;
 }
 function deadline(override: number | undefined, maximum: number): number {
   if (override === undefined) return maximum;
@@ -222,5 +235,83 @@ export function exploreRecoveryOptions(client: QueryClient, dependencies: Explor
     },
   });
 }
+export function exploreSearchOptions(client: QueryClient, dependencies: ExploreCommandDependencies = {}) {
+  const now = dependencies.now ?? Date.now;
+  const timeoutMs = deadline(dependencies.searchTimeoutMs, EXPLORE_SEARCH_CLIENT_DEADLINE_MS);
+  return mutationOptions<z.infer<typeof exploreSearchResponseSchema>, Error, { topicID: string }>({
+    mutationKey: ['news-explore-search'], retry: false, networkMode: 'always', gcTime: 0,
+    mutationFn: async ({ topicID }) => {
+      reconcileCachedNews(client, now());
+      const state = readExploreState(client, now());
+      if (state.lifecycle.state !== 'available') throw new ExploreCommandError('stale', 'This exploration session is unavailable. Check local status or request new ideas explicitly.');
+      const session = state.lifecycle.session, topic = session.topics.find(topic => topic.id === topicID);
+      if (!topic || topic.status === 'obsolete' || topic.preview.state === 'expired') {
+        throw new ExploreCommandError('stale', 'This topic is obsolete or expired. Request new ideas explicitly.');
+      }
+      if (state.searchRequestIDs[topicID] || topic.preview.state === 'pending' || topic.preview.state === 'uncertain') {
+        throw new ExploreCommandError('busy', 'Check local status before searching this topic again.');
+      }
+      if (session.topics.filter(topic => topic.preview.state === 'pending').length >= EXPLORE_MAX_CONCURRENT_SEARCHES) {
+        throw new ExploreCommandError('busy', 'Two topic searches are already running. Wait or check local status.');
+      }
+      const validated = exploreSearchRequestSchema.safeParse({ expectedSessionRevision: session.revision,
+        search: state.drafts[topicID] ?? topic.proposedSearch });
+      if (!validated.success) throw new ExploreCommandError('confirmed', validated.error.issues[0]?.message ?? 'Review the topic search.');
+      const request = validated.data, requestID = crypto.randomUUID();
+      const attempt = { requestID, search: request.search, startedAt: new Date(now()).toISOString() };
+      const previous = retainedExploreResult(topic.preview);
+      // Reserve synchronously before cancellation/fetch. The captured request is
+      // independent of subsequent selection or draft edits, with no AI mode.
+      client.setQueryData(exploreStateKey, updateExplorePreview(state, topicID, { state: 'pending', attempt, previous }, requestID));
+      const owns = () => {
+        reconcileCachedNews(client, now());
+        const current = readExploreState(client, now());
+        return current.lifecycle.state === 'available' && current.lifecycle.session.id === session.id &&
+          current.lifecycle.session.revision === session.revision && current.searchRequestIDs[topicID] === requestID &&
+          current.lifecycle.session.topics.some(topic => topic.id === topicID && topic.status === 'available');
+      };
+      const cancelRecovery = () => {
+        const current = readExploreState(client, now());
+        if (current.recovery.state === 'pending') client.setQueryData(exploreStateKey, { ...current, recovery: { state: 'idle' } });
+        return client.cancelQueries({ queryKey: recoveryKey });
+      };
+      try {
+        await cancelRecovery();
+        if (!owns()) throw staleResponse();
+        const result = await exploreRequest(`/news/explore/${session.id}/topics/${topicID}/search`, 'POST',
+          exploreSearchResponseSchema, timeoutMs, undefined, request);
+        if (!owns()) throw staleResponse();
+        // Strict runtime DTO validation is not sufficient: it must identify this
+        // command and its exact producing specification, not another topic/query.
+        if (result.sessionID !== session.id || result.sessionRevision !== session.revision || result.topicID !== topicID ||
+          !('result' in result.preview) || JSON.stringify(result.preview.result.search) !== JSON.stringify(request.search)) {
+          throw new ExploreCommandError('uncertain', 'The search response did not match this topic and query. Check local status.');
+        }
+        client.setQueryData(exploreStateKey, updateExplorePreview(readExploreState(client, now()), topicID, result.preview, null));
+        void cancelRecovery();
+        return result;
+      } catch (error) {
+        if (owns()) {
+          const failure = error instanceof ExploreCommandError ? error : new ExploreCommandError('uncertain', 'The search outcome is unknown. Check local status.');
+          const current = readExploreState(client, now());
+          if (failure.status === 410) {
+            client.setQueryData<ExploreClientState>(exploreStateKey, { ...current, lifecycle: { state: 'expired' },
+              drafts: {}, selectedTopicID: null, searchRequestIDs: {} });
+          } else {
+            // A 409 may mean revoked context, revision conflict or an earlier
+            // server operation still running. Only local recovery can disambiguate.
+            const preview: ExplorePreview = failure.outcome === 'uncertain' || failure.status === 409 ? { state: 'uncertain', attempt, previous } :
+              previous ? { state: 'failed-retained', attempt, previous, error: { code: 'search-failed', error: failure.message } } :
+                { state: 'failed', attempt, error: { code: 'search-failed', error: failure.message } };
+            client.setQueryData(exploreStateKey, updateExplorePreview(current, topicID, preview, null));
+          }
+          void cancelRecovery();
+        }
+        throw error;
+      }
+    },
+  });
+}
+export function useExploreSearch() { return useMutation(exploreSearchOptions(useQueryClient())); }
 export function useExploreGeneration() { return useMutation(exploreGenerationOptions(useQueryClient())); }
 export function useExploreRecovery() { return useMutation(exploreRecoveryOptions(useQueryClient())); }
