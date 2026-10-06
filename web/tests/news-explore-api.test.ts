@@ -6,11 +6,16 @@ import { getDiscovery } from '../server/news/discovery';
 import { exportData } from '../server/modules/settings';
 import { ExploreServiceError, type ExploreService } from '../server/news/explore';
 import type { AppOptions } from '../server/app';
-import type { NewsInterest, DiscoveredArticle } from '../shared/news';
+import type { NewsInterest, DiscoveredArticle, NewsResponse } from '../shared/news';
+import type { NewsState } from '../shared/schema';
+import { briefingStories } from '../shared/briefing';
+import {
+  EXPLORE_SESSION_TTL_MS, exploreGenerateResponseSchema, exploreSearchResponseSchema, exploreStatusResponseSchema,
+} from '../shared/news-explore';
 import type { Store } from '../server/store';
 
-// Step 6 exercises composition and existing mutation/import routes directly.
-// The Explore HTTP contracts are added separately; no fake endpoint is needed.
+// Composition/import fixtures use the service directly; endpoint fixtures below
+// exercise the protected HTTP contracts with injected providers and retrieval.
 const ideas = (sources: readonly NewsInterest[]) => JSON.stringify({ topics: [{
   sourceInterestID: sources[0].id, title: 'Community infrastructure',
   description: 'An adjacent topic direction, not a claim about current events.',
@@ -209,4 +214,289 @@ test('explore lifecycle: fixture teardown disposes timers and resolver before cl
   assert.equal(timers.size, 0);
   assert.equal(owner?.resolve('https://example.com/articles/community'), undefined);
   await assert.rejects(owner!.generate(), error => error instanceof ExploreServiceError && error.code === 'session-gone');
+});
+
+const topicSearchPath = (sessionID: string, topicID: string) => '/news/explore/' + sessionID + '/topics/' + topicID + '/search';
+const threeIdeas = (sources: readonly NewsInterest[]) => JSON.stringify({ topics: [
+  JSON.parse(ideas(sources)).topics[0],
+  { sourceInterestID: sources[0].id, title: 'Public archives', description: 'Another adjacent direction.',
+    connection: 'Connects research and public archives.', query: 'Public archives language preservation research tools' },
+  { sourceInterestID: sources[0].id, title: 'Urban cooling', description: 'A third adjacent direction.',
+    connection: 'Connects infrastructure and urban cooling.', query: 'Urban cooling district heating infrastructure research' },
+] });
+async function assertPublicError(response: Response, status: number, message?: RegExp) {
+  assert.equal(response.status, status);
+  const body = await response.json();
+  assert.deepEqual(Object.keys(body), ['error']);
+  assert.equal(typeof body.error, 'string');
+  assert.doesNotMatch(body.error, /private-provider-secret|private-transport-secret/);
+  if (message) assert.match(body.error, message);
+}
+
+test('explore HTTP: local recovery is zero-work; explicit actions preserve persistent News and fixed-clock briefing', async () => {
+  const at = Date.parse('2026-10-06T12:00:00Z');
+  let ideations = 0, searches = 0, availability = 0;
+  await withAPI(async ({ request, store }) => {
+    const news = store.get<NewsState>('news');
+    const feed = news.preferences.feeds.find(f => f.isEnabled && f.topicIDs.some(id => news.preferences.selectedTopicIDs.includes(id)))!;
+    assert.ok(feed);
+    news.articles = [{ ...retrieved(parent(store))[0], id: 'existing-feed-article', title: 'Existing feed story',
+      url: 'https://example.com/articles/existing', publishedAt: new Date(at).toISOString(),
+      fetchedAt: new Date(at).toISOString(), feedIDs: [feed.id], topicIDs: feed.topicIDs }];
+    store.set('news', news);
+    const initial: NewsResponse = await (await request('/news')).json();
+    const documents = store.db.prepare('SELECT * FROM documents ORDER BY key').all();
+    const edition = briefingStories(initial, undefined, at);
+    assert.ok(edition.length > 0, 'Non-empty briefing makes the equality check meaningful');
+    for (let i = 0; i < 2; i++) {
+      const response = await request('/news/explore');
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get('cache-control'), 'no-store');
+      assert.deepEqual(exploreStatusResponseSchema.parse(await response.json()), { lifecycle: { state: 'absent' }, generation: { state: 'idle' } });
+    }
+    assert.deepEqual([ideations, searches, availability], [0, 0, 0]);
+    const generated = await request('/news/explore/generate', 'POST', {});
+    assert.equal(generated.status, 200);
+    const { session, partial } = exploreGenerateResponseSchema.parse(await generated.json());
+    assert.equal(partial, false); assert.equal(session.topics.length, 3);
+    assert.deepEqual([ideations, searches, availability], [1, 0, 1]);
+    const topic = session.topics[0];
+    const found = await request(topicSearchPath(session.id, topic.id), 'POST', {
+      expectedSessionRevision: session.revision, search: topic.proposedSearch,
+    });
+    assert.equal(found.status, 200);
+    const result = exploreSearchResponseSchema.parse(await found.json());
+    assert.equal(result.topicID, topic.id); assert.equal(result.preview.state, 'successful');
+    if (result.preview.state !== 'successful') assert.fail('Expected retrieved coverage');
+    assert.equal(result.preview.result.articles[0].summary, 'Literal retrieved source excerpt.');
+    assert.equal(result.preview.result.articles[0].summaryKind, 'source');
+    assert.equal('matches' in result.preview.result.articles[0], false);
+    const status = exploreStatusResponseSchema.parse(await (await request('/news/explore')).json());
+    if (status.lifecycle.state !== 'available') assert.fail('Expected current session');
+    assert.deepEqual(status.lifecycle.session.topics[0].preview, result.preview);
+    assert.equal(status.lifecycle.session.topics[1].preview.state, 'not-searched');
+    assert.deepEqual([ideations, searches, availability], [1, 1, 1]);
+    assert.deepEqual(store.db.prepare('SELECT * FROM documents ORDER BY key').all(), documents);
+    const after: NewsResponse = await (await request('/news')).json();
+    assert.deepEqual(after, initial);
+    assert.deepEqual(briefingStories(after, undefined, at), edition);
+    // Temporary search does not weaken or repurpose saved-interest discovery.
+    await assertPublicError(await request('/news/discover', 'POST', { mode: 'search', interestID: topic.id }), 400);
+    assert.deepEqual(store.db.prepare('SELECT * FROM documents ORDER BY key').all(), documents);
+    assert.equal(searches, 1);
+  }, { clock: () => at, explore: { available: async () => { availability++; return true; },
+    ideate: async sources => { ideations++; return threeIdeas(sources); } },
+    news: { search: async interest => { searches++; return retrieved(interest); } } });
+});
+
+test('explore HTTP: every endpoint inherits client, host, origin, fetch-site and JSON protections', async () => {
+  let ideations = 0, searches = 0;
+  await withAPI(async ({ request, store, origin }) => {
+    const generated = exploreGenerateResponseSchema.parse(await (await request('/news/explore/generate', 'POST', {})).json());
+    const topic = generated.session.topics[0];
+    const before = store.db.prepare('SELECT * FROM documents ORDER BY key').all();
+    const routes = [
+      { path: '/news/explore', method: 'GET', body: undefined },
+      { path: '/news/explore/generate', method: 'POST', body: {} },
+      { path: topicSearchPath(generated.session.id, topic.id), method: 'POST',
+        body: { expectedSessionRevision: generated.session.revision, search: topic.proposedSearch } },
+    ];
+    const rejectedHeaders: Record<string, string>[] = [{ 'X-Kontrol-Client': '' }, { Origin: 'https://other.example' },
+      { Host: 'other.example' }, { 'Sec-Fetch-Site': 'cross-site' }];
+    for (const route of routes) {
+      for (const headers of rejectedHeaders) {
+        await assertPublicError(await request(route.path, route.method, route.body, headers), 403);
+      }
+      if (route.method === 'POST') {
+        await assertPublicError(await request(route.path, route.method, route.body, { 'Content-Type': 'text/plain' }), 415);
+        await assertPublicError(await fetch(origin + '/api' + route.path, { method: 'POST', headers: {
+          'X-Kontrol-Client': 'web', 'Content-Type': 'application/json',
+        }, body: '{broken-json' }), 400, /Invalid JSON/);
+      }
+    }
+    assert.deepEqual([ideations, searches], [1, 0]);
+    assert.deepEqual(store.db.prepare('SELECT * FROM documents ORDER BY key').all(), before);
+  }, { ...fixtures, explore: { ...fixtures.explore, ideate: async sources => { ideations++; return ideas(sources); } },
+    news: { search: async interest => { searches++; return retrieved(interest); } } });
+});
+
+test('explore HTTP: strict bodies, UUID parameters and query rules reject client context, evidence and AI modes before admission', async () => {
+  let ideations = 0, searches = 0;
+  await withAPI(async ({ request, store }) => {
+    for (const body of [undefined, null, [], { interests: [parent(store)] }, { prompt: 'private context' },
+      { articles: retrieved(parent(store)) }, { mode: 'ai' }]) {
+      await assertPublicError(await request('/news/explore/generate', 'POST', body), 400);
+    }
+    assert.equal(ideations, 0);
+    const { session } = exploreGenerateResponseSchema.parse(await (await request('/news/explore/generate', 'POST', {})).json());
+    const topic = session.topics[0], path = topicSearchPath(session.id, topic.id);
+    const valid = { expectedSessionRevision: session.revision, search: topic.proposedSearch };
+    const before = store.db.prepare('SELECT * FROM documents ORDER BY key').all();
+    for (const body of [undefined, null, [], {}, { ...valid, expectedSessionRevision: 'bad-revision' },
+      { ...valid, mode: 'ai' }, { ...valid, article: retrieved(parent(store))[0] },
+      { ...valid, search: { ...valid.search, query: 'short query' } },
+      { ...valid, search: { ...valid.search, language: 'fr' } }, { ...valid, search: { ...valid.search, region: 'DE' } },
+      { ...valid, search: { ...valid.search, days: 14 } }, { ...valid, search: { ...valid.search, enabled: false } },
+      { ...valid, search: { ...valid.search, mode: 'ai' } }, { ...valid, search: { ...valid.search, intent: 'opportunities' } },
+      { ...valid, search: { ...valid.search, requiredTerms: ['inherited'] } }]) {
+      await assertPublicError(await request(path, 'POST', body), 400);
+    }
+    for (const [sessionID, topicID] of [['model-session', topic.id], [session.id, 'model-topic']]) {
+      await assertPublicError(await request(topicSearchPath(sessionID, topicID), 'POST', valid), 400);
+    }
+    assert.deepEqual([ideations, searches], [1, 0]);
+    const status = exploreStatusResponseSchema.parse(await (await request('/news/explore')).json());
+    assert.deepEqual(status, { lifecycle: { state: 'available', session }, generation: { state: 'idle' } });
+    assert.deepEqual(store.db.prepare('SELECT * FROM documents ORDER BY key').all(), before);
+  }, { ...fixtures, explore: { ...fixtures.explore, ideate: async sources => { ideations++; return ideas(sources); } },
+    news: { search: async interest => { searches++; return retrieved(interest); } } });
+});
+
+test('explore HTTP: pending generation gates duplicates before availability and exposes local activity and partial success', async () => {
+  const started = deferred<void>(), release = deferred<void>();
+  let availability = 0, ideations = 0;
+  await withAPI(async ({ request }) => {
+    const pending = request('/news/explore/generate', 'POST', {});
+    try {
+      await started.promise;
+      const status = exploreStatusResponseSchema.parse(await (await request('/news/explore')).json());
+      assert.equal(status.generation.state, 'pending'); assert.equal(status.lifecycle.state, 'absent');
+      await assertPublicError(await request('/news/explore/generate', 'POST', {}), 409, /already running/);
+      assert.deepEqual([availability, ideations], [1, 0]);
+    } finally { release.resolve(); await pending; }
+    const response = await pending; assert.equal(response.status, 200);
+    const generated = exploreGenerateResponseSchema.parse(await response.json());
+    assert.equal(generated.partial, true); assert.equal(generated.session.topics.length, 1);
+    assert.deepEqual([availability, ideations], [1, 1]);
+    const recovered = exploreStatusResponseSchema.parse(await (await request('/news/explore')).json());
+    assert.equal(recovered.generation.state, 'idle');
+    assert.deepEqual(recovered.lifecycle, { state: 'available', session: generated.session });
+  }, { explore: { available: async () => { availability++; started.resolve(); await release.promise; return true; },
+    ideate: async sources => { ideations++; return ideas(sources); } } });
+});
+
+test('explore HTTP: preview activity gates same-topic duplicates and global concurrency without queuing', async () => {
+  const release = deferred<void>(), firstStarted = deferred<void>(), secondStarted = deferred<void>();
+  let searches = 0;
+  await withAPI(async ({ request }) => {
+    const { session } = exploreGenerateResponseSchema.parse(await (await request('/news/explore/generate', 'POST', {})).json());
+    const search = (index: number) => request(topicSearchPath(session.id, session.topics[index].id), 'POST', {
+      expectedSessionRevision: session.revision, search: session.topics[index].proposedSearch,
+    });
+    const first = search(0); let second: Promise<Response> | undefined;
+    try {
+      await firstStarted.promise;
+      await assertPublicError(await search(0), 409);
+      second = search(1); await secondStarted.promise;
+      await assertPublicError(await search(2), 409);
+      const status = exploreStatusResponseSchema.parse(await (await request('/news/explore')).json());
+      if (status.lifecycle.state !== 'available') assert.fail('Expected current session');
+      assert.deepEqual(status.lifecycle.session.topics.map(t => t.preview.state), ['pending', 'pending', 'not-searched']);
+      assert.equal(searches, 2);
+    } finally { release.resolve(); await Promise.all([first, second]); }
+    assert.equal((await first).status, 200); assert.equal((await second!).status, 200);
+    assert.equal((await search(2)).status, 200); assert.equal(searches, 3);
+  }, { explore: { available: async () => true, ideate: async sources => threeIdeas(sources) },
+    news: { search: async interest => {
+      searches++; if (searches === 1) firstStarted.resolve(); if (searches === 2) secondStarted.resolve();
+      await release.promise; return retrieved(interest);
+    } } });
+});
+
+test('explore HTTP: missing, restarted and expired identities give recovery errors without external work', async () => {
+  let now = Date.parse('2026-10-06T12:00:00Z'), searches = 0, ideations = 0;
+  let oldSessionID = '', oldTopicID = '', oldRevision = '';
+  await withAPI(async ({ request }) => {
+    const search = { query: 'Community infrastructure public research collaborative projects', language: 'en', region: 'US', days: 7 };
+    await assertPublicError(await request(topicSearchPath(randomUUID(), randomUUID()), 'POST', {
+      expectedSessionRevision: randomUUID(), search,
+    }), 410, /expired|unavailable/);
+    const { session } = exploreGenerateResponseSchema.parse(await (await request('/news/explore/generate', 'POST', {})).json());
+    const topic = session.topics[0];
+    oldSessionID = session.id; oldTopicID = topic.id; oldRevision = session.revision;
+    const body = { expectedSessionRevision: session.revision, search: topic.proposedSearch };
+    await assertPublicError(await request(topicSearchPath(randomUUID(), topic.id), 'POST', body), 410);
+    await assertPublicError(await request(topicSearchPath(session.id, randomUUID()), 'POST', body), 410);
+    await assertPublicError(await request(topicSearchPath(session.id, topic.id), 'POST', { ...body, expectedSessionRevision: randomUUID() }), 409);
+    now += EXPLORE_SESSION_TTL_MS;
+    const status = exploreStatusResponseSchema.parse(await (await request('/news/explore')).json());
+    assert.equal(status.lifecycle.state, 'expired');
+    await assertPublicError(await request(topicSearchPath(session.id, topic.id), 'POST', body), 410);
+    assert.deepEqual([ideations, searches], [1, 0]);
+  }, { clock: () => now, explore: { available: async () => true, ideate: async sources => { ideations++; return ideas(sources); } },
+    news: { search: async () => { searches++; return []; } } });
+  await withAPI(async ({ request }) => {
+    await assertPublicError(await request(topicSearchPath(oldSessionID, oldTopicID), 'POST', {
+      expectedSessionRevision: oldRevision,
+      search: { query: 'Community infrastructure public research collaborative projects', language: 'en', region: 'US', days: 7 },
+    }), 410);
+    assert.equal(exploreStatusResponseSchema.parse(await (await request('/news/explore')).json()).lifecycle.state, 'absent');
+  }, fixtures);
+});
+
+for (const failure of ['no-interests', 'pi-unavailable', 'availability-error', 'provider-error', 'invalid-output'] as const) {
+  test('explore HTTP: ' + failure + ' is sanitized, finite and recoverable', async () => {
+    let availableCalls = 0, ideations = 0;
+    await withAPI(async ({ request, store }) => {
+      if (failure === 'no-interests') {
+        const discovery = getDiscovery(store);
+        discovery.preferences.interests.forEach(i => { i.enabled = false; }); store.set('newsDiscovery', discovery);
+      }
+      const before = store.db.prepare('SELECT * FROM documents ORDER BY key').all();
+      await assertPublicError(await request('/news/explore/generate', 'POST', {}),
+        ['no-interests', 'pi-unavailable'].includes(failure) ? 400 : 502);
+      const status = exploreStatusResponseSchema.parse(await (await request('/news/explore')).json());
+      assert.equal(status.generation.state, 'failed'); assert.equal(status.lifecycle.state, 'absent');
+      assert.equal(availableCalls, failure === 'no-interests' ? 0 : 1);
+      assert.equal(ideations, ['provider-error', 'invalid-output'].includes(failure) ? 1 : 0);
+      assert.doesNotMatch(JSON.stringify(status), /private-provider-secret/);
+      assert.deepEqual(store.db.prepare('SELECT * FROM documents ORDER BY key').all(), before);
+    }, { explore: { available: async () => {
+      availableCalls++; if (failure === 'availability-error') throw new Error('private-provider-secret');
+      return failure !== 'pi-unavailable';
+    }, ideate: async () => {
+      ideations++; if (failure === 'provider-error') throw new Error('private-provider-secret');
+      return '{"topics":[]}';
+    } } });
+  });
+}
+
+test('explore HTTP: failed generation and changed-query refresh retain owned results; successful empty is distinct', async () => {
+  let failGeneration = false, failSearch = false, empty = false;
+  await withAPI(async ({ request }) => {
+    const { session } = exploreGenerateResponseSchema.parse(await (await request('/news/explore/generate', 'POST', {})).json());
+    const topic = session.topics[0], path = topicSearchPath(session.id, topic.id);
+    const searchBody = { expectedSessionRevision: session.revision, search: topic.proposedSearch };
+    const first = exploreSearchResponseSchema.parse(await (await request(path, 'POST', searchBody)).json());
+    failGeneration = true;
+    await assertPublicError(await request('/news/explore/generate', 'POST', {}), 502);
+    failSearch = true;
+    const changedSearch = { ...topic.proposedSearch, query: 'Public archives preservation research collaboration projects' };
+    await assertPublicError(await request(path, 'POST', { ...searchBody, search: changedSearch }), 502);
+    let status = exploreStatusResponseSchema.parse(await (await request('/news/explore')).json());
+    if (status.lifecycle.state !== 'available') assert.fail('Expected retained session');
+    assert.equal(status.lifecycle.session.id, session.id); assert.equal(status.generation.state, 'failed');
+    const retained = status.lifecycle.session.topics[0].preview;
+    if (retained.state !== 'failed-retained' || first.preview.state !== 'successful') assert.fail('Expected retained coverage');
+    assert.deepEqual(retained.previous, first.preview.result);
+    assert.deepEqual(retained.attempt.search, changedSearch);
+    failSearch = false; empty = true;
+    const replacement = await request(path, 'POST', { ...searchBody, search: changedSearch });
+    assert.equal(replacement.status, 200);
+    const result = exploreSearchResponseSchema.parse(await replacement.json());
+    assert.equal(result.preview.state, 'successful-empty');
+    status = exploreStatusResponseSchema.parse(await (await request('/news/explore')).json());
+    if (status.lifecycle.state !== 'available') assert.fail('Expected session');
+    assert.deepEqual(status.lifecycle.session.topics[0].preview, result.preview);
+    assert.doesNotMatch(JSON.stringify(status), /private-provider-secret|private-transport-secret/);
+    const source = status.lifecycle.session.sources[0];
+    const initial: NewsResponse = await (await request('/news')).json();
+    const interest = initial.discovery.preferences.interests.find(i => i.id === source.id)!;
+    assert.equal((await request('/news/interests/' + interest.id, 'PUT', { ...interest, name: 'Edited source', expectedRevision: interest.revision })).status, 200);
+    await assertPublicError(await request(path, 'POST', searchBody), 409, /interests changed/);
+  }, { explore: { available: async () => true, ideate: async sources => {
+    if (failGeneration) throw new Error('private-provider-secret'); return ideas(sources);
+  } }, news: { search: async interest => {
+    if (failSearch) throw new Error('private-transport-secret'); return empty ? [] : retrieved(interest);
+  } } });
 });

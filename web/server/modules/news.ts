@@ -11,6 +11,7 @@ import { getDiscovery, mergeDiscovery, searchDiscovery, type Discover } from '..
 import { aiDiscovery, aiSources } from '../news/ai';
 import { piStatus, type PIOptions } from '../news/pi';
 import type { ExploreService } from '../news/explore';
+import { newsExploreModule, type ExploreRoutes } from './news-explore';
 
 // Kept as exports for existing consumers of the original news module.
 export { fetchFeed, safeWebURL, isPublicIP } from '../news/transport';
@@ -23,7 +24,7 @@ export interface NewsOptions {
   pi?: PIOptions;
 }
 export function newsModule(store: Store, fetcher = fetchFeed, options: NewsOptions = {},
-  explore?: Pick<ExploreService, 'invalidateSources'>): Router {
+  explore?: ExploreRoutes & Pick<ExploreService, 'invalidateSources'>): Router {
   const router = Router();
   let refreshing = false, discovering = false;
   const search = options.search ?? searchDiscovery(fetcher);
@@ -32,6 +33,7 @@ export function newsModule(store: Store, fetcher = fetchFeed, options: NewsOptio
   const aiStatus = options.aiStatus ?? (() => piStatus(options.pi));
   store.init('news', initialNews());
   getDiscovery(store);
+  if (explore) router.use('/explore', newsExploreModule(explore));
   async function snapshot(): Promise<NewsResponse> {
     return { ...store.get<NewsState>('news'), discovery: getDiscovery(store),
       ai: await aiStatus(),
