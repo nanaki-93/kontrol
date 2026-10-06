@@ -19,6 +19,9 @@ import {
   saveInterestEditor, validateInterestEditorDraft, type InterestEditorInput,
 } from '../src/modules/news/interest-editor';
 
+import { navigateNewsView, newsViewFromHash } from '../src/modules/news';
+import { exploreGalleryModel } from '../src/modules/news/explore';
+
 // Pure editor/cache fixtures only: no DOM, application, listener or external request.
 const draft: InterestDraft = {
   name: 'Computing infrastructure', query: 'AI data center power grid cooling infrastructure developments',
@@ -1150,4 +1153,125 @@ test('client-follow: an old News poll is cancelled so it cannot roll back the re
   assert.equal((pollSignal as AbortSignal | null)?.aborted, true);
   staleNews.resolve(old); await Promise.resolve();
   assert.deepEqual(client.getQueryData<NewsResponse>(['news'])!.discovery.preferences.interests, [source, saved]);
+});
+
+function galleryNews(interests: NewsInterest[], configured = true): NewsResponse {
+  return { preferences: { selectedTopicIDs: [], feeds: [] }, articles: [], lastRefreshAt: null, errors: {},
+    discovery: { preferences: { schemaVersion: 1, interests }, articles: [], runs: {} },
+    ai: { configured, provider: 'pi', model: 'fixture', message: 'Fixture only.' },
+    activity: { discovering: false, refreshingFeeds: false } };
+}
+
+test('gallery: Explore route is supported without changing existing routes or briefing fallback', () => {
+  for (const view of ['discover', 'feeds', 'saved', 'explore'] as const) {
+    assert.equal(newsViewFromHash('#/news?view=' + view), view);
+    assert.equal(newsViewFromHash('#/news?other=value&view=' + view), view);
+  }
+  for (const hash of ['#/news', '#/news?view=briefing', '#/news?view=unknown', '#/news?view=Explore', '#/news?view=']) {
+    assert.equal(newsViewFromHash(hash), 'briefing');
+  }
+});
+
+test('gallery: Discover to Explore updates the hash so Discover recovery is not a same-URL no-op', context => {
+  const client = sessionClient(context), source = interest(), session = sessionFixture(source);
+  client.setQueryData(exploreStateKey, acceptExploreSession(readExploreState(client), session, Date.now()));
+  selectExploreTopic(client, session.topics[1].id);
+  const before = structuredClone(readExploreState(client));
+  let calls = 0;
+  context.mock.method(globalThis, 'fetch', async () => { calls++; throw new Error('Navigation must not request news or PI'); });
+  // A location-shaped value exercises the same tab command without a DOM or app.
+  const location = { hash: '#/news?view=discover' };
+  navigateNewsView('explore', location);
+  assert.equal(location.hash, '#/news?view=explore');
+  assert.equal(newsViewFromHash(location.hash), 'explore');
+  const discoverRecoveryHref = '#/news?view=discover'; // Both Explore recovery links.
+  assert.notEqual(location.hash, discoverRecoveryHref);
+  location.hash = discoverRecoveryHref;
+  assert.equal(newsViewFromHash(location.hash), 'discover');
+  for (const view of ['briefing', 'discover', 'explore', 'saved', 'feeds'] as const) {
+    navigateNewsView(view, location);
+    assert.equal(location.hash, view === 'briefing' ? '#/news' : '#/news?view=' + view);
+    assert.equal(newsViewFromHash(location.hash), view);
+  }
+  assert.deepEqual(readExploreState(client), before);
+  assert.equal(calls, 0);
+});
+
+test('gallery: three or fewer cards show source connections and never invent filler', context => {
+  const client = sessionClient(context), source = interest(), news = galleryNews([source]);
+  const session = sessionFixture(source);
+  for (const count of [1, 2, 3]) {
+    const partial = { ...session, topics: session.topics.slice(0, count) };
+    const state = acceptExploreSession(readExploreState(client), partial, Date.now());
+    const model = exploreGalleryModel(state, news);
+    assert.equal(model.cards.length, count);
+    assert.deepEqual(model.cards.map(card => card.title), partial.topics.map(topic => topic.title));
+    assert.ok(model.cards.every(card => card.sourceLabel === source.name && card.connection === 'Connected to computing infrastructure.'));
+    assert.equal(model.cards.filter(card => card.selected).length, 1);
+    assert.equal(model.notices.some(notice => /No filler/.test(notice)), count < 3);
+  }
+});
+
+test('gallery: restoring and selecting cards changes only cached selection, with zero requests', context => {
+  const client = sessionClient(context), source = interest(), news = galleryNews([source]), session = sessionFixture(source);
+  let calls = 0;
+  context.mock.method(globalThis, 'fetch', async () => { calls++; throw new Error('No gallery network work'); });
+  assert.equal(exploreGalleryModel(readExploreState(client), news).cards.length, 0);
+  client.setQueryData(exploreStateKey, acceptExploreSession(readExploreState(client), session, Date.now()));
+  const before = structuredClone(readExploreState(client));
+  selectExploreTopic(client, session.topics[2].id);
+  const after = readExploreState(client), model = exploreGalleryModel(after, news);
+  assert.equal(model.cards[2].selected, true);
+  assert.equal(model.cards[0].selected, false);
+  assert.deepEqual(after.lifecycle, before.lifecycle);
+  assert.deepEqual(after.drafts, before.drafts);
+  assert.deepEqual(after.generation, before.generation);
+  assert.equal(calls, 0);
+});
+
+test('gallery: local settings, no interests and PI setup map to deliberate actions', context => {
+  const state = readExploreState(sessionClient(context)), source = interest();
+  const loading = exploreGalleryModel(state);
+  assert.equal(loading.canGenerate, false); assert.equal(loading.canRecover, true);
+  assert.equal(loading.needsInterests, false); assert.equal(loading.needsPI, false);
+  const none = exploreGalleryModel(state, galleryNews([interest({ ...draft, enabled: false })]));
+  assert.equal(none.needsInterests, true); assert.equal(none.canGenerate, false);
+  assert.deepEqual(none.enabledNames, []);
+  const setup = exploreGalleryModel(state, galleryNews([source], false));
+  assert.equal(setup.needsPI, true); assert.equal(setup.canGenerate, false);
+  const ready = exploreGalleryModel(state, galleryNews([source, interest({ ...draft, name: 'Paused', enabled: false })]));
+  assert.equal(ready.canGenerate, true); assert.deepEqual(ready.enabledNames, [source.name]);
+});
+
+test('gallery: generation pending, no-valid failure and uncertainty retain cards and expose recovery', context => {
+  const client = sessionClient(context), source = interest(), news = galleryNews([source]);
+  const state = acceptExploreSession(readExploreState(client), sessionFixture(source), Date.now());
+  const pending = exploreGalleryModel({ ...state, generation: { state: 'pending', requestID: randomUUID(), startedAt: new Date().toISOString() } }, news);
+  assert.equal(pending.canGenerate, false); assert.equal(pending.canRecover, true);
+  assert.match(pending.generationLabel, /Suggesting/); assert.equal(pending.cards.length, 3);
+  assert.ok(pending.notices.some(notice => /Previous ideas remain visible/.test(notice)));
+  const failed = exploreGalleryModel({ ...state, generation: { state: 'failed', error: { code: 'no-valid-ideas', error: 'No usable distinct topic ideas.' } } }, news);
+  assert.equal(failed.canGenerate, true); assert.equal(failed.cards.length, 3);
+  assert.equal(failed.generationError, 'No usable distinct topic ideas.');
+  assert.ok(failed.notices.some(notice => /new request failed/.test(notice)));
+  const uncertain = exploreGalleryModel({ ...state, generation: { state: 'uncertain' } }, news);
+  assert.equal(uncertain.canGenerate, false); assert.equal(uncertain.canRecover, true);
+  assert.ok(uncertain.notices.some(notice => /outcome is unknown/.test(notice)));
+  const recovering = exploreGalleryModel({ ...state, recovery: { state: 'pending', requestID: randomUUID() } }, news);
+  assert.equal(recovering.canGenerate, false); assert.equal(recovering.canRecover, false);
+  const recoveryFailed = exploreGalleryModel({ ...state, recovery: { state: 'failed', error: 'Local status unavailable.' } }, news);
+  assert.equal(recoveryFailed.recoveryError, 'Local status unavailable.'); assert.equal(recoveryFailed.canRecover, true);
+});
+
+test('gallery: obsolete source labels never borrow edited interest context; expiry offers explicit recovery', context => {
+  const client = sessionClient(context), source = interest(), session = sessionFixture(source);
+  const state = acceptExploreSession(readExploreState(client), session, Date.now());
+  const changed = galleryNews([{ ...source, revision: randomUUID(), name: 'Unrelated replacement' }]);
+  const beforeReconciliation = exploreGalleryModel(state, changed);
+  assert.ok(beforeReconciliation.cards.every(card => !card.selectable && !card.sourceLabel.includes('Unrelated')));
+  for (const lifecycle of [{ state: 'expired' }, { state: 'obsolete' }] as const) {
+    const model = exploreGalleryModel({ ...state, lifecycle }, galleryNews([source]));
+    assert.equal(model.cards.length, 0); assert.equal(model.canRecover, true); assert.equal(model.canGenerate, true);
+    assert.ok(model.notices.some(notice => /explicitly/.test(notice)));
+  }
 });
