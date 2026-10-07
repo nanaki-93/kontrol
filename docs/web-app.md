@@ -71,33 +71,26 @@ review uses the current browser time zone and a Monday week boundary, showing
 completed lessons, recall reviews, saved stories and application stage changes.
 Due application follow-ups are surfaced on Today; they do not schedule background
 notifications or send messages. Weekly totals stay visible, with the activity
-list under **Activity**. The Matrix theme uses a near-black canvas, electric
-green actions and accents, monospace headings, square panels and a static grid.
-Every section shares this palette, including navigation, widgets and weekly
-totals. Other colors are reserved for meaningful information and status:
-blue for informational badges and application progress, amber for warnings,
-and red for errors or destructive actions. Success stays green. Text and symbols
-identify each state as well. Fonts are local system fonts.
+list under **Activity**. The interface uses dark slate surfaces, coral actions
+and accents, rounded panels and local system fonts. Green indicates success and
+amber indicates warnings; text and symbols also identify states. Explore reuses
+this palette rather than introducing another theme.
 
-Pages use a title and relevant actions without slogans or app-usage paragraphs.
-Page headers do not accept subtitles. Today displays a saved personal goal as
-user content. Empty states use an icon, brief status and an action where needed.
-Use short labels for primary actions and named icon buttons with tooltips for
-repeated save, read, edit, remove and close actions. Filter summaries use chips;
-match reasons, salary sources and project descriptions use expandable details.
-Apply this pattern to new features as well. Setup walkthroughs,
-search-method explanations and promotional panels are omitted from the interface;
-configuration and source details remain in this guide. Field formats, content
-provenance, errors, and concise notices about data transfer, provider billing and
-destructive actions remain where they affect a decision. Lesson explanations,
-exercises, source excerpts and personal notes are content and remain available.
+Pages use titles, short descriptions and relevant actions. Today displays a
+saved personal goal as user content. Empty states use a brief status and an
+action where needed. Repeated icon controls have names; match reasons, salary
+sources and project descriptions use expandable details. Field formats, content
+provenance, errors and notices about data transfer, provider billing and
+destructive actions remain where they affect a decision. Explore includes a
+short invitation and visible privacy/cost disclosure before generation. Lesson
+explanations, exercises, source excerpts and personal notes remain available.
 
 | Module | Implemented web behavior |
 | --- | --- |
 | Focus | Custom duration and presets, one active session, pause/resume/end, bounded completion, history, restart reconciliation and backward-clock recovery. |
 | Learning | Forty offline lessons, four persistent choices per topic, pinned answers, self-checks, goal-based paths, mini-project prompts, saved lessons and recall reviews. |
 | Projects | Explicit absolute-path connection to local .kontrol folders, manifests, roadmap/context/rules, deterministic next-three feature selection, validated frontmatter completion and revision-checked Undo, reference-only disconnection. |
-| News | A finite briefing, related coverage, read status, persistent bookmarks and notes, specific interests, cross-publisher search, optional AI selection and RSS/Atom subscriptions. |
+| News | A finite briefing, related coverage, read status, persistent bookmarks and notes, specific interests, cross-publisher search, temporary Explore topics/previews, optional AI selection and RSS/Atom subscriptions. |
 | Jobs | CV analysis and matching plus saved applications, manual job links, stages, notes, follow-up dates, comparisons and optional learning suggestions. |
 | Settings | Focus/text/motion defaults, data export, web backup restore and legacy macOS export import. |
 
@@ -119,31 +112,31 @@ mastery score. Lesson bookmarks are searchable in Saved library.
 
 ### Briefing and saved reading
 
-News opens on a briefing of up to five stories from the latest searches and
-enabled feeds. Briefing, Discover, Saved and Feeds group articles by publication
-day, newest first. Headings show **Today**, **Yesterday** and dated groups in
-the browser's local time zone; unknown publication dates stay in **Undated** at
-the end rather than taking the retrieval date. It does not fetch automatically.
-Similar dated headlines are grouped conservatively as related coverage; grouping is heuristic, not a verified
-event identity. Source dates remain visible, including unknown dates. AI text is
-labeled as an interpretation of retrieved snippets, including after bookmarking.
-Kontrol does not retrieve full articles for the briefing.
+News opens on a briefing of up to five story groups from eligible saved-search
+results and enabled feeds. Selection balances relevance, recency and variety
+across interests and publishers; it is not a newest-first edition. Saved News
+interests and workspace interests/target roles can inform that selection, but
+read status and notes do not rank it. Explore previews are not briefing inputs.
+Discover retains newest-first ordering, while Saved orders bookmarks by save
+time. Publication dates stay visible per source; missing dates are not replaced
+with retrieval dates. Opening these views does not fetch external news.
+Similar dated headlines are grouped conservatively as related coverage; grouping
+is heuristic, not a verified event identity. AI text is labeled as an
+interpretation of retrieved snippets, including after bookmarking. Kontrol does
+not retrieve full articles for the briefing.
 
 The Today widget previews the first three stories and links to the full briefing.
 The lead story receives a larger headline and a labeled excerpt; numbered story
-cards show read status. Article cards show a **0–100% match** estimate for their
-closest enabled news interest, with the interest name on full cards. Selecting
-one interest in Discover limits the percentage to that interest. Full article
-cards show each interest's percentage, reason and estimate method under
-**Interest matches**. Related coverage, reading notes and save/read actions
-remain available.
+cards show read status. Briefing stories show their selection context; discovery
+cards offer saved-interest match reasons under **Why this is relevant**.
+Related coverage, reading notes and save/read actions remain available.
 In Discover, **Manage** expands the saved interest cards; search controls
 and results remain visible when those cards are collapsed. Source excerpts and
 AI snippet summaries keep distinct labels.
 
-The bookmark, read/unread and notes buttons work on both discovery
-and feed articles. Bookmarks copy the title, excerpt, source, original link and
-dates into the workspace so cache refreshes or interest/feed deletion cannot
+The bookmark, read/unread and notes buttons work on discovery, feed and
+Explore preview articles. Bookmarks copy the title, excerpt, source, original
+link and dates into the workspace so cache refreshes or interest/feed deletion cannot
 remove saved reading. Reading notes also bookmark a story. If it is later
 unbookmarked, its authored notes are still searchable in Saved library. Links
 to Learning suggest existing lessons and explicitly report missing coverage.
@@ -188,8 +181,8 @@ Revision conflicts preserve the local draft and offer review of the currently
 saved response before choosing a version. Export includes server-saved answers,
 not an unsaved browser draft; wait for **Saved** before exporting.
 
-The Matrix theme uses a shared green accent, prominent headlines, and quieter
-secondary controls. Lesson cards surface titles, difficulty and duration;
+The shared slate/coral styling uses prominent headlines and quieter secondary
+controls. Lesson cards surface titles, difficulty and duration;
 job cards pair estimated fit with expandable **Match details**. Shared text sizes keep nested badges and metadata
 readable; **Text size → Large** scales those sizes along with body copy. Reading text
 has a bounded line length, and the layout adapts to narrow windows. Controls retain
@@ -230,8 +223,13 @@ work. Use a separate KONTROL_DATA_DIR to restore a backup alongside current
 work. The web backup includes the saved workspace, dashboard layout, news interests, extracted CV text,
 reviewed job profile, job preferences and cached matches; native exports do not. Web
 exports exclude project references/paths, external files, browser drafts,
-news article caches and credentials. They contain unencrypted personal content,
-including the full extracted CV. Original PDF/DOCX/TXT file bytes are not retained.
+news article caches, temporary Explore ideas/previews/submission receipts and
+credentials. Followed interests and saved reading use the ordinary backup fields.
+A successful import revokes all temporary exploration, even when a legacy import
+retains current interests; previewing or rejecting an import does not. Late
+Explore responses cannot restore that revoked session. Web backups contain
+unencrypted personal content, including the full extracted CV. Original
+PDF/DOCX/TXT file bytes are not retained.
 
 JSON export and import share a 64 MB UTF-8 document limit, including download
 formatting. Export checks the complete file before offering it for download.
@@ -248,14 +246,14 @@ become invented completed snapshots.
 Open **News → Discover**. The initial interests are **Programming jobs in Japan**
 and **AI models & releases**. Add or edit up to 12 interests with a search
 description of **at least five words**, such as **Java and Kotlin backend hiring
-trends in Japan**. The editor shows a word count; Boolean operators,
-excluded phrases and search filters such as `site:` do not count toward the
-minimum. Japanese descriptions use word segmentation, including text without
-spaces. Short existing interests and backups stay readable; expand their
+trends in Japan**. Validation enforces the word minimum; Boolean operators,
+excluded phrases and search filters such as `site:` do not count toward it.
+Japanese descriptions use word segmentation, including text without spaces. Short existing interests and backups stay readable; expand their
 descriptions or pause those interests before running another search. Choose the
-**News & announcements** or **Career & industry news** coverage, English or
-Japanese, a search region, and a 1-, 7- or
-30-day publication window. Advanced filters require every keyword group, accept
+**News & announcements** or the legacy **Jobs & opportunities** editor option,
+English or Japanese, a search region, and a 1-, 7- or 30-day publication window.
+The latter is displayed as **Career news** in Discover and still searches news
+articles, not job offers. Advanced filters require every keyword group, accept
 alternatives within a group separated by a vertical bar, and exclude phrases.
 Change those keywords when changing the query or language.
 
@@ -328,11 +326,11 @@ never a successful search.
 
 Install **PI 1.0 or later** and configure it in your terminal. In PI, use **/login**
 to sign in to your provider and **/model** to choose a model; save it as the default
-with **Ctrl+S**. News uses that default automatically. **News → PI connection**
-shows the configured model and can refresh after configuration changes. “PI
+with **Ctrl+S**. News uses that default automatically. The PI connection panel
+in **News → Discover** shows the configured model and can refresh after configuration changes. “PI
 available” confirms the executable and settings are accessible; login and model
-access are checked on the first search. Kontrol does not read PI's credential
-file, collect API keys or copy credentials into SQLite, the browser or exports.
+access are checked by an explicit search or topic-generation request. Kontrol
+does not read PI's credential file, collect API keys or copy credentials into SQLite, the browser or exports.
 PI continues to manage its own credentials, including OAuth refresh when needed.
 
 Optional overrides can be placed in the ignored **web/.env** (copy
@@ -381,6 +379,143 @@ titles and publication metadata), pi.ts (isolated PI runner
 and connection status), and server/modules/news.ts
 (HTTP routes and persistence). UI components for interests, connection, discovery,
 articles, feeds and the dashboard widget live under src/modules/news/.
+
+## News Explore: try a direction before following
+
+Open **News → Explore** (`#/news?view=explore`). News still opens on the briefing;
+Discover, Saved and Feeds remain available. The topic gallery offers up to three
+AI-suggested directions with a connection to a saved interest, followed by the
+selected topic's reading preview. Novelty and usefulness are not guaranteed:
+obvious repeats are filtered, not semantic equivalents.
+
+### Explicit generation and privacy
+
+**Suggest new topics · PI** is the only generation trigger. Opening Explore,
+restoring its cache, navigating or selecting a card performs no PI inference or
+external news search. Existing local News settings/status reads can still occur.
+Enable at least one saved News interest in Discover and configure PI to generate
+ideas. If PI is unavailable, Standard Discover search, feeds and saved reading
+remain usable.
+
+Each admitted generation makes at most one tool-free PI invocation using the
+configured provider/model. Provider usage limits and billing apply. The context
+is limited to enabled saved News-interest IDs, names, queries, language, region,
+freshness and coverage intent. Revisions and keyword filters stay local. No CV,
+workspace profile, notes, reading history, credentials or unrelated local context
+are supplied. Anything private typed into an enabled interest's name or query
+is part of that context. PI continues to own credentials. Explore does not use
+hosted web search, local tools or saved PI sessions for ideas.
+
+The request targets three distinct ideas, but validates each against the captured
+interest snapshot and the normal five-word query rule. Invalid, unknown-source,
+short-query, linked-evidence and obvious duplicate candidates are discarded.
+Fewer valid ideas get an honest notice; none yields a recoverable error. There
+is no invented filler, repair inference or automatic retry. Failed generation
+retains previous still-valid ideas; successful generation replaces the session.
+**AI-suggested topic** labels describe ideas and their suggested connection, not
+verified events, headlines, trends or popularity.
+
+### Temporary Standard previews and recovery
+
+**Select topic** only selects. Review its query, language, region and freshness,
+then choose **Search this topic · Standard**. Proposed locale/freshness come from
+the source interest; required/excluded keyword filters start empty rather than
+being copied into an adjacent search. Editing controls does not search.
+
+Standard search sends the reviewed query/locale/freshness to Google News RSS;
+it never invokes PI. It applies existing public-network, article-URL, date,
+freshness, canonical-link and result limits. Previews show retrieved **Source
+excerpt** text, not AI-written reporting or full-article/publisher-page
+verification. Unknown publication dates remain labeled. Related coverage is a
+headline/date heuristic, not proof of identical-event reporting. Original links
+open separately with the existing link protections.
+
+Each topic owns its own draft, request and results. Switching topics cannot
+relabel another topic's coverage. A failed refresh retains same-topic results
+with their original producing parameters and last-success time; the failed
+attempt and a changed editable draft remain distinguishable. Generation and
+Standard search have separate progress notices; prior ideas/coverage remain
+visible while pending, with retained coverage identified as belonging to the
+previous successful search. A successful search with zero results clears
+previous current coverage and says no stories were found. Neither state is padded with unrelated articles.
+
+A timeout or lost response can mean the server completed work: it is an
+**unknown outcome**, not confirmed failure. Choose **Check local status** to
+recover generation/preview state without PI or external search. It never retries
+paid work. Missing/expired sessions require an explicit fresh generation, then
+an explicit search. A browser may briefly retain old cards after a server restart
+until a command or local status check reports the loss; nothing reruns on its own.
+
+### Lifetime and bounds
+
+Explore is app-scoped process memory, separate from SQLite discovery, feeds and
+briefing inputs. Ordinary navigation retains ideas, selection, search drafts and
+previews through the client query cache, not persistent exploration history.
+A browser reload is not a retention guarantee; server restart loses the session.
+Editing, pausing or deleting a source interest makes its topics/results obsolete;
+successful import revokes the whole session. Late replies cannot restore revoked,
+expired or replaced context. Already saved reading is independent.
+
+The implemented policy is defined in
+[shared Explore contracts](../web/shared/news-explore.ts) and the
+[temporary service](../web/server/news/explore.ts):
+
+| Bound | Policy |
+| --- | --- |
+| Live sessions | One per app; successful generation atomically replaces it. |
+| Absolute lifetime | 30 minutes from generation request start; reads/navigation do not renew it. Inactive client query state has a 30-minute retention limit. |
+| Topics/results | Up to 3 topics, 40 articles per topic, 120 total. |
+| Retained data | 8 MiB including operation/submission bookkeeping. Oversized preview publication drops whole trailing articles in retrieval order, not another topic's coverage; if no retrieved article fits, it fails rather than claiming zero results. |
+| Follow receipts | Up to 64, FIFO eviction under count/byte limits; retries do not renew them, and none outlives its session. |
+| Concurrent work | One generation, two preview searches, one search per topic; duplicate/busy work is rejected, not queued. |
+| Generation deadlines | Availability 5 seconds, inference 60 seconds, combined server limit 65 seconds; client response limit 75 seconds. |
+| Search/recovery deadlines | Standard preview server limit 20 seconds, client 30 seconds; explicit local status client limit 10 seconds. Follow client response limit 15 seconds. |
+| Idea output | Title 100 characters, description/connection 280 each, query 600; model envelope 64 KiB and at most 12 candidates before filtering down to 3. |
+
+Expired evidence is discarded without an unbounded history. Failed or oversized
+replacement requests preserve previous still-valid state, not expired evidence.
+The client cache is not an export field; temporary sessions and receipts are
+excluded from backups and imports.
+
+### Keep reading or deliberately follow
+
+**Save for later**, **Mark read** and **Notes** reuse workspace actions. New
+records resolve from server-known articles, never client-provided article text.
+Existing workspace snapshots and authored notes take precedence over new
+previews; normal revision/note conflicts and storage limits still apply.
+Bookmarks and authored notes remain in Saved/library after cache loss or server
+restart and use ordinary version-5 backups. Notes also bookmark a story; notes
+remain searchable after unbookmarking. A read-only marker without a bookmark or
+notes is still a bounded disposable workspace record, not permanent retention.
+An expired unsaved result cannot create an incomplete record: explicitly retrieve
+current coverage before trying again. Save/note errors remain visible and note
+drafts survive rejected saves.
+
+**Review & follow topic** opens a new-interest draft from the topic and current
+reviewed search, even before searching. Edit its name, query, coverage, locale,
+freshness and keyword filters with normal validation. Opening or cancelling the
+review saves nothing. Saving only persists the approved normal interest: it
+performs no search, does not replace the preview and does not promote temporary
+articles into the briefing. After success, use **Search this interest in
+Discover**, select that saved interest and explicitly Search. Only that normal
+search can populate saved-interest matches for the briefing.
+
+There is a 12-interest limit, including paused interests. Before creating,
+following prefers an existing conservatively equivalent interest, even at
+capacity, without renaming it. Equivalence ignores the display name but compares
+query, locale, freshness, coverage intent, enabled state and filters. Query
+normalization preserves case, operators, quotes and punctuation; filter comparison
+ignores case/order, not group structure. This is not fuzzy topic matching.
+Otherwise remove an interest in Discover before saving. Capacity, stale-session
+and conflict failures keep the review draft.
+
+Repeated pending saves are gated. An uncertain follow outcome has a separate
+**Retry original approved follow** action: it reuses the same submission ID and
+unchanged approved payload, not a new automatic submission. Local status cannot
+recover follow receipts. Reusing an ID with a changed draft is rejected. Receipts
+are temporary; if the session is gone, check saved interests in Discover before
+starting a current review. Exact-equivalence lookup still prevents duplicate
+creation when an unchanged equivalent interest remains after receipt eviction.
 
 ## Jobs: CV to matching offers
 

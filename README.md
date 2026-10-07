@@ -32,14 +32,18 @@ and `npm start`.
 - A searchable saved library, quick notes, pinned links and configurable world clocks.
 - Focus sessions with persistent history, available from every page.
 - Local `.kontrol` project inspection, next-feature suggestions, completion and Undo.
-- News interests, cross-publisher search and optional RSS/Atom subscriptions.
+- News interests, cross-publisher search, temporary [Explore topics and previews](docs/web-app.md#news-explore-try-a-direction-before-following),
+  and optional RSS/Atom subscriptions.
 - Jobs CV extraction, reviewed profiles, city/work filters and ranked job offers.
 - Dashboard customization, preferences, JSON backup and validated import.
 
-News AI and Jobs analysis use your existing **PI** installation, login and saved
-model. Configure PI before using those actions; Kontrol does not collect an API
-key. See the [setup and module guide](docs/web-app.md) for configuration, source
-coverage and feature limits.
+News AI, Explore topic suggestions and Jobs analysis use your existing **PI**
+installation, login and saved model; provider charges may apply. Explore sends
+only enabled saved News interests for explicit topic generation. Its previews
+use explicit Standard search, and following an editable interest does not search
+it automatically. Configure PI before AI actions; Kontrol does not collect an
+API key. See the [setup and module guide](docs/web-app.md) for configuration,
+privacy, temporary-state limits and source coverage.
 
 ## Data and configuration
 
