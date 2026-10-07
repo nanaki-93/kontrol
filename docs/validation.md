@@ -1276,3 +1276,177 @@ screenshot or presentation checks were run or required. No production database,
 application data or stored credentials were read or modified. Kontrol never
 reads PI credentials; the live diagnostics used PI's own login. Earlier
 validation entries remain unchanged.
+
+## News Explore — complete final gate, 2026-10-07
+
+Verified Step 19 against the current specification, all Steps 1–18, the cumulative
+review checklist and earlier execution/review/repair reports in
+`.pi/workflows/2026-10-06T17-39-50-821Z-bLIScz/`. The first incomplete task is
+Step 19. The baseline is `1d1c82051feec3cf41213d469149f63fc3b9f88a`; all 18 task
+hashes in `commits.json` were verified ancestors of HEAD with
+`git merge-base --is-ancestor <task-hash> HEAD`. The feature diff was inspected
+with `git diff --stat <baseline> HEAD` and targeted source diffs.
+
+Validation covers the current combined working tree, including preserved
+pre-existing News/Edition work and untracked source dependencies; it is not a
+claim that a clean checkout of HEAD without that pre-existing work was built.
+This task changed only `web/server/app.ts`,
+`web/server/modules/news-explore.ts`, `web/tests/news-explore-api.test.ts` and
+this evidence file. Unrelated changes and historical evidence were preserved.
+The plan was not edited and no changes were staged or committed in this builder
+step; the runner owns the separate approval/commit step.
+
+### Commands and actual results
+
+From the repository root:
+
+```sh
+node --version
+npm --version
+make typecheck
+make build
+git diff --check
+git diff --check 1d1c82051feec3cf41213d469149f63fc3b9f88a HEAD
+python3 /tmp/kontrol-explore-final-a8b85aca/audit.py
+```
+
+- Node **v25.8.2**, npm **11.14.1**; required Node minimum satisfied.
+- Final `make typecheck` and `make build`: **exit 0**, TypeScript and Vite passed,
+  **2,076 modules** transformed. No application was started.
+- Working-tree and cumulative feature whitespace checks: **exit 0**.
+- Static source/resource audit: **exit 0**. All **21** local README/web-guide
+  links/heading anchors, **23** links/resources in the three existing Explore
+  mock HTML files, and **4** compiled index asset references resolve. No external
+  resources load in those mocks. The eight new production files contain no
+  fictional mock stories or mock dependencies; new client files contain no
+  remote visual assets or HTML injection. Explore CSS uses eight defined
+  existing tokens with no new colors, assets or fonts. Dependencies, briefing
+  algorithm, backup contract and SQLite owner are unchanged from baseline.
+
+From `web/`, the complete explicit inventory (all 18 current `.test.ts` files):
+
+```sh
+env -u KONTROL_TEST_PI_COMMAND ./node_modules/.bin/tsx --test \
+  tests/domain.test.ts tests/api.test.ts tests/projects-persistence.test.ts \
+  tests/news-domain.test.ts tests/news-discovery.test.ts tests/news-ai.test.ts \
+  tests/news-api.test.ts tests/news-pi.test.ts tests/news-pi-cli.test.ts \
+  tests/jobs-domain.test.ts tests/jobs-api.test.ts tests/jobs-client.test.ts \
+  tests/workspace-domain.test.ts tests/workspace-api.test.ts \
+  tests/news-explore-domain.test.ts tests/news-explore.test.ts \
+  tests/news-explore-api.test.ts tests/news-explore-client.test.ts
+```
+
+Final result: **exit 0; 418 tests, 416 passed, 0 failed, 0 cancelled, 2 skipped**.
+The skips are the optional installed-PI CLI fixtures with the opt-in variable
+removed, not passes. Required fake-executable PI integration, Standard transport,
+HTTP, SQLite reopen and backup/import tests all ran. The inventory was inspected
+for non-GUI fixture use and injection before execution. No real paid provider,
+public-news fetch, production database or credentials were used.
+
+Logs and the reproducible static-audit script are retained under
+`/tmp/kontrol-explore-final-a8b85aca/`: `typecheck-final-2.log`,
+`build-final-2.log`, `diff-check-final-2.log`, `tests-final.log`,
+`audit-final.log`, `audit.py` and `cleanup.log`. These are local scratch evidence,
+not new runtime dependencies. Earlier failing logs remain alongside them.
+
+### Failures investigated and repaired (not relabeled as passes)
+
+The initial build/typecheck passed, but the first full suite (`tests.log`) had
+**411 passes, 5 failures, 2 skips**:
+
+- Two security-test failures supplied a hostile `Host` through Node 25 `fetch`,
+  which derived Host from the URL instead. The server's native HTTP rebinding
+  guard was already correct. Added a bounded `node:http` fixture request that
+  actually sends the hostile header, covering recovery, generation, search and
+  follow. Origin/client/fetch-site/content-type and malformed-JSON checks remain.
+- The strict generation-body test exposed a real omission: Express parses a
+  bodyless JSON request as `{}`. The JSON verifier now records actual body bytes;
+  generation rejects missing/zero-byte bodies before availability/inference.
+  Both ordinary bodyless and empty chunked requests have HTTP regressions.
+- The capacity fixture's `JP` region and 30-day freshness matched its baseline,
+  so the implementation correctly reused an equivalent interest. Locale and
+  freshness differences now derive from the actual baseline, retaining the
+  assertions that a genuinely different draft is rejected at capacity and can
+  succeed after room is freed.
+- The replacement fixture re-suggested its newly followed topic; duplicate
+  filtering correctly rejected it. The fixture now offers three directions so
+  replacement has remaining valid adjacent candidates and old reviews/receipts
+  still return 410 without undoing the followed interest.
+
+The first focused repair run still had one capacity-fixture failure because its
+region also matched the baseline. After that correction,
+`cd web && ./node_modules/.bin/tsx --test tests/news-explore-api.test.ts` passed
+**49/49** (`repair-tests-2.log`). A repair typecheck/build caught the verifier's
+HTTP `ServerResponse` typing (`TS2339: locals`); narrowing to Express's actual
+Response repaired it without changing behavior. Both full checks then passed,
+followed by the full suite above. A preliminary diagnostic `tsx -e` failed before
+execution because its CJS transform did not support top-level await; the same
+isolated fixture probe succeeded using `node --import tsx --input-type=module`.
+
+Earlier review findings were explicitly rechecked: Boolean `OR/or`, `AND/and`
+and `NOT/not` identities remain distinct (`news-explore-domain.test.ts:157–173`);
+News tabs use hash-owned navigation and the Discover → Explore → Discover
+regression passes (`index.tsx:9–32`, client `gallery:` cases); preview tests no
+longer import the unrelated `isAISummary` helper (client test imports:1–24).
+Prior compiler/whitespace repairs are covered by the passing complete checks.
+
+### Acceptance closure and source review
+
+All earlier **DEFERRED TO FINAL GATE** build, transport/process, HTTP/import,
+trusted-reading persistence, follow transaction, regression, link and cumulative
+source-review checks were executed/completed here. No required deferral remains.
+
+| Requirement / earlier tasks | Passing final evidence |
+| --- | --- |
+| Explicit-only generation, navigation retention (1, 4, 11, 14) | `client-session:` disabled QueryObserver/remount and MutationObserver counters; `gallery:` navigation/selection cases; API local-recovery and service-isolation counters. `explore-api.ts:20–99,157–244` uses disabled local queries, no focus/mount/reconnect work, no retries and explicit commands only. |
+| Context privacy and one-call PI (1, 3) | `ideation:` whitelist and distinct forbidden CV/profile/notes/history/credential/disabled/filter sentinels; literal-input fixtures; fake executable asserts one invocation, isolation flags, dedicated system prompt, retry disablement and child closure. `explore-ideation.ts:21–97` serializes only enabled News fields. |
+| Three/partial/zero-valid output and no fabricated evidence (1, 3, 14) | Complete domain/ideation cases for bounds, malformed envelopes, unknown sources, short English/Japanese queries, URLs/evidence and duplicate siblings; no-filler/no-retry assertions. `explore.tsx:104–133,177–195` renders only actual cards and an honest partial notice. |
+| Eligible Standard previews and persistence/briefing isolation (2, 5, 7, 15) | Standard URL/type/date/unknown-date/cap and real transport cancellation/public-network cases; service normalization and strict HTTP requests; all stored-document and non-empty fixed-clock briefing equality assertions pass. `explore.ts:108–138,349–421` retains results only in memory; no AI search or persisted synthetic interests. |
+| Topic ownership, retained failure and empty success (5, 12, 15) | Out-of-order/deferred service/client cases, edited-query failed refresh, same-topic original parameters/time, successful-empty replacement and explicit local recovery. `explore-preview.tsx:13–63,117–144` keeps producing, attempted and editable searches separate. |
+| Revocation/import/late-response protection (4–9, 11–13) | Source edit/disable/delete service and route fixtures, exposure/resolver checks, generation/search legacy/current import races, failed-import/rollback preservation, follow source/revision checks, client import/status races. Both server and client revoke only after successful import; saved workspace reading remains independent. |
+| Finite bounds, replacement, expiry/restart and uncertainty (1, 4, 5, 9, 11–13) | Fake clocks, exact byte/count reservations, FIFO receipt eviction, generation/search deadlines and gate release, fresh-app missing identities, late completion and explicit timeout recovery cases. Named contracts in `news-explore.ts:13–44` match `docs/web-app.md:463–478`. |
+| Trusted save/read/notes and survival (8) | Every `explore reading:` HTTP trust/precedence/canonical/revision/note/capacity case; cache disposal/loss; SQLite reopen with zero new network calls (`workspace-api.test.ts:180–239`); version-5 backup/import equality. `workspace.ts:53–77` resolves only server-known evidence after existing records/discovery/feeds. |
+| Deliberate editable follow (9, 10, 13, 16) | `editor:`, `follow:`, `follow HTTP:`, `client-follow:` and `follow-presentation:` cases cover cancel no-op, dirty/error drafts, pending/concurrent/repeated/lost-response submissions, token conflict, equivalence-before-capacity, rollback, stale state, receipt eviction and zero-search counters. `news-explore.ts:48–65` follows transactionally; UI success provides only an explicit Discover link. |
+| Existing behavior (all) | All named News domain/briefing/Discover/feeds/optional-AI, workspace provenance/notes/backup and unrelated module regressions passed. `shared/briefing.ts` is unchanged. |
+| Selected Option 1, readability and semantics (14–17) | Compared selected mock source with `explore.tsx:136–206`: invitation/disclosure → actual topic cards/connections → preview → deliberate follow. `explore-preview.tsx:72–157` has named/labelled reviewable controls, native disclosures, unknown dates/source excerpts, heuristic related coverage and end cue. `interest-editor.tsx:67–120` pins edit/create identity, nests the heading correctly and preserves failures. |
+| Narrow/large-text, errors and links (15–18) | `styles.css:534–606` uses shrinkable grids, wrapping, existing typography, bounded reading width, narrow and large-text single columns. Existing focus rule at line 42 is inherited. Named sections, card selected-state/accessible names, status/live announcements, recovery and capacity/conflict copy are in `explore.tsx:69–99,150–193` and `explore-preview.tsx:89–139`; shared ErrorMessage uses `role="alert"`. Publisher links retain `noopener noreferrer` (`articles.tsx:59`). Save/note errors and draft protection reuse existing actions. Saved/library access uses workspace records (`briefing.tsx:28–37`, `workspace/library.tsx:15,31`), not the temporary cache. |
+
+This is source/fixture evidence, not rendered appearance or live model relevance.
+No browser/app launch, hosted UI, screenshots/comparisons, synthetic input,
+AX/VoiceOver, native focus, or manual journey was executed or required; these are
+excluded by `AGENTS.md`, not outstanding deferrals. The existing selected mocks
+were checked as source/resources only. Native signing/packaging/notarization and
+release/distribution approval are not applicable to this web-only gate. Semantic
+novelty, live PI quality, index coverage and running-app appearance remain
+unmeasured; no engagement/verification guarantee is claimed.
+
+### Resource teardown
+
+All commands were bounded foreground checks. No dev server, application,
+browser, watcher, container or remote resource was started. Fixture listeners
+close connections/listeners in `finally`; apps dispose exploration, SQLite
+stores close, temporary fixture directories are removed, and QueryClients,
+subscriptions, deadlines and timers are cleared. Standard cancellation tests
+await request closure; fake PI tests verify exact child PIDs no longer exist
+(`ESRCH`) and isolated configurations are removed (`ENOENT`), including timeout
+and cancellation. Service teardown asserts zero remaining fixture timers.
+
+Final build/typecheck shell **90326** and full-suite shell **90435** were verified
+absent using `os.kill(pid, 0)` → `ProcessLookupError`. Registry-recorded full-suite
+descendants **90444** and **90622** were likewise absent. Earlier task resource
+reports and cleanup history were inspected; none introduced containers or remote
+resources needing separate teardown.
+
+After the suite/static gate, ran the mandatory feature-wide owned-process sweep:
+
+```sh
+'/opt/homebrew/Cellar/node/25.8.2/bin/node' \
+  '/Users/marcoandreose/.pi/agent/workflows/feature/process-cleanup.mjs' \
+  --cleanup '/Users/marcoandreose/DEV/lab/kontrol/.pi/workflows/2026-10-06T17-39-50-821Z-bLIScz/process-registry.json'
+```
+
+Actual report at `2026-10-07T00:28:11.489Z`: **exit 0, SUCCESSFUL**,
+`signalled: []`, `remaining: []`, `errors: []`. No owned local processes remained;
+no resource-specific external shutdown was necessary. Pre-existing/shared
+services were preserved. The runner's subsequent sweep remains an additional
+safety check, not the evidence substituted for this teardown.

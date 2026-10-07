@@ -34,6 +34,7 @@ export function newsExploreModule(explore: ExploreRoutes, store: Store): Router 
     res.json(exploreStatusResponseSchema.parse(status));
   });
   router.post('/generate', async (req, res) => {
+    if (!(res.locals.jsonBodyBytes > 0)) throw new HttpError(400, 'Send an explicit empty JSON object to request topic ideas.');
     exploreGenerateRequestSchema.parse(req.body);
     const result = await publicResult(() => explore.generate());
     res.json(exploreGenerateResponseSchema.parse(result));

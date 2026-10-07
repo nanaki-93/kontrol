@@ -1,4 +1,4 @@
-import express, { type ErrorRequestHandler } from 'express';
+import express, { type ErrorRequestHandler, type Response } from 'express';
 import { z } from 'zod';
 import { Store } from './store';
 import { HttpError } from './errors';
@@ -59,7 +59,11 @@ export function createApp(store: Store, options: AppOptions) {
     next();
   });
   app.use('/api/settings/import', express.json({ limit: MAX_BACKUP_BYTES }));
-  app.use(express.json({ limit: '16mb' }));
+  app.use(express.json({ limit: '16mb', verify: (_req, res, body) => {
+    // express.json represents an empty wire body as {}. Preserve actual byte
+    // presence for endpoints whose strict contract requires an explicit object.
+    (res as Response).locals.jsonBodyBytes = body.length;
+  } }));
   // Registration is explicit. Modules own their routes and persisted documents.
   app.use('/api/focus', focusModule(store, options.clock));
   app.use('/api/learning', learningModule(store));

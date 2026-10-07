@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { request as httpRequest } from 'node:http';
 import { withAPI } from './helpers';
 import { getDiscovery } from '../server/news/discovery';
 import { exportData } from '../server/modules/settings';
@@ -52,6 +53,23 @@ const obsolete = (error: unknown) => error instanceof ExploreServiceError && err
 
 type Request = Parameters<Parameters<typeof withAPI>[0]>[0]['request'];
 const previewURL = 'https://example.com/articles/community';
+// Node fetch derives Host from its URL, ignoring a supplied override. Send
+// rebinding and empty chunked-body fixtures over actual HTTP instead.
+async function rawRequest(origin: string, path: string, method: string, body: string | undefined,
+  headers: Record<string, string>): Promise<Response> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(origin + '/api' + path, { method, signal: AbortSignal.timeout(5_000), headers: {
+      'X-Kontrol-Client': 'web', 'Content-Type': 'application/json', ...headers,
+    } }, res => {
+      const chunks: Buffer[] = [];
+      res.on('data', chunk => chunks.push(Buffer.from(chunk)));
+      res.on('error', reject);
+      res.on('end', () => resolve(new Response(Buffer.concat(chunks), { status: res.statusCode })));
+    });
+    req.on('error', reject);
+    req.end(body);
+  });
+}
 async function reading(request: Request, store: Store, body: Record<string, unknown>) {
   return request('/workspace/articles', 'PUT', { expectedRevision: getWorkspace(store).revision, ...body });
 }
@@ -481,7 +499,10 @@ test('explore HTTP: every endpoint inherits client, host, origin, fetch-site and
       { Host: 'other.example' }, { 'Sec-Fetch-Site': 'cross-site' }];
     for (const route of routes) {
       for (const headers of rejectedHeaders) {
-        await assertPublicError(await request(route.path, route.method, route.body, headers), 403);
+        const response = headers.Host ? await rawRequest(origin, route.path, route.method,
+          route.body === undefined ? undefined : JSON.stringify(route.body), headers) :
+          await request(route.path, route.method, route.body, headers);
+        await assertPublicError(response, 403);
       }
       if (route.method === 'POST') {
         await assertPublicError(await request(route.path, route.method, route.body, { 'Content-Type': 'text/plain' }), 415);
@@ -498,7 +519,10 @@ test('explore HTTP: every endpoint inherits client, host, origin, fetch-site and
 
 test('explore HTTP: strict bodies, UUID parameters and query rules reject client context, evidence and AI modes before admission', async () => {
   let ideations = 0, searches = 0;
-  await withAPI(async ({ request, store }) => {
+  await withAPI(async ({ request, store, origin }) => {
+    await assertPublicError(await rawRequest(origin, '/news/explore/generate', 'POST', '', {
+      'Transfer-Encoding': 'chunked',
+    }), 400);
     for (const body of [undefined, null, [], { interests: [parent(store)] }, { prompt: 'private context' },
       { articles: retrieved(parent(store)) }, { mode: 'ai' }]) {
       await assertPublicError(await request('/news/explore/generate', 'POST', body), 400);
@@ -741,18 +765,20 @@ test('follow HTTP: equivalence precedes capacity, while locale, filters, enabled
     const path = topicFollowPath(session.id, topic.id), body = { expectedSessionRevision: session.revision, submissionID: randomUUID(), draft };
     const same = exploreFollowResponseSchema.parse(await (await request(path, 'POST', body)).json());
     assert.equal(same.created, false); assert.equal(same.interest.id, existing.id);
-    for (const difference of [{ language: 'ja' }, { region: 'JP' }, { days: 30 }, { intent: 'opportunities' },
+    for (const difference of [{ language: draft.language === 'ja' ? 'en' : 'ja' }, { region: draft.region === 'JP' ? 'US' : 'JP' },
+      { days: draft.days === 30 ? 7 : 30 }, { intent: 'opportunities' },
       { enabled: false }, { requiredTerms: ['different'] }, { excludedTerms: [] }]) {
       await assertPublicError(await request(path, 'POST', { ...body, submissionID: randomUUID(), draft: { ...draft, ...difference } }), 400, /12/);
     }
     assert.deepEqual(getDiscovery(store), state);
     // Failed capacity attempts do not bind tokens. Once room exists, the same
     // token can approve a corrected draft and create an ordinary interest.
-    const failed = { ...body, submissionID: randomUUID(), draft: { ...draft, region: 'JP' } };
+    const changedRegion = draft.region === 'JP' ? 'US' : 'JP';
+    const failed = { ...body, submissionID: randomUUID(), draft: { ...draft, region: changedRegion } };
     await assertPublicError(await request(path, 'POST', failed), 400);
     state.preferences.interests.pop(); store.set('newsDiscovery', state);
     const result = exploreFollowResponseSchema.parse(await (await request(path, 'POST', failed)).json());
-    assert.equal(result.created, true); assert.equal(result.interest.region, 'JP');
+    assert.equal(result.created, true); assert.equal(result.interest.region, changedRegion);
     assert.equal(getDiscovery(store).preferences.interests.length, 12);
   }, fixtures);
 });
@@ -800,7 +826,11 @@ for (const loss of ['edit', 'disable', 'delete', 'expiry', 'replacement', 'impor
         assert.deepEqual(getDiscovery(store), before);
       }
       assert.ok(getDiscovery(store).preferences.interests.some(i => i.id === result.interest.id));
-    }, { ...fixtures, clock: () => at });
+    }, { ...fixtures, clock: () => at, explore: { ...fixtures.explore,
+      // After following the first topic, generation must still have genuinely
+      // adjacent candidates; duplicate rejection is not a replacement failure.
+      ideate: async sources => threeIdeas(sources),
+    } });
     if (loss === 'restart') await withAPI(async ({ request, store }) => {
       const before = getDiscovery(store);
       await assertPublicError(await request(oldPath, 'POST', oldBody), 410);
@@ -821,7 +851,7 @@ test('follow HTTP: strict drafts, IDs, revision and existing API protections rej
     await assertPublicError(await request(topicFollowPath('bad', topic.id), 'POST', body), 400);
     await assertPublicError(await request(path, 'POST', { ...body, expectedSessionRevision: randomUUID() }), 409);
     await assertPublicError(await request(path, 'POST', body, { Origin: 'https://untrusted.example' }), 403);
-    await assertPublicError(await request(path, 'POST', body, { Host: 'untrusted.example' }), 403);
+    await assertPublicError(await rawRequest(origin, path, 'POST', JSON.stringify(body), { Host: 'untrusted.example' }), 403);
     await assertPublicError(await fetch(origin + '/api' + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }), 403);
     assert.deepEqual(getDiscovery(store), before);
   }, fixtures);
